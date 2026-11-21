@@ -1396,6 +1396,8 @@ impl<S> World<S> {
 
     // Every entity there is.
     pub fn entities(world: &Self) -> [Entity] { entities(world) }
+    // The names of the components it stores, in the order registered.
+    pub fn component_names(world: &Self) -> [Str] { clone(&world.bring_names) }
 
     // A query of the world: `world.query<(Entity, &Score)>()`. While it is
     // had, the world is borrowed by it; its columns go back when it is let go.

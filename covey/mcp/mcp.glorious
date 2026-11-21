@@ -1,0 +1,411 @@
+// A Model Context Protocol server over a live app (upstream's
+// devtools::mcp): JSON-RPC requests sent through a channel, answered when
+// the app's loop pumps the session, so every tool sees the app between
+// frames. Tools: overview, entity, explain, history, emit, step, what_if,
+// why_not, pause, resume (asm reads a binary: covey's `asm` module reads
+// objdump's text; here it says so).
+use std::reflect::{Described, NoValue, FlagValue, WholeValue, FloatValue, CharValue, TextValue, StructValue, ListValue, OpaqueValue};
+use std::thread::{Sender, Receiver, channel, send, try_recv};
+use std::text::{join, starts_with, contains, split, trim, parse_int};
+use ecs::{App, World, Entity, StepReport, SystemInfo, Dispatch, Fires, Requests, Listed, Columns};
+use reflected::{Edits, describe_component, set_field};
+
+// JSON: what requests and replies are written in.
+pub enum Json { JNull, JBool(Bool), JNum(Int), JStr(Str), JArr([Json]), JObj([(Str, Json)]) }
+
+fn jat(cs: &[char], i: Int) -> char { if(i < len_at(cs)) { cs[i] } else { '\u{0}' } }
+fn jskip(cs: &[char], i: Int) -> Int { if(std::char::is_space(jat(cs, i))) { jskip(cs, i + 1) } else { i } }
+fn jstring(cs: &[char], i: Int) -> (Str, Int) {
+    let mut out = "";
+    let mut j = i + 1;
+    while({ if(j < len_at(cs)) { jat(cs, j) != '"' } else { false } }) {
+        if(jat(cs, j) == '\\') {
+            let e = jat(cs, j + 1);
+            out = out ++ show(if(e == 'n') { '\n' } else if(e == 't') { '\t' } else { e });
+            j = j + 2
+        } else { out = out ++ show(jat(cs, j)); j = j + 1 }
+    };
+    (out, j + 1)
+}
+// A JSON value from `i`, and where it ends. (One function: what an array or
+// an object holds is read by it again.)
+fn jvalue(cs: &[char], i: Int) -> (Json, Int) {
+    let i = jskip(cs, i);
+    let c = jat(cs, i);
+    if(if(c == '[') { true } else { c == '{' }) {
+        let close = if(c == '[') { ']' } else { '}' };
+        let mut items = [];
+        let mut fields = [];
+        let mut j = jskip(cs, i + 1);
+        while({ if(j < len_at(cs)) { jat(cs, j) != close } else { false } }) {
+            if(c == '{') {
+                let (key, k) = jstring(cs, j);
+                let k = jskip(cs, k);
+                let (v, k2) = jvalue(cs, k + 1);
+                push_at(&mut fields, (key, v));
+                j = jskip(cs, k2)
+            } else {
+                let (v, k) = jvalue(cs, j);
+                push_at(&mut items, v);
+                j = jskip(cs, k)
+            };
+            if(jat(cs, j) == ',') { j = jskip(cs, j + 1) } else { () }
+        };
+        (if(c == '[') { JArr(items) } else { JObj(fields) }, j + 1)
+    } else if(c == '"') { let (t, j) = jstring(cs, i); (JStr(t), j) }
+    else if(c == 't') { (JBool(true), i + 4) }
+    else if(c == 'f') { (JBool(false), i + 5) }
+    else if(c == 'n') { (JNull, i + 4) }
+    else {
+        // (A number: its whole part; what follows a point is left out.)
+        let negative = c == '-';
+        let mut j = if(negative) { i + 1 } else { i };
+        let mut n = 0;
+        while({ std::char::is_digit(jat(cs, j)) }) { n = n * 10 + (int(jat(cs, j)) - int('0')); j = j + 1 };
+        if(jat(cs, j) == '.') { j = j + 1; while({ std::char::is_digit(jat(cs, j)) }) { j = j + 1 } } else { () };
+        (JNum(if(negative) { 0 - n } else { n }), j)
+    }
+}
+pub fn parse_json(text: Str) -> Json { let cs = chars(text); let (v, _) = jvalue(&cs, 0); v }
+fn jquote(t: Str) -> Str {
+    "\"" ++ std::text::concat(std::vec::map(chars(t), fn(c: char) -> Str { if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else if(c == '\n') { "\\n" } else { show(c) } })) ++ "\""
+}
+fn jitems(vs: &[Json]) -> Str { let mut out = []; let mut i = 0; while({ i < len_at(vs) }) { push_at(&mut out, written(&vs[i])); i = i + 1 }; join(out, ",") }
+// A JSON value written.
+pub fn written(v: &Json) -> Str {
+    match(v) {
+        JNull => "null",
+        JBool(b) => if(*b) { "true" } else { "false" },
+        JNum(n) => show(*n),
+        JStr(t) => jquote(*t),
+        JArr(vs) => "[" ++ jitems(vs) ++ "]",
+        JObj(fs) =>
+            let mut out = [];
+            let mut i = 0;
+            while({ i < len_at(fs) }) { let pair = &fs[i]; push_at(&mut out, jquote(pair.0) ++ ":" ++ written(&pair.1)); i = i + 1 };
+            "{" ++ join(out, ",") ++ "}"
+    }
+}
+// A field of an object.
+pub fn field<'a>(v: &'a Json, name: Str) -> Option<&'a Json> {
+    match(v) { JObj(fs) => field_in(fs, name), _ => None }
+}
+fn field_in<'a>(fs: &'a [(Str, Json)], name: Str) -> Option<&'a Json> {
+    let mut found: Option<&'a Json> = None;
+    let mut i = 0;
+    while({ i < len_at(fs) }) { let pair = &fs[i]; if(pair.0 == name) { found = Some(&pair.1) } else { () }; i = i + 1 };
+    found
+}
+fn text_of(v: Option<&Json>) -> Str { match(v) { Some(j) => match(j) { JStr(t) => *t, JNum(n) => show(*n), _ => "" }, None => "" } }
+fn num_of(v: Option<&Json>, otherwise: Int) -> Int { match(v) { Some(j) => match(j) { JNum(n) => *n, JStr(t) => match(parse_int(*t)) { Some(n) => n, None => otherwise }, _ => otherwise }, None => otherwise } }
+pub fn object(fields: [(Str, Json)]) -> Json { JObj(fields) }
+
+// What a described value is written as: `Hp(44)`, `Pos { x: 1 }`.
+pub fn value_text(d: &Described) -> Str {
+    match(d) {
+        NoValue => "()",
+        FlagValue(b) => if(*b) { "true" } else { "false" },
+        WholeValue(n) => show(*n),
+        FloatValue(f) => show(*f),
+        CharValue(c) => "'" ++ show(*c) ++ "'",
+        TextValue(t) => jquote(*t),
+        StructValue(name, fs) =>
+            let mut parts = [];
+            let mut placed = true;
+            let mut i = 0;
+            while({ i < len_at(fs) }) {
+                let pair = &fs[i];
+                if(match(parse_int(pair.0)) { Some(_) => false, None => true }) { placed = false } else { () };
+                push_at(&mut parts, (pair.0, value_text(&pair.1)));
+                i = i + 1
+            };
+            if(len_at(&parts) == 0) { *name }
+            else if(placed) { *name ++ "(" ++ join(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (_, v) = p; v }), ", ") ++ ")" }
+            else { *name ++ " { " ++ join(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (k, v) = p; k ++ ": " ++ v }), ", ") ++ " }" },
+        ListValue(vs) =>
+            let mut out = [];
+            let mut i = 0;
+            while({ i < len_at(vs) }) { push_at(&mut out, value_text(&vs[i])); i = i + 1 };
+            "[" ++ join(out, ", ") ++ "]",
+        OpaqueValue(n) => *n
+    }
+}
+// The first whole number in a described value.
+fn number_in(d: &Described) -> Option<Int> {
+    match(d) {
+        WholeValue(n) => Some(*n),
+        StructValue(_, fs) => if(len_at(fs) > 0) { let pair = &fs[0]; number_in(&pair.1) } else { None },
+        _ => None
+    }
+}
+// Whether `n` meets a condition written `< 48`, `>= 3`, `== 1`.
+fn meets(n: Int, condition: Str) -> Bool {
+    let parts = std::text::words(condition);
+    if(len_at(&parts) < 2) { false } else {
+        match(parse_int(parts[1])) {
+            Some(m) =>
+                let op = parts[0];
+                if(op == "<") { n < m } else if(op == "<=") { n <= m } else if(op == ">") { n > m }
+                else if(op == ">=") { n >= m } else if(op == "==") { n == m } else if(op == "!=") { n != m } else { false },
+            None => false
+        }
+    }
+}
+fn entity_text(e: Entity) -> Str { show(e.index) ++ "v" ++ show(e.generation) }
+
+// The other end of the session: requests sent, each with where its reply
+// goes.
+pub struct Client { requests: Sender<(Str, Sender<Str>)>, next: Int }
+impl Client {
+    // A request as written; the reply, once the session is pumped.
+    pub fn send(client: &mut Self, text: Str) -> Receiver<Str> {
+        let (tx, rx) = channel();
+        send(&client.requests, (text, tx));
+        rx
+    }
+    // A tool called with its arguments.
+    pub fn call(client: &mut Self, tool: Str, arguments: Json) -> Receiver<Str> {
+        client.next = client.next + 1;
+        let request = object([("jsonrpc", JStr("2.0")), ("id", JNum(client.next + 100)), ("method", JStr("tools/call")),
+            ("params", object([("name", JStr(tool)), ("arguments", arguments)]))]);
+        client.send(written(&request))
+    }
+}
+
+// The app's side: the labels it may emit or step by name, the frames it
+// has emitted, and what each entity's components were at each.
+pub struct Session<S, L> {
+    requests: Receiver<(Str, Sender<Str>)>,
+    labels: [Str], emits: [fn(&mut App<S, L>) -> ()], steps: [fn(&mut App<S, L>) -> StepReport],
+    frame: Int, paused: Bool,
+    recorded: [(Int, Entity, Str, Described)]
+}
+pub fn session_channel<S, L>() -> (Session<S, L>, Client) {
+    let (tx, rx) = channel();
+    (Session { requests: rx, labels: [], emits: [], steps: [], frame: 0, paused: false, recorded: [] }, Client { requests: tx, next: 0 })
+}
+fn tool_names() -> [Str] { ["overview", "entity", "explain", "history", "emit", "step", "what_if", "why_not", "asm", "pause", "resume"] }
+fn reply_to(id: Json, result: Json) -> Str { written(&object([("jsonrpc", JStr("2.0")), ("id", id), ("result", result)])) }
+fn tool_reply(id: Json, text: Str, error: Bool) -> Str {
+    reply_to(id, object([("content", JArr([object([("type", JStr("text")), ("text", JStr(text))])])), ("isError", JBool(error))]))
+}
+fn place_of(labels: &[Str], name: Str) -> Int {
+    let mut at = 0 - 1;
+    let mut i = 0;
+    while({ i < len_at(labels) }) { if(labels[i] == name) { at = i } else { () }; i = i + 1 };
+    at
+}
+fn entity_named<S>(world: &World<S>, text: Str) -> Option<Entity> {
+    let parts = split(text, 'v');
+    if(len_at(&parts) != 2) { None } else {
+        match((parse_int(parts[0]), parse_int(parts[1]))) {
+            (Some(index), Some(generation)) =>
+                let all = world.entities();
+                let mut found = None;
+                let mut i = 0;
+                while({ i < len_at(&all) }) { if(if(all[i].index == index) { all[i].generation == generation } else { false }) { found = Some(all[i]) } else { () }; i = i + 1 };
+                found,
+            _ => None
+        }
+    }
+}
+impl<S, L> Session<S, L> {
+    // A label the tools may emit or step, by its name.
+    pub fn label<E>(session: &mut Self, name: Str, event: E) where L: Dispatch<E, S>, S: Fires<S, L>, S: Requests<S, L>, E: Use<[0, *]> {
+        push_at(&mut session.labels, name);
+        push_at(&mut session.emits, fn(app: &mut App<S, L>) { let ev = event; app.emit(&ev) });
+        push_at(&mut session.steps, fn(app: &mut App<S, L>) -> StepReport { let ev = event; app.step(&ev) })
+    }
+    // This frame's values of each entity's components, kept.
+    fn record(session: &mut Self, app: &App<S, L>) where S: Edits<S> {
+        let all = app.world.entities();
+        let names = app.world.component_names();
+        let mut i = 0;
+        while({ i < len_at(&all) }) {
+            let mut k = 0;
+            while({ k < len_at(&names) }) {
+                match(describe_component(&app.world, all[i], names[k])) { Some(d) => push_at(&mut session.recorded, (session.frame, all[i], names[k], d)), None => () };
+                k = k + 1
+            };
+            i = i + 1
+        }
+    }
+    // Answer every request sent so far.
+    pub fn pump(session: &mut Self, app: &mut App<S, L>) where S: Edits<S>, S: Columns, L: Listed<S> {
+        let mut going = true;
+        while({ going }) {
+            match(try_recv(&session.requests)) {
+                Some(request) => let (text, reply) = request; match(Session::answer(session, app, text)) { Some(r) => send(&reply, r), None => () },
+                None => going = false
+            }
+        }
+    }
+    fn answer(session: &mut Self, app: &mut App<S, L>, text: Str) -> Option<Str> where S: Edits<S>, S: Columns, L: Listed<S> {
+        let request = parse_json(text);
+        let method = text_of(field(&request, "method"));
+        match(field(&request, "id")) {
+            None => None,
+            Some(id) =>
+                let id = match(id) { JNum(n) => JNum(*n), JStr(t) => JStr(*t), _ => JNull };
+                if(method == "initialize") {
+                    Some(reply_to(id, object([("protocolVersion", JStr("2025-06-18")), ("capabilities", object([("tools", object([]))])),
+                        ("serverInfo", object([("name", JStr("covey")), ("version", JStr("0.1"))]))])))
+                } else if(method == "tools/list") {
+                    Some(reply_to(id, object([("tools", JArr(std::vec::map(tool_names(), fn(n: Str) -> Json { object([("name", JStr(n)), ("inputSchema", object([("type", JStr("object"))]))]) })))])))
+                } else if(method == "tools/call") {
+                    let tool = match(field(&request, "params")) { Some(p) => text_of(field(p, "name")), None => "" };
+                    let args = match(field(&request, "params")) { Some(p) => match(field(p, "arguments")) { Some(a) => written(a), None => "{}" }, None => "{}" };
+                    match(Session::tool(session, app, tool, parse_json(args))) {
+                        Ok(t) => Some(tool_reply(id, t, false)),
+                        Err(e) => Some(tool_reply(id, e, true))
+                    }
+                } else {
+                    Some(written(&object([("jsonrpc", JStr("2.0")), ("id", id), ("error", object([("code", JNum(0 - 32601)), ("message", JStr("no method `" ++ method ++ "`"))]))])))
+                }
+        }
+    }
+    fn emit_frames(session: &mut Self, app: &mut App<S, L>, at: Int, count: Int) where S: Edits<S> {
+        let mut k = 0;
+        while({ k < count }) {
+            let f = session.emits[at];
+            f(app);
+            Session::record(session, &*app);
+            session.frame = session.frame + 1;
+            k = k + 1
+        }
+    }
+    fn tool(session: &mut Self, app: &mut App<S, L>, name: Str, args: Json) -> Result<Str, Str> where S: Edits<S>, S: Columns, L: Listed<S> {
+        if(name == "pause") { session.paused = true; Ok("paused: the app waits for `resume`") }
+        else if(name == "resume") { session.paused = false; Ok("resumed") }
+        else if(name == "overview") {
+            let infos = app.system_infos();
+            Ok("frame " ++ show(session.frame) ++ "\n" ++ show(len_at(&app.world.entities())) ++ " entities\ncomponents: " ++ join(app.world.component_names(), ", ")
+                ++ "\nsystems: " ++ join(std::vec::map(infos, fn(i: SystemInfo) -> Str { i.name }), ", ")
+                ++ "\nlabels you can emit/step: " ++ join(clone(&session.labels), ", "))
+        }
+        else if(name == "emit") {
+            let label = text_of(field(&args, "label"));
+            let count = num_of(field(&args, "count"), 1);
+            let at = place_of(&session.labels, label);
+            if(at < 0) { Err("no label `" ++ label ++ "`: the labels are " ++ join(clone(&session.labels), ", ")) } else {
+                Session::emit_frames(session, app, at, count);
+                Ok("emitted `" ++ label ++ "` " ++ show(count) ++ "x; now frame " ++ show(session.frame))
+            }
+        }
+        else if(name == "step") {
+            let label = text_of(field(&args, "label"));
+            let at = place_of(&session.labels, label);
+            if(at < 0) { Err("no label `" ++ label ++ "`") } else {
+                let f = session.steps[at];
+                let report = f(app);
+                Ok("step " ++ show(report.index) ++ ": " ++ (if(report.finished) { "the pass finished" } else if(report.kind == 1) { "system #" ++ show(report.index) } else { "condition #" ++ show(report.index) }))
+            }
+        }
+        else if(name == "entity") {
+            let id = text_of(field(&args, "id"));
+            match(entity_named(&app.world, id)) {
+                Some(e) =>
+                    let names = app.world.component_names();
+                    let mut lines = ["entity " ++ id];
+                    let mut k = 0;
+                    while({ k < len_at(&names) }) {
+                        match(describe_component(&app.world, e, names[k])) { Some(d) => push_at(&mut lines, names[k] ++ " = " ++ value_text(&d)), None => () };
+                        k = k + 1
+                    };
+                    Ok(join(lines, "\n")),
+                None => Err("entity " ++ id ++ " is not alive")
+            }
+        }
+        else if(name == "explain") {
+            let component = text_of(field(&args, "component"));
+            let infos = app.system_infos();
+            let mut lines = [];
+            let mut i = 0;
+            while({ i < len_at(&infos) }) {
+                let info = &infos[i];
+                if(std::vec::contains(info.writes(), component)) {
+                    let reads = info.reads();
+                    push_at(&mut lines, "`" ++ component ++ "` is written by `" ++ info.name ++ "`; reads: " ++ (if(len_at(&reads) == 0) { "-" } else { join(clone(&reads), ", ") }));
+                    let mut r = 0;
+                    while({ r < len_at(&reads) }) {
+                        let mut j = 0;
+                        while({ j < len_at(&infos) }) {
+                            let other = &infos[j];
+                            if(std::vec::contains(other.writes(), reads[r])) { push_at(&mut lines, "  `" ++ reads[r] ++ "` is written by `" ++ other.name ++ "`; reads: " ++ (if(len_at(&other.reads()) == 0) { "-" } else { join(other.reads(), ", ") })) } else { () };
+                            j = j + 1
+                        };
+                        r = r + 1
+                    }
+                } else { () };
+                i = i + 1
+            };
+            if(len_at(&lines) == 0) { Err("no system writes `" ++ component ++ "`") } else { Ok(join(lines, "\n")) }
+        }
+        else if(name == "history") {
+            let component = text_of(field(&args, "component"));
+            let condition = text_of(field(&args, "condition"));
+            let mut found = None;
+            let mut i = 0;
+            while({ i < len_at(&session.recorded) }) {
+                let entry = &session.recorded[i];
+                let (f, e, n, d) = (entry.0, entry.1, entry.2, &entry.3);
+                if(if(match(found) { Some(_) => false, None => true }) { n == component } else { false }) {
+                    match(number_in(d)) { Some(x) => if(meets(x, condition)) { found = Some("first at frame " ++ show(f) ++ ": " ++ entity_text(e) ++ " " ++ n ++ " = " ++ value_text(d)) } else { () }, None => () }
+                } else { () };
+                i = i + 1
+            };
+            match(found) { Some(t) => Ok(t), None => Ok("never, over " ++ show(session.frame) ++ " frames") }
+        }
+        else if(name == "what_if") {
+            let label = text_of(field(&args, "label"));
+            let frames = num_of(field(&args, "frames"), 1);
+            let at = place_of(&session.labels, label);
+            if(at < 0) { Err("no label `" ++ label ++ "`") } else {
+                // (A copy of the world to go back to; the edits made, the
+                // frames run, what came of it said, and the world put back.)
+                let saved = app.world.snapshot();
+                let mut edited = [];
+                match(field(&args, "edits")) {
+                    Some(list) => match(list) {
+                        JArr(edits) =>
+                            let mut k = 0;
+                            while({ k < len_at(edits) }) {
+                                let edit = &edits[k];
+                                match(entity_named(&app.world, text_of(field(edit, "entity")))) {
+                                    Some(e) => discard(set_field(&mut app.world, e, text_of(field(edit, "component")), text_of(field(edit, "field")), text_of(field(edit, "value")))); push_at(&mut edited, e),
+                                    None => ()
+                                };
+                                k = k + 1
+                            },
+                        _ => ()
+                    },
+                    None => ()
+                };
+                let mut k = 0;
+                while({ k < frames }) { let f = session.emits[at]; f(app); k = k + 1 };
+                let names = app.world.component_names();
+                let mut lines = ["after " ++ show(frames) ++ " frame(s) of `" ++ label ++ "`:"];
+                let mut i = 0;
+                while({ i < len_at(&edited) }) {
+                    let mut n = 0;
+                    while({ n < len_at(&names) }) {
+                        match(describe_component(&app.world, edited[i], names[n])) { Some(d) => push_at(&mut lines, names[n] ++ ": " ++ value_text(&d)), None => () };
+                        n = n + 1
+                    };
+                    i = i + 1
+                };
+                app.world = saved;
+                Ok(join(lines, "\n"))
+            }
+        }
+        else if(name == "why_not") {
+            let system = text_of(field(&args, "system"));
+            match(entity_named(&app.world, text_of(field(&args, "entity")))) {
+                Some(e) => match(app.why_not(system, e)) { Some(why) => Ok(if(len_at(&why) == 0) { "nothing: it runs on it" } else { join(why, "\n") }), None => Err("no system `" ++ system ++ "`") },
+                None => Err("the entity is not alive")
+            }
+        }
+        else if(name == "asm") { Err("asm reads a binary's machine code: covey's `asm` module reads what objdump writes of it") }
+        else { Err("no tool `" ++ name ++ "`") }
+    }
+}

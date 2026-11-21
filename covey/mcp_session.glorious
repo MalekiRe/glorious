@@ -1,0 +1,117 @@
+// Upstream's tests/devtools.rs, `mcp_tools_serve_a_live_app_on_its_own_thread`:
+// a Model Context Protocol session over a live app (module `mcp`): JSON-RPC
+// requests sent through a channel and answered when the app's loop pumps
+// the session; the tools emit frames, say the world, an entity and why a
+// component has its value, the first frame a condition held, step one
+// system, run frames on a copy with edits (the app untouched), and pause.
+// expect:
+// true
+// true
+// true
+// emitted `Update` 3x; now frame 3
+// 44
+// true
+// true
+// true
+// true
+// first at frame 1
+// step 0: system #
+// true
+// true
+// true
+// true
+// paused: the app waits for `resume`
+// resumed
+// 0
+pub mod ecs;
+pub mod reflected;
+mod mcp;
+
+use ecs::{App, Query, chain};
+use mcp::{Json, JStr, JNum, JArr, JObj, session_channel, parse_json, field, object, written};
+use std::reflect::{Described};
+use std::thread::{Receiver, try_recv};
+use std::text::{contains, starts_with};
+
+pub struct Update
+impl Use<[0, *]> for Update {}
+pub struct Hp(pub Int)
+impl Clone for Hp { fn clone(h: &Hp) -> Hp { Hp(h.0) } }
+pub struct Damage(pub Int)
+impl Clone for Damage { fn clone(d: &Damage) -> Damage { Damage(d.0) } }
+
+fn ramp(q: &mut Query<(&mut Damage,), ()>) { q.for_each() { (mut d,) => d.0 = d.0 + 1; } }
+fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut hp => hp.0 = hp.0 - d.0; } }
+
+// The text of a tool's reply; whether it is marked an error.
+fn reply_text(r: Receiver<Str>) -> Str {
+    match(try_recv(&r)) {
+        Some(t) => let reply = parse_json(t); match(field(&reply, "result")) {
+            Some(result) => match(field(result, "content")) {
+                Some(content) => match(content) { JArr(items) => match(field(&items[0], "text")) { Some(x) => match(x) { JStr(s) => *s, _ => "" }, None => "" }, _ => "" },
+                None => ""
+            },
+            None => ""
+        },
+        None => "no reply"
+    }
+}
+fn is_error(r: Receiver<Str>) -> Bool { match(try_recv(&r)) { Some(t) => contains(t, "\"isError\":true"), None => false } }
+fn args(pairs: [(Str, Str)]) -> Json { object(std::vec::map(pairs, fn(p: (Str, Str)) -> (Str, Json) { let (k, v) = p; (k, JStr(v)) })) }
+fn shown(b: Bool) -> Str { if(b) { "true" } else { "false" } }
+
+fn main() -> Int {
+    let mut app = App::new().register<Hp>().register<Damage>().add_systems(Update, (ramp, apply_damage).chain()).build();
+    let e = app.world.spawn_bundle((Hp(50), Damage(0)));
+    let (mut session, mut client) = session_channel();
+    session.label("Update", Update);
+
+    let init = client.send("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}");
+    let list = client.send("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
+    let none = client.send("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+    session.pump(&mut app);
+    say(shown(match(try_recv(&init)) { Some(t) => contains(t, "\"serverInfo\""), None => false }));
+    let tools = match(try_recv(&list)) { Some(t) => t, None => "" };
+    say(shown(std::vec::all(["overview", "explain", "history", "step", "what_if", "why_not", "asm"], fn(n: Str) -> Bool { contains(tools, "\"name\":\"" ++ n ++ "\"") })));
+    say(shown(match(try_recv(&none)) { Some(_) => false, None => true }));
+
+    let emitted = client.call("emit", object([("label", JStr("Update")), ("count", JNum(3))]));
+    session.pump(&mut app);
+    say(reply_text(emitted));
+    say(match(app.world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 });
+
+    let entity = show(e.index) ++ "v" ++ show(e.generation);
+    let overview = client.call("overview", args([]));
+    let shown_entity = client.call("entity", args([("id", entity)]));
+    let explained = client.call("explain", args([("entity", entity), ("component", "Hp")]));
+    let first = client.call("history", args([("component", "Hp"), ("condition", "< 48"), ("mode", "first")]));
+    let stepped = client.call("step", args([("label", "Update")]));
+    let missing = client.call("entity", args([("id", "999v0")]));
+    session.pump(&mut app);
+    let overview = reply_text(overview);
+    say(shown(starts_with(overview, "frame 3")));
+    say(shown(contains(overview, "labels you can emit/step: Update")));
+    say(shown(contains(reply_text(shown_entity), "Hp = Hp(44)")));
+    let explained = reply_text(explained);
+    say(shown(if(contains(explained, "apply_damage")) { if(contains(explained, "reads:")) { contains(explained, "ramp") } else { false } } else { false }));
+    say(std::text::take(reply_text(first), 16));
+    say(std::text::take(reply_text(stepped), 16));
+    say(shown(is_error(missing)));
+
+    // (With Damage raised, Hp drops further in the edited copy only.)
+    let what_if = client.call("what_if", object([("label", JStr("Update")), ("frames", JNum(1)),
+        ("edits", JArr([args([("entity", entity), ("component", "Damage"), ("field", "0"), ("value", "20")])]))]));
+    let before = match(app.world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 };
+    session.pump(&mut app);
+    let what_if = reply_text(what_if);
+    say(shown(if(contains(what_if, "Hp: Hp(")) { contains(what_if, "Damage: Damage(") } else { false }));
+    say(shown(match(app.world.get<Hp>(e)) { Some(h) => h.0 == before, None => false }));
+    say(shown(contains(what_if, "Hp: Hp(23)")));
+
+    let paused = client.call("pause", args([]));
+    let resumed = client.call("resume", args([]));
+    session.pump(&mut app);
+    say(reply_text(paused));
+    say(reply_text(resumed));
+    0
+}
