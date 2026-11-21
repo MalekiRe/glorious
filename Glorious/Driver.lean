@@ -765,8 +765,11 @@ def compileSourceAt (src : String) (check : Bool := true)
   let unitDeps := unitList.zipIdx.map fun ((k, _), i) =>
     let uses := (resolved.info.unitUses.lookup k).getD []
     ((unitList.take i).zipIdx.filter fun ((k', _), _) => uses.contains k').map (·.2)
-  -- (The library's modules among them, which come first.)
-  let library := (unitList.takeWhile fun (k, _) => k == "std" || k.startsWith "std::").length
+  -- (The library's modules among them, which come first, and the program's
+  -- modules that are files of their own: every unit but the program's,
+  -- which come before it. Kept for any program, which starts from them
+  -- where it begins with the same.)
+  let library := unitList.length - 1
   let infoKeys := Trace.timed "units' keys" fun _ => unitList.zipIdx.map fun ((k, is), i) =>
     unitInfoKey resolved.info ((unitList.take i).map (·.1)) k is
   -- (And what the prelude and library checked first count, without marks.)

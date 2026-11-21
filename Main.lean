@@ -321,20 +321,11 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   let dir ← Target.dirOf path
   let kept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
     pure ((← Target.readCert dir).toList)
-  -- (What the checker kept the last time, where none is given: its state
-  -- after each step, which a step made from the same is taken from.)
-  let checkKept ← if !checkKept.isEmpty || (← IO.getEnv "GLORIOUS_FRESH").isSome then pure checkKept
-    else Trace.timedIO "load kept checks" do
-      pure ((← Store.load (α := Check.Kept) (dir / "checked") "checked").getD [])
   -- (And what any program kept of the library's modules, checked first.)
   let library ← Target.libraryDir
   let libraryKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure []
     else pure ((← Store.load (α := Check.Kept) (library / "units") "units").getD [])
-  -- (And what any program kept of modules that are files of their own,
-  -- `mod ecs;`: another program of the same modules starts from them.)
-  let modulesKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure []
-    else pure ((← Store.load (α := Check.Kept) (library / "modules") "modules").getD [])
-  let checkKept := checkKept ++ libraryKept ++ modulesKept
+  let checkKept := checkKept ++ libraryKept
   -- (What certificate inference made the last time, by function and signature.)
   let memo ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {}
     else pure ((← Store.load (α := Infer.Memo) (dir / "infer") "infer").getD {})
@@ -362,20 +353,9 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if search then
       writePlaces file c.places
       if let some cert := c.cert then Target.writeCert dir cert
-    -- (Without the library's modules' states: those are kept with the
-    -- library, and read with the program's.)
-    let ofLibrary := fun (k : UInt64) => libraryKept.any (·.1 == k) || c.libraryKept.any (·.1 == k)
-    let mine := c.checkKept.filter fun (k, _) => !ofLibrary k
-    unless mine.isEmpty do
-      Trace.timedIO "save: checked" (Store.save (dir / "checked") "checked" mine (chain := 4))
-    -- (The states after the program's own modules that are files, all but
-    -- the last, which is the program's: kept for any program, newest first
-    -- and no more than eight, where one is new.)
-    if !files.isEmpty && mine.length > 1 then
-      let modules := mine.dropLast
-      unless modules.all (fun (k, _) => modulesKept.any (·.1 == k)) do
-        Trace.timedIO "save: modules" (Store.save (library / "modules") "modules"
-          ((modules ++ modulesKept.filter fun (k, _) => !modules.any (·.1 == k)).take 8) (chain := 4))
+    -- (The program's own unit's state is not kept: a compile of the same
+    -- texts takes the program built, and one of others checks it anew.
+    -- The states before it are kept with the library, for any program.)
     if preludeKept.isNone then
       if let .ok parsed := readPrelude.get then Store.save (library / "prelude") "prelude" parsed
     -- (Saved again only where something was parsed anew.)
@@ -384,12 +364,13 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     unless c.inferMade.isEmpty do Trace.timedIO "save: infer" (Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade))
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
-    -- (The library's modules as this compile checked them, with those kept
-    -- before, newest first and no more than 32.)
+    -- (The library's modules, and the program's modules that are files, as
+    -- this compile checked them, with those kept before, newest first and
+    -- no more than 96.)
     let newKeys := c.libraryKept.map (·.1)
     unless c.libraryKept.isEmpty || newKeys.all (fun k => libraryKept.any (·.1 == k)) do
       Store.save (library / "units") "units"
-        ((c.libraryKept ++ libraryKept.filter fun (k, _) => !newKeys.contains k).take 32)
+        ((c.libraryKept ++ libraryKept.filter fun (k, _) => !newKeys.contains k).take 96)
     if let some k := List.lookup ("%way", 0) c.places then Store.save (dir / "way") "way" k
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
