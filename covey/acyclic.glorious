@@ -17,7 +17,7 @@ impl Use<[0, *]> for Precedes {}
 impl Acyclic for Precedes { const ACYCLIC: Bool = true; }
 
 fn main() -> Int {
-    let mut world = App::new().relation<Precedes>().build().world;
+    let mut world = App::new().relation<Precedes>().build().into_world();
     let top = world.spawn_bundle(());
     let left = world.spawn_bundle(());
     let right = world.spawn_bundle(());

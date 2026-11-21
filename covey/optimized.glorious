@@ -59,7 +59,7 @@ fn changed_numbers(q: &mut Query<(&Number,), (Changed<Number>,)>) {
 fn tagged_or_changed(q: &mut Query<(&Number,), (Or<(With<Tag>, Changed<Number>)>,)>) { say(q.count()) }
 
 fn main() -> Int {
-    let mut world = App::new().register<Number>().register<Tag>().build().world;
+    let mut world = App::new().register<Number>().register<Tag>().build().into_world();
     let mut batch = [];
     let mut i = 0;
     while({ i < 12 }) { batch = push(batch, (Number(i),)); i = i + 1 };
@@ -70,7 +70,7 @@ fn main() -> Int {
     say(world.query_filtered<(Entity,), (Without<Tag>,)>().count());
     say("--");
 
-    let mut world = App::new().register<Number>().register<Tag>().storage<Sparse<Tag>>().build().world;
+    let mut world = App::new().register<Number>().register<Tag>().storage<Sparse<Tag>>().build().into_world();
     let mut batch = [];
     let mut i = 0;
     while({ i < 32 }) { batch = push(batch, (Number(i),)); i = i + 1 };
@@ -96,7 +96,7 @@ fn main() -> Int {
     flag(len_at(&values) == 32);
     say("--");
 
-    let mut world = App::new().register<Label>().register<Number>().register<Tag>().storage<Sparse<Tag>>().build().world;
+    let mut world = App::new().register<Label>().register<Number>().register<Tag>().storage<Sparse<Tag>>().build().into_world();
     let entity = world.spawn_bundle((Label("before"), Tag(9)));
     match(world.insert_bundle(entity, (Label("after"), Number(42)))) {
         Some((Some(l), _)) => say(l.0),
@@ -127,7 +127,7 @@ fn main() -> Int {
     match(app.world.get_mut<Number>(entities[3])) { Some(mut n) => n.0 = 30;, None => () };
     app.emit(&Update);
     app.emit(&Update);
-    app.world = App::new().register<Number>().register<Tag>().build().world;
+    app.world = App::new().register<Number>().register<Tag>().build().into_world();
     discard(app.world.spawn_bundle((Number(99),)));
     app.emit(&Update);
     say("--");

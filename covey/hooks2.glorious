@@ -51,7 +51,7 @@ fn main() -> Int {
     app.world.query<(&Health, &Marker)>().for_each() { h, _ => seen = push(seen, h.0); };
     say(sort(seen));
 
-    let mut world = App::new().register<Health>().register<Marker>().build().world;
+    let mut world = App::new().register<Health>().register<Marker>().build().into_world();
     let entity = world.spawn_bundle((Health(1),));
     discard(world.insert(entity, Marker));
     discard(world.remove<Health>(entity));

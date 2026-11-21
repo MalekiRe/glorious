@@ -6386,6 +6386,16 @@ covey/remote ports `a_waiting_envelope_point_runs_work_published_to_its_worker`
 (its point's bridge waits while a list beside it goes on), but for which
 thread ran what, which upstream asks.
 
+An app ends what other threads ask of its world (`AppGuard`, a `Drop`
+of the app's and not the world's, which the world's tasks move about):
+what is queued is told the world is closed (each request's `fail`, its
+callable cancelled), and a mark left that any asked after finds
+(`BridgeError::Closed`). A world taken out of its app, `into_world` (it was
+`.world`: a field taken out of a value with a `drop` is refused), ends the
+app. covey/remote ports the first half of
+`dropping_the_app_or_a_granted_bridge_never_strands_anyone`; its second
+is of Rust's futures.
+
 A bridge's function may wait, as a system's may, said by `waits(f)`
 (`RunsRemote`: taken out as a waiting system's parameters are, and called
 among the threads of the point's run), so two bridges that wait for each

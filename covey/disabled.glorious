@@ -31,7 +31,7 @@ fn main() -> Int {
         .register<Hp>()
         .register<Disabled>()
         .register<Prefab>()
-        .build().world;
+        .build().into_world();
     let enabled = world.spawn_bundle((Hp(0),));
     let disabled = world.spawn_bundle((Hp(1), Disabled));
     let prefab = world.spawn_bundle((Hp(2), Prefab));

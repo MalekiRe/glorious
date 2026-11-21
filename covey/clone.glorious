@@ -40,7 +40,7 @@ fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 
 fn main() -> Int {
     let mut world = App::new().relation<ChildOf>().relation<Likes>()
-        .register<Label>().register<Size>().register<Template>().register<Handle>().build().world;
+        .register<Label>().register<Size>().register<Template>().register<Handle>().build().into_world();
     let other = world.spawn_bundle((Label(0),));
     let original = world.spawn_bundle((Label(1), Size(3), Handle(1)));
     discard(world.relate(original, Likes, other));
@@ -54,7 +54,7 @@ fn main() -> Int {
     flag(match(world.clone_entity(original)) { Some(_) => false, None => true });
 
     let mut world = App::new().relation<ChildOf>().relation<Likes>()
-        .register<Label>().register<Size>().register<Template>().register<Handle>().build().world;
+        .register<Label>().register<Size>().register<Template>().register<Handle>().build().into_world();
     let row = world.spawn_bundle((Label(1), Template));
     let mut n = 0;
     while({ n < 3 }) {

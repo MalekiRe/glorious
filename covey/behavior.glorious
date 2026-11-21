@@ -64,7 +64,7 @@ fn id_of(o: &Option<Owned>) -> Int { match(o) { Some(r) => owned_id(r), None => 
 fn counted(drops: &Mutex<[Int]>, at: Int) -> Int { lock(&*drops, fn(d: &mut [Int]) -> Int { d[at] }) }
 
 fn main() -> Int {
-    let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().build().world;
+    let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().build().into_world();
     let mut entities = [];
     let mut i = 0;
     while({ i < 96 }) { entities = push(entities, world.spawn_bundle(())); i = i + 1 };
@@ -103,8 +103,8 @@ fn main() -> Int {
     flag(true);
     say("--");
 
-    let mut first = App::new().register<Int>().build().world;
-    let mut second = App::new().register<Int>().build().world;
+    let mut first = App::new().register<Int>().build().into_world();
+    let mut second = App::new().register<Int>().build().into_world();
     let a = first.spawn_bundle(());
     let b = second.spawn_bundle(());
     discard(first.insert(a, 10));
@@ -125,7 +125,7 @@ fn main() -> Int {
     say("--");
 
     let drops = (Mutex::new(fold(range(0, 65), [], fn(out: [Int], i: Int) -> [Int] { push(out, 0) })));
-    let mut world = App::new().register<Owned>().register<Tag>().build().world;
+    let mut world = App::new().register<Owned>().register<Tag>().build().into_world();
     let mut owned = [];
     let mut id = 0;
     while({ id < 64 }) {
@@ -152,7 +152,7 @@ fn main() -> Int {
     say(fold(range(0, 65), 0, fn(sum: Int, i: Int) -> Int { sum + counted(&drops, i) }) - 1);
     say("--");
 
-    let mut world = App::new().build().world;
+    let mut world = App::new().build().into_world();
     let a = world.spawn_bundle(());
     let b = world.spawn_bundle(());
     flag(world.despawn(a));

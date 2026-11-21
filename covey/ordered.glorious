@@ -28,7 +28,7 @@ fn insert_at(list: [Int], at: Int, x: Int) -> [Int] {
 }
 
 fn main() -> Int {
-    let mut world = App::new().register<Name>().relation<Ordered>().build().world;
+    let mut world = App::new().register<Name>().relation<Ordered>().build().into_world();
     let mut es = [];
     let mut alive = [];
     let mut targets = [];

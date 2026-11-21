@@ -63,7 +63,7 @@ fn main() -> Int {
     say(seen_of(&app.world));
     say("--");
 
-    let mut world = App::new().register<Hp>().register<Disabled>().register<HiddenBy>().relation<ChildOf>().build().world;
+    let mut world = App::new().register<Hp>().register<Disabled>().register<HiddenBy>().relation<ChildOf>().build().into_world();
     let root = world.spawn_bundle((Hp(0),));
     let child = world.spawn_bundle((Hp(1),));
     let closed = world.spawn_bundle((Hp(2), Disabled));
@@ -90,7 +90,7 @@ fn main() -> Int {
     say(app.world.query<(&Hp,)>().count() - 1);
     say("--");
 
-    let mut world = App::new().register<Hp>().register<Disabled>().register<HiddenBy>().relation<ChildOf>().build().world;
+    let mut world = App::new().register<Hp>().register<Disabled>().register<HiddenBy>().relation<ChildOf>().build().into_world();
     let root = world.spawn_bundle((Hp(0),));
     let child = world.spawn_bundle((Hp(1),));
     discard(world.relate(child, ChildOf, root));

@@ -57,7 +57,7 @@ fn walkers(q: &mut Query<(&mut Walking,), (Without<Running>,)>) { q.for_each() {
 fn runners(q: &mut Query<(&mut Running,), (Without<Walking>,)>) { q.for_each() { (mut r,) => r.0 = r.0 + 1; } }
 
 fn main() -> Int {
-    let mut world = App::new().register<Walking>().register<Running>().register<Dead>().register<Pos>().build().world;
+    let mut world = App::new().register<Walking>().register<Running>().register<Dead>().register<Pos>().build().into_world();
     let e = world.spawn_bundle((Running(1), Dead));
     discard(world.insert_bundle(e, (Walking(2), Pos(1))));
     say(has<Walking, _>(&world, e));
@@ -76,7 +76,7 @@ fn main() -> Int {
     discard(app.insert(e, Walking(1)));
     say("--");
 
-    let mut world = App::new().register<Rider>().register<Walking>().register<Running>().register<Dead>().build().world;
+    let mut world = App::new().register<Rider>().register<Walking>().register<Running>().register<Dead>().build().into_world();
     let e = world.spawn_bundle((Running(1),));
     discard(world.insert(e, Rider));
     say(match(world.get<Walking>(e)) { Some(w) => w.0, None => 0 - 1 });

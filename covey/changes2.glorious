@@ -114,7 +114,7 @@ fn replaced() {
     let mut i = 0;
     while({ i < 10 }) { app.emit(&Update); i = i + 1 };
     let count = match(app.world.remove_resource<Count>()) { Some(c) => c.0, None => 0 };
-    app.world = App::new().register<Value>().register<Tag>().insert_resource(Count(count)).build().world;
+    app.world = App::new().register<Value>().register<Tag>().insert_resource(Count(count)).build().into_world();
     // The same place now holds another set of columns.
     discard(app.world.spawn_bundle((Tag,)));
     discard(app.world.spawn_bundle((Value(2),)));

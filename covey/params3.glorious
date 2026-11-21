@@ -49,7 +49,7 @@ fn toggle<S>(world: &mut World<S>) where S: ecs::Get<Position>, S: ecs::Get<Tag>
 fn tagged(query: &mut Query<(&mut Position,), (With<Tag>,)>) { query.for_each() { (mut p,) => p.0 = p.0 + 10; } }
 
 fn main() -> Int {
-    let mut world = App::new().register<Position>().register<Tag>().register<Other>().register<Global>().build().world;
+    let mut world = App::new().register<Position>().register<Tag>().register<Other>().register<Global>().build().into_world();
     let mut mask = 0;
     while({ mask < 8 }) {
         let entity = world.spawn_bundle((Position(mask),));

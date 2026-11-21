@@ -34,7 +34,7 @@ fn names<S>(world: &mut World<S>, parent: Entity) -> [Int]
 }
 
 fn main() -> Int {
-    let mut world = App::new().relation<Child>().register<Name>().build().world;
+    let mut world = App::new().relation<Child>().register<Name>().build().into_world();
     let root = world.spawn_bundle((Name(100),));
     let other = world.spawn_bundle((Name(200),));
     let mut kids = [];

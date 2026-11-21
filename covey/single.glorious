@@ -20,7 +20,7 @@ struct Tag
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 
 fn main() -> Int {
-    let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().build().world;
+    let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().build().into_world();
     flag(is_none(world.query<(&Position,)>().single()));
     let a = world.spawn_bundle(());
     discard(world.insert(a, Position(1)));

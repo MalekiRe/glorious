@@ -62,13 +62,13 @@ fn untagged<S>(world: &mut World<S>, moving: Entity, tagged: Entity) where S: ec
 }
 
 fn main() -> Int {
-    let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().register<Other>().storage<ecs::Sparse<Tag>>().build().world;
+    let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().register<Other>().storage<ecs::Sparse<Tag>>().build().into_world();
     let moving = world.spawn_bundle((Position(1), Velocity(2)));
     let tagged = world.spawn_bundle((Position(3), Velocity(4), Tag));
     let still = world.spawn_bundle((Position(5),));
     let gone = world.spawn_bundle((Position(6), Velocity(7)));
     discard(world.despawn(gone));
-    let mut other = App::new().register<Position>().register<Velocity>().build().world;
+    let mut other = App::new().register<Position>().register<Velocity>().build().into_world();
     let elsewhere = other.spawn_bundle((Position(8), Velocity(9)));
     through_query(&mut world, [tagged, still, gone, elsewhere]);
     say(match(world.get<Position>(tagged)) { Some(p) => p.0, None => 0 });

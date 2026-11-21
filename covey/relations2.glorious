@@ -85,7 +85,7 @@ fn family<S>(commands: &mut Commands<S>) where S: ecs::Get<Name>, S: ecs::Column
 }
 
 fn main() -> Int {
-    let mut world = App::new().register<Name>().relation<Likes>().build().world;
+    let mut world = App::new().register<Name>().relation<Likes>().build().into_world();
     let a = world.spawn_bundle((Name(0),));
     let b = world.spawn_bundle((Name(1),));
     let c = world.spawn_bundle((Name(2),));
@@ -101,7 +101,7 @@ fn main() -> Int {
     say(names(&world, world.sources<Likes>(b)));
     say("--");
 
-    let mut world = App::new().register<Name>().relation<ChildOf>().build().world;
+    let mut world = App::new().register<Name>().relation<ChildOf>().build().into_world();
     let root = world.spawn_bundle((Name(0),));
     let other = world.spawn_bundle((Name(1),));
     let mut children = [];
@@ -119,7 +119,7 @@ fn main() -> Int {
     say(world.query<(&Name,)>().count());
     say("--");
 
-    let mut world = App::new().register<Name>().relation<Partner>().build().world;
+    let mut world = App::new().register<Name>().relation<Partner>().build().into_world();
     let a = world.spawn_bundle((Name(0),));
     let b = world.spawn_bundle((Name(1),));
     let c = world.spawn_bundle((Name(2),));
@@ -148,7 +148,7 @@ fn main() -> Int {
     say(most);
     say("--");
 
-    let mut world = App::new().register<Name>().relation<InSquad>().build().world;
+    let mut world = App::new().register<Name>().relation<InSquad>().build().into_world();
     let alpha = world.spawn_bundle((Name(100),));
     let beta = world.spawn_bundle((Name(200),));
     let mut members = [];
@@ -161,7 +161,7 @@ fn main() -> Int {
     say(names(&world, world.sources<InSquad>(beta)));
     say("--");
 
-    let mut world = App::new().register<Name>().relation<Tagged>().build().world;
+    let mut world = App::new().register<Name>().relation<Tagged>().build().into_world();
     let red = world.spawn_bundle((Name(100),));
     let blue = world.spawn_bundle((Name(200),));
     let mut things = [];
@@ -179,7 +179,7 @@ fn main() -> Int {
     say(names(&world, world.targets<Tagged>(things[2])));
     say("--");
 
-    let mut world = App::new().register<Name>().relation<ChildOf>().build().world;
+    let mut world = App::new().register<Name>().relation<ChildOf>().build().into_world();
     let mut ns = [];
     let mut i = 0;
     while({ i < 7 }) { ns = push(ns, world.spawn_bundle((Name(i),))); i = i + 1 };
@@ -195,7 +195,7 @@ fn main() -> Int {
     flag(parents_first);
     say("--");
 
-    let mut world = App::new().register<Name>().relation<Mount>().build().world;
+    let mut world = App::new().register<Name>().relation<Mount>().build().into_world();
     let mut ns = [];
     let mut i = 0;
     while({ i < 6 }) { ns = push(ns, world.spawn_bundle((Name(i),))); i = i + 1 };
@@ -214,7 +214,7 @@ fn main() -> Int {
     flag(world.query<(&Name,)>().count() == 1);
     say("--");
 
-    let mut world = App::new().register<Name>().relation<Likes>().build().world;
+    let mut world = App::new().register<Name>().relation<Likes>().build().into_world();
     let me = world.spawn_bundle((Name(0),));
     discard(world.relate(me, Likes, me));
     flag(names(&world, world.targets<Likes>(me)) == [0]);

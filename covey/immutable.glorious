@@ -18,7 +18,7 @@ impl Mutability for Level { type Writes = Immutable; }
 struct Hp(Int)
 
 fn main() -> Int {
-    let mut world = App::new().register<Level>().register<Hp>().build().world;
+    let mut world = App::new().register<Level>().register<Hp>().build().into_world();
     let e = world.spawn_bundle((Level(1), Hp(3)));
     say(match(world.get<Level>(e)) { Some(l) => l.0, None => 0 });
     discard(world.insert(e, Level(2)));

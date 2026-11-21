@@ -61,7 +61,7 @@ fn needs_player(h: &mut Single<(&Health,), (With<Player>,)>) { () }
 fn player_health(h: &mut Single<(&Health,), (With<Player>,)>) -> Int { match(h.get_mut()) { Some((h,)) => h.0, None => 0 } }
 fn waiting<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Get<Player>, S: ecs::Hidden<(&Health,), (ecs::With<Player>,)> {
     let mut world = world;
-    match(bridge(&mut world, Update, needs_player)) { Err(BridgeError::Invalid) => say("invalid"), Ok(_) => say("ran") };
+    match(bridge(&mut world, Update, needs_player)) { Err(BridgeError::Invalid) => say("invalid"), Err(BridgeError::Closed) => say("closed"), Ok(_) => say("ran") };
     let hp = until(&mut world, Render, player_health);
     if(hp == 7) { say("seven") } else { say("other") };
     world

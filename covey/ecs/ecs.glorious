@@ -3974,7 +3974,7 @@ pub fn in_state<T>() -> fn(Option<&T>) -> Bool { fn(state: Option<&T>) -> Bool {
 pub trait Schedule { const NAME: Str; }
 impl<T> Schedule for T { const NAME: Str = self_name(); }
 
-pub enum BridgeError { Invalid }
+pub enum BridgeError { Invalid, Closed }
 
 // What a task holds of the world while it runs: the world itself, and
 // commands, given to it at its place and given back when it waits.
@@ -4447,7 +4447,7 @@ impl<G, S, B, T> Follows<G, S> for (BehaviorsOf<B, S>, T) where T: Follows<G, S>
 // commands is done before the sync point is left. `until` asks again at the
 // next sync point while its parameters are not there.
 // (Those granted at one sync point are run one after another.)
-pub struct Request<S> { point: Str, touches: [Str], run: for<'a, 'b> fn(&'a mut World<S>, &'b mut Commands<S>) -> Option<Request<S>> / {Threads} }
+pub struct Request<S> { point: Str, touches: [Str], run: for<'a, 'b> fn(&'a mut World<S>, &'b mut Commands<S>) -> Option<Request<S>> / {Threads}, fail: fn() }
 // What a sync point runs for another thread: a function as a system is, or
 // one that may wait (`waits(f)`: at a barrier, for a channel), run among
 // the threads of the point's run.
@@ -4492,8 +4492,11 @@ impl<S> Remote<S> {
         discard(point);
         let (tx, rx) = channel();
         let asked = bridge_request<S, F, O>(<P as Schedule>::NAME, f, tx);
-        lock(&remote.queue, fn(queue: &mut [Request<S>]) { push_at(queue, asked) });
-        match(recv(&rx)) { Some(answer) => answer, None => Err(BridgeError::Invalid) }
+        // (Not queued where the app has ended: let go, which tells the
+        // asker so.)
+        let refused = lock(&remote.queue, fn(queue: &mut [Request<S>]) -> Option<Request<S>> { if(is_closed(&*queue)) { Some(asked) } else { push_at(queue, asked); None } });
+        match(refused) { Some(r) => fail_request(r), None => () };
+        match(recv(&rx)) { Some(answer) => answer, None => Err(BridgeError::Closed) }
     }
     // The same, asked again at each sync point until it can run.
     pub fn until<P, F, O>(remote: &Self, point: P, f: F) -> O / {Threads} where P: Schedule, F: RunsRemote<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
@@ -4509,12 +4512,13 @@ impl<S> Remote<S> {
 // What is asked of a sync point: run `f` there, and send back what it gave.
 fn bridge_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<Result<O, BridgeError>>) -> Request<S> where F: RunsRemote<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
     let touches = <F as RunsRemote<S, O>>::remote_touches();
+    let back = tx;
     Request { point: point, touches: touches, run: fn(world: &mut World<S>, commands: &mut Commands<S>) -> Option<Request<S>> / {Threads} {
         let g = f;
         let to = tx;
         match(<F as RunsRemote<S, O>>::run_remote(&g, world, commands)) { Some(out) => send(&to, Ok(out)), None => send(&to, Err(BridgeError::Invalid)) };
         None
-    } }
+    }, fail: fn() { let t = back; send(&t, Err(BridgeError::Closed)) } }
 }
 // (Asked again at the next sync point while it cannot run.)
 fn until_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<O>) -> Request<S> where F: RunsRemote<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
@@ -4526,7 +4530,7 @@ fn until_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<O>) -> Reque
             Some(out) => send(&to, out); None,
             None => Some(until_request<S, F, O>(point, g, to))
         }
-    } }
+    }, fail: fn() { () } }
 }
 
 // A sync point that says what its bridges may touch, upstream's envelope
@@ -4603,7 +4607,7 @@ impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind, P
         let mut each = into_iter(mine);
         while({ match(next(&mut each)) {
             Some(request) =>
-                let Request { point, touches, run } = request;
+                let Request { point, touches, run, fail } = request;
                 let world: &mut World<S> = unsafe { std::ptr::as_mut(at) };
                 match(run(world, commands)) { Some(later) => again = push(again, later), None => () };
                 true,
@@ -4646,7 +4650,7 @@ impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind, P
             } else {
                 let (first, rest) = first_of(mine);
                 mine = rest;
-                let Request { point, touches, run } = first;
+                let Request { point, touches, run, fail } = first;
                 match(std::thread::scope(fn(s: &std::thread::Scope) -> Option<Request<S>> / {Threads} { run(world, commands) })) { Some(later) => kept = push(kept, later), None => () }
             }
         };
@@ -4694,7 +4698,7 @@ fn apart_from_all(mine: &[Str], others: &[[Str]]) -> Bool {
 fn run_wave<S>(wave: [Request<S>], world: &mut World<S>) -> [Request<S>] {
     if(len_at(&wave) == 1) {
         let (first, _) = first_of(wave);
-        let Request { point, touches, run } = first;
+        let Request { point, touches, run, fail } = first;
         let mut mine = no_commands(&*world);
         let again = std::thread::scope(fn(s: &std::thread::Scope) -> Option<Request<S>> / {Threads} { run(world, &mut mine) });
         apply(mine, world);
@@ -4706,7 +4710,7 @@ fn run_wave<S>(wave: [Request<S>], world: &mut World<S>) -> [Request<S>] {
             let mut each = into_iter(wave);
             while({ match(next(&mut each)) {
                 Some(r) =>
-                    let Request { point, touches, run } = r;
+                    let Request { point, touches, run, fail } = r;
                     let w = at;
                     let cell = unsafe { std::thread::spawn_unchecked(s, fn() -> (Option<Request<S>>, Commands<S>) / {std::thread::Threads} {
                         let lent: &mut World<S> = unsafe { std::ptr::as_mut(w) };
@@ -4862,20 +4866,56 @@ impl<P, X, T> TaskStatuses for (SubOf<P, X>, T) where T: TaskStatuses { fn statu
 impl<P, C, T> TaskStatuses for (ComputedOf<P, C>, T) where T: TaskStatuses { fn statuses(list: &(ComputedOf<P, C>, T)) -> [TaskStatus] { <T as TaskStatuses>::statuses(&list.1) } }
 impl<B, S, T> TaskStatuses for (BehaviorsOf<B, S>, T) where T: TaskStatuses { fn statuses(list: &(BehaviorsOf<B, S>, T)) -> [TaskStatus] { <T as TaskStatuses>::statuses(&list.1) } }
 
-pub struct App<S, L> { pub world: World<S>, systems: L }
+pub struct App<S, L> { pub world: World<S>, systems: L, guard: AppGuard<S> }
+// What ends with an app: what other threads ask of its world. When it does,
+// what is queued is let go, each asker told the world is closed, and a mark
+// is left that any asking after finds (`BridgeError::Closed`).
+pub struct AppGuard<S> { queue: Mutex<[Request<S>]> }
+fn guard_of<S>(world: &World<S>) -> AppGuard<S> { AppGuard { queue: std::thread::share(&world.remotes) } }
+impl<S> Drop for AppGuard<S> {
+    fn drop(g: &mut AppGuard<S>) {
+        let left = lock(&g.queue, fn(queue: &mut [Request<S>]) -> [Request<S>] { replace(queue, [closed_mark()]) });
+        let mut each = into_iter(left);
+        while({ match(next(&mut each)) { Some(r) => fail_request_now(r); true, None => false } }) { () }
+    }
+}
+// A request told the world is closed, and let go.
+fn fail_request<S>(r: Request<S>) / {Threads} { let Request { point, touches, run, fail } = r; cancel(run); fail() }
+fn fail_request_now<S>(r: Request<S>) { std::thread::scope(fn(s: &std::thread::Scope) / {Threads} { fail_request(r) }) }
+fn closed_mark<S>() -> Request<S> { Request { point: "%closed", touches: [], run: fn(world: &mut World<S>, commands: &mut Commands<S>) -> Option<Request<S>> / {Threads} { None }, fail: fn() { () } } }
+fn is_closed<S>(queue: &[Request<S>]) -> Bool {
+    let mut i = 0;
+    let mut found = false;
+    while({ i < len_at(queue) }) { if(queue[i].point == "%closed") { found = true } else { () }; i = i + 1 };
+    found
+}
 
 impl<S, L> App<S, L> {
     // An app with nothing in its world and no systems.
     pub fn new() -> App<(), ()> {
-        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: () }
+        let w = World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
+        let guard = guard_of(&w);
+        App { world: w, systems: (), guard: guard }
+    }
+
+    // The world alone: the app ends, its systems with it (what other threads
+    // ask of the world is then closed).
+    pub fn into_world(app: Self) -> World<S> {
+        let App { world, systems, guard } = app;
+        discard(systems);
+        discard(guard);
+        world
     }
 
     // Give the world a resource.
     pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> {
-        let App { world, systems } = app;
+        let App { world, systems, guard } = app;
         let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
+        let w = World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
+        discard(guard);
+        let guard = guard_of(&w);
+        App { world: w, systems: systems, guard: guard }
     }
 
     // The resource at its type's start.
@@ -4884,31 +4924,37 @@ impl<S, L> App<S, L> {
     // A place for a resource the world does not have yet. (Upstream finds
     // it from the systems that ask for it.)
     pub fn register_resource<T>(app: Self) -> App<(Resource<T>, S), L> {
-        let App { world, systems } = app;
+        let App { world, systems, guard } = app;
         let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
+        let w = World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
+        discard(guard);
+        let guard = guard_of(&w);
+        App { world: w, systems: systems, guard: guard }
     }
 
     // Store a component.
     pub fn register<T>(app: Self) -> App<(Column<T>, S), L> {
-        let App { world, systems } = app;
+        let App { world, systems, guard } = app;
         let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
+        let w = World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
+        discard(guard);
+        let guard = guard_of(&w);
+        App { world: w, systems: systems, guard: guard }
     }
 
     // Register systems under a label, named by a value of it: `Update`.
     pub fn add_systems<E, P, Q>(app: Self, label: E, systems: P) -> App<S, (On<E, Q>, L)> where P: IntoSystem<E, S, Out = Q> {
-        let App { world, systems: before } = app;
-        App { world: world, systems: (On { label: fn(event: E) { () }, systems: <P as IntoSystem<E, S>>::into_system(systems) }, before) }
+        let App { world, systems: before, guard } = app;
+        App { world: world, systems: (On { label: fn(event: E) { () }, systems: <P as IntoSystem<E, S>>::into_system(systems) }, before), guard: guard }
     }
 
     // Register systems under a label that carries something, named by its
     // type: `.on<Hit>(..)`. A system under it may take `&Hit` first.
     pub fn on<E, P, Q>(app: Self, systems: P) -> App<S, (On<E, SharedSystem<Q>>, L)> where P: IntoSystem<E, S, Out = Q> {
-        let App { world, systems: before } = app;
-        App { world: world, systems: (On { label: fn(event: E) { () }, systems: SharedSystem { shared: Mutex::new(<P as IntoSystem<E, S>>::into_system(systems)) } }, before) }
+        let App { world, systems: before, guard } = app;
+        App { world: world, systems: (On { label: fn(event: E) { () }, systems: SharedSystem { shared: Mutex::new(<P as IntoSystem<E, S>>::into_system(systems)) } }, before), guard: guard }
     }
 
     // Add what a plugin has: its components, then what it builds.
@@ -4918,18 +4964,24 @@ impl<S, L> App<S, L> {
 
     // Store a relation: what relates and what is related to.
     pub fn relation<R>(app: Self) -> App<<R as RelationColumns<S>>::Out, L> where R: RelationColumns<S> {
-        let App { world, systems } = app;
+        let App { world, systems, guard } = app;
         let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
+        let w = World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
+        discard(guard);
+        let guard = guard_of(&w);
+        App { world: w, systems: systems, guard: guard }
     }
 
     // Store each of a list of components: `.register_all<(Position, Velocity)>()`.
     pub fn register_all<C>(app: Self) -> App<<C as Registers<S>>::Out, L> where C: Registers<S> {
-        let App { world, systems } = app;
+        let App { world, systems, guard } = app;
         let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
+        let w = World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
+        discard(guard);
+        let guard = guard_of(&w);
+        App { world: w, systems: systems, guard: guard }
     }
 
     // The app, ready to run.
@@ -4982,15 +5034,15 @@ impl<S, L> App<S, L> {
     // The group of `X` follows the state `P`. A group follows one state.
     pub fn add_sub_state<P, X>(app: Self) -> App<S, (SubOf<P, X>, L)> where X: State, L: Follows<<X as State>::Group, S> {
         if(<L as Follows<<X as State>::Group, S>>::has_parent()) { abort("the state group already follows a parent state") };
-        let App { world, systems } = app;
-        App { world: world, systems: (SubOf { none: [] }, systems) }
+        let App { world, systems, guard } = app;
+        App { world: world, systems: (SubOf { none: [] }, systems), guard: guard }
     }
     // Behaviors, and the instances they keep.
     pub fn add_behaviors(app: Self) -> App<(Resource<Instances>, S), L> { app.insert_resource(Instances { running: [], next: 0 }) }
     // The behavior `B`, run at the label `E`.
     pub fn add_behavior<B, E>(app: Self) -> App<S, (BehaviorsOf<B, S>, L)> where E: Schedule {
-        let App { world, systems } = app;
-        App { world: world, systems: (BehaviorsOf { label: <E as Schedule>::NAME, entities: [], ids: [], states: [], none: [] }, systems) }
+        let App { world, systems, guard } = app;
+        App { world: world, systems: (BehaviorsOf { label: <E as Schedule>::NAME, entities: [], ids: [], states: [], none: [] }, systems), guard: guard }
     }
     // A place for the events of type `E` delivered to entities.
     pub fn add_inbox<E>(app: Self) -> App<(Resource<Inbox<E>>, S), L> { app.insert_resource(Inbox::new()) }
@@ -5006,15 +5058,15 @@ impl<S, L> App<S, L> {
     pub fn with_execution_mode(app: Self, mode: ExecutionMode) -> Self { discard(mode); app }
     // A task, at this place among the systems (see `TaskOf`).
     pub fn add_task(app: Self, body: fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}) -> App<S, (TaskOf<S>, L)> {
-        let App { world, systems } = app;
-        App { world: world, systems: (TaskOf { state: TaskState::Fresh(body) }, systems) }
+        let App { world, systems, guard } = app;
+        App { world: world, systems: (TaskOf { state: TaskState::Fresh(body) }, systems), guard: guard }
     }
     // A state worked out from `P`'s value whenever `P` is entered.
     pub fn add_computed_state<P, C>(app: Self, f: fn(&P) -> Option<C>) -> App<(Resource<Computer<P, C>>, S), (ComputedOf<P, C>, L)>
         where C: State, L: Follows<<C as State>::Group, S> {
         if(<L as Follows<<C as State>::Group, S>>::has_parent()) { abort("the state group already follows a parent state") };
-        let App { world, systems } = app.insert_resource(Computer { f: f });
-        App { world: world, systems: (ComputedOf { none: [] }, systems) }
+        let App { world, systems, guard } = app.insert_resource(Computer { f: f });
+        App { world: world, systems: (ComputedOf { none: [] }, systems), guard: guard }
     }
     // The world's structural operations, with the hooks they fire.
     pub fn spawn_bundle<B>(app: &mut Self, bundle: B) -> Entity where B: Bundle<S>, B: Hooked<S, L>, S: ByName<S, L> {

@@ -43,7 +43,7 @@ fn crew<S>(world: &mut World<S>, e: Entity) -> Str
 }
 
 fn main() -> Int {
-    let mut world = App::new().relation<DockedAt>().relation<InSquad>().register<Name>().build().world;
+    let mut world = App::new().relation<DockedAt>().relation<InSquad>().register<Name>().build().into_world();
     let a = world.spawn_bundle((Name(10),));
     let b = world.spawn_bundle((Name(11),));
     let unit = world.spawn_bundle((Name(1), DockedAt { berth: 0 }.to(a), InSquad.to(a)));

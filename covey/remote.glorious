@@ -20,7 +20,11 @@
 //   envelope point's bridge waits, the systems beside it go on, one of them
 //   waiting for another that comes after it (upstream asks which thread ran
 //   `y`: here, that the emit ends).
-// Not ported: `dropping_the_app_or_a_granted_bridge_never_strands_anyone`
+// - `dropping_the_app_or_a_granted_bridge_never_strands_anyone`, its first
+//   half: a request queued when its app ends is told the world is closed,
+//   as is any asked after. (Its second, of a bridge granted and its future
+//   dropped unpolled, is of Rust's futures.)
+// Not ported: none further
 // (a request is not failed when the app is dropped); the envelope sync
 // points that run beside other systems
 // (`an_envelope_point_runs_beside_disjoint_systems_and_infers_its_components`,
@@ -58,6 +62,9 @@
 // 20
 // --
 // ran
+// --
+// closed
+// closed
 // 0
 mod ecs;
 
@@ -163,7 +170,7 @@ fn main() -> Int {
         let worker = s.spawn({
             let mut m = mine;
             let mut to = finished;
-            match(m.bridge(Net, needs_player)) { Err(BridgeError::Invalid) => say("invalid"), Ok(_) => say("ran") };
+            match(m.bridge(Net, needs_player)) { Err(BridgeError::Invalid) => say("invalid"), Err(BridgeError::Closed) => say("closed"), Ok(_) => say("ran") };
             let value = ecs::Remote::until(&m, Net, player_a);
             store(&to, value)
         });
@@ -388,5 +395,18 @@ fn main() -> Int {
         join(worker)
     });
     say(if(load(&y_ran) == 1) { "ran" } else { "not" });
+    say("--");
+
+    let app = App::new().register<A>().add_systems(Update, sync_point(Net)).build();
+    let remote = app.world.remote();
+    let mut held = Some(app);
+    scope(fn(s: &Scope) / {Threads} {
+        let mine = remote.share();
+        let waiter = s.spawn({ let m = mine; match(m.bridge(Net, fn(q: &mut Query<(&A,), ()>) { () })) { Err(BridgeError::Closed) => "closed", Err(_) => "invalid", Ok(_) => "ran" } });
+        wait_for(&remote, 1);
+        discard(replace(&mut held, None));
+        say(join(waiter))
+    });
+    say(scope(fn(s: &Scope) -> Str / {Threads} { match(remote.bridge(Net, fn(q: &mut Query<(&A,), ()>) { () })) { Err(BridgeError::Closed) => "closed", Err(_) => "invalid", Ok(_) => "ran" } }));
     0
 }

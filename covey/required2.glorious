@@ -92,7 +92,7 @@ impl<S, L> Plugin<S, L> for Flock {
 }
 
 fn main() -> Int {
-    let mut world = App::new().register<Bird>().register<Pos>().register<Vel>().register<Mass>().build().world;
+    let mut world = App::new().register<Bird>().register<Pos>().register<Vel>().register<Mass>().build().into_world();
     let fresh = world.spawn_bundle((Mass(1),));
     let moving = world.spawn_bundle((Mass(2), Pos(7)));
     discard(world.insert(fresh, Bird));
@@ -109,7 +109,7 @@ fn main() -> Int {
     flag(is_some(world.get<Bird>(moving)));
     say("--");
 
-    let mut cycle = App::new().register<Left>().register<Right>().build().world;
+    let mut cycle = App::new().register<Left>().register<Right>().build().into_world();
     let l = cycle.spawn_bundle((Left,));
     flag(is_some(cycle.get<Right>(l)));
     let r = cycle.spawn_bundle((Right,));
@@ -139,7 +139,7 @@ fn main() -> Int {
     say(match(asked.world.get<Mass>(made[1])) { Some(m) => m.0, None => 0 - 1 });
     say("--");
 
-    let mut flock = App::new().add_plugins(Flock).build().world;
+    let mut flock = App::new().add_plugins(Flock).build().into_world();
     let e = flock.spawn_bundle((Bird,));
     say(match(flock.get<Mass>(e)) { Some(m) => m.0, None => 0 - 1 });
     0

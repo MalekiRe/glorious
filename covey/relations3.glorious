@@ -74,7 +74,7 @@ fn docking<S>(s: &mut Single<(&Station,), ()>, commands: &mut Commands<S>)
 }
 
 fn main() -> Int {
-    let mut world = App::new().register<Name>().relation<DockedAt>().build().world;
+    let mut world = App::new().register<Name>().relation<DockedAt>().build().into_world();
     let kestrel = world.spawn_bundle((Name(1),));
     let osprey = world.spawn_bundle((Name(2),));
     let ship = world.spawn_bundle((Name(3), DockedAt { berth: 3 }.to(kestrel)));

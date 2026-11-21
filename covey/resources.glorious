@@ -44,7 +44,7 @@ fn had(score: Option<Score>) -> Int { match(score) { Some(s) => s.0, None => -1 
 
 // `world_resources_insert_replace_read_write_and_remove`
 fn by_hand() {
-    let mut world = App::new().register_resource<Score>().build().world;
+    let mut world = App::new().register_resource<Score>().build().into_world();
     say(shown(world.resource<Score>()));
     say(had(world.remove_resource<Score>()));
     say(had(world.insert_resource(Score(1))));
@@ -60,7 +60,7 @@ fn by_hand() {
 
 // `queries_never_see_resources_even_with_identical_components`
 fn unseen() {
-    let mut world = App::new().register<Score>().register_resource<Score>().build().world;
+    let mut world = App::new().register<Score>().register_resource<Score>().build().into_world();
     let _ = world.insert_resource(Score(1));
     let entity = world.spawn_bundle((Score(2),));
     let mut rows = world.query<(Entity, &Score)>();

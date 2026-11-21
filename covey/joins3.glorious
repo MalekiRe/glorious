@@ -56,7 +56,7 @@ fn say_all(xs: [Str]) { let mut i = 0; while({ i < len_at(&xs) }) { say(xs[i]); 
 fn fuel<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Fuel> { match(world.get<Fuel>(e)) { Some(f) => f.0, None => 0 - 1 } }
 
 fn main() -> Int {
-    let mut world = App::new().relation<DockedAt>().relation<Partner>().register<Name>().register<Fuel>().build().world;
+    let mut world = App::new().relation<DockedAt>().relation<Partner>().register<Name>().register<Fuel>().build().into_world();
     let kestrel = world.spawn_bundle((Name(10), Fuel(0)));
     let osprey = world.spawn_bundle((Name(11), Fuel(0)));
     let s1 = world.spawn_bundle((Name(1), Fuel(1)));
