@@ -6982,7 +6982,7 @@ number changed in the middle function. Wall time, on this machine (load
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
 | Glorious (then) | 5.1 s | 1.6 s | 0.89 s |
-| Glorious (now) | 1.48 s | 0.31 s | |
+| Glorious (now) | 1.48 s | 0.28 s | |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
 
@@ -7196,7 +7196,20 @@ before what was kept is taken (`readHolds`). A place's way of lending is
 read only where the place has borrows, so that the elaboration a compile
 does first, every place lending, takes what the last compile kept of most
 functions too. Taken only where the checker ran. Elaborating on an edit
-30 ms -> 6 ms; the middle edit 0.37 s -> 0.31 s. (Tried and not kept: the
+30 ms -> 6 ms; the middle edit 0.37 s -> 0.31 s.
+
+And each function's lowering is kept (`Elab.LowerKept`, in `lower`): the
+function as lowered, the implementations it numbered and the copies it
+asked, in order, and whether it was a copy made; under a key of the item it
+is written in (`Lowering.srcKeys`), of what every function is lowered with
+(`Lowering.globalKey`: what the checker said of traits, fields and effects,
+each part summed entry by entry so that the order it was gathered in does
+not matter, and the declarations), and of the copies asked before it, in
+order (`Lowered.chain`). Lowering on an edit 31 ms -> 5 ms; the middle edit
+0.31 s -> 0.28 s. (Found on the way: a program taken from the build
+directory unchanged was written without its functions' names, which its
+file has for `host_fn_name`; they are kept now, and it is the same file a
+fresh build writes.) (Tried and not kept: the
 groups put on one after another where all but a few were kept, to save
 marking the state they start from as shared between threads. One after
 another, each reads what those before it found of their bodies, not only

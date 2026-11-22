@@ -49,6 +49,8 @@ structure Copies where
   /-- Each copy by its name: the function it is of, the implementations it
   is for, and whether their places are dropped. -/
   byName : Std.HashMap String (String × List Nat × Bool) := {}
+  /-- What `askCopy` added, in order (`LowerKept`). -/
+  asked : Array ((String × List Nat × Bool) × String) := #[]
 
 def internId (f : String) (ids : List Nat) : StateM Copies Nat := do
   match (← get).pool[(f, ids)]? with
@@ -96,7 +98,8 @@ def askCopy (fn : String) (ids : List Nat) (drop : Bool) : StateM Copies String 
   let key := (fn, ids, drop)
   if let some name := (← get).byKey[key]? then return name
   let name := s!"{fn}⟨{",".intercalate (ids.map toString)}⟩{if drop then "'" else ""}"
-  modify fun c => { c with byKey := c.byKey.insert key name, byName := c.byName.insert name key }
+  modify fun c => { c with byKey := c.byKey.insert key name, byName := c.byName.insert name key
+                           asked := c.asked.push (key, name) }
   pure name
 
 mutual

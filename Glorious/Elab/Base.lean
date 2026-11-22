@@ -51,7 +51,7 @@ function that makes it a value, given how each of its conditions is met. -/
 inductive DictE where
   | param (k : Nat)
   | impl (fn : String) (subs : List DictE)
-  deriving Inhabited
+  deriving Inhabited, Hashable
 
 /-- An implementation of a trait: the function that makes it a value, how many
 conditions it has, and the function for each of the trait's, in the trait's
@@ -60,6 +60,7 @@ structure ImplE where
   dictFn : String
   conditions : Nat
   methods : List (String × Nat)
+  deriving Hashable
 
 /-- The name a `_` has where what it takes is destroyed: its number among
 the `_` of its clause's patterns, read in order. -/
@@ -106,6 +107,7 @@ structure Destroy where
   hook : Option DictE
   array : Bool
   ctors : List (String × List (Option DictE))
+  deriving Hashable
 
 /-- What the checker tells the elaborator about a program's traits. -/
 structure TraitInfo where

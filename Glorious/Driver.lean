@@ -95,6 +95,8 @@ structure Compiled where
   /-- What elaborating each top-level function made, where `elabKept` was
   given: for the next compile (`Elab.ElabKept`). -/
   elabMade : Elab.ElabMemo := {}
+  /-- What lowering each function made: for the next compile (`Elab.LowerKept`). -/
+  lowerMade : Elab.LowerMemo := {}
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -788,7 +790,8 @@ def compileSourceAt (src : String) (check : Bool := true)
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
     (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none)
-    (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none) :
+    (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
+    (lowerKept : Option Elab.LowerMemo := none) :
     Except String Compiled := do
   let (prelude, items, parsedMade, textsMade, itemsMade) ← Trace.timed "parse" fun _ =>
     parseProgram src files check few packs lexed parsedKept preludeKept texts itemsKept
@@ -934,7 +937,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   let (all, lowered) := Trace.timed "lower what main reaches" fun _ =>
     match lowering with
     | some L =>
-      let st := L.reach L.start roots
+      let st := L.reach { L.start with kept := lowerKept.getD {} } roots
       (Elab.reachable roots (L.items st), some st)
     | none => (Elab.reachable roots all, none)
   -- (Only they and what they reach: what `main` reaches is elaborated below.
@@ -971,7 +974,10 @@ def compileSourceAt (src : String) (check : Bool := true)
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
        inferMade := made, firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade, frontMade := front.made,
-       parsedMade, textsMade, itemsMade, elabMade := out.made } : Compiled)
+       parsedMade, textsMade, itemsMade, elabMade := out.made
+       lowerMade := match lowered with
+         | some st => st.keptMade
+         | none => {} } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
     let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks (kept := elabKept) with
       | .ok out => do aside.get; pure out
@@ -1260,7 +1266,8 @@ def compileSource (src : String) (check : Bool := true)
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
     (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none)
-    (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none) :
+    (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
+    (lowerKept : Option Elab.LowerMemo := none) :
     Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it;
   -- and each text lexed, once: each that an earlier compile read as it is,
@@ -1284,7 +1291,7 @@ def compileSource (src : String) (check : Bool := true)
     match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
         (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts)
         (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) (frontKept := frontKept)
-        (itemsKept := itemsKept) (elabKept := elabKept) with
+        (itemsKept := itemsKept) (elabKept := elabKept) (lowerKept := lowerKept) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with

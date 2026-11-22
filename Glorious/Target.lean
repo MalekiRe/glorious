@@ -98,6 +98,7 @@ def encode (key : String) (b : Built) : Bytes :=
     ++ Enc.bool b.regions ++ Enc.bool b.loans ++ Bytecode.Encode.nat b.lent
     ++ Bytecode.Encode.list Bytecode.Encode.string b.plain
     ++ Bytecode.Encode.list Enc.place b.places ++ Enc.bool b.searched
+    ++ Bytecode.Encode.list Bytecode.Encode.string b.bytecode.names.toList
     ++ Bytecode.Encode.program b.bytecode
 
 /-- A built program from bytes, if they are one and were made from `key`. -/
@@ -117,8 +118,10 @@ def decode (key : String) (bs : Bytes) : Option Built := do
   let (plain, bs) ← Bytecode.Decode.list Dec.string bs
   let (places, bs) ← Bytecode.Decode.list Dec.place bs
   let (searched, bs) ← Dec.bool bs
+  -- (The functions' names, which the program's file has, `host_fn_name`.)
+  let (names, bs) ← Bytecode.Decode.list Dec.string bs
   let bytecode ← Bytecode.Decode.program bs
-  pure { bytecode, ctorNames := ctorNames.toArray, startLocals, sigs, certified, strict, regions
+  pure { bytecode := { bytecode with names := names.toArray }, ctorNames := ctorNames.toArray, startLocals, sigs, certified, strict, regions
          loans, lent, plain, places, searched }
 
 /-! ## A certificate
