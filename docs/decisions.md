@@ -6303,6 +6303,42 @@ is destroyed, which only the tuple of the length it comes to can say (the
 specializer can put that in its place, but the proved solver's one-way
 check would have to leave `Destroy` out).
 
+## Typed Core: borrow scopes decided by the checker, tried (not kept)
+
+Which borrows are scopes of their own in Core is found by a search
+(`Driver`'s `lending`, `blame`, `narrow`): each try elaborates and
+certifies the whole program again. It runs only where a certificate is
+asked for (`certify`, `sigs`, the server, the test suite); `run` and
+`build` take what an earlier compile found, or none. For
+`examples/calculator` it is 2.8 s of `certify`'s 3.3 s (25 tries).
+
+Tried: the checker notes, for each borrow of a mutable variable, the last
+later use where something still holds its loan (a holder among the names
+used after the use, or what the use reaches through or calls), and the
+statement after the borrow's own (a callable's body inside the statement
+is the statement's); the elaborator then takes each place's way from that
+(`1` where nothing holds it past its statement, `2` where something made
+of it is used no further than the scope reaches, else `0`) and the
+program is certified once, with no search. Measured on the test programs:
+
+| Way | Borrows that are scopes | Checks failing |
+|---|---|---|
+| The search | 1559 | 0 |
+| Every place a scope, else none | 1085 | 1 |
+| The checker's spans decide | 815 to 953 | 6 to 8 |
+
+What the spans do not say: a borrow given to a call that a handler is
+around has to last until the handler is gone (the third and fourth ways);
+a callable given the borrow needs the way that binds its region; a
+function that lends to itself; and, most of all, certificates inference
+finds that the proved checker turns away (337 of 704 failed tries in the
+earlier measurement), which no fact of the source predicts. That last is
+what Core's types taken from the checker (signatures and `let` types, in
+place of inference) would remove, and so would have to come first. Both
+are left: the search stays, where a certificate is asked for. (The
+attempt: `/tmp/typed_core1_wip.patch` at the time; `St.borrowSpans`,
+`Elab.askLends`.)
+
 ## A graph's nodes on threads of their own: where it is
 
 Upstream's executor runs a graph's nodes at once where it can: a node's
