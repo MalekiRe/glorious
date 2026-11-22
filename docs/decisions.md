@@ -6982,7 +6982,7 @@ number changed in the middle function. Wall time, on this machine (load
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
 | Glorious (then) | 5.1 s | 1.6 s | 0.89 s |
-| Glorious (now) | 4.0 s | 0.44 s | |
+| Glorious (now) | 3.6 s | 0.43 s | |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
 
@@ -7009,6 +7009,20 @@ pointing into what was read), each group a place in it. And the resolved
 items of the unit `main` is in, when it is the only one made anew, are not
 saved: that text is the one being edited, resolved again each time. The
 middle edit 0.57 s -> 0.44 s.
+
+Where that leaves it: an edit is faster than either of Zig's backends, a
+fresh build of the chain faster than Zig's LLVM backend and six times its
+own x86 backend. (Jai is not to be had here to measure.) Of the fresh
+build, a profile with frame pointers (`-Kquick=1`) puts certificate
+inference (on a thread of its own) and the check about level, and in the
+check what each group's delta is (`diffStates`) as much as the checking:
+each store's segments and each map's buckets are gone through for every
+group, one segment and some entries for each, the square of their
+number. Tried and not kept: marking each store where a group begins so a
+diff skips what was not touched since (3.67 s -> 3.6 s, not worth the
+field). What would pay: the maps that every group adds to (`fns`,
+`runFns`, `fnBodies`, ..) kept so that a group's additions are its own,
+not found by going through every bucket.
 
 Of an edit of the last function, 0.14 s is the process starting and
 reading what is kept, 0.05 s reading the edited text again, 0.12 s putting
