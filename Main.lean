@@ -358,17 +358,11 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   -- (What each of the program's own groups added, as the last compile of it
   -- checked them.)
   -- (Each in a file of its own: a compile writes only those it made anew.)
-  let groupsKept : Check.Deltas ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else do
-    let groupsDir := dir / "groups"
-    let mut kept : Check.Deltas := {}
-    if ← groupsDir.isDir then
-      for entry in ← groupsDir.readDir do
-        if let some k := entry.fileName.toNat? then
-          let later := Store.loadLater (α := List Check.KeptGroup) entry.path "group"
-          kept := kept.insert k.toUInt64 (Thunk.mk fun _ => match later.get with
-            | some [d] => some d
-            | _ => none)
-    pure kept
+  -- (All in one kept file, read as one region: each group is a place in
+  -- it, not a file of its own to open.)
+  let groupsKeptList : List (UInt64 × Check.KeptGroup) ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
+    pure ((← Store.load (α := List (UInt64 × Check.KeptGroup)) (dir / "groups.kept") "groups").getD [])
+  let groupsKept : Check.Deltas := groupsKeptList.foldl (fun m (k, d) => m.insertIfNew k (Thunk.pure (some d))) {}
   -- (And each module's items as resolution made them.)
   let unitsKept : Syntax.Modules.UnitsKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
     pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Flat.FItem × Syntax.Modules.UnitMade))
@@ -415,20 +409,24 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     -- was read, up to 64 files, then all written again.)
     unless c.frontMade.all (fun (k, _) => frontKept.contains k) do
       Trace.timedIO "save: front" (Store.save (dir / "front") "front" c.frontMade.toList (chain := 64))
-    unless c.unitsMade.all (fun (k, _) => unitsKept.contains k) do
+    -- (Not where the only unit made anew is the one the program's `main` is
+    -- in: the text being edited, resolved again the next time it changes,
+    -- which is each time; the others' are what a next compile finds.)
+    let isMain := fun (items : List Syntax.Flat.FItem) => items.any fun
+      | .fn "main" .. => true
+      | _ => false
+    let anew := c.unitsMade.filter fun (k, _) => !unitsKept.contains k
+    unless anew.isEmpty || anew.all (fun (_, items, _) => isMain items) do
       Trace.timedIO "save: resolved" (Store.save (dir / "resolved") "resolved" c.unitsMade (chain := 64))
-    -- (Saved again only where a group was checked anew.)
+    -- (Saved again only where a group was checked anew, pointing into what
+    -- was read. Those of earlier versions of the program are kept, for an
+    -- edit taken back: up to 4096, this compile's first.)
     Trace.timedIO "save: groups" do
-      for (k, d) in c.groupsMade do
-        -- (One kept by another compiler, or not at all: written.)
-        unless ((groupsKept[k]?).bind (·.get)).isSome do Store.save (dir / "groups" / toString k) "group" [d]
-      -- (Those of earlier versions of the program are kept, for an edit
-      -- taken back; past 4096, those no group of this compile is are taken
-      -- away.)
-      if groupsKept.size > 4096 then
+      let fresh := c.groupsMade.filter fun (k, _) => !groupsKept.contains k
+      unless fresh.isEmpty do
         let made : Std.HashSet UInt64 := c.groupsMade.foldl (fun s (k, _) => s.insert k) {}
-        for (k, _) in groupsKept do
-          unless made.contains k do discard <| (IO.FS.removeFile (dir / "groups" / toString k)).toBaseIO
+        let older := groupsKeptList.filter fun (k, _) => !made.contains k
+        Store.save (dir / "groups.kept") "groups" ((c.groupsMade.toList ++ older).take 4096) (chain := 64)
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)

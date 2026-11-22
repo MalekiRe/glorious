@@ -6982,7 +6982,7 @@ number changed in the middle function. Wall time, on this machine (load
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
 | Glorious (then) | 5.1 s | 1.6 s | 0.89 s |
-| Glorious (now) | 4.0 s | 0.57 s | |
+| Glorious (now) | 4.0 s | 0.44 s | |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
 
@@ -7000,6 +7000,15 @@ searched for each of the 2,000 functions, `startLocals`) and a text that
 writes no `mod` not read as tokens to find its modules: 0.79 s -> 0.57 s.
 covey/states2: a string in a small function 0.78 s -> 0.66 s; in `main`
 1.40 s, its bounds (some 460 of them, 0.55 s) the most of it.
+
+Then what is kept of the groups was a file for each (2,000 for the
+chain), each opened, read as a region and checked for its compiler on
+every compile, with the directory listed first: now one kept file, layered
+as the others are (`groups.kept`, saved where a group was made anew,
+pointing into what was read), each group a place in it. And the resolved
+items of the unit `main` is in, when it is the only one made anew, are not
+saved: that text is the one being edited, resolved again each time. The
+middle edit 0.57 s -> 0.44 s.
 
 Of an edit of the last function, 0.14 s is the process starting and
 reading what is kept, 0.05 s reading the edited text again, 0.12 s putting
