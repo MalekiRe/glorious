@@ -6982,7 +6982,7 @@ number changed in the middle function. Wall time, on this machine (load
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
 | Glorious (then) | 5.1 s | 1.6 s | 0.89 s |
-| Glorious (now) | 1.75 s | 0.43 s | |
+| Glorious (now) | 1.5 s | 0.43 s | |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
 
@@ -7150,9 +7150,20 @@ a certificate it did not take.
 - **The process ends once what is kept is written** (`IO.Process.exit`),
   not when the certificate searches it did not need are done.
 
-Where it is now: the check about 0.5 s on 24 cores, certificate inference
-1 s on one, then what is kept 0.2 s. Inference is the next: one state for
-the whole program, a group at a time.
+Where that left it: the check about 0.5 s on 24 cores, certificate
+inference 1 s on one, then what is kept 0.2 s. Then, 1.75 s -> 1.5 s:
+
+- **Inference's monad is `EStateM`**, not `StateT` over `Except`: one
+  result made at each step, not a pair inside an `Except`. What fails goes
+  back to the state it began with, as before (`Backtrackable` saving the
+  whole state). Inference 1.0 s -> 0.8 s.
+- **What is kept of the groups and of the front end is in shards too**
+  (`saveShards`, `loadShards`), each written on a thread of its own and
+  only where something new falls to it: an edit writes one or two of each.
+
+Now the front end and the check 0.45 s, inference 0.8 s, what is kept
+0.15 s. Inference is the next: one state for the whole program, a group at
+a time, and most of its time making and letting go of small values.
 
 ## Other standing decisions
 

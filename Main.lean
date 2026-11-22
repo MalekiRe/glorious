@@ -321,6 +321,24 @@ def keep (act : IO Unit) : IO Unit := do
   let t ← IO.asTask act
   keeping.modify (·.push t)
 
+/-- Entries by key, kept as `inferShards` files `name.i` by `shardOf`: each
+written on a thread of its own, only where an entry not `kept` falls to it,
+pointing into what was read; the first `most` of each. -/
+def saveShards {α : Type} (dir : System.FilePath) (name key : String) (entries : List (UInt64 × α))
+    (kept : UInt64 → Bool) (most : Nat := 1 <<< 30) : IO Unit := do
+  for i in [0:inferShards] do
+    let mine := entries.filter (shardOf ·.1 == i)
+    if mine.any (!kept ·.1) then
+      keep <| Trace.timedIO s!"save: {name}" (Store.save (dir / s!"{name}.{i}") key (mine.take most) (chain := 64))
+
+/-- What `saveShards` kept, all of it. -/
+def loadShards {α : Type} (dir : System.FilePath) (name key : String) : IO (List (UInt64 × α)) := do
+  let mut all : List (UInt64 × α) := []
+  for i in [0:inferShards] do
+    if let some part ← Store.load (α := List (UInt64 × α)) (dir / s!"{name}.{i}") key then
+      all := part ++ all
+  pure all
+
 /-- Compile the program at `path`, with the modules it has in other files.
 What the last compile of it found for each place where a borrow can be a scope
 of its own is where this one starts; and what this one finds is kept for the
@@ -374,7 +392,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   -- (All in one kept file, read as one region: each group is a place in
   -- it, not a file of its own to open.)
   let groupsKeptList : List (UInt64 × Check.KeptGroup) ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
-    pure ((← Store.load (α := List (UInt64 × Check.KeptGroup)) (dir / "groups.kept") "groups").getD [])
+    loadShards dir "groups.kept" "groups"
   let groupsKept : Check.Deltas := groupsKeptList.foldl (fun m (k, d) => m.insertIfNew k (Thunk.pure (some d))) {}
   -- (And each module's items as resolution made them.)
   let unitsKept : Syntax.Modules.UnitsKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
@@ -382,7 +400,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       (dir / "resolved") "resolved").getD []))
   -- (And what the front end's passes made of each item.)
   let frontKept : Std.HashMap UInt64 (List Syntax.Flat.FItem) ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
-    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Flat.FItem)) (dir / "front") "front").getD []))
+    pure (Std.HashMap.ofList (← loadShards (α := List Syntax.Flat.FItem) dir "front" "front"))
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
@@ -427,8 +445,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if let some k := List.lookup ("%way", 0) c.places then Store.save (dir / "way") "way" k
     -- (Saved again only where something was made anew; pointing into what
     -- was read, up to 64 files, then all written again.)
-    unless c.frontMade.all (fun (k, _) => frontKept.contains k) do
-      keep <| Trace.timedIO "save: front" (Store.save (dir / "front") "front" c.frontMade.toList (chain := 64))
+    saveShards dir "front" "front" c.frontMade.toList (frontKept.contains ·)
     -- (Not where the only unit made anew is the one the program's `main` is
     -- in: the text being edited, resolved again the next time it changes,
     -- which is each time; the others' are what a next compile finds.)
@@ -441,12 +458,10 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     -- (Saved again only where a group was checked anew, pointing into what
     -- was read. Those of earlier versions of the program are kept, for an
     -- edit taken back: up to 4096, this compile's first.)
-    keep <| Trace.timedIO "save: groups" do
-      let fresh := c.groupsMade.filter fun (k, _) => !groupsKept.contains k
-      unless fresh.isEmpty do
-        let made : Std.HashSet UInt64 := c.groupsMade.foldl (fun s (k, _) => s.insert k) {}
-        let older := groupsKeptList.filter fun (k, _) => !made.contains k
-        Store.save (dir / "groups.kept") "groups" ((c.groupsMade.toList ++ older).take 4096) (chain := 64)
+    let made : Std.HashSet UInt64 := c.groupsMade.foldl (fun s (k, _) => s.insert k) {}
+    let older := groupsKeptList.filter fun (k, _) => !made.contains k
+    saveShards dir "groups.kept" "groups" (c.groupsMade.toList ++ older) (groupsKept.contains ·)
+      (most := 4096 / inferShards)
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)

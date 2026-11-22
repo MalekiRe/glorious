@@ -332,10 +332,11 @@ def certifyKept (items : List Item) (p : Core.Program) (strict : Bool)
     (envSizes : List (Nat × Nat × Nat) := []) (regions loans ranked widen : Bool := false)
     (memo : Memo := {}) (remember : Bool := true) : Except String (Cert × Made) := do
   let g ← Elab.collectDeclared items
-  let (cert, st) ← (certifyM items g p envSizes).run
+  match (certifyM items g p envSizes).run
     { fns := p.fns, strict, regions, loans, ranked, widen, memo := memo.inst
-      frozen := memo.schemes, keptFaces := memo.faces, remember }
-  pure (cert, ⟨st.made, st.frozenMade, st.facesMade⟩)
+      frozen := memo.schemes, keptFaces := memo.faces, remember } with
+  | .ok cert st => pure (cert, ⟨st.made, st.frozenMade, st.facesMade⟩)
+  | .error e _ => throw e
 
 /-- The certificate alone, with nothing kept. -/
 def certify (items : List Item) (p : Core.Program) (strict : Bool)

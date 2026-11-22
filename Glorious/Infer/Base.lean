@@ -422,7 +422,12 @@ structure St where
   frozen : Std.HashMap UInt64 Frozen := {}
   frozenMade : Array (UInt64 × Frozen) := #[]
 
-abbrev M := StateT St (Except String)
+/-- (One result made at each step, not a pair inside an `Except`: most of
+inference is small steps. What fails goes back to the state it began
+with, `try` as over `Except`: the whole state is what is saved.) -/
+abbrev M := EStateM String St
+
+instance : EStateM.Backtrackable St St := ⟨id, fun _ saved => saved⟩
 
 instance {α : Type} : Inhabited (M α) := ⟨throw "certificate: unreachable"⟩
 
