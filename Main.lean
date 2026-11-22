@@ -401,11 +401,15 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   -- (And what the front end's passes made of each item.)
   let frontKept : Std.HashMap UInt64 (List Syntax.Flat.FItem) ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
     pure (Std.HashMap.ofList (← loadShards (α := List Syntax.Flat.FItem) dir "front" "front"))
+  -- (And each group of the program's own text's items, as parsed.)
+  let itemsKept : Syntax.ItemsKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
+    pure ((← Store.load (α := Syntax.ItemsKept) (dir / "items") "items").getD {})
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
     compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept texts
-      (groupsKept := some groupsKept) (unitsKept := some unitsKept) (frontKept := some frontKept))
+      (groupsKept := some groupsKept) (unitsKept := some unitsKept) (frontKept := some frontKept)
+      (itemsKept := some itemsKept))
   if let .ok c := result then keep <| Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
@@ -419,7 +423,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       if let .ok parsed := readPrelude.get then Store.save (library / "prelude") "prelude" parsed
     -- (Saved again only where something was parsed anew.)
     unless c.parsedMade.all (parsedKept.contains ·.1) do Trace.timedIO "save: parsed" (Store.save (dir / "parsed") "parsed" c.parsedMade)
-    unless c.textsMade.all (texts.contains ·.1) do Trace.timedIO "save: texts" (Store.save (dir / "texts") "texts" c.textsMade)
+    unless c.textsMade.all (texts.contains ·.1) do Trace.timedIO "save: texts" (Store.save (dir / "texts") "texts" c.textsMade (chain := 64))
     -- (Saved again only where something was made anew, pointing into what
     -- was read.)
     -- (The large ones each on a thread of its own, beside the others.)
@@ -446,6 +450,8 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     -- (Saved again only where something was made anew; pointing into what
     -- was read, up to 64 files, then all written again.)
     saveShards dir "front" "front" c.frontMade.toList (frontKept.contains ·)
+    if c.itemsMade.fold (fun b i (_, h, _, _) => b || ((itemsKept[i]?).map (·.2.1)) != some h) false then
+      keep <| Trace.timedIO "save: items" (Store.save (dir / "items") "items" c.itemsMade (chain := 64))
     -- (Not where the only unit made anew is the one the program's `main` is
     -- in: the text being edited, resolved again the next time it changes,
     -- which is each time; the others' are what a next compile finds.)
@@ -842,13 +848,13 @@ certificate with all of them asked for. -/
 def why (path : String) : IO UInt32 := do
   let src ← IO.FS.readFile path
   let files ← moduleFiles path
-  let .ok (prelude, items, _, _) := parseProgram src files | IO.println "parse failed"; return 1
+  let .ok (prelude, items, _, _, _) := parseProgram src files | IO.println "parse failed"; return 1
   let .ok resolved := Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items) | IO.println "resolve failed"; return 1
   let .ok (all, _) := Syntax.Flat.expandAliases resolved.items | IO.println "aliases failed"; return 1
   let all := (Syntax.Flat.fillDefaults all).1
   -- (With what destroys values written, where the program has something to
   -- destroy, as a compile has it.)
-  let drops := hasDrop items || (src.splitOn "defer").length > 1
+  let drops := hasDrop items || src.contains "defer"
   let blocks ← match Check.checkProgram all resolved.info drops with
     | .ok blocks => pure blocks
     | .error e => IO.println s!"check failed: {e}"; return 1
@@ -926,7 +932,7 @@ def stages (path : String) : IO UInt32 := do
     let now ← IO.monoMsNow
     IO.println s!"{what}: {now - last} ms"
     pure now
-  let .ok (prelude, items, _, _) := parseProgram src files | IO.println "parse failed"; return 1
+  let .ok (prelude, items, _, _, _) := parseProgram src files | IO.println "parse failed"; return 1
   IO.println s!"{prelude.length + items.length} items"
   last ← lap "parse" last
   let .ok resolved := Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items) | IO.println "resolve failed"; return 1
@@ -939,7 +945,7 @@ def stages (path : String) : IO UInt32 := do
   last ← lap "aliases, defaults" last
   -- (With what destroys values written, where the program has something to
   -- destroy, as a compile has it.)
-  let drops := hasDrop items || (src.splitOn "defer").length > 1
+  let drops := hasDrop items || src.contains "defer"
   let blocks ← match Check.checkProgram all resolved.info drops with
     | .ok blocks => pure blocks
     | .error e => IO.println s!"check failed: {e}"; return 1

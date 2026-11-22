@@ -955,6 +955,56 @@ private partial def parseItems : P (List Item) := do
     out := out ++ (← parseItemGroup).toArray
   pure out.toList
 
+/-- What an earlier parse of a text made of each group of its items, by the
+token the group began at: where it ended; a hash of its tokens, of the one
+after, and of what it was read with; its items; and the functions written in
+its blocks. -/
+abbrev ItemsKept := Std.HashMap Nat (Nat × UInt64 × List Item × Array Item)
+
+/-- The tokens from `i` to `j`, and the one after, with `seed`. -/
+def tokensHash (toks : Array Token) (i j : Nat) (seed : UInt64) : UInt64 := Id.run do
+  let mut h := seed
+  for k in [i:min (j + 1) toks.size] do
+    h := mixHash h (hash toks[k]!)
+  h
+
+/-- A text's operators, as what its items are read with. -/
+def fixKey (f : Fixities) : UInt64 :=
+  hash (f.infixes.map (fun (o, p, a) => (o, p, match a with
+    | .left => (0 : Nat)
+    | .right => 1
+    | .non => 2)), f.prefixes, f.bound)
+
+/-- `parseItems`, each group of items taken from `kept` where it began at the
+same token, its tokens and the one after the same, read with the same: the
+items are numbered by where their tokens are, so they are what parsing them
+again would give. Each group's items as `unmutItems` and `promoteItems` make
+them, which go item by item; the functions written in blocks as parsed. Gives
+each group, for the next. -/
+private partial def parseItemsKept (kept : ItemsKept) : P (List Item × ItemsKept) := do
+  let ctx ← read
+  let seed := hash (ctx.records, ctx.base, ctx.path, ctx.fixed, fixKey ctx.fix,
+    ctx.tables.map fun (p, f) => (p, fixKey f))
+  let mut out : Array Item := #[]
+  let mut made : ItemsKept := {}
+  repeat
+    if (← peek) == .eof then break
+    let i ← getThe Nat
+    if let some (j, h, items, locals) := kept[i]? then
+      if j ≤ ctx.toks.size && tokensHash ctx.toks i j seed == h then
+        set (σ := Nat) j
+        modifyThe (Array Item) (· ++ locals)
+        out := out ++ items.toArray
+        made := made.insert i (j, h, items, locals)
+        continue
+    let before := (← getThe (Array Item)).size
+    let group := promoteItems (unmutItems (← parseItemGroup))
+    let j ← getThe Nat
+    let m ← getThe (Array Item)
+    out := out ++ group.toArray
+    made := made.insert i (j, tokensHash ctx.toks i j seed, group, m.extract before m.size)
+  pure (out.toList, made)
+
 /-- The constructors a token stream declares with named fields: `struct Name
 { a: A }` and, inside an enum, `Name { a: A }`. -/
 private def collectRecords (toks : Array Token) : List String := Id.run do
@@ -1662,11 +1712,11 @@ and the fixities including those it declares. `base` keeps the identities of
 this text's callable literals apart from those of a text parsed before it.
 With `tables`, each module of the text has the operators the table gives it,
 and the text is the module `path`. -/
-def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
+def parseKept (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
     (tables : List (List String × Fixities) := []) (path : List String := [])
     (fixed : Bool := false) (packs : Nat := 0) (lexed : Option (Array Token) := none)
-    (reflect : Bool := true) :
-    Except String (List Item × Fixities) := do
+    (reflect : Bool := true) (kept : Option ItemsKept := none) :
+    Except String (List Item × Fixities × ItemsKept) := do
   -- (`packs`: how long lists of types are written out to; by default, as
   -- long as the longest list this text writes.)
   let toks ← match lexed with
@@ -1674,13 +1724,28 @@ def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List Stri
     | none => lex src
   let toks := expandPacks toks (if packs == 0 then max 2 (longestList toks) else packs)
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
-  let (items, _, local_) ← parseItems
-    { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed } 0 #[]
-  let items := items ++ local_.toList
-  -- (Each declared type's `Reflect`, read as the text is, after its items;
-  -- checked only where something asks it, as a copy for each length of a
-  -- list is.)
-  let made ← if reflect then reflectionsOf fix items (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
-  pure (promoteItems (unmutItems (items ++ made)), fix)
+  let ctx : PCtx := { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed }
+  match kept with
+  | some kept =>
+    let ((items, groups), _, local_) ← parseItemsKept kept ctx 0 #[]
+    let made ← if reflect then reflectionsOf fix (items ++ local_.toList) (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
+    pure (items ++ promoteItems (unmutItems (local_.toList ++ made)), fix, groups)
+  | none =>
+    let (items, _, local_) ← parseItems ctx 0 #[]
+    let items := items ++ local_.toList
+    -- (Each declared type's `Reflect`, read as the text is, after its items;
+    -- checked only where something asks it, as a copy for each length of a
+    -- list is.)
+    let made ← if reflect then reflectionsOf fix items (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
+    pure (promoteItems (unmutItems (items ++ made)), fix, {})
+
+/-- `parseKept`, nothing taken from an earlier parse. -/
+def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
+    (tables : List (List String × Fixities) := []) (path : List String := [])
+    (fixed : Bool := false) (packs : Nat := 0) (lexed : Option (Array Token) := none)
+    (reflect : Bool := true) :
+    Except String (List Item × Fixities) := do
+  let (items, fix, _) ← parseKept fix src base records tables path fixed packs lexed reflect
+  pure (items, fix)
 
 end Glorious.Syntax

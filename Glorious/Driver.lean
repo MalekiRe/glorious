@@ -89,6 +89,9 @@ structure Compiled where
   parsedMade : List (UInt64 × List Syntax.Item) := []
   /-- Each text as this compile read it or took it (`Texts`), for the next. -/
   textsMade : List (UInt64 × TextRead) := []
+  /-- Each group of the program's own text's items, where `itemsKept` was
+  given: for the next compile (`Syntax.ItemsKept`). -/
+  itemsMade : Syntax.ItemsKept := {}
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -265,24 +268,41 @@ declares nor brings itself: the program then reads the library, and those.
 (What is read, not what a name means: a name the text declares is its own
 whatever is read.) One pass over the text's words. -/
 def preludeModules (text : String) : List String := Id.run do
-  let isWord := fun (c : Char) => c.isAlphanum || c == '_'
+  -- (Over the bytes: a word is of ASCII letters, digits and `_`, and the
+  -- bytes of any other character are none of those, as the character is
+  -- not. Each word made once, from its bytes.)
+  let isWord := fun (b : UInt8) => (b ≥ 48 && b ≤ 57) || (b ≥ 65 && b ≤ 90) || (b ≥ 97 && b ≤ 122) || b == 95
   let decls := ["fn", "enum", "struct", "type", "trait", "effect", "const", "let"]
-  -- (One pass over the characters, each word made once.)
-  let (_, _, mentioned, own, _, _, _) := (text.push ' ').foldl
-    (init := ("", ' ', ({} : Std.HashSet String), ({} : Std.HashSet String), false, "", false))
-    fun (word, before, mentioned, own, afterPath, prev, inUse) c =>
-      if isWord c then
-        let afterPath := if word.isEmpty then before == ':' || before == '.' else afterPath
-        (word.push c, before, mentioned, own, afterPath, prev, inUse)
-      else
-        let (mentioned, own, prev, inUse) :=
-          if word.isEmpty then (mentioned, own, prev, inUse)
-          else if word == "use" then (mentioned, own, word, true)
-          else if inUse || afterPath || decls.contains prev then (mentioned, own.insert word, word, inUse)
-          else (mentioned.insert word, own, word, inUse)
-        let inUse := if c == ';' then false else inUse
-        let before := if c == ' ' || c == '\n' then before else c
-        ("", before, mentioned, own, afterPath, prev, inUse)
+  let bytes := text.toUTF8
+  let n := bytes.size
+  let mut mentioned : Std.HashSet String := {}
+  let mut own : Std.HashSet String := {}
+  let mut before : UInt8 := 32
+  let mut start := 0
+  let mut inWord := false
+  let mut afterPath := false
+  let mut prev := ""
+  let mut inUse := false
+  for i in [0:n + 1] do
+    let b := if i < n then bytes[i]! else 32
+    if isWord b then
+      if !inWord then
+        inWord := true
+        start := i
+        afterPath := before == 58 || before == 46
+    else
+      if inWord then
+        inWord := false
+        let word := String.fromUTF8! (bytes.extract start i)
+        if word == "use" then
+          prev := word
+          inUse := true
+        else
+          if inUse || afterPath || decls.contains prev then own := own.insert word
+          else mentioned := mentioned.insert word
+          prev := word
+      if b == 59 then inUse := false
+      if b != 32 && b != 10 then before := b
   pure ((Syntax.Modules.libraryPrelude.filter fun (name, _) =>
     mentioned.contains name && !own.contains name).map (·.2)).eraseDups
 
@@ -292,10 +312,9 @@ def mentionsPrelude (text : String) : Bool := !(preludeModules text).isEmpty
 module `std` of its own? -/
 def usesStd (src : String) (files : List (List String × String)) : Bool :=
   let named := fun (text : String) =>
-    (text.splitOn "std").length > 1 || (text.splitOn "core::").length > 1
-      || (text.splitOn "alloc::").length > 1
+    text.contains "std" || text.contains "core::" || text.contains "alloc::"
   let own := fun (text : String) =>
-    (text.splitOn "mod std {").length > 1 || (text.splitOn "mod std{").length > 1
+    text.contains "mod std {" || text.contains "mod std{"
   (named src || mentionsPrelude src || files.any fun (_, text) => named text || mentionsPrelude text)
     && !own src && !files.any fun (path, _) => path.head? == some "std"
 
@@ -506,7 +525,7 @@ def parseKey (text : String) (base : Nat) (records : List String)
 
 /-- Does a text name reflection, `std::reflect`, through which alone
 anything asks a type's `Reflect`. -/
-def mentionsReflection (text : String) : Bool := (text.splitOn "std::reflect").length > 1
+def mentionsReflection (text : String) : Bool := text.contains "std::reflect"
 
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
@@ -514,8 +533,9 @@ the program says `mod name;` the items of that module's text are put. -/
 def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true)
     (few : Bool := false) (packs : Nat := 0) (lexed : List (List String × Array Syntax.Token) := [])
     (parsedKept : Parsed := {}) (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none)
-    (texts : Texts := {}) :
-    Except String (List Syntax.Item × List Syntax.Item × List (UInt64 × List Syntax.Item) × List (UInt64 × TextRead)) := do
+    (texts : Texts := {}) (itemsKept : Option Syntax.ItemsKept := none) :
+    Except String (List Syntax.Item × List Syntax.Item × List (UInt64 × List Syntax.Item) × List (UInt64 × TextRead)
+      × Syntax.ItemsKept) := do
   -- (The program's own texts lexed once, where they were not already, and
   -- none told how long its lists are.)
   let lexed ← if !lexed.isEmpty || packs != 0 then pure lexed else lexTexts src files
@@ -525,7 +545,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   let packs := if packs != 0 then packs else longestOf lexed
   -- The library's texts are files of the program, before its own.
   -- (`#![no_std]`: without the library, whatever the text mentions.)
-  let std := usesStd src files && (src.splitOn "#![no_std]").length == 1
+  let std := usesStd src files && !src.contains "#![no_std]"
   let own := files
   -- (`few`: only the library's modules the program needs, read and checked
   -- with it, where it is one program that is compiled: the whole library
@@ -573,8 +593,10 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- Whether the program has arrays of a length their type says: then what
   -- `[a, b, c]` is depends on what is wanted of it.
   let fixed := ((src :: own.map (·.2)).any saysLength)
-  let (items, _) ← Trace.timed "parse: the program's text" fun _ => Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
-    (fixed := fixed) (packs := packs) (lexed := tokensOf []) (reflect := reflect)
+  -- (Each group of its items as an earlier compile parsed it, where it is
+  -- where it was, written alike: `itemsKept`.)
+  let (items, _, itemsMade) ← Trace.timed "parse: the program's text" fun _ => Syntax.parseKept fix src (base := 1000000) (records := records) (tables := tables)
+    (fixed := fixed) (packs := packs) (lexed := tokensOf []) (reflect := reflect) (kept := itemsKept)
   let declares := items.any fun
     | .module "std" _ | .pub _ (.module "std" _) => true
     | _ => false
@@ -628,7 +650,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
       | _, _ => pure item
   let (items, made) ← (fill 64 [] items).run []
   checkUnsafeImpls items
-  pure (prelude, items, made, ownRead ++ unread)
+  pure (prelude, items, made, ownRead ++ unread, itemsMade)
 
 /-- A program's items as the resolver gives them, each module's after a mark
 (`Syntax.unitMark`), put in an order that has every module after those it
@@ -687,7 +709,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
     let resolved ← Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) []
     let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases resolved.items).1).1
     return (all.length, ← Check.checkFirst all resolved.info drop)
-  let (prelude, items, _, _) ← parseProgram "// std" []
+  let (prelude, items, _, _, _) ← parseProgram "// std" []
   let resolved ← Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items)
   -- (Its modules in the order a program has them, marks and all, so that
   -- what a program has first is these, item for item.)
@@ -744,10 +766,11 @@ def compileSourceAt (src : String) (check : Bool := true)
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
-    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none) :
+    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none)
+    (itemsKept : Option Syntax.ItemsKept := none) :
     Except String Compiled := do
-  let (prelude, items, parsedMade, textsMade) ← Trace.timed "parse" fun _ =>
-    parseProgram src files check few packs lexed parsedKept preludeKept texts
+  let (prelude, items, parsedMade, textsMade, itemsMade) ← Trace.timed "parse" fun _ =>
+    parseProgram src files check few packs lexed parsedKept preludeKept texts itemsKept
   -- Every name is given its meaning: the modules become one list of items,
   -- each module a unit, after those it uses.
   -- (Resolved, and all that follows, from flat bodies.)
@@ -777,9 +800,9 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- it rejects is elaborated without that.
   -- (Or that has a cleanup, which a resumption given up runs: what destroys
   -- a resumption that is let go is then written.)
-  let drops := hasDrop items || (src.splitOn "defer").length > 1
+  let drops := hasDrop items || src.contains "defer"
   -- (The library read for this program alone is checked with it.)
-  let withStd := usesStd src files && (src.splitOn "#![no_std]").length == 1
+  let withStd := usesStd src files && !src.contains "#![no_std]"
     && !(few && (neededStd (src :: files.map (·.2))).isSome)
     -- (Where reflection is named, the library's types have their
     -- `Reflect`, which the library checked once has not.)
@@ -927,7 +950,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
        inferMade := made, firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade, frontMade := front.made,
-       parsedMade, textsMade } : Compiled)
+       parsedMade, textsMade, itemsMade } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
     let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks with
       | .ok out => do aside.get; pure out
@@ -1215,7 +1238,8 @@ def compileSource (src : String) (check : Bool := true)
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
-    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none) :
+    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none)
+    (itemsKept : Option Syntax.ItemsKept := none) :
     Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it;
   -- and each text lexed, once: each that an earlier compile read as it is,
@@ -1238,7 +1262,8 @@ def compileSource (src : String) (check : Bool := true)
   let rec go (fuel packs : Nat) : Except String Compiled :=
     match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
         (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts)
-        (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) (frontKept := frontKept) with
+        (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) (frontKept := frontKept)
+        (itemsKept := itemsKept) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with

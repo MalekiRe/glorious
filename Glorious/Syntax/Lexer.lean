@@ -28,13 +28,13 @@ inductive Tok where
   /-- Punctuation: `( ) { } [ ] , ; . @ : :: = => ->`. -/
   | punct (s : String)
   | eof
-  deriving BEq, Inhabited
+  deriving BEq, Inhabited, Hashable
 
 structure Token where
   tok : Tok
   line : Nat
   col : Nat
-  deriving Inhabited
+  deriving Inhabited, Hashable
 
 def Tok.describe : Tok → String
   | .ident s => s!"`{s}`"

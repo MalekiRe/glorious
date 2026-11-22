@@ -6982,7 +6982,7 @@ number changed in the middle function. Wall time, on this machine (load
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
 | Glorious (then) | 5.1 s | 1.6 s | 0.89 s |
-| Glorious (now) | 1.48 s | 0.43 s | |
+| Glorious (now) | 1.48 s | 0.37 s | |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
 
@@ -7167,6 +7167,32 @@ inference 1 s on one, then what is kept 0.2 s. Then, 1.75 s -> 1.5 s:
 Now the front end and the check 0.45 s, inference 0.8 s, what is kept
 0.15 s. Inference is the next: one state for the whole program, a group at
 a time, and most of its time making and letting go of small values.
+
+## Edits: what each pass costs, and what is kept of parsing
+
+The middle edit of the chain 0.43 s -> 0.37 s:
+
+- **Each group of the program's own items is kept as parsed**
+  (`Syntax.ItemsKept`, `parseKept`): by the token it began at, with a hash
+  of its tokens, the one after, and what it is read with (the constructors
+  with named fields, the operators, the path). Items are numbered by where
+  their tokens are, so a group whose tokens are where they were and the
+  same is what parsing it again would give; it is kept as `unmutItems` and
+  `promoteItems` make it, which go item by item. Parsing the program's text
+  on an edit 50 ms -> 3 ms.
+- **Strongly connected components by maps** (`components`, Tarjan's over
+  `HashMap`s, not association lists): 17 ms -> 0.6 ms on 2,000 functions.
+- The texts kept are chained as the others are; the scans of a text for
+  what of the library it names go over its bytes, and `contains` stands
+  for `splitOn` where only whether is asked.
+
+What an edit is made of now, on one thread, each a pass over the whole
+program: elaborating (50 ms), the check's parts that go one after another
+(the kept groups themselves are put on side by side, 8 ms), certifying
+(the proved checker 22 ms, inference 30 ms), lowering (40 ms), resolving
+names (20 ms), writing the program (25 ms). Each would be kept by function
+to go further; elaboration numbers what it lifts across the program, so
+that is where it would start.
 
 ## Other standing decisions
 

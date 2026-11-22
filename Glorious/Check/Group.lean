@@ -24,36 +24,43 @@ def checkUseDecls : M Unit := do
         if ← tyOwnsOnce [head] part then
           throw s!"`impl Use` for `{head}`: it holds a value that can be used only once, so the most uses of a `{head}` cannot be `infinity`"
 
+/-- (What `components` has found so far: Tarjan's, with each lookup by a
+map, not a list: on the chain of 2,000 functions the lists took 17 ms.) -/
+structure ComponentsSt where
+  index : Nat := 0
+  stack : List String := []
+  onStack : Std.HashSet String := {}
+  info : Std.HashMap String (Nat × Nat) := {}
+  out : Array (List String) := #[]
+  deriving Inhabited
+
 /-- Strongly connected components of the call graph, callees first. -/
 partial def components (names : List String) (deps : String → List String) : List (List String) :=
-  let rec visit (v : String) (st : Nat × List String × List (String × Nat × Nat) × List (List String)) :
-      Nat × List String × List (String × Nat × Nat) × List (List String) :=
-    let (index, stack, info, out) := st
-    let info := (v, index, index) :: info
-    let st := (index + 1, v :: stack, info, out)
+  let rec visit (v : String) (st : ComponentsSt) : ComponentsSt :=
+    let st := { st with index := st.index + 1, stack := v :: st.stack, onStack := st.onStack.insert v,
+                        info := st.info.insert v (st.index, st.index) }
     let st := (deps v).foldl (fun st w =>
-      let (index, stack, info, out) := st
-      match info.lookup w with
+      match st.info[w]? with
       | none =>
-        let (index, stack, info, out) := visit w (index, stack, info, out)
-        let lowW := ((info.lookup w).map (·.2)).getD 0
-        (index, stack, lower info v lowW, out)
+        let st := visit w st
+        let lowW := ((st.info[w]?).map (·.2)).getD 0
+        { st with info := lower st.info v lowW }
       | some (idxW, _) =>
-        if stack.contains w then (index, stack, lower info v idxW, out) else st) st
-    let (index, stack, info, out) := st
-    match info.lookup v with
+        if st.onStack.contains w then { st with info := lower st.info v idxW } else st) st
+    match st.info[v]? with
     | some (idx, low) =>
       if idx == low then
-        let comp := (stack.takeWhile (· != v)) ++ [v]
-        (index, stack.drop comp.length, info, out ++ [comp])
+        let comp := (st.stack.takeWhile (· != v)) ++ [v]
+        { st with stack := st.stack.drop comp.length, onStack := comp.foldl (·.erase ·) st.onStack
+                  out := st.out.push comp }
       else st
     | none => st
-  let (_, _, _, out) := names.foldl (fun st v =>
-    if (st.2.2.1.lookup v).isSome then st else visit v st) (0, [], [], [])
-  out
+  (names.foldl (fun st v => if st.info.contains v then st else visit v st) ({} : ComponentsSt)).out.toList
 where
-  lower (info : List (String × Nat × Nat)) (v : String) (bound : Nat) : List (String × Nat × Nat) :=
-    info.map fun (n, idx, low) => if n == v then (n, idx, min low bound) else (n, idx, low)
+  lower (info : Std.HashMap String (Nat × Nat)) (v : String) (bound : Nat) : Std.HashMap String (Nat × Nat) :=
+    match info[v]? with
+    | some (idx, low) => info.insert v (idx, min low bound)
+    | none => info
 
 /-- The lifetime of each reference a written type has in it, none where it is
 not written; not looking inside a callable's type, which has lifetimes of its
