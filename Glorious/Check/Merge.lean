@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Check.Expr
+meta import Lean.Parser.Command
 
 public section
 
@@ -462,730 +463,184 @@ def ownImpls {κ : Type} [BEq κ] [Hashable κ] (start : Nat) (m : Std.HashMap �
     let mine := is.filter (· ≥ start)
     if mine.isEmpty then acc else acc.insert k mine
 
-/-- (A part of `StDelta`.) -/
-structure StDelta0 where
-  tys : StoreD (Option Ty)
-  rows : StoreD (Option Row)
-  mono : ListD Nat
-  monoRows : ListD Nat
-  monoCaps : ListD Nat
-  caps : StoreD (Option Nat)
-  capEdges : StoreD (Nat × Captured)
-  capOut : StoreD (Array Nat)
-  capEdgeNames : StoreD (Option (String × Nat))
-  dups : ArrD (Ty × String)
-  lateDups : ArrD (Ty × String)
-  drops : ArrD (Ty × String)
+/-- `delta_part StDeltaN diffPartN applyPartN fitsPartN clearPartN restorePartN
+[field : D, ..]`: a part of `StDelta`, those fields of `St` each its delta `D`
+(`Delta`); what a check added to each (`diffPartN`), it put on another state
+(`applyPartN`: each field taken out of the state first, so that it is held
+once while the delta is put on it, in place, not copied), whether that would
+go (`fitsPartN`, read only), the state with them empty (`clearPartN`) and with
+them another's (`restorePartN`). -/
+syntax "delta_part " ident ident ident ident ident ident " [" sepBy1(ident " : " term, ", ") "]" : command
 
-def diffPart0 (p b : St) : Option StDelta0 := do
-  pure {
-    tys := ← Delta.diff p.tys b.tys
-    rows := ← Delta.diff p.rows b.rows
-    mono := ← Delta.diff p.mono b.mono
-    monoRows := ← Delta.diff p.monoRows b.monoRows
-    monoCaps := ← Delta.diff p.monoCaps b.monoCaps
-    caps := ← Delta.diff p.caps b.caps
-    capEdges := ← Delta.diff p.capEdges b.capEdges
-    capOut := ← Delta.diff p.capOut b.capOut
-    capEdgeNames := ← Delta.diff p.capEdgeNames b.capEdgeNames
-    dups := ← Delta.diff p.dups b.dups
-    lateDups := ← Delta.diff p.lateDups b.lateDups
-    drops := ← Delta.diff p.drops b.drops }
+open Lean in
+macro_rules
+  | `(delta_part $S $diff $apply $fits $clear $restore [ $[$fs : $ts],* ]) => do
+    -- (The names bound here are written as the fields are reached through
+    -- them, `p.tys`: unhygienic, both.)
+    let (pI, bI, aI, dI, sI) := (mkIdent `p, mkIdent `b, mkIdent `a, mkIdent `d, mkIdent `s)
+    let proj := fun (x : Name) (f : TSyntax `ident) => mkIdent (x ++ f.getId)
+    let mk := mkIdent (S.getId ++ `mk)
+    let diffs ← fs.mapM fun f => `((← Delta.diff $(proj `p f) $(proj `b f)))
+    let set := fun (acc : TSyntax `term) (f : TSyntax `ident) (v : TSyntax `term) => `({ $acc with $f:ident := $v })
+    let cleared ← fs.foldlM (fun acc f => do set acc f (← `({}))) aI
+    let put ← fs.foldlM (fun acc f => do
+      set acc f (← `(← Delta.apply (Option.map (fun $sI => $(proj `s f)) $pI) $f $(proj `d f)))) aI
+    let back ← fs.foldlM (fun acc f => set acc f (proj `s f)) bI
+    let fitsEach ← fs.mapM fun f => `(Delta.fits (Option.map (fun $sI => $(proj `s f)) $pI) $(proj `a f) $(proj `d f))
+    let fitsAll ← fitsEach[1:].foldlM (fun acc x => `($acc && $x)) fitsEach[0]!
+    let tuple := fun (xs : Array (TSyntax `term)) => (do
+      let mut acc := xs.back!
+      for x in xs.pop.reverse do acc ← `(($x, $acc))
+      pure acc : MacroM (TSyntax `term))
+    let taken ← tuple (fs.map fun f => ⟨f.raw⟩)
+    let projs ← tuple (fs.map fun f => ⟨(proj `a f).raw⟩)
+    let fields ← (fs.zip ts).mapM fun (f, t) => `(Lean.Parser.Command.structExplicitBinder| ($f:ident : $t))
+    `(structure $S where
+        $[$fields]*
+      def $diff ($pI $bI : St) : Option $S := do
+        pure ($mk $diffs*)
+      def $apply ($pI : Option St) ($aI : St) ($dI : $S) : Option St := do
+        let $taken:term := $projs
+        let $aI := $cleared
+        pure $put
+      def $fits ($pI : Option St) ($aI : St) ($dI : $S) : Bool := $fitsAll
+      def $clear ($aI : St) : St := $cleared
+      def $restore ($bI $sI : St) : St := $back)
 
-def applyPart0 (p : Option St) (a : St) (d : StDelta0) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let tys := a.tys
-  let rows := a.rows
-  let mono := a.mono
-  let monoRows := a.monoRows
-  let monoCaps := a.monoCaps
-  let caps := a.caps
-  let capEdges := a.capEdges
-  let capOut := a.capOut
-  let capEdgeNames := a.capEdgeNames
-  let dups := a.dups
-  let lateDups := a.lateDups
-  let drops := a.drops
-  let a := { a with tys := {}, rows := {}, mono := {}, monoRows := {}, monoCaps := {}, caps := {}, capEdges := {}, capOut := {}, capEdgeNames := {}, dups := {}, lateDups := {}, drops := {} }
-  pure { a with
-    tys := ← Delta.apply (p.map (·.tys)) tys d.tys,
-    rows := ← Delta.apply (p.map (·.rows)) rows d.rows,
-    mono := ← Delta.apply (p.map (·.mono)) mono d.mono,
-    monoRows := ← Delta.apply (p.map (·.monoRows)) monoRows d.monoRows,
-    monoCaps := ← Delta.apply (p.map (·.monoCaps)) monoCaps d.monoCaps,
-    caps := ← Delta.apply (p.map (·.caps)) caps d.caps,
-    capEdges := ← Delta.apply (p.map (·.capEdges)) capEdges d.capEdges,
-    capOut := ← Delta.apply (p.map (·.capOut)) capOut d.capOut,
-    capEdgeNames := ← Delta.apply (p.map (·.capEdgeNames)) capEdgeNames d.capEdgeNames,
-    dups := ← Delta.apply (p.map (·.dups)) dups d.dups,
-    lateDups := ← Delta.apply (p.map (·.lateDups)) lateDups d.lateDups,
-    drops := ← Delta.apply (p.map (·.drops)) drops d.drops }
+delta_part StDelta0 diffPart0 applyPart0 fitsPart0 clearPart0 restorePart0 [
+  tys : StoreD (Option Ty),
+  rows : StoreD (Option Row),
+  mono : ListD Nat,
+  monoRows : ListD Nat,
+  monoCaps : ListD Nat,
+  caps : StoreD (Option Nat),
+  capEdges : StoreD (Nat × Captured),
+  capOut : StoreD (Array Nat),
+  capEdgeNames : StoreD (Option (String × Nat)),
+  dups : ArrD (Ty × String),
+  lateDups : ArrD (Ty × String),
+  drops : ArrD (Ty × String)]
 
-/-- Would `applyPart0` put it on (`Delta.fits`). -/
-def fitsPart0 (p : Option St) (a : St) (d : StDelta0) : Bool :=
-  Delta.fits (p.map (·.tys)) a.tys d.tys &&
-  Delta.fits (p.map (·.rows)) a.rows d.rows &&
-  Delta.fits (p.map (·.mono)) a.mono d.mono &&
-  Delta.fits (p.map (·.monoRows)) a.monoRows d.monoRows &&
-  Delta.fits (p.map (·.monoCaps)) a.monoCaps d.monoCaps &&
-  Delta.fits (p.map (·.caps)) a.caps d.caps &&
-  Delta.fits (p.map (·.capEdges)) a.capEdges d.capEdges &&
-  Delta.fits (p.map (·.capOut)) a.capOut d.capOut &&
-  Delta.fits (p.map (·.capEdgeNames)) a.capEdgeNames d.capEdgeNames &&
-  Delta.fits (p.map (·.dups)) a.dups d.dups &&
-  Delta.fits (p.map (·.lateDups)) a.lateDups d.lateDups &&
-  Delta.fits (p.map (·.drops)) a.drops d.drops
+delta_part StDelta1 diffPart1 applyPart1 fitsPart1 clearPart1 restorePart1 [
+  lateDrops : ArrD (Ty × String),
+  stays : ArrD (Ty × String),
+  lateStays : ArrD (Ty × String),
+  statics : ArrD (Ty × String),
+  pendingCopies : ArrD (String × FnDecl),
+  useDecls : MapD String (Bool × Bool),
+  movedCells : ListD Nat,
+  flagged : ListD String,
+  givenSites : ListD (String × Elab.DropSite × Ty × String),
+  givenEdges : Array Nat,
+  givers : ListD (Nat × Nat),
+  givenReads : ArrD (Ty × String)]
 
-/-- (A part of `StDelta`.) -/
-structure StDelta1 where
-  lateDrops : ArrD (Ty × String)
-  stays : ArrD (Ty × String)
-  lateStays : ArrD (Ty × String)
-  statics : ArrD (Ty × String)
-  pendingCopies : ArrD (String × FnDecl)
-  useDecls : MapD String (Bool × Bool)
-  movedCells : ListD Nat
-  flagged : ListD String
-  givenSites : ListD (String × Elab.DropSite × Ty × String)
-  givenEdges : Array Nat
-  givers : ListD (Nat × Nat)
-  givenReads : ArrD (Ty × String)
+delta_part StDelta2 diffPart2 applyPart2 fitsPart2 clearPart2 restorePart2 [
+  aparts : ArrD (Ty × String × Option Nat),
+  fieldNames : MapLD String String,
+  dotChosen : ListD (Nat × String × Nat),
+  argsChosen : ListD ((Nat × Nat) × Expr),
+  decided : ListD Elab.Decision,
+  traitShape : MapD String (Nat × List String),
+  writtenArgs : ListD (String × String × String × List Ty),
+  supers : ListD (String × List String),
+  ranked : ListD (Nat × List (Nat × String)),
+  packs : ArrD (Nat × List String),
+  envGroups : ArrD (String × List (String × Nat) × Bool × List String × Flat.Body × List Flat.StmtId),
+  envAfter : ArrD (String × List (String × Nat) × List (String × Nat) × List String × Flat.Body × List Flat.StmtId)]
 
-def diffPart1 (p b : St) : Option StDelta1 := do
-  pure {
-    lateDrops := ← Delta.diff p.lateDrops b.lateDrops
-    stays := ← Delta.diff p.stays b.stays
-    lateStays := ← Delta.diff p.lateStays b.lateStays
-    statics := ← Delta.diff p.statics b.statics
-    pendingCopies := ← Delta.diff p.pendingCopies b.pendingCopies
-    useDecls := ← Delta.diff p.useDecls b.useDecls
-    movedCells := ← Delta.diff p.movedCells b.movedCells
-    flagged := ← Delta.diff p.flagged b.flagged
-    givenSites := ← Delta.diff p.givenSites b.givenSites
-    givenEdges := ← Delta.diff p.givenEdges b.givenEdges
-    givers := ← Delta.diff p.givers b.givers
-    givenReads := ← Delta.diff p.givenReads b.givenReads }
+delta_part StDelta3 diffPart3 applyPart3 fitsPart3 clearPart3 restorePart3 [
+  envLent : ArrD (String × List (String × Nat) × List (String × Nat) × List String × Flat.Body × List Flat.StmtId),
+  fnGroups : ListD (String × List (List Nat)),
+  fnRunsIn : ListD (String × List (Nat × Bool)),
+  bindLoans : MapD Nat Nat,
+  envBlocks : Array Nat,
+  inPlace : Array Nat,
+  envMust : ListD String,
+  envHeld : ArrD (String × String × List Nat),
+  derefReads : ArrD Nat,
+  rowChecks : ListD (String × List (String × Ty)),
+  typeBounds : ListD (String × List (String × Nat)),
+  typeParams : ListD (String × List (Option Nat))]
 
-def applyPart1 (p : Option St) (a : St) (d : StDelta1) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let lateDrops := a.lateDrops
-  let stays := a.stays
-  let lateStays := a.lateStays
-  let statics := a.statics
-  let pendingCopies := a.pendingCopies
-  let useDecls := a.useDecls
-  let movedCells := a.movedCells
-  let flagged := a.flagged
-  let givenSites := a.givenSites
-  let givenEdges := a.givenEdges
-  let givers := a.givers
-  let givenReads := a.givenReads
-  let a := { a with lateDrops := {}, stays := {}, lateStays := {}, statics := {}, pendingCopies := {}, useDecls := {}, movedCells := {}, flagged := {}, givenSites := {}, givenEdges := {}, givers := {}, givenReads := {} }
-  pure { a with
-    lateDrops := ← Delta.apply (p.map (·.lateDrops)) lateDrops d.lateDrops,
-    stays := ← Delta.apply (p.map (·.stays)) stays d.stays,
-    lateStays := ← Delta.apply (p.map (·.lateStays)) lateStays d.lateStays,
-    statics := ← Delta.apply (p.map (·.statics)) statics d.statics,
-    pendingCopies := ← Delta.apply (p.map (·.pendingCopies)) pendingCopies d.pendingCopies,
-    useDecls := ← Delta.apply (p.map (·.useDecls)) useDecls d.useDecls,
-    movedCells := ← Delta.apply (p.map (·.movedCells)) movedCells d.movedCells,
-    flagged := ← Delta.apply (p.map (·.flagged)) flagged d.flagged,
-    givenSites := ← Delta.apply (p.map (·.givenSites)) givenSites d.givenSites,
-    givenEdges := ← Delta.apply (p.map (·.givenEdges)) givenEdges d.givenEdges,
-    givers := ← Delta.apply (p.map (·.givers)) givers d.givers,
-    givenReads := ← Delta.apply (p.map (·.givenReads)) givenReads d.givenReads }
+delta_part StDelta4 diffPart4 applyPart4 fitsPart4 clearPart4 restorePart4 [
+  fieldReads : ArrD (Nat × Nat),
+  fieldSites : ArrD (Nat × Bool × Ty × List Nat × List (Option String) × String × String),
+  fieldTable : ArrD (Nat × Bool × List Nat × List (Option String × Nat)),
+  calls : ArrD (Nat × Ty × Bool),
+  instRows : ListD Nat,
+  unrunGiven : ArrD (Nat × Nat × Ty × List (String × Nat) × String × Nat),
+  sharedEdges : Array Nat,
+  assumedLinks : ArrD (Nat × Nat × Ty × String),
+  abandoned : ArrD (Nat × Ty × String),
+  sure : Array Nat,
+  lowerChecks : ArrD (String × String × Ty × List String × Flat.Body × List Flat.StmtId),
+  refusals : ArrD String]
 
-/-- Would `applyPart1` put it on (`Delta.fits`). -/
-def fitsPart1 (p : Option St) (a : St) (d : StDelta1) : Bool :=
-  Delta.fits (p.map (·.lateDrops)) a.lateDrops d.lateDrops &&
-  Delta.fits (p.map (·.stays)) a.stays d.stays &&
-  Delta.fits (p.map (·.lateStays)) a.lateStays d.lateStays &&
-  Delta.fits (p.map (·.statics)) a.statics d.statics &&
-  Delta.fits (p.map (·.pendingCopies)) a.pendingCopies d.pendingCopies &&
-  Delta.fits (p.map (·.useDecls)) a.useDecls d.useDecls &&
-  Delta.fits (p.map (·.movedCells)) a.movedCells d.movedCells &&
-  Delta.fits (p.map (·.flagged)) a.flagged d.flagged &&
-  Delta.fits (p.map (·.givenSites)) a.givenSites d.givenSites &&
-  Delta.fits (p.map (·.givenEdges)) a.givenEdges d.givenEdges &&
-  Delta.fits (p.map (·.givers)) a.givers d.givers &&
-  Delta.fits (p.map (·.givenReads)) a.givenReads d.givenReads
+delta_part StDelta5 diffPart5 applyPart5 fitsPart5 clearPart5 restorePart5 [
+  runFns : MapD String Flat.Body,
+  runCtors : Array String,
+  runAliases : MapD String Expr,
+  runOps : MapD String Bool,
+  runExact : Array String,
+  runNow : Array Nat,
+  rowIncl : ArrD (Row × Row × String),
+  types : MapD String TypeDecl,
+  ctors : MapD String CtorSig,
+  ops : ListD (String × OpSig),
+  effects : ListD (String × EffectDecl),
+  aliases : MapD String Expr]
 
-/-- (A part of `StDelta`.) -/
-structure StDelta2 where
-  aparts : ArrD (Ty × String × Option Nat)
-  fieldNames : MapLD String String
-  dotChosen : ListD (Nat × String × Nat)
-  argsChosen : ListD ((Nat × Nat) × Expr)
-  decided : ListD Elab.Decision
-  traitShape : MapD String (Nat × List String)
-  writtenArgs : ListD (String × String × String × List Ty)
-  supers : ListD (String × List String)
-  ranked : ListD (Nat × List (Nat × String))
-  packs : ArrD (Nat × List String)
-  envGroups : ArrD (String × List (String × Nat) × Bool × List String × Flat.Body × List Flat.StmtId)
-  envAfter : ArrD (String × List (String × Nat) × List (String × Nat) × List String × Flat.Body × List Flat.StmtId)
+delta_part StDelta6 diffPart6 applyPart6 fitsPart6 clearPart6 restorePart6 [
+  fns : MapD String Scheme,
+  pending : ArrD Pending,
+  projections : ArrD (Ty × Nat × Ty × String × Nat),
+  namedReads : ArrD (Ty × String × Ty × Nat × String),
+  blockCaps : ArrD (Nat × Nat),
+  given : ArrD Nat,
+  unrun : ArrD (Nat × Nat),
+  coercing : ListD String,
+  coercions : ArrD (Elab.Site × String),
+  loans : StoreD Loan,
+  cells : ArrD (Nat × String × Ty),
+  bindSites : ListD (Nat × Nat × Nat)]
 
-def diffPart2 (p b : St) : Option StDelta2 := do
-  pure {
-    aparts := ← Delta.diff p.aparts b.aparts
-    fieldNames := ← Delta.diff p.fieldNames b.fieldNames
-    dotChosen := ← Delta.diff p.dotChosen b.dotChosen
-    argsChosen := ← Delta.diff p.argsChosen b.argsChosen
-    decided := ← Delta.diff p.decided b.decided
-    traitShape := ← Delta.diff p.traitShape b.traitShape
-    writtenArgs := ← Delta.diff p.writtenArgs b.writtenArgs
-    supers := ← Delta.diff p.supers b.supers
-    ranked := ← Delta.diff p.ranked b.ranked
-    packs := ← Delta.diff p.packs b.packs
-    envGroups := ← Delta.diff p.envGroups b.envGroups
-    envAfter := ← Delta.diff p.envAfter b.envAfter }
+delta_part StDelta7 diffPart7 applyPart7 fitsPart7 clearPart7 restorePart7 [
+  leftBehind : ArrD (Ty × String),
+  takenApart : ArrD (Ty × String),
+  partReads : ArrD (Nat × String × Ty × Nat × String × String),
+  uses : ArrD Use,
+  heldMoves : ArrD Use,
+  traits : ListD (String × List String),
+  methods : MapD String MethodSig,
+  kimpls : Array Traits.Impl,
+  blanketTraits : ListD (String × List String),
+  instSites : ArrD (String × Nat × String × String × List Ty),
+  siteTable : ListD (String × List (Nat × String × String × Nat × Nat)),
+  siteTypes : ListD (String × List (Option Syntax.TypeExpr))]
 
-def applyPart2 (p : Option St) (a : St) (d : StDelta2) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let aparts := a.aparts
-  let fieldNames := a.fieldNames
-  let dotChosen := a.dotChosen
-  let argsChosen := a.argsChosen
-  let decided := a.decided
-  let traitShape := a.traitShape
-  let writtenArgs := a.writtenArgs
-  let supers := a.supers
-  let ranked := a.ranked
-  let packs := a.packs
-  let envGroups := a.envGroups
-  let envAfter := a.envAfter
-  let a := { a with aparts := {}, fieldNames := {}, dotChosen := {}, argsChosen := {}, decided := {}, traitShape := {}, writtenArgs := {}, supers := {}, ranked := {}, packs := {}, envGroups := {}, envAfter := {} }
-  pure { a with
-    aparts := ← Delta.apply (p.map (·.aparts)) aparts d.aparts,
-    fieldNames := ← Delta.apply (p.map (·.fieldNames)) fieldNames d.fieldNames,
-    dotChosen := ← Delta.apply (p.map (·.dotChosen)) dotChosen d.dotChosen,
-    argsChosen := ← Delta.apply (p.map (·.argsChosen)) argsChosen d.argsChosen,
-    decided := ← Delta.apply (p.map (·.decided)) decided d.decided,
-    traitShape := ← Delta.apply (p.map (·.traitShape)) traitShape d.traitShape,
-    writtenArgs := ← Delta.apply (p.map (·.writtenArgs)) writtenArgs d.writtenArgs,
-    supers := ← Delta.apply (p.map (·.supers)) supers d.supers,
-    ranked := ← Delta.apply (p.map (·.ranked)) ranked d.ranked,
-    packs := ← Delta.apply (p.map (·.packs)) packs d.packs,
-    envGroups := ← Delta.apply (p.map (·.envGroups)) envGroups d.envGroups,
-    envAfter := ← Delta.apply (p.map (·.envAfter)) envAfter d.envAfter }
+delta_part StDelta8 diffPart8 applyPart8 fitsPart8 clearPart8 restorePart8 [
+  bounds : ArrD Bound,
+  groupUses : ArrD GroupUse,
+  rigidKeys : StoreD String,
+  rigidAt : MapD String Nat,
+  conditionsAt : MapLD String Nat,
+  dropCands : ArrD (Elab.DropSite × Ty × String),
+  unsafeFns : ListD String,
+  dropSites : ArrD (Elab.DropSite × Nat),
+  lateKeeps : ArrD (Elab.DropSite × Ty × List (Ty × Nat) × String),
+  quiets : ArrD (Ty × String),
+  paramTraits : ListD (String × String × List TypeExpr),
+  gatOccs : ArrD (String × List Ty × Nat)]
 
-/-- Would `applyPart2` put it on (`Delta.fits`). -/
-def fitsPart2 (p : Option St) (a : St) (d : StDelta2) : Bool :=
-  Delta.fits (p.map (·.aparts)) a.aparts d.aparts &&
-  Delta.fits (p.map (·.fieldNames)) a.fieldNames d.fieldNames &&
-  Delta.fits (p.map (·.dotChosen)) a.dotChosen d.dotChosen &&
-  Delta.fits (p.map (·.argsChosen)) a.argsChosen d.argsChosen &&
-  Delta.fits (p.map (·.decided)) a.decided d.decided &&
-  Delta.fits (p.map (·.traitShape)) a.traitShape d.traitShape &&
-  Delta.fits (p.map (·.writtenArgs)) a.writtenArgs d.writtenArgs &&
-  Delta.fits (p.map (·.supers)) a.supers d.supers &&
-  Delta.fits (p.map (·.ranked)) a.ranked d.ranked &&
-  Delta.fits (p.map (·.packs)) a.packs d.packs &&
-  Delta.fits (p.map (·.envGroups)) a.envGroups d.envGroups &&
-  Delta.fits (p.map (·.envAfter)) a.envAfter d.envAfter
-
-/-- (A part of `StDelta`.) -/
-structure StDelta3 where
-  envLent : ArrD (String × List (String × Nat) × List (String × Nat) × List String × Flat.Body × List Flat.StmtId)
-  fnGroups : ListD (String × List (List Nat))
-  fnRunsIn : ListD (String × List (Nat × Bool))
-  bindLoans : MapD Nat Nat
-  envBlocks : Array Nat
-  inPlace : Array Nat
-  envMust : ListD String
-  envHeld : ArrD (String × String × List Nat)
-  derefReads : ArrD Nat
-  rowChecks : ListD (String × List (String × Ty))
-  typeBounds : ListD (String × List (String × Nat))
-  typeParams : ListD (String × List (Option Nat))
-
-def diffPart3 (p b : St) : Option StDelta3 := do
-  pure {
-    envLent := ← Delta.diff p.envLent b.envLent
-    fnGroups := ← Delta.diff p.fnGroups b.fnGroups
-    fnRunsIn := ← Delta.diff p.fnRunsIn b.fnRunsIn
-    bindLoans := ← Delta.diff p.bindLoans b.bindLoans
-    envBlocks := ← Delta.diff p.envBlocks b.envBlocks
-    inPlace := ← Delta.diff p.inPlace b.inPlace
-    envMust := ← Delta.diff p.envMust b.envMust
-    envHeld := ← Delta.diff p.envHeld b.envHeld
-    derefReads := ← Delta.diff p.derefReads b.derefReads
-    rowChecks := ← Delta.diff p.rowChecks b.rowChecks
-    typeBounds := ← Delta.diff p.typeBounds b.typeBounds
-    typeParams := ← Delta.diff p.typeParams b.typeParams }
-
-def applyPart3 (p : Option St) (a : St) (d : StDelta3) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let envLent := a.envLent
-  let fnGroups := a.fnGroups
-  let fnRunsIn := a.fnRunsIn
-  let bindLoans := a.bindLoans
-  let envBlocks := a.envBlocks
-  let inPlace := a.inPlace
-  let envMust := a.envMust
-  let envHeld := a.envHeld
-  let derefReads := a.derefReads
-  let rowChecks := a.rowChecks
-  let typeBounds := a.typeBounds
-  let typeParams := a.typeParams
-  let a := { a with envLent := {}, fnGroups := {}, fnRunsIn := {}, bindLoans := {}, envBlocks := {}, inPlace := {}, envMust := {}, envHeld := {}, derefReads := {}, rowChecks := {}, typeBounds := {}, typeParams := {} }
-  pure { a with
-    envLent := ← Delta.apply (p.map (·.envLent)) envLent d.envLent,
-    fnGroups := ← Delta.apply (p.map (·.fnGroups)) fnGroups d.fnGroups,
-    fnRunsIn := ← Delta.apply (p.map (·.fnRunsIn)) fnRunsIn d.fnRunsIn,
-    bindLoans := ← Delta.apply (p.map (·.bindLoans)) bindLoans d.bindLoans,
-    envBlocks := ← Delta.apply (p.map (·.envBlocks)) envBlocks d.envBlocks,
-    inPlace := ← Delta.apply (p.map (·.inPlace)) inPlace d.inPlace,
-    envMust := ← Delta.apply (p.map (·.envMust)) envMust d.envMust,
-    envHeld := ← Delta.apply (p.map (·.envHeld)) envHeld d.envHeld,
-    derefReads := ← Delta.apply (p.map (·.derefReads)) derefReads d.derefReads,
-    rowChecks := ← Delta.apply (p.map (·.rowChecks)) rowChecks d.rowChecks,
-    typeBounds := ← Delta.apply (p.map (·.typeBounds)) typeBounds d.typeBounds,
-    typeParams := ← Delta.apply (p.map (·.typeParams)) typeParams d.typeParams }
-
-/-- Would `applyPart3` put it on (`Delta.fits`). -/
-def fitsPart3 (p : Option St) (a : St) (d : StDelta3) : Bool :=
-  Delta.fits (p.map (·.envLent)) a.envLent d.envLent &&
-  Delta.fits (p.map (·.fnGroups)) a.fnGroups d.fnGroups &&
-  Delta.fits (p.map (·.fnRunsIn)) a.fnRunsIn d.fnRunsIn &&
-  Delta.fits (p.map (·.bindLoans)) a.bindLoans d.bindLoans &&
-  Delta.fits (p.map (·.envBlocks)) a.envBlocks d.envBlocks &&
-  Delta.fits (p.map (·.inPlace)) a.inPlace d.inPlace &&
-  Delta.fits (p.map (·.envMust)) a.envMust d.envMust &&
-  Delta.fits (p.map (·.envHeld)) a.envHeld d.envHeld &&
-  Delta.fits (p.map (·.derefReads)) a.derefReads d.derefReads &&
-  Delta.fits (p.map (·.rowChecks)) a.rowChecks d.rowChecks &&
-  Delta.fits (p.map (·.typeBounds)) a.typeBounds d.typeBounds &&
-  Delta.fits (p.map (·.typeParams)) a.typeParams d.typeParams
-
-/-- (A part of `StDelta`.) -/
-structure StDelta4 where
-  fieldReads : ArrD (Nat × Nat)
-  fieldSites : ArrD (Nat × Bool × Ty × List Nat × List (Option String) × String × String)
-  fieldTable : ArrD (Nat × Bool × List Nat × List (Option String × Nat))
-  calls : ArrD (Nat × Ty × Bool)
-  instRows : ListD Nat
-  unrunGiven : ArrD (Nat × Nat × Ty × List (String × Nat) × String × Nat)
-  sharedEdges : Array Nat
-  assumedLinks : ArrD (Nat × Nat × Ty × String)
-  abandoned : ArrD (Nat × Ty × String)
-  sure : Array Nat
-  lowerChecks : ArrD (String × String × Ty × List String × Flat.Body × List Flat.StmtId)
-  refusals : ArrD String
-
-def diffPart4 (p b : St) : Option StDelta4 := do
-  pure {
-    fieldReads := ← Delta.diff p.fieldReads b.fieldReads
-    fieldSites := ← Delta.diff p.fieldSites b.fieldSites
-    fieldTable := ← Delta.diff p.fieldTable b.fieldTable
-    calls := ← Delta.diff p.calls b.calls
-    instRows := ← Delta.diff p.instRows b.instRows
-    unrunGiven := ← Delta.diff p.unrunGiven b.unrunGiven
-    sharedEdges := ← Delta.diff p.sharedEdges b.sharedEdges
-    assumedLinks := ← Delta.diff p.assumedLinks b.assumedLinks
-    abandoned := ← Delta.diff p.abandoned b.abandoned
-    sure := ← Delta.diff p.sure b.sure
-    lowerChecks := ← Delta.diff p.lowerChecks b.lowerChecks
-    refusals := ← Delta.diff p.refusals b.refusals }
-
-def applyPart4 (p : Option St) (a : St) (d : StDelta4) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let fieldReads := a.fieldReads
-  let fieldSites := a.fieldSites
-  let fieldTable := a.fieldTable
-  let calls := a.calls
-  let instRows := a.instRows
-  let unrunGiven := a.unrunGiven
-  let sharedEdges := a.sharedEdges
-  let assumedLinks := a.assumedLinks
-  let abandoned := a.abandoned
-  let sure := a.sure
-  let lowerChecks := a.lowerChecks
-  let refusals := a.refusals
-  let a := { a with fieldReads := {}, fieldSites := {}, fieldTable := {}, calls := {}, instRows := {}, unrunGiven := {}, sharedEdges := {}, assumedLinks := {}, abandoned := {}, sure := {}, lowerChecks := {}, refusals := {} }
-  pure { a with
-    fieldReads := ← Delta.apply (p.map (·.fieldReads)) fieldReads d.fieldReads,
-    fieldSites := ← Delta.apply (p.map (·.fieldSites)) fieldSites d.fieldSites,
-    fieldTable := ← Delta.apply (p.map (·.fieldTable)) fieldTable d.fieldTable,
-    calls := ← Delta.apply (p.map (·.calls)) calls d.calls,
-    instRows := ← Delta.apply (p.map (·.instRows)) instRows d.instRows,
-    unrunGiven := ← Delta.apply (p.map (·.unrunGiven)) unrunGiven d.unrunGiven,
-    sharedEdges := ← Delta.apply (p.map (·.sharedEdges)) sharedEdges d.sharedEdges,
-    assumedLinks := ← Delta.apply (p.map (·.assumedLinks)) assumedLinks d.assumedLinks,
-    abandoned := ← Delta.apply (p.map (·.abandoned)) abandoned d.abandoned,
-    sure := ← Delta.apply (p.map (·.sure)) sure d.sure,
-    lowerChecks := ← Delta.apply (p.map (·.lowerChecks)) lowerChecks d.lowerChecks,
-    refusals := ← Delta.apply (p.map (·.refusals)) refusals d.refusals }
-
-/-- Would `applyPart4` put it on (`Delta.fits`). -/
-def fitsPart4 (p : Option St) (a : St) (d : StDelta4) : Bool :=
-  Delta.fits (p.map (·.fieldReads)) a.fieldReads d.fieldReads &&
-  Delta.fits (p.map (·.fieldSites)) a.fieldSites d.fieldSites &&
-  Delta.fits (p.map (·.fieldTable)) a.fieldTable d.fieldTable &&
-  Delta.fits (p.map (·.calls)) a.calls d.calls &&
-  Delta.fits (p.map (·.instRows)) a.instRows d.instRows &&
-  Delta.fits (p.map (·.unrunGiven)) a.unrunGiven d.unrunGiven &&
-  Delta.fits (p.map (·.sharedEdges)) a.sharedEdges d.sharedEdges &&
-  Delta.fits (p.map (·.assumedLinks)) a.assumedLinks d.assumedLinks &&
-  Delta.fits (p.map (·.abandoned)) a.abandoned d.abandoned &&
-  Delta.fits (p.map (·.sure)) a.sure d.sure &&
-  Delta.fits (p.map (·.lowerChecks)) a.lowerChecks d.lowerChecks &&
-  Delta.fits (p.map (·.refusals)) a.refusals d.refusals
-
-/-- (A part of `StDelta`.) -/
-structure StDelta5 where
-  runFns : MapD String Flat.Body
-  runCtors : Array String
-  runAliases : MapD String Expr
-  runOps : MapD String Bool
-  runExact : Array String
-  runNow : Array Nat
-  rowIncl : ArrD (Row × Row × String)
-  types : MapD String TypeDecl
-  ctors : MapD String CtorSig
-  ops : ListD (String × OpSig)
-  effects : ListD (String × EffectDecl)
-  aliases : MapD String Expr
-
-def diffPart5 (p b : St) : Option StDelta5 := do
-  pure {
-    runFns := ← Delta.diff p.runFns b.runFns
-    runCtors := ← Delta.diff p.runCtors b.runCtors
-    runAliases := ← Delta.diff p.runAliases b.runAliases
-    runOps := ← Delta.diff p.runOps b.runOps
-    runExact := ← Delta.diff p.runExact b.runExact
-    runNow := ← Delta.diff p.runNow b.runNow
-    rowIncl := ← Delta.diff p.rowIncl b.rowIncl
-    types := ← Delta.diff p.types b.types
-    ctors := ← Delta.diff p.ctors b.ctors
-    ops := ← Delta.diff p.ops b.ops
-    effects := ← Delta.diff p.effects b.effects
-    aliases := ← Delta.diff p.aliases b.aliases }
-
-def applyPart5 (p : Option St) (a : St) (d : StDelta5) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let runFns := a.runFns
-  let runCtors := a.runCtors
-  let runAliases := a.runAliases
-  let runOps := a.runOps
-  let runExact := a.runExact
-  let runNow := a.runNow
-  let rowIncl := a.rowIncl
-  let types := a.types
-  let ctors := a.ctors
-  let ops := a.ops
-  let effects := a.effects
-  let aliases := a.aliases
-  let a := { a with runFns := {}, runCtors := {}, runAliases := {}, runOps := {}, runExact := {}, runNow := {}, rowIncl := {}, types := {}, ctors := {}, ops := {}, effects := {}, aliases := {} }
-  pure { a with
-    runFns := ← Delta.apply (p.map (·.runFns)) runFns d.runFns,
-    runCtors := ← Delta.apply (p.map (·.runCtors)) runCtors d.runCtors,
-    runAliases := ← Delta.apply (p.map (·.runAliases)) runAliases d.runAliases,
-    runOps := ← Delta.apply (p.map (·.runOps)) runOps d.runOps,
-    runExact := ← Delta.apply (p.map (·.runExact)) runExact d.runExact,
-    runNow := ← Delta.apply (p.map (·.runNow)) runNow d.runNow,
-    rowIncl := ← Delta.apply (p.map (·.rowIncl)) rowIncl d.rowIncl,
-    types := ← Delta.apply (p.map (·.types)) types d.types,
-    ctors := ← Delta.apply (p.map (·.ctors)) ctors d.ctors,
-    ops := ← Delta.apply (p.map (·.ops)) ops d.ops,
-    effects := ← Delta.apply (p.map (·.effects)) effects d.effects,
-    aliases := ← Delta.apply (p.map (·.aliases)) aliases d.aliases }
-
-/-- Would `applyPart5` put it on (`Delta.fits`). -/
-def fitsPart5 (p : Option St) (a : St) (d : StDelta5) : Bool :=
-  Delta.fits (p.map (·.runFns)) a.runFns d.runFns &&
-  Delta.fits (p.map (·.runCtors)) a.runCtors d.runCtors &&
-  Delta.fits (p.map (·.runAliases)) a.runAliases d.runAliases &&
-  Delta.fits (p.map (·.runOps)) a.runOps d.runOps &&
-  Delta.fits (p.map (·.runExact)) a.runExact d.runExact &&
-  Delta.fits (p.map (·.runNow)) a.runNow d.runNow &&
-  Delta.fits (p.map (·.rowIncl)) a.rowIncl d.rowIncl &&
-  Delta.fits (p.map (·.types)) a.types d.types &&
-  Delta.fits (p.map (·.ctors)) a.ctors d.ctors &&
-  Delta.fits (p.map (·.ops)) a.ops d.ops &&
-  Delta.fits (p.map (·.effects)) a.effects d.effects &&
-  Delta.fits (p.map (·.aliases)) a.aliases d.aliases
-
-/-- (A part of `StDelta`.) -/
-structure StDelta6 where
-  fns : MapD String Scheme
-  pending : ArrD Pending
-  projections : ArrD (Ty × Nat × Ty × String × Nat)
-  namedReads : ArrD (Ty × String × Ty × Nat × String)
-  blockCaps : ArrD (Nat × Nat)
-  given : ArrD Nat
-  unrun : ArrD (Nat × Nat)
-  coercing : ListD String
-  coercions : ArrD (Elab.Site × String)
-  loans : StoreD Loan
-  cells : ArrD (Nat × String × Ty)
-  bindSites : ListD (Nat × Nat × Nat)
-
-def diffPart6 (p b : St) : Option StDelta6 := do
-  pure {
-    fns := ← Delta.diff p.fns b.fns
-    pending := ← Delta.diff p.pending b.pending
-    projections := ← Delta.diff p.projections b.projections
-    namedReads := ← Delta.diff p.namedReads b.namedReads
-    blockCaps := ← Delta.diff p.blockCaps b.blockCaps
-    given := ← Delta.diff p.given b.given
-    unrun := ← Delta.diff p.unrun b.unrun
-    coercing := ← Delta.diff p.coercing b.coercing
-    coercions := ← Delta.diff p.coercions b.coercions
-    loans := ← Delta.diff p.loans b.loans
-    cells := ← Delta.diff p.cells b.cells
-    bindSites := ← Delta.diff p.bindSites b.bindSites }
-
-def applyPart6 (p : Option St) (a : St) (d : StDelta6) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let fns := a.fns
-  let pending := a.pending
-  let projections := a.projections
-  let namedReads := a.namedReads
-  let blockCaps := a.blockCaps
-  let given := a.given
-  let unrun := a.unrun
-  let coercing := a.coercing
-  let coercions := a.coercions
-  let loans := a.loans
-  let cells := a.cells
-  let bindSites := a.bindSites
-  let a := { a with fns := {}, pending := {}, projections := {}, namedReads := {}, blockCaps := {}, given := {}, unrun := {}, coercing := {}, coercions := {}, loans := {}, cells := {}, bindSites := {} }
-  pure { a with
-    fns := ← Delta.apply (p.map (·.fns)) fns d.fns,
-    pending := ← Delta.apply (p.map (·.pending)) pending d.pending,
-    projections := ← Delta.apply (p.map (·.projections)) projections d.projections,
-    namedReads := ← Delta.apply (p.map (·.namedReads)) namedReads d.namedReads,
-    blockCaps := ← Delta.apply (p.map (·.blockCaps)) blockCaps d.blockCaps,
-    given := ← Delta.apply (p.map (·.given)) given d.given,
-    unrun := ← Delta.apply (p.map (·.unrun)) unrun d.unrun,
-    coercing := ← Delta.apply (p.map (·.coercing)) coercing d.coercing,
-    coercions := ← Delta.apply (p.map (·.coercions)) coercions d.coercions,
-    loans := ← Delta.apply (p.map (·.loans)) loans d.loans,
-    cells := ← Delta.apply (p.map (·.cells)) cells d.cells,
-    bindSites := ← Delta.apply (p.map (·.bindSites)) bindSites d.bindSites }
-
-/-- Would `applyPart6` put it on (`Delta.fits`). -/
-def fitsPart6 (p : Option St) (a : St) (d : StDelta6) : Bool :=
-  Delta.fits (p.map (·.fns)) a.fns d.fns &&
-  Delta.fits (p.map (·.pending)) a.pending d.pending &&
-  Delta.fits (p.map (·.projections)) a.projections d.projections &&
-  Delta.fits (p.map (·.namedReads)) a.namedReads d.namedReads &&
-  Delta.fits (p.map (·.blockCaps)) a.blockCaps d.blockCaps &&
-  Delta.fits (p.map (·.given)) a.given d.given &&
-  Delta.fits (p.map (·.unrun)) a.unrun d.unrun &&
-  Delta.fits (p.map (·.coercing)) a.coercing d.coercing &&
-  Delta.fits (p.map (·.coercions)) a.coercions d.coercions &&
-  Delta.fits (p.map (·.loans)) a.loans d.loans &&
-  Delta.fits (p.map (·.cells)) a.cells d.cells &&
-  Delta.fits (p.map (·.bindSites)) a.bindSites d.bindSites
-
-/-- (A part of `StDelta`.) -/
-structure StDelta7 where
-  leftBehind : ArrD (Ty × String)
-  takenApart : ArrD (Ty × String)
-  partReads : ArrD (Nat × String × Ty × Nat × String × String)
-  uses : ArrD Use
-  heldMoves : ArrD Use
-  traits : ListD (String × List String)
-  methods : MapD String MethodSig
-  kimpls : Array Traits.Impl
-  blanketTraits : ListD (String × List String)
-  instSites : ArrD (String × Nat × String × String × List Ty)
-  siteTable : ListD (String × List (Nat × String × String × Nat × Nat))
-  siteTypes : ListD (String × List (Option Syntax.TypeExpr))
-
-def diffPart7 (p b : St) : Option StDelta7 := do
-  pure {
-    leftBehind := ← Delta.diff p.leftBehind b.leftBehind
-    takenApart := ← Delta.diff p.takenApart b.takenApart
-    partReads := ← Delta.diff p.partReads b.partReads
-    uses := ← Delta.diff p.uses b.uses
-    heldMoves := ← Delta.diff p.heldMoves b.heldMoves
-    traits := ← Delta.diff p.traits b.traits
-    methods := ← Delta.diff p.methods b.methods
-    kimpls := ← Delta.diff p.kimpls b.kimpls
-    blanketTraits := ← Delta.diff p.blanketTraits b.blanketTraits
-    instSites := ← Delta.diff p.instSites b.instSites
-    siteTable := ← Delta.diff p.siteTable b.siteTable
-    siteTypes := ← Delta.diff p.siteTypes b.siteTypes }
-
-def applyPart7 (p : Option St) (a : St) (d : StDelta7) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let leftBehind := a.leftBehind
-  let takenApart := a.takenApart
-  let partReads := a.partReads
-  let uses := a.uses
-  let heldMoves := a.heldMoves
-  let traits := a.traits
-  let methods := a.methods
-  let kimpls := a.kimpls
-  let blanketTraits := a.blanketTraits
-  let instSites := a.instSites
-  let siteTable := a.siteTable
-  let siteTypes := a.siteTypes
-  let a := { a with leftBehind := {}, takenApart := {}, partReads := {}, uses := {}, heldMoves := {}, traits := {}, methods := {}, kimpls := {}, blanketTraits := {}, instSites := {}, siteTable := {}, siteTypes := {} }
-  pure { a with
-    leftBehind := ← Delta.apply (p.map (·.leftBehind)) leftBehind d.leftBehind,
-    takenApart := ← Delta.apply (p.map (·.takenApart)) takenApart d.takenApart,
-    partReads := ← Delta.apply (p.map (·.partReads)) partReads d.partReads,
-    uses := ← Delta.apply (p.map (·.uses)) uses d.uses,
-    heldMoves := ← Delta.apply (p.map (·.heldMoves)) heldMoves d.heldMoves,
-    traits := ← Delta.apply (p.map (·.traits)) traits d.traits,
-    methods := ← Delta.apply (p.map (·.methods)) methods d.methods,
-    kimpls := ← Delta.apply (p.map (·.kimpls)) kimpls d.kimpls,
-    blanketTraits := ← Delta.apply (p.map (·.blanketTraits)) blanketTraits d.blanketTraits,
-    instSites := ← Delta.apply (p.map (·.instSites)) instSites d.instSites,
-    siteTable := ← Delta.apply (p.map (·.siteTable)) siteTable d.siteTable,
-    siteTypes := ← Delta.apply (p.map (·.siteTypes)) siteTypes d.siteTypes }
-
-/-- Would `applyPart7` put it on (`Delta.fits`). -/
-def fitsPart7 (p : Option St) (a : St) (d : StDelta7) : Bool :=
-  Delta.fits (p.map (·.leftBehind)) a.leftBehind d.leftBehind &&
-  Delta.fits (p.map (·.takenApart)) a.takenApart d.takenApart &&
-  Delta.fits (p.map (·.partReads)) a.partReads d.partReads &&
-  Delta.fits (p.map (·.uses)) a.uses d.uses &&
-  Delta.fits (p.map (·.heldMoves)) a.heldMoves d.heldMoves &&
-  Delta.fits (p.map (·.traits)) a.traits d.traits &&
-  Delta.fits (p.map (·.methods)) a.methods d.methods &&
-  Delta.fits (p.map (·.kimpls)) a.kimpls d.kimpls &&
-  Delta.fits (p.map (·.blanketTraits)) a.blanketTraits d.blanketTraits &&
-  Delta.fits (p.map (·.instSites)) a.instSites d.instSites &&
-  Delta.fits (p.map (·.siteTable)) a.siteTable d.siteTable &&
-  Delta.fits (p.map (·.siteTypes)) a.siteTypes d.siteTypes
-
-/-- (A part of `StDelta`.) -/
-structure StDelta8 where
-  bounds : ArrD Bound
-  groupUses : ArrD GroupUse
-  rigidKeys : StoreD String
-  rigidAt : MapD String Nat
-  conditionsAt : MapLD String Nat
-  dropCands : ArrD (Elab.DropSite × Ty × String)
-  unsafeFns : ListD String
-  dropSites : ArrD (Elab.DropSite × Nat)
-  lateKeeps : ArrD (Elab.DropSite × Ty × List (Ty × Nat) × String)
-  quiets : ArrD (Ty × String)
-  paramTraits : ListD (String × String × List TypeExpr)
-  gatOccs : ArrD (String × List Ty × Nat)
-
-def diffPart8 (p b : St) : Option StDelta8 := do
-  pure {
-    bounds := ← Delta.diff p.bounds b.bounds
-    groupUses := ← Delta.diff p.groupUses b.groupUses
-    rigidKeys := ← Delta.diff p.rigidKeys b.rigidKeys
-    rigidAt := ← Delta.diff p.rigidAt b.rigidAt
-    conditionsAt := ← Delta.diff p.conditionsAt b.conditionsAt
-    dropCands := ← Delta.diff p.dropCands b.dropCands
-    unsafeFns := ← Delta.diff p.unsafeFns b.unsafeFns
-    dropSites := ← Delta.diff p.dropSites b.dropSites
-    lateKeeps := ← Delta.diff p.lateKeeps b.lateKeeps
-    quiets := ← Delta.diff p.quiets b.quiets
-    paramTraits := ← Delta.diff p.paramTraits b.paramTraits
-    gatOccs := ← Delta.diff p.gatOccs b.gatOccs }
-
-def applyPart8 (p : Option St) (a : St) (d : StDelta8) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let bounds := a.bounds
-  let groupUses := a.groupUses
-  let rigidKeys := a.rigidKeys
-  let rigidAt := a.rigidAt
-  let conditionsAt := a.conditionsAt
-  let dropCands := a.dropCands
-  let unsafeFns := a.unsafeFns
-  let dropSites := a.dropSites
-  let lateKeeps := a.lateKeeps
-  let quiets := a.quiets
-  let paramTraits := a.paramTraits
-  let gatOccs := a.gatOccs
-  let a := { a with bounds := {}, groupUses := {}, rigidKeys := {}, rigidAt := {}, conditionsAt := {}, dropCands := {}, unsafeFns := {}, dropSites := {}, lateKeeps := {}, quiets := {}, paramTraits := {}, gatOccs := {} }
-  pure { a with
-    bounds := ← Delta.apply (p.map (·.bounds)) bounds d.bounds,
-    groupUses := ← Delta.apply (p.map (·.groupUses)) groupUses d.groupUses,
-    rigidKeys := ← Delta.apply (p.map (·.rigidKeys)) rigidKeys d.rigidKeys,
-    rigidAt := ← Delta.apply (p.map (·.rigidAt)) rigidAt d.rigidAt,
-    conditionsAt := ← Delta.apply (p.map (·.conditionsAt)) conditionsAt d.conditionsAt,
-    dropCands := ← Delta.apply (p.map (·.dropCands)) dropCands d.dropCands,
-    unsafeFns := ← Delta.apply (p.map (·.unsafeFns)) unsafeFns d.unsafeFns,
-    dropSites := ← Delta.apply (p.map (·.dropSites)) dropSites d.dropSites,
-    lateKeeps := ← Delta.apply (p.map (·.lateKeeps)) lateKeeps d.lateKeeps,
-    quiets := ← Delta.apply (p.map (·.quiets)) quiets d.quiets,
-    paramTraits := ← Delta.apply (p.map (·.paramTraits)) paramTraits d.paramTraits,
-    gatOccs := ← Delta.apply (p.map (·.gatOccs)) gatOccs d.gatOccs }
-
-/-- Would `applyPart8` put it on (`Delta.fits`). -/
-def fitsPart8 (p : Option St) (a : St) (d : StDelta8) : Bool :=
-  Delta.fits (p.map (·.bounds)) a.bounds d.bounds &&
-  Delta.fits (p.map (·.groupUses)) a.groupUses d.groupUses &&
-  Delta.fits (p.map (·.rigidKeys)) a.rigidKeys d.rigidKeys &&
-  Delta.fits (p.map (·.rigidAt)) a.rigidAt d.rigidAt &&
-  Delta.fits (p.map (·.conditionsAt)) a.conditionsAt d.conditionsAt &&
-  Delta.fits (p.map (·.dropCands)) a.dropCands d.dropCands &&
-  Delta.fits (p.map (·.unsafeFns)) a.unsafeFns d.unsafeFns &&
-  Delta.fits (p.map (·.dropSites)) a.dropSites d.dropSites &&
-  Delta.fits (p.map (·.lateKeeps)) a.lateKeeps d.lateKeeps &&
-  Delta.fits (p.map (·.quiets)) a.quiets d.quiets &&
-  Delta.fits (p.map (·.paramTraits)) a.paramTraits d.paramTraits &&
-  Delta.fits (p.map (·.gatOccs)) a.gatOccs d.gatOccs
-
-/-- (A part of `StDelta`.) -/
-structure StDelta9 where
-  gatHolds : ArrD (Nat × List Nat)
-  dictTable : ArrD (Nat × List Elab.DictE)
-  methodCalls : ArrD (Nat × Nat)
-  fnBounds : ListD (String × Nat)
-  impls : ArrD ImplDecl
-  fnBodies : MapD String Flat.Body
-  followed : ArrD String
-
-def diffPart9 (p b : St) : Option StDelta9 := do
-  pure {
-    gatHolds := ← Delta.diff p.gatHolds b.gatHolds
-    dictTable := ← Delta.diff p.dictTable b.dictTable
-    methodCalls := ← Delta.diff p.methodCalls b.methodCalls
-    fnBounds := ← Delta.diff p.fnBounds b.fnBounds
-    impls := ← Delta.diff p.impls b.impls
-    fnBodies := ← Delta.diff p.fnBodies b.fnBodies
-    followed := ← Delta.diff p.followed b.followed }
-
-def applyPart9 (p : Option St) (a : St) (d : StDelta9) : Option St := do
-  -- (Each part taken out of `a` first, so that it is held once while
-  -- what the delta adds is put on it: in place, not copied.)
-  let gatHolds := a.gatHolds
-  let dictTable := a.dictTable
-  let methodCalls := a.methodCalls
-  let fnBounds := a.fnBounds
-  let impls := a.impls
-  let fnBodies := a.fnBodies
-  let followed := a.followed
-  let a := { a with gatHolds := {}, dictTable := {}, methodCalls := {}, fnBounds := {}, impls := {}, fnBodies := {}, followed := {} }
-  pure { a with
-    gatHolds := ← Delta.apply (p.map (·.gatHolds)) gatHolds d.gatHolds,
-    dictTable := ← Delta.apply (p.map (·.dictTable)) dictTable d.dictTable,
-    methodCalls := ← Delta.apply (p.map (·.methodCalls)) methodCalls d.methodCalls,
-    fnBounds := ← Delta.apply (p.map (·.fnBounds)) fnBounds d.fnBounds,
-    impls := ← Delta.apply (p.map (·.impls)) impls d.impls,
-    fnBodies := ← Delta.apply (p.map (·.fnBodies)) fnBodies d.fnBodies,
-    followed := ← Delta.apply (p.map (·.followed)) followed d.followed }
-
-/-- Would `applyPart9` put it on (`Delta.fits`). -/
-def fitsPart9 (p : Option St) (a : St) (d : StDelta9) : Bool :=
-  Delta.fits (p.map (·.gatHolds)) a.gatHolds d.gatHolds &&
-  Delta.fits (p.map (·.dictTable)) a.dictTable d.dictTable &&
-  Delta.fits (p.map (·.methodCalls)) a.methodCalls d.methodCalls &&
-  Delta.fits (p.map (·.fnBounds)) a.fnBounds d.fnBounds &&
-  Delta.fits (p.map (·.impls)) a.impls d.impls &&
-  Delta.fits (p.map (·.fnBodies)) a.fnBodies d.fnBodies &&
-  Delta.fits (p.map (·.followed)) a.followed d.followed
+delta_part StDelta9 diffPart9 applyPart9 fitsPart9 clearPart9 restorePart9 [
+  gatHolds : ArrD (Nat × List Nat),
+  dictTable : ArrD (Nat × List Elab.DictE),
+  methodCalls : ArrD (Nat × Nat),
+  fnBounds : ListD (String × Nat),
+  impls : ArrD ImplDecl,
+  fnBodies : MapD String Flat.Body,
+  followed : ArrD String]
 
 /-- What a check added to the state it began with (`diffStates`): each part
 the checks put together as above, and the rest as the check left it. -/
@@ -1210,122 +665,7 @@ structure StDelta where
 changed what cannot be told apart from what was there. -/
 def diffStates (p b : St) : Option StDelta := do
   pure {
-    rest := { b with
-      tys := {},
-      rows := {},
-      mono := [],
-      monoRows := [],
-      monoCaps := [],
-      caps := {},
-      capEdges := {},
-      capOut := {},
-      capEdgeNames := {},
-      dups := #[],
-      lateDups := #[],
-      drops := #[],
-      lateDrops := #[],
-      stays := #[],
-      lateStays := #[],
-      statics := #[],
-      pendingCopies := #[],
-      useDecls := {},
-      movedCells := [],
-      flagged := [],
-      givenSites := [],
-      givenEdges := {},
-      givers := [],
-      givenReads := #[],
-      aparts := #[],
-      fieldNames := {},
-      dotChosen := [],
-      argsChosen := [],
-      decided := [],
-      traitShape := {},
-      writtenArgs := [],
-      supers := [],
-      ranked := [],
-      packs := #[],
-      envGroups := #[],
-      envAfter := #[],
-      envLent := #[],
-      fnGroups := [],
-      fnRunsIn := [],
-      bindLoans := {},
-      envBlocks := {},
-      inPlace := {},
-      envMust := [],
-      envHeld := #[],
-      derefReads := #[],
-      rowChecks := [],
-      typeBounds := [],
-      typeParams := [],
-      fieldReads := #[],
-      fieldSites := #[],
-      fieldTable := #[],
-      calls := #[],
-      instRows := [],
-      unrunGiven := #[],
-      sharedEdges := {},
-      assumedLinks := #[],
-      abandoned := #[],
-      sure := {},
-      lowerChecks := #[],
-      refusals := #[],
-      runFns := {},
-      runCtors := {},
-      runAliases := {},
-      runOps := {},
-      runExact := {},
-      runNow := {},
-      rowIncl := #[],
-      types := {},
-      ctors := {},
-      ops := [],
-      effects := [],
-      aliases := {},
-      fns := {},
-      pending := #[],
-      projections := #[],
-      namedReads := #[],
-      blockCaps := #[],
-      given := #[],
-      unrun := #[],
-      coercing := [],
-      coercions := #[],
-      loans := {},
-      cells := #[],
-      bindSites := [],
-      leftBehind := #[],
-      takenApart := #[],
-      partReads := #[],
-      uses := #[],
-      heldMoves := #[],
-      traits := [],
-      methods := {},
-      kimpls := {},
-      blanketTraits := [],
-      instSites := #[],
-      siteTable := [],
-      siteTypes := [],
-      bounds := #[],
-      groupUses := #[],
-      rigidKeys := {},
-      rigidAt := {},
-      conditionsAt := {},
-      dropCands := #[],
-      unsafeFns := [],
-      dropSites := #[],
-      lateKeeps := #[],
-      quiets := #[],
-      paramTraits := [],
-      gatOccs := #[],
-      gatHolds := #[],
-      dictTable := #[],
-      methodCalls := #[],
-      fnBounds := [],
-      impls := #[],
-      fnBodies := {},
-      followed := #[],
+    rest := clearPart9 <| clearPart8 <| clearPart7 <| clearPart6 <| clearPart5 <| clearPart4 <| clearPart3 <| clearPart2 <| clearPart1 <| clearPart0 <| { b with
       assocUses := #[],
       solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0,
       tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {}, modules := {}, body := {}, blockRoots := {}, blockRootsAt := 0,
@@ -1390,122 +730,7 @@ def applyDelta (p : Option St) (a : St) (d : StDelta) : Option St := do
   s ← applyPart7 p s d.part7
   s ← applyPart8 p s d.part8
   s ← applyPart9 p s d.part9
-  pure { b with
-    tys := s.tys,
-    rows := s.rows,
-    mono := s.mono,
-    monoRows := s.monoRows,
-    monoCaps := s.monoCaps,
-    caps := s.caps,
-    capEdges := s.capEdges,
-    capOut := s.capOut,
-    capEdgeNames := s.capEdgeNames,
-    dups := s.dups,
-    lateDups := s.lateDups,
-    drops := s.drops,
-    lateDrops := s.lateDrops,
-    stays := s.stays,
-    lateStays := s.lateStays,
-    statics := s.statics,
-    pendingCopies := s.pendingCopies,
-    useDecls := s.useDecls,
-    movedCells := s.movedCells,
-    flagged := s.flagged,
-    givenSites := s.givenSites,
-    givenEdges := s.givenEdges,
-    givers := s.givers,
-    givenReads := s.givenReads,
-    aparts := s.aparts,
-    fieldNames := s.fieldNames,
-    dotChosen := s.dotChosen,
-    argsChosen := s.argsChosen,
-    decided := s.decided,
-    traitShape := s.traitShape,
-    writtenArgs := s.writtenArgs,
-    supers := s.supers,
-    ranked := s.ranked,
-    packs := s.packs,
-    envGroups := s.envGroups,
-    envAfter := s.envAfter,
-    envLent := s.envLent,
-    fnGroups := s.fnGroups,
-    fnRunsIn := s.fnRunsIn,
-    bindLoans := s.bindLoans,
-    envBlocks := s.envBlocks,
-    inPlace := s.inPlace,
-    envMust := s.envMust,
-    envHeld := s.envHeld,
-    derefReads := s.derefReads,
-    rowChecks := s.rowChecks,
-    typeBounds := s.typeBounds,
-    typeParams := s.typeParams,
-    fieldReads := s.fieldReads,
-    fieldSites := s.fieldSites,
-    fieldTable := s.fieldTable,
-    calls := s.calls,
-    instRows := s.instRows,
-    unrunGiven := s.unrunGiven,
-    sharedEdges := s.sharedEdges,
-    assumedLinks := s.assumedLinks,
-    abandoned := s.abandoned,
-    sure := s.sure,
-    lowerChecks := s.lowerChecks,
-    refusals := s.refusals,
-    runFns := s.runFns,
-    runCtors := s.runCtors,
-    runAliases := s.runAliases,
-    runOps := s.runOps,
-    runExact := s.runExact,
-    runNow := s.runNow,
-    rowIncl := s.rowIncl,
-    types := s.types,
-    ctors := s.ctors,
-    ops := s.ops,
-    effects := s.effects,
-    aliases := s.aliases,
-    fns := s.fns,
-    pending := s.pending,
-    projections := s.projections,
-    namedReads := s.namedReads,
-    blockCaps := s.blockCaps,
-    given := s.given,
-    unrun := s.unrun,
-    coercing := s.coercing,
-    coercions := s.coercions,
-    loans := s.loans,
-    cells := s.cells,
-    bindSites := s.bindSites,
-    leftBehind := s.leftBehind,
-    takenApart := s.takenApart,
-    partReads := s.partReads,
-    uses := s.uses,
-    heldMoves := s.heldMoves,
-    traits := s.traits,
-    methods := s.methods,
-    kimpls := s.kimpls,
-    blanketTraits := s.blanketTraits,
-    instSites := s.instSites,
-    siteTable := s.siteTable,
-    siteTypes := s.siteTypes,
-    bounds := s.bounds,
-    groupUses := s.groupUses,
-    rigidKeys := s.rigidKeys,
-    rigidAt := s.rigidAt,
-    conditionsAt := s.conditionsAt,
-    dropCands := s.dropCands,
-    unsafeFns := s.unsafeFns,
-    dropSites := s.dropSites,
-    lateKeeps := s.lateKeeps,
-    quiets := s.quiets,
-    paramTraits := s.paramTraits,
-    gatOccs := s.gatOccs,
-    gatHolds := s.gatHolds,
-    dictTable := s.dictTable,
-    methodCalls := s.methodCalls,
-    fnBounds := s.fnBounds,
-    impls := s.impls,
-    fnBodies := s.fnBodies,
-    followed := s.followed,
+  pure { restorePart9 (restorePart8 (restorePart7 (restorePart6 (restorePart5 (restorePart4 (restorePart3 (restorePart2 (restorePart1 (restorePart0 b s) s) s) s) s) s) s) s) s) s with
     assocUses,
     brands := max a.brands b.brands, anyMust := a.anyMust || b.anyMust, modules := a.modules,
     shapes := a.shapes || b.shapes, patterned := a.patterned || b.patterned, dropMode := a.dropMode,

@@ -7241,6 +7241,13 @@ source in Lean strings 6,021, and the test table 3,928.
   audit (`Proof/Audit.lean`), which imported them, did not build either. It
   builds again, without the five witness theorems it named, and every
   theorem it names is checked again with each build of the library. -619.
+- **What a check added, by part, written by a macro.** `Check/Merge.lean`
+  had each of the checker state's 115 fields that a delta goes through
+  written out four times, in ten parts (a structure, `diffPartN`,
+  `applyPartN`, `fitsPartN`), and twice more in `diffStates` and
+  `applyDelta`. Now each part is one use of `delta_part`, the field and its
+  delta once, which writes those and `clearPartN`, `restorePartN` for the
+  other two. -716.
 
 ## Other standing decisions
 
