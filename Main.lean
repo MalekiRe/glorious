@@ -93,10 +93,13 @@ def usage : String :=
 closure captured, and one more; zero where the certificate does not say.
 What runs the bytecode does not need this: it is for what rewrites it. -/
 def startLocals (c : Compiled) : List Nat :=
-  (List.range c.core.fns.size).map fun i =>
-    match c.cert.bind fun cert => cert.sigs.find? (·.fn == i) with
-    | some entry => entry.sig.params.length + entry.sig.caps.length + 1
-    | none => 0
+  -- (Each function's first signature, found once: not looked for among
+  -- them all for each function.)
+  let first : Std.HashMap Nat Nat := match c.cert with
+    | some cert => cert.sigs.foldl (init := {}) fun m entry =>
+      m.insertIfNew entry.fn (entry.sig.params.length + entry.sig.caps.length + 1)
+    | none => {}
+  (List.range c.core.fns.size).map fun i => first.getD i 0
 
 /-- The bytes of a compiled program's bytecode file. -/
 def bytecodeBytes (c : Compiled) : ByteArray :=

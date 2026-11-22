@@ -309,16 +309,21 @@ def checkSideBySide (groups : List (List FnDecl)) : M Unit := do
 checked from (`checkGroupKept`): kept by one compile for the next. -/
 abbrev Deltas := Std.HashMap UInt64 (Thunk (Option KeptGroup))
 
-/-- The state with what is made next numbered from where the `i`-th group
-of a unit that began at `pre` numbers from, `runGap` after the one before;
-none if as much is made already. -/
-def jumpedTo (s pre : St) (i : Nat) : Option St :=
+/-- Is there room for the `i`-th group of a unit that began at `pre` to
+number from where it does (`jumpedTo`): no more made already? -/
+def jumpRoom (s pre : St) (i : Nat) : Bool :=
   let at_ := fun (n : Nat) => n + (i + 1) * runGap
   let room := fun (now was : Nat) => now ≤ at_ was
-  if !(room s.tys.size pre.tys.size && room s.rows.size pre.rows.size && room s.caps.size pre.caps.size
-      && room s.capEdges.size pre.capEdges.size && room s.loans.size pre.loans.size
-      && room s.rigidKeys.size pre.rigidKeys.size && room s.brands pre.brands && room s.dropAsked pre.dropAsked) then none
-  else some { s with
+  room s.tys.size pre.tys.size && room s.rows.size pre.rows.size && room s.caps.size pre.caps.size
+    && room s.capEdges.size pre.capEdges.size && room s.loans.size pre.loans.size
+    && room s.rigidKeys.size pre.rigidKeys.size && room s.brands pre.brands && room s.dropAsked pre.dropAsked
+
+/-- The state with what is made next numbered from where the `i`-th group
+of a unit that began at `pre` numbers from, `runGap` after the one before,
+where there is room (`jumpRoom`). -/
+def jumpedTo (s pre : St) (i : Nat) : St :=
+  let at_ := fun (n : Nat) => n + (i + 1) * runGap
+  { s with
     tys := s.tys.jumpTo (at_ pre.tys.size), rows := s.rows.jumpTo (at_ pre.rows.size)
     caps := s.caps.jumpTo (at_ pre.caps.size), capOut := s.capOut.jumpTo (at_ pre.caps.size)
     capEdges := s.capEdges.jumpTo (at_ pre.capEdges.size)
@@ -364,27 +369,35 @@ it made. Gives what it added, under `key`, with what it read. `callees`:
 the unit's functions it calls; `locals`: the unit's functions. -/
 def checkGroupKept (kept : Deltas) (pre : St) (key : UInt64) (i : Nat) (g : List FnDecl)
     (callees : List String) (locals : Std.HashSet String) : M (Array (UInt64 × KeptGroup)) := do
-  match jumpedTo (← get) pre i with
-  | none => checkMaybe g; pure #[]
-  | some st =>
-    if let some (d, reads) := (kept[key]?).bind (·.get) then
-      set st
-      if ← readsHold reads then
-        if let some st' := Trace.timed "group: reused" fun _ => applyDelta none st d then
+  unless jumpRoom (← get) pre i do
+    checkMaybe g
+    return #[]
+  -- (In place: the state is not held twice, so its stores are not copied.)
+  modify fun s => jumpedTo s pre i
+  if let some (d, reads) := (kept[key]?).bind (·.get) then
+    if ← timedM "group: reads hold" (readsHold reads) then
+      -- (Taken out of the state, so that it is held once while what the
+      -- group added is put on, in place, where it fits.)
+      let cur ← modifyGet fun s => (s, {})
+      if fitsDelta none cur d then
+        match Trace.timed "group: reused" fun _ => applyDelta none cur d with
+        | some st' =>
           set st'
           return #[(key, (d, reads))]
-    set st
-    checkMaybe g
-    let after ← get
-    -- (One that made more than its room: what it added is not kept.)
-    if (jumpedTo after pre (i + 1)).isNone then return #[]
-    let followed := (after.followed.extract st.followed.size after.followed.size).toList.eraseDups
-    if followed.contains "*" then return #[]
-    let mut reads : Array (String × UInt64) := #[]
-    for c in callees do reads := reads.push (s!"fn {c}", ← interfaceOf c)
-    for f in followed do
-      if locals.contains f then reads := reads.push (s!"body {f}", ← bodyKey f)
-    pure ((Trace.timed "group: delta" fun _ => diffStates st after).toArray.map fun d => (key, (d, reads)))
+        | none => throw "what an earlier compile kept of a group fits and was not put on; this is a compiler defect: build with GLORIOUS_FRESH=1"
+      set cur
+  let st ← get
+  checkMaybe g
+  let after ← get
+  -- (One that made more than its room: what it added is not kept.)
+  unless jumpRoom after pre (i + 1) do return #[]
+  let followed := (after.followed.extract st.followed.size after.followed.size).toList.eraseDups
+  if followed.contains "*" then return #[]
+  let mut reads : Array (String × UInt64) := #[]
+  for c in callees do reads := reads.push (s!"fn {c}", ← interfaceOf c)
+  for f in followed do
+    if locals.contains f then reads := reads.push (s!"body {f}", ← bodyKey f)
+  pure ((Trace.timed "group: delta" fun _ => diffStates st after).toArray.map fun d => (key, (d, reads)))
 
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
@@ -533,7 +546,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       modify fun s =>
         { s with runFns := later.foldl (fun m d => m.insert d.name d.body) s.runFns } : M Unit)
     let declBy : Std.HashMap String FnDecl := decls.foldl (fun m d => if m.contains d.name then m else m.insert d.name d) {}
-    let groups := (components names deps).map fun comp => comp.filterMap fun n => declBy[n]?
+    let groups := Trace.timed "unit: order" fun _ => (components names deps).map fun comp => comp.filterMap fun n => declBy[n]?
     -- Each group's level: groups of one level use none of each other, so
     -- they are checked side by side (`checkSideBySide`), each level after
     -- those before it.
@@ -569,7 +582,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       acc.push (callees.foldl (fun h j => mixHash h ((acc[j]?).getD 0)) (groupKey declKey g))) #[]
     -- (Of the groups themselves: the declarations and the group whole; what
     -- each reads of the others is said with what it added, `checkGroupKept`.)
-    let ownKeyAt : Array UInt64 := (sorted.map fun (_, _, g) => groupKey declKey g).toArray
+    let ownKeyAt : Array UInt64 := Trace.timed "unit: own keys" fun _ => (sorted.map fun (_, _, g) => groupKey declKey g).toArray
     let calleesAt : Array (List String) := (sorted.map fun (_, i, g) =>
       (g.flatMap fun d => (deps d.name).filter fun n => match groupOf[n]? with
         | some j => j != i
@@ -675,7 +688,10 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
           checkGroupKept kept pre (keyOf k) k g ((calleesAt[k]?).getD []) localFns)
       | none => checkSideBySide (run.map (·.1))
       let last := (run.getLast?.map (·.2)).getD 0
-      if run.any (fun (_, k) => (k + 1) % every == 0) || last + 1 == groups.length then
+      -- (Of a unit whose groups are each kept, `deltas`, only the state
+      -- after the last: one held now and then would be copied by the next
+      -- change, and is never looked for.)
+      if (deltas.isNone && run.any (fun (_, k) => (k + 1) % every == 0)) || last + 1 == groups.length then
         made := (keys[last]!, forKeeping (← get)) :: made
       i := j
     if let some k := keys.getLast? then key := k

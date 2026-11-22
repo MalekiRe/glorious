@@ -100,6 +100,9 @@ the state it began with too). -/
 class Delta (α : Type) (δ : outParam Type) where
   diff : α → α → Option δ
   apply : Option α → α → δ → Option α
+  /-- Would `apply` put it on: read only, so that it can be put on in place
+  after, the value held once. -/
+  fits : Option α → α → δ → Bool
 
 /-- An entry of `a` changed to `now` by a check that found it `was`. -/
 @[inline] def putEntry {α : Type} [Absorb α] (cur was now : α) : Option α :=
@@ -200,9 +203,33 @@ def apply [Absorb α] (a : Store α) (d : StoreD α) : Option (Store α) := do
 
 end StoreD
 
+/-- Would `apply` put `d` on `a`: where only its last segment grows and new
+ones come after, by where each starts and how many it has; else tried. -/
+def StoreD.fits {α : Type} [Absorb α] (a : Store α) (d : StoreD α) : Bool := Id.run do
+  if d.segs.isEmpty && d.grown.isEmpty && d.sets.isEmpty then return true
+  if d.sets.isEmpty then
+    let mut base := a.last.base
+    let mut count := a.last.count
+    let mut quick := true
+    for (b, before, pushed) in d.grown do
+      if b == base && count == before then count := count + pushed.size
+      else quick := false
+    if quick then
+      for s in d.segs do
+        if s.base == base && count == 0 then
+          base := s.base
+          count := s.count
+        else if s.base ≥ base + count && s.base > base then
+          base := s.base
+          count := s.count
+        else quick := false
+      if quick then return true
+  return (StoreD.apply a d).isSome
+
 instance {α : Type} [Absorb α] : Delta (Store α) (StoreD α) where
   diff := StoreD.diff
   apply _ a d := StoreD.apply a d
+  fits _ a d := StoreD.fits a d
 
 /-- Does `b` go on from `p`: its first entries `p`'s? -/
 def extendsArr {α : Type} (p b : Array α) : Bool := Id.run do
@@ -238,6 +265,13 @@ instance {α : Type} : Delta (Array α) (ArrD α) where
       match p with
       | some p => if samePtr a p then some all else none
       | none => some all
+  fits p a
+    | .grown _ tail => tail.isEmpty || match p with
+      | some p => samePtr a p || extendsArr p a
+      | none => true
+    | .whole _ => match p with
+      | some p => samePtr a p
+      | none => true
 
 /-- Does `b` go on from `p` at its end? -/
 def extendsList {α : Type} (p b : List α) : Bool :=
@@ -272,6 +306,20 @@ instance {α : Type} : Delta (List α) (ListD α) where
       match p with
       | some p => if samePtr a p then some all else none
       | none => some all
+  fits p a
+    | .front [] => true
+    | .front _ => match p with
+      | some p =>
+        let la := a.length
+        samePtr a p || (la ≥ p.length && samePtr (a.drop (la - p.length)) p) || extendsList p a
+      | none => true
+    | .back _ [] => true
+    | .back _ _ => match p with
+      | some p => samePtr a p || extendsList p a
+      | none => true
+    | .whole _ => match p with
+      | some p => samePtr a p
+      | none => true
 
 /-- The entries of `b` in the buckets it changed of `p`'s, where it has as many
 buckets: a bucket not changed is the same object. -/
@@ -307,6 +355,12 @@ instance (priority := low) {κ ν : Type} [BEq κ] [Hashable κ] [Absorb ν] : D
         | none => none
     | none, none => some (m.insert k v)
     | some _, none => none
+  fits _ a d := d.all fun (k, was, v) =>
+    match was, a.get? k with
+    | some pv, some cur => (putEntry cur pv v).isSome
+    | none, some cur => samePtr cur v
+    | none, none => true
+    | some _, none => false
 
 instance {κ ν : Type} [BEq κ] [Hashable κ] : Delta (Std.HashMap κ (List ν)) (MapLD κ ν) where
   diff p b := if samePtr p b then some #[] else
@@ -327,6 +381,16 @@ instance {κ ν : Type} [BEq κ] [Hashable κ] : Delta (Std.HashMap κ (List ν)
       | .whole v => some (m.insert k v)
       | _ => none
     | some _, none => none
+  fits p a d := d.all fun (k, was, ld) =>
+    match was, a.get? k with
+    | some pv, some cur => Delta.fits (p.map fun _ => pv) cur ld
+    | none, some _ => match ld with
+      | .whole _ => true
+      | _ => false
+    | none, none => match ld with
+      | .whole _ => true
+      | _ => false
+    | some _, none => false
 
 instance {κ : Type} [BEq κ] [Hashable κ] : Delta (Std.HashSet κ) (Array κ) where
   diff p b := if samePtr p b then some #[] else
@@ -335,6 +399,7 @@ instance {κ : Type} [BEq κ] [Hashable κ] : Delta (Std.HashSet κ) (Array κ) 
       | none => b.toList
     some (es.filter (!p.contains ·)).toArray
   apply _ a d := some (d.foldl (·.insert ·) a)
+  fits _ _ _ := true
 
 instance : Delta Traits.ImplIndex (Array Traits.Impl) where
   diff p b :=
@@ -346,6 +411,9 @@ instance : Delta Traits.ImplIndex (Array Traits.Impl) where
     match p with
     | some p => if samePtr a p || extendsArr p.impls a.impls then some (.ofArray (a.impls ++ d)) else none
     | none => some (.ofArray (a.impls ++ d))
+  fits p a d := d.isEmpty || match p with
+    | some p => samePtr a p || extendsArr p.impls a.impls
+    | none => true
 
 /-- Of a map to implementations by their places, the places from `start` on. -/
 def ownImpls {κ : Type} [BEq κ] [Hashable κ] (start : Nat) (m : Std.HashMap κ (Array Nat)) : Std.HashMap κ (Array Nat) :=
@@ -384,19 +452,49 @@ def diffPart0 (p b : St) : Option StDelta0 := do
     drops := ← Delta.diff p.drops b.drops }
 
 def applyPart0 (p : Option St) (a : St) (d : StDelta0) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let tys := a.tys
+  let rows := a.rows
+  let mono := a.mono
+  let monoRows := a.monoRows
+  let monoCaps := a.monoCaps
+  let caps := a.caps
+  let capEdges := a.capEdges
+  let capOut := a.capOut
+  let capEdgeNames := a.capEdgeNames
+  let dups := a.dups
+  let lateDups := a.lateDups
+  let drops := a.drops
+  let a := { a with tys := {}, rows := {}, mono := {}, monoRows := {}, monoCaps := {}, caps := {}, capEdges := {}, capOut := {}, capEdgeNames := {}, dups := {}, lateDups := {}, drops := {} }
   pure { a with
-    tys := ← Delta.apply (p.map (·.tys)) a.tys d.tys,
-    rows := ← Delta.apply (p.map (·.rows)) a.rows d.rows,
-    mono := ← Delta.apply (p.map (·.mono)) a.mono d.mono,
-    monoRows := ← Delta.apply (p.map (·.monoRows)) a.monoRows d.monoRows,
-    monoCaps := ← Delta.apply (p.map (·.monoCaps)) a.monoCaps d.monoCaps,
-    caps := ← Delta.apply (p.map (·.caps)) a.caps d.caps,
-    capEdges := ← Delta.apply (p.map (·.capEdges)) a.capEdges d.capEdges,
-    capOut := ← Delta.apply (p.map (·.capOut)) a.capOut d.capOut,
-    capEdgeNames := ← Delta.apply (p.map (·.capEdgeNames)) a.capEdgeNames d.capEdgeNames,
-    dups := ← Delta.apply (p.map (·.dups)) a.dups d.dups,
-    lateDups := ← Delta.apply (p.map (·.lateDups)) a.lateDups d.lateDups,
-    drops := ← Delta.apply (p.map (·.drops)) a.drops d.drops }
+    tys := ← Delta.apply (p.map (·.tys)) tys d.tys,
+    rows := ← Delta.apply (p.map (·.rows)) rows d.rows,
+    mono := ← Delta.apply (p.map (·.mono)) mono d.mono,
+    monoRows := ← Delta.apply (p.map (·.monoRows)) monoRows d.monoRows,
+    monoCaps := ← Delta.apply (p.map (·.monoCaps)) monoCaps d.monoCaps,
+    caps := ← Delta.apply (p.map (·.caps)) caps d.caps,
+    capEdges := ← Delta.apply (p.map (·.capEdges)) capEdges d.capEdges,
+    capOut := ← Delta.apply (p.map (·.capOut)) capOut d.capOut,
+    capEdgeNames := ← Delta.apply (p.map (·.capEdgeNames)) capEdgeNames d.capEdgeNames,
+    dups := ← Delta.apply (p.map (·.dups)) dups d.dups,
+    lateDups := ← Delta.apply (p.map (·.lateDups)) lateDups d.lateDups,
+    drops := ← Delta.apply (p.map (·.drops)) drops d.drops }
+
+/-- Would `applyPart0` put it on (`Delta.fits`). -/
+def fitsPart0 (p : Option St) (a : St) (d : StDelta0) : Bool :=
+  Delta.fits (p.map (·.tys)) a.tys d.tys &&
+  Delta.fits (p.map (·.rows)) a.rows d.rows &&
+  Delta.fits (p.map (·.mono)) a.mono d.mono &&
+  Delta.fits (p.map (·.monoRows)) a.monoRows d.monoRows &&
+  Delta.fits (p.map (·.monoCaps)) a.monoCaps d.monoCaps &&
+  Delta.fits (p.map (·.caps)) a.caps d.caps &&
+  Delta.fits (p.map (·.capEdges)) a.capEdges d.capEdges &&
+  Delta.fits (p.map (·.capOut)) a.capOut d.capOut &&
+  Delta.fits (p.map (·.capEdgeNames)) a.capEdgeNames d.capEdgeNames &&
+  Delta.fits (p.map (·.dups)) a.dups d.dups &&
+  Delta.fits (p.map (·.lateDups)) a.lateDups d.lateDups &&
+  Delta.fits (p.map (·.drops)) a.drops d.drops
 
 /-- (A part of `StDelta`.) -/
 structure StDelta1 where
@@ -429,19 +527,49 @@ def diffPart1 (p b : St) : Option StDelta1 := do
     givenReads := ← Delta.diff p.givenReads b.givenReads }
 
 def applyPart1 (p : Option St) (a : St) (d : StDelta1) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let lateDrops := a.lateDrops
+  let stays := a.stays
+  let lateStays := a.lateStays
+  let statics := a.statics
+  let pendingCopies := a.pendingCopies
+  let useDecls := a.useDecls
+  let movedCells := a.movedCells
+  let flagged := a.flagged
+  let givenSites := a.givenSites
+  let givenEdges := a.givenEdges
+  let givers := a.givers
+  let givenReads := a.givenReads
+  let a := { a with lateDrops := {}, stays := {}, lateStays := {}, statics := {}, pendingCopies := {}, useDecls := {}, movedCells := {}, flagged := {}, givenSites := {}, givenEdges := {}, givers := {}, givenReads := {} }
   pure { a with
-    lateDrops := ← Delta.apply (p.map (·.lateDrops)) a.lateDrops d.lateDrops,
-    stays := ← Delta.apply (p.map (·.stays)) a.stays d.stays,
-    lateStays := ← Delta.apply (p.map (·.lateStays)) a.lateStays d.lateStays,
-    statics := ← Delta.apply (p.map (·.statics)) a.statics d.statics,
-    pendingCopies := ← Delta.apply (p.map (·.pendingCopies)) a.pendingCopies d.pendingCopies,
-    useDecls := ← Delta.apply (p.map (·.useDecls)) a.useDecls d.useDecls,
-    movedCells := ← Delta.apply (p.map (·.movedCells)) a.movedCells d.movedCells,
-    flagged := ← Delta.apply (p.map (·.flagged)) a.flagged d.flagged,
-    givenSites := ← Delta.apply (p.map (·.givenSites)) a.givenSites d.givenSites,
-    givenEdges := ← Delta.apply (p.map (·.givenEdges)) a.givenEdges d.givenEdges,
-    givers := ← Delta.apply (p.map (·.givers)) a.givers d.givers,
-    givenReads := ← Delta.apply (p.map (·.givenReads)) a.givenReads d.givenReads }
+    lateDrops := ← Delta.apply (p.map (·.lateDrops)) lateDrops d.lateDrops,
+    stays := ← Delta.apply (p.map (·.stays)) stays d.stays,
+    lateStays := ← Delta.apply (p.map (·.lateStays)) lateStays d.lateStays,
+    statics := ← Delta.apply (p.map (·.statics)) statics d.statics,
+    pendingCopies := ← Delta.apply (p.map (·.pendingCopies)) pendingCopies d.pendingCopies,
+    useDecls := ← Delta.apply (p.map (·.useDecls)) useDecls d.useDecls,
+    movedCells := ← Delta.apply (p.map (·.movedCells)) movedCells d.movedCells,
+    flagged := ← Delta.apply (p.map (·.flagged)) flagged d.flagged,
+    givenSites := ← Delta.apply (p.map (·.givenSites)) givenSites d.givenSites,
+    givenEdges := ← Delta.apply (p.map (·.givenEdges)) givenEdges d.givenEdges,
+    givers := ← Delta.apply (p.map (·.givers)) givers d.givers,
+    givenReads := ← Delta.apply (p.map (·.givenReads)) givenReads d.givenReads }
+
+/-- Would `applyPart1` put it on (`Delta.fits`). -/
+def fitsPart1 (p : Option St) (a : St) (d : StDelta1) : Bool :=
+  Delta.fits (p.map (·.lateDrops)) a.lateDrops d.lateDrops &&
+  Delta.fits (p.map (·.stays)) a.stays d.stays &&
+  Delta.fits (p.map (·.lateStays)) a.lateStays d.lateStays &&
+  Delta.fits (p.map (·.statics)) a.statics d.statics &&
+  Delta.fits (p.map (·.pendingCopies)) a.pendingCopies d.pendingCopies &&
+  Delta.fits (p.map (·.useDecls)) a.useDecls d.useDecls &&
+  Delta.fits (p.map (·.movedCells)) a.movedCells d.movedCells &&
+  Delta.fits (p.map (·.flagged)) a.flagged d.flagged &&
+  Delta.fits (p.map (·.givenSites)) a.givenSites d.givenSites &&
+  Delta.fits (p.map (·.givenEdges)) a.givenEdges d.givenEdges &&
+  Delta.fits (p.map (·.givers)) a.givers d.givers &&
+  Delta.fits (p.map (·.givenReads)) a.givenReads d.givenReads
 
 /-- (A part of `StDelta`.) -/
 structure StDelta2 where
@@ -474,19 +602,49 @@ def diffPart2 (p b : St) : Option StDelta2 := do
     envAfter := ← Delta.diff p.envAfter b.envAfter }
 
 def applyPart2 (p : Option St) (a : St) (d : StDelta2) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let aparts := a.aparts
+  let fieldNames := a.fieldNames
+  let dotChosen := a.dotChosen
+  let argsChosen := a.argsChosen
+  let decided := a.decided
+  let traitShape := a.traitShape
+  let writtenArgs := a.writtenArgs
+  let supers := a.supers
+  let ranked := a.ranked
+  let packs := a.packs
+  let envGroups := a.envGroups
+  let envAfter := a.envAfter
+  let a := { a with aparts := {}, fieldNames := {}, dotChosen := {}, argsChosen := {}, decided := {}, traitShape := {}, writtenArgs := {}, supers := {}, ranked := {}, packs := {}, envGroups := {}, envAfter := {} }
   pure { a with
-    aparts := ← Delta.apply (p.map (·.aparts)) a.aparts d.aparts,
-    fieldNames := ← Delta.apply (p.map (·.fieldNames)) a.fieldNames d.fieldNames,
-    dotChosen := ← Delta.apply (p.map (·.dotChosen)) a.dotChosen d.dotChosen,
-    argsChosen := ← Delta.apply (p.map (·.argsChosen)) a.argsChosen d.argsChosen,
-    decided := ← Delta.apply (p.map (·.decided)) a.decided d.decided,
-    traitShape := ← Delta.apply (p.map (·.traitShape)) a.traitShape d.traitShape,
-    writtenArgs := ← Delta.apply (p.map (·.writtenArgs)) a.writtenArgs d.writtenArgs,
-    supers := ← Delta.apply (p.map (·.supers)) a.supers d.supers,
-    ranked := ← Delta.apply (p.map (·.ranked)) a.ranked d.ranked,
-    packs := ← Delta.apply (p.map (·.packs)) a.packs d.packs,
-    envGroups := ← Delta.apply (p.map (·.envGroups)) a.envGroups d.envGroups,
-    envAfter := ← Delta.apply (p.map (·.envAfter)) a.envAfter d.envAfter }
+    aparts := ← Delta.apply (p.map (·.aparts)) aparts d.aparts,
+    fieldNames := ← Delta.apply (p.map (·.fieldNames)) fieldNames d.fieldNames,
+    dotChosen := ← Delta.apply (p.map (·.dotChosen)) dotChosen d.dotChosen,
+    argsChosen := ← Delta.apply (p.map (·.argsChosen)) argsChosen d.argsChosen,
+    decided := ← Delta.apply (p.map (·.decided)) decided d.decided,
+    traitShape := ← Delta.apply (p.map (·.traitShape)) traitShape d.traitShape,
+    writtenArgs := ← Delta.apply (p.map (·.writtenArgs)) writtenArgs d.writtenArgs,
+    supers := ← Delta.apply (p.map (·.supers)) supers d.supers,
+    ranked := ← Delta.apply (p.map (·.ranked)) ranked d.ranked,
+    packs := ← Delta.apply (p.map (·.packs)) packs d.packs,
+    envGroups := ← Delta.apply (p.map (·.envGroups)) envGroups d.envGroups,
+    envAfter := ← Delta.apply (p.map (·.envAfter)) envAfter d.envAfter }
+
+/-- Would `applyPart2` put it on (`Delta.fits`). -/
+def fitsPart2 (p : Option St) (a : St) (d : StDelta2) : Bool :=
+  Delta.fits (p.map (·.aparts)) a.aparts d.aparts &&
+  Delta.fits (p.map (·.fieldNames)) a.fieldNames d.fieldNames &&
+  Delta.fits (p.map (·.dotChosen)) a.dotChosen d.dotChosen &&
+  Delta.fits (p.map (·.argsChosen)) a.argsChosen d.argsChosen &&
+  Delta.fits (p.map (·.decided)) a.decided d.decided &&
+  Delta.fits (p.map (·.traitShape)) a.traitShape d.traitShape &&
+  Delta.fits (p.map (·.writtenArgs)) a.writtenArgs d.writtenArgs &&
+  Delta.fits (p.map (·.supers)) a.supers d.supers &&
+  Delta.fits (p.map (·.ranked)) a.ranked d.ranked &&
+  Delta.fits (p.map (·.packs)) a.packs d.packs &&
+  Delta.fits (p.map (·.envGroups)) a.envGroups d.envGroups &&
+  Delta.fits (p.map (·.envAfter)) a.envAfter d.envAfter
 
 /-- (A part of `StDelta`.) -/
 structure StDelta3 where
@@ -519,19 +677,49 @@ def diffPart3 (p b : St) : Option StDelta3 := do
     typeParams := ← Delta.diff p.typeParams b.typeParams }
 
 def applyPart3 (p : Option St) (a : St) (d : StDelta3) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let envLent := a.envLent
+  let fnGroups := a.fnGroups
+  let fnRunsIn := a.fnRunsIn
+  let bindLoans := a.bindLoans
+  let envBlocks := a.envBlocks
+  let inPlace := a.inPlace
+  let envMust := a.envMust
+  let envHeld := a.envHeld
+  let derefReads := a.derefReads
+  let rowChecks := a.rowChecks
+  let typeBounds := a.typeBounds
+  let typeParams := a.typeParams
+  let a := { a with envLent := {}, fnGroups := {}, fnRunsIn := {}, bindLoans := {}, envBlocks := {}, inPlace := {}, envMust := {}, envHeld := {}, derefReads := {}, rowChecks := {}, typeBounds := {}, typeParams := {} }
   pure { a with
-    envLent := ← Delta.apply (p.map (·.envLent)) a.envLent d.envLent,
-    fnGroups := ← Delta.apply (p.map (·.fnGroups)) a.fnGroups d.fnGroups,
-    fnRunsIn := ← Delta.apply (p.map (·.fnRunsIn)) a.fnRunsIn d.fnRunsIn,
-    bindLoans := ← Delta.apply (p.map (·.bindLoans)) a.bindLoans d.bindLoans,
-    envBlocks := ← Delta.apply (p.map (·.envBlocks)) a.envBlocks d.envBlocks,
-    inPlace := ← Delta.apply (p.map (·.inPlace)) a.inPlace d.inPlace,
-    envMust := ← Delta.apply (p.map (·.envMust)) a.envMust d.envMust,
-    envHeld := ← Delta.apply (p.map (·.envHeld)) a.envHeld d.envHeld,
-    derefReads := ← Delta.apply (p.map (·.derefReads)) a.derefReads d.derefReads,
-    rowChecks := ← Delta.apply (p.map (·.rowChecks)) a.rowChecks d.rowChecks,
-    typeBounds := ← Delta.apply (p.map (·.typeBounds)) a.typeBounds d.typeBounds,
-    typeParams := ← Delta.apply (p.map (·.typeParams)) a.typeParams d.typeParams }
+    envLent := ← Delta.apply (p.map (·.envLent)) envLent d.envLent,
+    fnGroups := ← Delta.apply (p.map (·.fnGroups)) fnGroups d.fnGroups,
+    fnRunsIn := ← Delta.apply (p.map (·.fnRunsIn)) fnRunsIn d.fnRunsIn,
+    bindLoans := ← Delta.apply (p.map (·.bindLoans)) bindLoans d.bindLoans,
+    envBlocks := ← Delta.apply (p.map (·.envBlocks)) envBlocks d.envBlocks,
+    inPlace := ← Delta.apply (p.map (·.inPlace)) inPlace d.inPlace,
+    envMust := ← Delta.apply (p.map (·.envMust)) envMust d.envMust,
+    envHeld := ← Delta.apply (p.map (·.envHeld)) envHeld d.envHeld,
+    derefReads := ← Delta.apply (p.map (·.derefReads)) derefReads d.derefReads,
+    rowChecks := ← Delta.apply (p.map (·.rowChecks)) rowChecks d.rowChecks,
+    typeBounds := ← Delta.apply (p.map (·.typeBounds)) typeBounds d.typeBounds,
+    typeParams := ← Delta.apply (p.map (·.typeParams)) typeParams d.typeParams }
+
+/-- Would `applyPart3` put it on (`Delta.fits`). -/
+def fitsPart3 (p : Option St) (a : St) (d : StDelta3) : Bool :=
+  Delta.fits (p.map (·.envLent)) a.envLent d.envLent &&
+  Delta.fits (p.map (·.fnGroups)) a.fnGroups d.fnGroups &&
+  Delta.fits (p.map (·.fnRunsIn)) a.fnRunsIn d.fnRunsIn &&
+  Delta.fits (p.map (·.bindLoans)) a.bindLoans d.bindLoans &&
+  Delta.fits (p.map (·.envBlocks)) a.envBlocks d.envBlocks &&
+  Delta.fits (p.map (·.inPlace)) a.inPlace d.inPlace &&
+  Delta.fits (p.map (·.envMust)) a.envMust d.envMust &&
+  Delta.fits (p.map (·.envHeld)) a.envHeld d.envHeld &&
+  Delta.fits (p.map (·.derefReads)) a.derefReads d.derefReads &&
+  Delta.fits (p.map (·.rowChecks)) a.rowChecks d.rowChecks &&
+  Delta.fits (p.map (·.typeBounds)) a.typeBounds d.typeBounds &&
+  Delta.fits (p.map (·.typeParams)) a.typeParams d.typeParams
 
 /-- (A part of `StDelta`.) -/
 structure StDelta4 where
@@ -564,19 +752,49 @@ def diffPart4 (p b : St) : Option StDelta4 := do
     refusals := ← Delta.diff p.refusals b.refusals }
 
 def applyPart4 (p : Option St) (a : St) (d : StDelta4) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let fieldReads := a.fieldReads
+  let fieldSites := a.fieldSites
+  let fieldTable := a.fieldTable
+  let calls := a.calls
+  let instRows := a.instRows
+  let unrunGiven := a.unrunGiven
+  let sharedEdges := a.sharedEdges
+  let assumedLinks := a.assumedLinks
+  let abandoned := a.abandoned
+  let sure := a.sure
+  let lowerChecks := a.lowerChecks
+  let refusals := a.refusals
+  let a := { a with fieldReads := {}, fieldSites := {}, fieldTable := {}, calls := {}, instRows := {}, unrunGiven := {}, sharedEdges := {}, assumedLinks := {}, abandoned := {}, sure := {}, lowerChecks := {}, refusals := {} }
   pure { a with
-    fieldReads := ← Delta.apply (p.map (·.fieldReads)) a.fieldReads d.fieldReads,
-    fieldSites := ← Delta.apply (p.map (·.fieldSites)) a.fieldSites d.fieldSites,
-    fieldTable := ← Delta.apply (p.map (·.fieldTable)) a.fieldTable d.fieldTable,
-    calls := ← Delta.apply (p.map (·.calls)) a.calls d.calls,
-    instRows := ← Delta.apply (p.map (·.instRows)) a.instRows d.instRows,
-    unrunGiven := ← Delta.apply (p.map (·.unrunGiven)) a.unrunGiven d.unrunGiven,
-    sharedEdges := ← Delta.apply (p.map (·.sharedEdges)) a.sharedEdges d.sharedEdges,
-    assumedLinks := ← Delta.apply (p.map (·.assumedLinks)) a.assumedLinks d.assumedLinks,
-    abandoned := ← Delta.apply (p.map (·.abandoned)) a.abandoned d.abandoned,
-    sure := ← Delta.apply (p.map (·.sure)) a.sure d.sure,
-    lowerChecks := ← Delta.apply (p.map (·.lowerChecks)) a.lowerChecks d.lowerChecks,
-    refusals := ← Delta.apply (p.map (·.refusals)) a.refusals d.refusals }
+    fieldReads := ← Delta.apply (p.map (·.fieldReads)) fieldReads d.fieldReads,
+    fieldSites := ← Delta.apply (p.map (·.fieldSites)) fieldSites d.fieldSites,
+    fieldTable := ← Delta.apply (p.map (·.fieldTable)) fieldTable d.fieldTable,
+    calls := ← Delta.apply (p.map (·.calls)) calls d.calls,
+    instRows := ← Delta.apply (p.map (·.instRows)) instRows d.instRows,
+    unrunGiven := ← Delta.apply (p.map (·.unrunGiven)) unrunGiven d.unrunGiven,
+    sharedEdges := ← Delta.apply (p.map (·.sharedEdges)) sharedEdges d.sharedEdges,
+    assumedLinks := ← Delta.apply (p.map (·.assumedLinks)) assumedLinks d.assumedLinks,
+    abandoned := ← Delta.apply (p.map (·.abandoned)) abandoned d.abandoned,
+    sure := ← Delta.apply (p.map (·.sure)) sure d.sure,
+    lowerChecks := ← Delta.apply (p.map (·.lowerChecks)) lowerChecks d.lowerChecks,
+    refusals := ← Delta.apply (p.map (·.refusals)) refusals d.refusals }
+
+/-- Would `applyPart4` put it on (`Delta.fits`). -/
+def fitsPart4 (p : Option St) (a : St) (d : StDelta4) : Bool :=
+  Delta.fits (p.map (·.fieldReads)) a.fieldReads d.fieldReads &&
+  Delta.fits (p.map (·.fieldSites)) a.fieldSites d.fieldSites &&
+  Delta.fits (p.map (·.fieldTable)) a.fieldTable d.fieldTable &&
+  Delta.fits (p.map (·.calls)) a.calls d.calls &&
+  Delta.fits (p.map (·.instRows)) a.instRows d.instRows &&
+  Delta.fits (p.map (·.unrunGiven)) a.unrunGiven d.unrunGiven &&
+  Delta.fits (p.map (·.sharedEdges)) a.sharedEdges d.sharedEdges &&
+  Delta.fits (p.map (·.assumedLinks)) a.assumedLinks d.assumedLinks &&
+  Delta.fits (p.map (·.abandoned)) a.abandoned d.abandoned &&
+  Delta.fits (p.map (·.sure)) a.sure d.sure &&
+  Delta.fits (p.map (·.lowerChecks)) a.lowerChecks d.lowerChecks &&
+  Delta.fits (p.map (·.refusals)) a.refusals d.refusals
 
 /-- (A part of `StDelta`.) -/
 structure StDelta5 where
@@ -609,19 +827,49 @@ def diffPart5 (p b : St) : Option StDelta5 := do
     aliases := ← Delta.diff p.aliases b.aliases }
 
 def applyPart5 (p : Option St) (a : St) (d : StDelta5) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let runFns := a.runFns
+  let runCtors := a.runCtors
+  let runAliases := a.runAliases
+  let runOps := a.runOps
+  let runExact := a.runExact
+  let runNow := a.runNow
+  let rowIncl := a.rowIncl
+  let types := a.types
+  let ctors := a.ctors
+  let ops := a.ops
+  let effects := a.effects
+  let aliases := a.aliases
+  let a := { a with runFns := {}, runCtors := {}, runAliases := {}, runOps := {}, runExact := {}, runNow := {}, rowIncl := {}, types := {}, ctors := {}, ops := {}, effects := {}, aliases := {} }
   pure { a with
-    runFns := ← Delta.apply (p.map (·.runFns)) a.runFns d.runFns,
-    runCtors := ← Delta.apply (p.map (·.runCtors)) a.runCtors d.runCtors,
-    runAliases := ← Delta.apply (p.map (·.runAliases)) a.runAliases d.runAliases,
-    runOps := ← Delta.apply (p.map (·.runOps)) a.runOps d.runOps,
-    runExact := ← Delta.apply (p.map (·.runExact)) a.runExact d.runExact,
-    runNow := ← Delta.apply (p.map (·.runNow)) a.runNow d.runNow,
-    rowIncl := ← Delta.apply (p.map (·.rowIncl)) a.rowIncl d.rowIncl,
-    types := ← Delta.apply (p.map (·.types)) a.types d.types,
-    ctors := ← Delta.apply (p.map (·.ctors)) a.ctors d.ctors,
-    ops := ← Delta.apply (p.map (·.ops)) a.ops d.ops,
-    effects := ← Delta.apply (p.map (·.effects)) a.effects d.effects,
-    aliases := ← Delta.apply (p.map (·.aliases)) a.aliases d.aliases }
+    runFns := ← Delta.apply (p.map (·.runFns)) runFns d.runFns,
+    runCtors := ← Delta.apply (p.map (·.runCtors)) runCtors d.runCtors,
+    runAliases := ← Delta.apply (p.map (·.runAliases)) runAliases d.runAliases,
+    runOps := ← Delta.apply (p.map (·.runOps)) runOps d.runOps,
+    runExact := ← Delta.apply (p.map (·.runExact)) runExact d.runExact,
+    runNow := ← Delta.apply (p.map (·.runNow)) runNow d.runNow,
+    rowIncl := ← Delta.apply (p.map (·.rowIncl)) rowIncl d.rowIncl,
+    types := ← Delta.apply (p.map (·.types)) types d.types,
+    ctors := ← Delta.apply (p.map (·.ctors)) ctors d.ctors,
+    ops := ← Delta.apply (p.map (·.ops)) ops d.ops,
+    effects := ← Delta.apply (p.map (·.effects)) effects d.effects,
+    aliases := ← Delta.apply (p.map (·.aliases)) aliases d.aliases }
+
+/-- Would `applyPart5` put it on (`Delta.fits`). -/
+def fitsPart5 (p : Option St) (a : St) (d : StDelta5) : Bool :=
+  Delta.fits (p.map (·.runFns)) a.runFns d.runFns &&
+  Delta.fits (p.map (·.runCtors)) a.runCtors d.runCtors &&
+  Delta.fits (p.map (·.runAliases)) a.runAliases d.runAliases &&
+  Delta.fits (p.map (·.runOps)) a.runOps d.runOps &&
+  Delta.fits (p.map (·.runExact)) a.runExact d.runExact &&
+  Delta.fits (p.map (·.runNow)) a.runNow d.runNow &&
+  Delta.fits (p.map (·.rowIncl)) a.rowIncl d.rowIncl &&
+  Delta.fits (p.map (·.types)) a.types d.types &&
+  Delta.fits (p.map (·.ctors)) a.ctors d.ctors &&
+  Delta.fits (p.map (·.ops)) a.ops d.ops &&
+  Delta.fits (p.map (·.effects)) a.effects d.effects &&
+  Delta.fits (p.map (·.aliases)) a.aliases d.aliases
 
 /-- (A part of `StDelta`.) -/
 structure StDelta6 where
@@ -654,19 +902,49 @@ def diffPart6 (p b : St) : Option StDelta6 := do
     bindSites := ← Delta.diff p.bindSites b.bindSites }
 
 def applyPart6 (p : Option St) (a : St) (d : StDelta6) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let fns := a.fns
+  let pending := a.pending
+  let projections := a.projections
+  let namedReads := a.namedReads
+  let blockCaps := a.blockCaps
+  let given := a.given
+  let unrun := a.unrun
+  let coercing := a.coercing
+  let coercions := a.coercions
+  let loans := a.loans
+  let cells := a.cells
+  let bindSites := a.bindSites
+  let a := { a with fns := {}, pending := {}, projections := {}, namedReads := {}, blockCaps := {}, given := {}, unrun := {}, coercing := {}, coercions := {}, loans := {}, cells := {}, bindSites := {} }
   pure { a with
-    fns := ← Delta.apply (p.map (·.fns)) a.fns d.fns,
-    pending := ← Delta.apply (p.map (·.pending)) a.pending d.pending,
-    projections := ← Delta.apply (p.map (·.projections)) a.projections d.projections,
-    namedReads := ← Delta.apply (p.map (·.namedReads)) a.namedReads d.namedReads,
-    blockCaps := ← Delta.apply (p.map (·.blockCaps)) a.blockCaps d.blockCaps,
-    given := ← Delta.apply (p.map (·.given)) a.given d.given,
-    unrun := ← Delta.apply (p.map (·.unrun)) a.unrun d.unrun,
-    coercing := ← Delta.apply (p.map (·.coercing)) a.coercing d.coercing,
-    coercions := ← Delta.apply (p.map (·.coercions)) a.coercions d.coercions,
-    loans := ← Delta.apply (p.map (·.loans)) a.loans d.loans,
-    cells := ← Delta.apply (p.map (·.cells)) a.cells d.cells,
-    bindSites := ← Delta.apply (p.map (·.bindSites)) a.bindSites d.bindSites }
+    fns := ← Delta.apply (p.map (·.fns)) fns d.fns,
+    pending := ← Delta.apply (p.map (·.pending)) pending d.pending,
+    projections := ← Delta.apply (p.map (·.projections)) projections d.projections,
+    namedReads := ← Delta.apply (p.map (·.namedReads)) namedReads d.namedReads,
+    blockCaps := ← Delta.apply (p.map (·.blockCaps)) blockCaps d.blockCaps,
+    given := ← Delta.apply (p.map (·.given)) given d.given,
+    unrun := ← Delta.apply (p.map (·.unrun)) unrun d.unrun,
+    coercing := ← Delta.apply (p.map (·.coercing)) coercing d.coercing,
+    coercions := ← Delta.apply (p.map (·.coercions)) coercions d.coercions,
+    loans := ← Delta.apply (p.map (·.loans)) loans d.loans,
+    cells := ← Delta.apply (p.map (·.cells)) cells d.cells,
+    bindSites := ← Delta.apply (p.map (·.bindSites)) bindSites d.bindSites }
+
+/-- Would `applyPart6` put it on (`Delta.fits`). -/
+def fitsPart6 (p : Option St) (a : St) (d : StDelta6) : Bool :=
+  Delta.fits (p.map (·.fns)) a.fns d.fns &&
+  Delta.fits (p.map (·.pending)) a.pending d.pending &&
+  Delta.fits (p.map (·.projections)) a.projections d.projections &&
+  Delta.fits (p.map (·.namedReads)) a.namedReads d.namedReads &&
+  Delta.fits (p.map (·.blockCaps)) a.blockCaps d.blockCaps &&
+  Delta.fits (p.map (·.given)) a.given d.given &&
+  Delta.fits (p.map (·.unrun)) a.unrun d.unrun &&
+  Delta.fits (p.map (·.coercing)) a.coercing d.coercing &&
+  Delta.fits (p.map (·.coercions)) a.coercions d.coercions &&
+  Delta.fits (p.map (·.loans)) a.loans d.loans &&
+  Delta.fits (p.map (·.cells)) a.cells d.cells &&
+  Delta.fits (p.map (·.bindSites)) a.bindSites d.bindSites
 
 /-- (A part of `StDelta`.) -/
 structure StDelta7 where
@@ -699,19 +977,49 @@ def diffPart7 (p b : St) : Option StDelta7 := do
     siteTypes := ← Delta.diff p.siteTypes b.siteTypes }
 
 def applyPart7 (p : Option St) (a : St) (d : StDelta7) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let leftBehind := a.leftBehind
+  let takenApart := a.takenApart
+  let partReads := a.partReads
+  let uses := a.uses
+  let heldMoves := a.heldMoves
+  let traits := a.traits
+  let methods := a.methods
+  let kimpls := a.kimpls
+  let blanketTraits := a.blanketTraits
+  let instSites := a.instSites
+  let siteTable := a.siteTable
+  let siteTypes := a.siteTypes
+  let a := { a with leftBehind := {}, takenApart := {}, partReads := {}, uses := {}, heldMoves := {}, traits := {}, methods := {}, kimpls := {}, blanketTraits := {}, instSites := {}, siteTable := {}, siteTypes := {} }
   pure { a with
-    leftBehind := ← Delta.apply (p.map (·.leftBehind)) a.leftBehind d.leftBehind,
-    takenApart := ← Delta.apply (p.map (·.takenApart)) a.takenApart d.takenApart,
-    partReads := ← Delta.apply (p.map (·.partReads)) a.partReads d.partReads,
-    uses := ← Delta.apply (p.map (·.uses)) a.uses d.uses,
-    heldMoves := ← Delta.apply (p.map (·.heldMoves)) a.heldMoves d.heldMoves,
-    traits := ← Delta.apply (p.map (·.traits)) a.traits d.traits,
-    methods := ← Delta.apply (p.map (·.methods)) a.methods d.methods,
-    kimpls := ← Delta.apply (p.map (·.kimpls)) a.kimpls d.kimpls,
-    blanketTraits := ← Delta.apply (p.map (·.blanketTraits)) a.blanketTraits d.blanketTraits,
-    instSites := ← Delta.apply (p.map (·.instSites)) a.instSites d.instSites,
-    siteTable := ← Delta.apply (p.map (·.siteTable)) a.siteTable d.siteTable,
-    siteTypes := ← Delta.apply (p.map (·.siteTypes)) a.siteTypes d.siteTypes }
+    leftBehind := ← Delta.apply (p.map (·.leftBehind)) leftBehind d.leftBehind,
+    takenApart := ← Delta.apply (p.map (·.takenApart)) takenApart d.takenApart,
+    partReads := ← Delta.apply (p.map (·.partReads)) partReads d.partReads,
+    uses := ← Delta.apply (p.map (·.uses)) uses d.uses,
+    heldMoves := ← Delta.apply (p.map (·.heldMoves)) heldMoves d.heldMoves,
+    traits := ← Delta.apply (p.map (·.traits)) traits d.traits,
+    methods := ← Delta.apply (p.map (·.methods)) methods d.methods,
+    kimpls := ← Delta.apply (p.map (·.kimpls)) kimpls d.kimpls,
+    blanketTraits := ← Delta.apply (p.map (·.blanketTraits)) blanketTraits d.blanketTraits,
+    instSites := ← Delta.apply (p.map (·.instSites)) instSites d.instSites,
+    siteTable := ← Delta.apply (p.map (·.siteTable)) siteTable d.siteTable,
+    siteTypes := ← Delta.apply (p.map (·.siteTypes)) siteTypes d.siteTypes }
+
+/-- Would `applyPart7` put it on (`Delta.fits`). -/
+def fitsPart7 (p : Option St) (a : St) (d : StDelta7) : Bool :=
+  Delta.fits (p.map (·.leftBehind)) a.leftBehind d.leftBehind &&
+  Delta.fits (p.map (·.takenApart)) a.takenApart d.takenApart &&
+  Delta.fits (p.map (·.partReads)) a.partReads d.partReads &&
+  Delta.fits (p.map (·.uses)) a.uses d.uses &&
+  Delta.fits (p.map (·.heldMoves)) a.heldMoves d.heldMoves &&
+  Delta.fits (p.map (·.traits)) a.traits d.traits &&
+  Delta.fits (p.map (·.methods)) a.methods d.methods &&
+  Delta.fits (p.map (·.kimpls)) a.kimpls d.kimpls &&
+  Delta.fits (p.map (·.blanketTraits)) a.blanketTraits d.blanketTraits &&
+  Delta.fits (p.map (·.instSites)) a.instSites d.instSites &&
+  Delta.fits (p.map (·.siteTable)) a.siteTable d.siteTable &&
+  Delta.fits (p.map (·.siteTypes)) a.siteTypes d.siteTypes
 
 /-- (A part of `StDelta`.) -/
 structure StDelta8 where
@@ -744,19 +1052,49 @@ def diffPart8 (p b : St) : Option StDelta8 := do
     gatOccs := ← Delta.diff p.gatOccs b.gatOccs }
 
 def applyPart8 (p : Option St) (a : St) (d : StDelta8) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let bounds := a.bounds
+  let groupUses := a.groupUses
+  let rigidKeys := a.rigidKeys
+  let rigidAt := a.rigidAt
+  let conditionsAt := a.conditionsAt
+  let dropCands := a.dropCands
+  let unsafeFns := a.unsafeFns
+  let dropSites := a.dropSites
+  let lateKeeps := a.lateKeeps
+  let quiets := a.quiets
+  let paramTraits := a.paramTraits
+  let gatOccs := a.gatOccs
+  let a := { a with bounds := {}, groupUses := {}, rigidKeys := {}, rigidAt := {}, conditionsAt := {}, dropCands := {}, unsafeFns := {}, dropSites := {}, lateKeeps := {}, quiets := {}, paramTraits := {}, gatOccs := {} }
   pure { a with
-    bounds := ← Delta.apply (p.map (·.bounds)) a.bounds d.bounds,
-    groupUses := ← Delta.apply (p.map (·.groupUses)) a.groupUses d.groupUses,
-    rigidKeys := ← Delta.apply (p.map (·.rigidKeys)) a.rigidKeys d.rigidKeys,
-    rigidAt := ← Delta.apply (p.map (·.rigidAt)) a.rigidAt d.rigidAt,
-    conditionsAt := ← Delta.apply (p.map (·.conditionsAt)) a.conditionsAt d.conditionsAt,
-    dropCands := ← Delta.apply (p.map (·.dropCands)) a.dropCands d.dropCands,
-    unsafeFns := ← Delta.apply (p.map (·.unsafeFns)) a.unsafeFns d.unsafeFns,
-    dropSites := ← Delta.apply (p.map (·.dropSites)) a.dropSites d.dropSites,
-    lateKeeps := ← Delta.apply (p.map (·.lateKeeps)) a.lateKeeps d.lateKeeps,
-    quiets := ← Delta.apply (p.map (·.quiets)) a.quiets d.quiets,
-    paramTraits := ← Delta.apply (p.map (·.paramTraits)) a.paramTraits d.paramTraits,
-    gatOccs := ← Delta.apply (p.map (·.gatOccs)) a.gatOccs d.gatOccs }
+    bounds := ← Delta.apply (p.map (·.bounds)) bounds d.bounds,
+    groupUses := ← Delta.apply (p.map (·.groupUses)) groupUses d.groupUses,
+    rigidKeys := ← Delta.apply (p.map (·.rigidKeys)) rigidKeys d.rigidKeys,
+    rigidAt := ← Delta.apply (p.map (·.rigidAt)) rigidAt d.rigidAt,
+    conditionsAt := ← Delta.apply (p.map (·.conditionsAt)) conditionsAt d.conditionsAt,
+    dropCands := ← Delta.apply (p.map (·.dropCands)) dropCands d.dropCands,
+    unsafeFns := ← Delta.apply (p.map (·.unsafeFns)) unsafeFns d.unsafeFns,
+    dropSites := ← Delta.apply (p.map (·.dropSites)) dropSites d.dropSites,
+    lateKeeps := ← Delta.apply (p.map (·.lateKeeps)) lateKeeps d.lateKeeps,
+    quiets := ← Delta.apply (p.map (·.quiets)) quiets d.quiets,
+    paramTraits := ← Delta.apply (p.map (·.paramTraits)) paramTraits d.paramTraits,
+    gatOccs := ← Delta.apply (p.map (·.gatOccs)) gatOccs d.gatOccs }
+
+/-- Would `applyPart8` put it on (`Delta.fits`). -/
+def fitsPart8 (p : Option St) (a : St) (d : StDelta8) : Bool :=
+  Delta.fits (p.map (·.bounds)) a.bounds d.bounds &&
+  Delta.fits (p.map (·.groupUses)) a.groupUses d.groupUses &&
+  Delta.fits (p.map (·.rigidKeys)) a.rigidKeys d.rigidKeys &&
+  Delta.fits (p.map (·.rigidAt)) a.rigidAt d.rigidAt &&
+  Delta.fits (p.map (·.conditionsAt)) a.conditionsAt d.conditionsAt &&
+  Delta.fits (p.map (·.dropCands)) a.dropCands d.dropCands &&
+  Delta.fits (p.map (·.unsafeFns)) a.unsafeFns d.unsafeFns &&
+  Delta.fits (p.map (·.dropSites)) a.dropSites d.dropSites &&
+  Delta.fits (p.map (·.lateKeeps)) a.lateKeeps d.lateKeeps &&
+  Delta.fits (p.map (·.quiets)) a.quiets d.quiets &&
+  Delta.fits (p.map (·.paramTraits)) a.paramTraits d.paramTraits &&
+  Delta.fits (p.map (·.gatOccs)) a.gatOccs d.gatOccs
 
 /-- (A part of `StDelta`.) -/
 structure StDelta9 where
@@ -779,14 +1117,34 @@ def diffPart9 (p b : St) : Option StDelta9 := do
     followed := ← Delta.diff p.followed b.followed }
 
 def applyPart9 (p : Option St) (a : St) (d : StDelta9) : Option St := do
+  -- (Each part taken out of `a` first, so that it is held once while
+  -- what the delta adds is put on it: in place, not copied.)
+  let gatHolds := a.gatHolds
+  let dictTable := a.dictTable
+  let methodCalls := a.methodCalls
+  let fnBounds := a.fnBounds
+  let impls := a.impls
+  let fnBodies := a.fnBodies
+  let followed := a.followed
+  let a := { a with gatHolds := {}, dictTable := {}, methodCalls := {}, fnBounds := {}, impls := {}, fnBodies := {}, followed := {} }
   pure { a with
-    gatHolds := ← Delta.apply (p.map (·.gatHolds)) a.gatHolds d.gatHolds,
-    dictTable := ← Delta.apply (p.map (·.dictTable)) a.dictTable d.dictTable,
-    methodCalls := ← Delta.apply (p.map (·.methodCalls)) a.methodCalls d.methodCalls,
-    fnBounds := ← Delta.apply (p.map (·.fnBounds)) a.fnBounds d.fnBounds,
-    impls := ← Delta.apply (p.map (·.impls)) a.impls d.impls,
-    fnBodies := ← Delta.apply (p.map (·.fnBodies)) a.fnBodies d.fnBodies,
-    followed := ← Delta.apply (p.map (·.followed)) a.followed d.followed }
+    gatHolds := ← Delta.apply (p.map (·.gatHolds)) gatHolds d.gatHolds,
+    dictTable := ← Delta.apply (p.map (·.dictTable)) dictTable d.dictTable,
+    methodCalls := ← Delta.apply (p.map (·.methodCalls)) methodCalls d.methodCalls,
+    fnBounds := ← Delta.apply (p.map (·.fnBounds)) fnBounds d.fnBounds,
+    impls := ← Delta.apply (p.map (·.impls)) impls d.impls,
+    fnBodies := ← Delta.apply (p.map (·.fnBodies)) fnBodies d.fnBodies,
+    followed := ← Delta.apply (p.map (·.followed)) followed d.followed }
+
+/-- Would `applyPart9` put it on (`Delta.fits`). -/
+def fitsPart9 (p : Option St) (a : St) (d : StDelta9) : Bool :=
+  Delta.fits (p.map (·.gatHolds)) a.gatHolds d.gatHolds &&
+  Delta.fits (p.map (·.dictTable)) a.dictTable d.dictTable &&
+  Delta.fits (p.map (·.methodCalls)) a.methodCalls d.methodCalls &&
+  Delta.fits (p.map (·.fnBounds)) a.fnBounds d.fnBounds &&
+  Delta.fits (p.map (·.impls)) a.impls d.impls &&
+  Delta.fits (p.map (·.fnBodies)) a.fnBodies d.fnBodies &&
+  Delta.fits (p.map (·.followed)) a.followed d.followed
 
 /-- What a check added to the state it began with (`diffStates`): each part
 the checks put together as above, and the rest as the check left it. -/
@@ -944,6 +1302,19 @@ def diffStates (p b : St) : Option StDelta := do
     part7 := ← diffPart7 p b
     part8 := ← diffPart8 p b
     part9 := ← diffPart9 p b }
+
+/-- Would `applyDelta` put `d` on `a`: read only. -/
+def fitsDelta (p : Option St) (a : St) (d : StDelta) : Bool :=
+  let sameBase := match p with
+    | some p => samePtr a.modules p.modules && samePtr a.dropMode p.dropMode
+    | none => true
+  let left := match d.assocUses with
+    | .grown _ tail => tail.isEmpty
+    | .whole all => all.isEmpty
+  sameBase && (a.assocUses.isEmpty && left || Delta.fits (p.map (·.assocUses)) a.assocUses d.assocUses)
+    && fitsPart0 p a d.part0 && fitsPart1 p a d.part1 && fitsPart2 p a d.part2 && fitsPart3 p a d.part3
+    && fitsPart4 p a d.part4 && fitsPart5 p a d.part5 && fitsPart6 p a d.part6 && fitsPart7 p a d.part7
+    && fitsPart8 p a d.part8 && fitsPart9 p a d.part9
 
 /-- `d` put on `a`: the state after checking what made `d` after what made
 `a`. `p`, where it is at hand, is the state both went on from. None where

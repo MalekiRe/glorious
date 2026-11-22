@@ -1058,6 +1058,8 @@ def declaredSyntax (fix : Fixities) (src : String) (lexed : Option (Array Token)
 /-- The modules a text says are files of their own, `mod name;`: each as its
 path from the module the text is, through the modules written in the text. -/
 def fileModules (src : String) : Except String (List (List String)) := do
+  -- (A text that never writes `mod` declares none: not read as tokens.)
+  if (src.splitOn "mod").length == 1 then return []
   let toks ← lex src
   let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
   let mut out : Array (List String) := #[]

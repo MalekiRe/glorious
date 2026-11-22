@@ -6981,9 +6981,25 @@ number changed in the middle function. Wall time, on this machine (load
 
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
-| Glorious | 5.1 s | 1.6 s | 0.89 s |
+| Glorious (then) | 5.1 s | 1.6 s | 0.89 s |
+| Glorious (now) | 4.0 s | 0.57 s | |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
+
+How the middle came down: a group kept is checked again only where what
+it read of the others changed (above: 1.6 s -> 0.79 s); then every group's
+stores were jumped and its delta put on with the state held twice, so each
+store's segments and each map's buckets were copied for every group, the
+square of their number (`lean_copy_expand_array` the most of a profile):
+the state is now taken out of the monad while a delta is put on, each part
+of it taken out of the state first (`applyPartN`), whether it fits asked
+read only before (`Delta.fits`, `fitsDelta`), and where there is room
+asked apart from making the jumped state (`jumpRoom`). With each
+function's first signature found once for the bytecode's start (a list
+searched for each of the 2,000 functions, `startLocals`) and a text that
+writes no `mod` not read as tokens to find its modules: 0.79 s -> 0.57 s.
+covey/states2: a string in a small function 0.78 s -> 0.66 s; in `main`
+1.40 s, its bounds (some 460 of them, 0.55 s) the most of it.
 
 Of an edit of the last function, 0.14 s is the process starting and
 reading what is kept, 0.05 s reading the edited text again, 0.12 s putting
