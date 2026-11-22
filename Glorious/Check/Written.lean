@@ -227,7 +227,7 @@ def writeMethod (ms : MethodSig) : M (Except String Written) := do
 /-- Each trait's functions as declared (`writeMethod`), by `Trait::name`. -/
 def writtenMethods (st : St) : List (String × Except String Written) :=
   st.methods.toList.filterMap fun (name, ms) =>
-    match (writeMethod ms).run st with
+    match (writeMethod ms).runE st with
     | .ok (w, _) => some (s!"{ms.trait}::{name}", w)
     | .error _ => none
 
@@ -244,7 +244,7 @@ def writtenSignatures (st : St) (library : Bool := false) : List (String × Exce
       | .fn f _ _ _ _ => m.insert (Syntax.implFnName im.trait im.head (Syntax.lastSegment f)) (im.pvars.map fun (p, v) => (v, p))
       | _ => m) m) {}
   sorted.filterMap fun (name, scheme) =>
-    match (writeSignature scheme (implParams.getD name [])).run st with
+    match (writeSignature scheme (implParams.getD name [])).runE st with
     | .ok (w, _) => some (name, w)
     | .error _ => none
 

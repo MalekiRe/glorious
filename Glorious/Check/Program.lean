@@ -279,7 +279,7 @@ def checkSideBySideWith {α : Type} (groups : List α) (one : α → M (Array (U
   let start ← get
   let tasks := runs.zipIdx.map fun (run, j) =>
     (run, j, Task.spawn (prio := .dedicated) fun _ =>
-      (run.foldlM (fun acc g => do pure (acc ++ (← one g))) #[] : M (Array (UInt64 × KeptGroup))).run
+      (run.foldlM (fun acc g => do pure (acc ++ (← one g))) #[] : M (Array (UInt64 × KeptGroup))).runE
         (if jump then jumpedFor start j runGap else start))
   -- (In order: a run that cannot be put with those before it, or was
   -- refused, is checked again after them, as one after another would.)
@@ -934,7 +934,7 @@ def checkProgram (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) (
     modify fun s => { s with modules }
     let _ ← checkItems items
     finish
-  let (blocks, _) ← (action.run { dropMode := drops }).mapError (·.msg)
+  let (blocks, _) ← (action.runE { dropMode := drops }).mapError (·.msg)
   pure blocks
 
 /-- What is known once some items are checked: for a program that is checked
@@ -944,7 +944,7 @@ def checkFirst (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) (dr
   let action : M Unit := do
     modify fun s => { s with modules }
     let _ ← checkItems items
-  let (_, st) ← (action.run { dropMode := drops }).mapError (·.msg)
+  let (_, st) ← (action.runE { dropMode := drops }).mapError (·.msg)
   pure st
 
 /-- Check a program whose first items are already checked. -/
@@ -954,7 +954,7 @@ def checkAfter (first : St) (items : List Flat.FItem) (modules : Syntax.ModuleIn
     modify fun s => { s with modules, ownItems := true }
     let _ ← checkItems items
     finish
-  let (blocks, _) ← (action.run first).mapError (·.msg)
+  let (blocks, _) ← (action.runE first).mapError (·.msg)
   pure blocks
 
 
@@ -1013,7 +1013,7 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
           continue
         let tasks := level.zipIdx.map fun (((u, info), k), j) =>
           (k, j, Task.spawn fun _ => Trace.timed s!"check unit {k} (side by side)" fun _ =>
-            (checkItems u (mixHash side info) kept (deltasOf k)).run (jumpedFor start j))
+            (checkItems u (mixHash side info) kept (deltasOf k)).runE (jumpedFor start j))
         let mut together : Option St := none
         let mut mines : List (Nat × Kept) := []
         let mut deltasMine : Array (UInt64 × KeptGroup) := #[]
@@ -1045,7 +1045,7 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
       for ((u, info), k) in level do
         let before ← get
         let ((mine, ds), after) ← match Trace.timed s!"check unit {k}" fun _ =>
-            (checkItems u (mixHash key info) kept (deltasOf k)).run before with
+            (checkItems u (mixHash key info) kept (deltasOf k)).runE before with
           | .ok r => pure r
           | .error e => throwThe Elab.Said e
         set after
@@ -1061,7 +1061,7 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
         made := (whole, ← get) :: made
         if level.all (fun (_, k) => k < library) then shared := (whole, ← get) :: shared
     pure (← finish, made, shared, groupsMade)
-  let (r, _) ← action.run first
+  let (r, _) ← action.runE first
   pure r
 
 end Glorious.Check

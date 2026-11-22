@@ -955,7 +955,18 @@ structure St where
   function is checked from, its declaration having none. -/
   fnBodies : Std.HashMap String Flat.Body := {}
 
-abbrev M := StateT St (Except Elab.Said)
+/-- (One result made at each step, not a pair inside an `Except`. What fails
+goes back to the state it began with, `try` as over `Except`: the whole state
+is what is saved.) -/
+abbrev M := EStateM Elab.Said St
+
+instance : EStateM.Backtrackable St St := ⟨id, fun _ saved => saved⟩
+
+/-- `act` run from `s`: what it gives and the state after, or why it stopped. -/
+@[inline] def M.runE {α : Type} (act : M α) (s : St) : Except Elab.Said (α × St) :=
+  match act.run s with
+  | .ok a s => .ok (a, s)
+  | .error e _ => .error e
 
 /-- `act`, its time added to `label`'s where a compile is traced (`Trace`). -/
 def timedM {α : Type} (label : String) (act : M α) : M α := fun s => Trace.timed label fun _ => act.run s
@@ -970,8 +981,8 @@ keeps the state from before to go back to, nothing holds that state while
 `act` runs: so what `act` changes is changed in place, and not copied. -/
 @[inline] def onError {α : Type} (act : M α) (f : String → String) : M α := fun s =>
   match act s with
-  | .ok r => .ok r
-  | .error e => .error (e.map f)
+  | .ok a s => .ok a s
+  | .error e s => .error (e.map f) s
 
 /-! ### The body being checked -/
 

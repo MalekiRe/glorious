@@ -6982,7 +6982,7 @@ number changed in the middle function. Wall time, on this machine (load
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
 | Glorious (then) | 5.1 s | 1.6 s | 0.89 s |
-| Glorious (now) | 1.5 s | 0.43 s | |
+| Glorious (now) | 1.48 s | 0.43 s | |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
 
@@ -7157,6 +7157,9 @@ inference 1 s on one, then what is kept 0.2 s. Then, 1.75 s -> 1.5 s:
   result made at each step, not a pair inside an `Except`. What fails goes
   back to the state it began with, as before (`Backtrackable` saving the
   whole state). Inference 1.0 s -> 0.8 s.
+- **The checker's monad is `EStateM` too**, the same way (`M.runE` where
+  a caller wants the `Except`): covey/states2 fresh 2.29 s -> 2.2 s, an
+  edit of `main` 1.42 s -> 1.32 s; the chain as it was.
 - **What is kept of the groups and of the front end is in shards too**
   (`saveShards`, `loadShards`), each written on a thread of its own and
   only where something new falls to it: an edit writes one or two of each.
