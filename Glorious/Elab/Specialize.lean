@@ -102,6 +102,25 @@ def askCopy (fn : String) (ids : List Nat) (drop : Bool) : StateM Copies String 
                            asked := c.asked.push (key, name) }
   pure name
 
+/-- Which of the prelude's spreads `g` is. -/
+def spreadKind (g : String) : Option String :=
+  if g == "spread_split" || g == "spread_split_as" then some "split"
+  else if g == "spread_cons" || g == "spread_cons_as" then some "cons"
+  else if g == "spread_snoc" || g == "spread_snoc_as" then some "snoc"
+  else if g == "spread_call" || g == "spread_call_as" then some "call"
+  else none
+
+/-- How long a list is, by the implementation of `Spread` it has: one for
+`()`, or one for its first and rest given the rest's. -/
+def spreadLength (byId : Array (String × List Nat)) (i : Nat) : Nat → Option Nat
+  | 0 => none
+  | fuel + 1 =>
+    match byId[i]? with
+    | some (f, []) => if f.startsWith (implDictName "Spread" "") then some 0 else none
+    | some (f, [j]) =>
+      if f.startsWith (implDictName "Spread" "") then (spreadLength byId j fuel).map (· + 1) else none
+    | _ => none
+
 mutual
 
 /-- An expression of a function written out for the implementations `known`
@@ -170,6 +189,16 @@ partial def specCall (tr : TraitInfo) (known : List (String × String)) (f : Fla
       | none => kept ()
     | none => kept ()
   | .name none g =>
+    -- (A list of values spread, `Prelude`'s `spread_split`, `spread_cons`
+    -- and `spread_snoc`: written out for its length, known from how the
+    -- list has `Spread`: one implementation for each of its parts.)
+    if let some kind := spreadKind g then
+      let bounds := (tr.boundedAt[g]?).getD 0
+      for k in [0:bounds] do
+        if let some d := args[k]? then
+          if let some i ← dictId tr.implsAt d then
+            if let some n := spreadLength (← getThe Copies).byId i 4096 then
+              return (← specPush (.name none s!"%spread_{kind}#{n}"), args.extract bounds args.size)
     let n := (tr.boundedAt[g]?).getD 0
     if n > 0 && args.size ≥ n then
       let mut ids : Array Nat := #[]

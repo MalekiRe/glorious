@@ -6302,7 +6302,47 @@ catch: covey/sixteen 4.4 s -> 88 s; and (2) a function generic in a
 tuple's first and rest that destroys such a value needs how `%Cons<H, R>`
 is destroyed, which only the tuple of the length it comes to can say (the
 specializer can put that in its place, but the proved solver's one-way
-check would have to leave `Destroy` out).
+check would have to leave `Destroy` out). Since: nothing is written out
+for each length by the compiler (next section); covey's ecs writes `Item`
+and `Fill` for each length to sixteen itself, as `std::tuple` does.
+
+## Lists of values spread, and no copies for each length
+
+**Decision: an implementation over a list of types is one implementation or
+none. What its functions spread of a list of values is a prelude function
+(`spread_split`, `spread_cons`, `spread_snoc`, `spread_call`), which the
+specializer makes the function for one length where the dictionaries are
+known; an implementation that uses its list one by one (`(..Option<R>)`,
+`..R: Show`, two lists in one tuple) is refused, with how to write it by
+first and rest. `expandPacks`' copies for every length up to the longest
+list, and the driver's reading again with longer lists where a joined
+tuple was longer, are gone.**
+
+- **Syntax** (`expandPacks.spreadValues`). In a function of an
+  implementation whose lists are each a tuple (`consOnly`), `let (h, ..r) =
+  e` is `let (h, r) = spread_split_as<R>(e)`, `let (..r) = e` is `let r =
+  e`, `(a, ..e)` and `(..e, a)` are `spread_cons_as<R>(a, e)` and
+  `spread_snoc_as<R>(e, a)`, and `f(..e)` is `spread_call_as<R>(f, e)`; the
+  implementation is asked `R: Spread` (`trait Spread`, implemented for `()`
+  and `(H, ..R)`). What is spread is taken to be as long as the
+  implementation's one list.
+- **A spread longer than the list**, as one that joins two tuples, is
+  written `spread_cons(h, join((..r), b))`, the length that of the value's
+  own type, with the condition that says it is a list:
+  `<(..R) as Join<B>>::Out: Spread`. Taken too short, the length is a Core
+  program the proved checker refuses, not a wrong one that runs.
+- **The specializer** (`spreadKind`, `spreadLength`): a call whose `Spread`
+  dictionary is known is `%spread_{kind}#{n}`, `n` the depth of the
+  dictionary's chain of `impl Spread for (H, ..R)`; the elaborator makes
+  that function once (`spreadFn`). One it cannot know is refused ("a list
+  of values is spread here whose length is not known").
+- **Also**: a field read of a first and rest, `t.2` of `%Cons<H, R>`, is a
+  field of the rest (`fieldType`); a projection may be written with its
+  lifetimes, `<R as Item>::Got<'a>`, which a condition reads as without
+  them.
+- **Tests**: `Join`, `Then`, `Wrap`, `Texts`, `Flip`, `AllSome` rewritten
+  by first and rest; `CallWith` calls `(*f)(..p)` as before.
+
 
 ## Typed Core: borrow scopes decided by the checker, tried (not kept)
 
@@ -7248,6 +7288,16 @@ source in Lean strings 6,021, and the test table 3,928.
   `applyDelta`. Now each part is one use of `delta_part`, the field and its
   delta once, which writes those and `clearPartN`, `restorePartN` for the
   other two. -716.
+- **No copies of an implementation for each length** (see "Lists of values
+  spread"). Gone: `expandPacks`' copies (`linked`, `expandOne`,
+  `longestList`) and the driver's lengths (`longestOf`, `partsWritten`,
+  `longestUnimplemented`, the reading again with longer lists): Driver -39,
+  Parser -21 with the spreads it writes. Come: the prelude's spreads (+18),
+  the specializer's and elaborator's functions for them (+41), a first and
+  rest's fields and a projection's lifetimes (+10). +10 in all: what it
+  takes away is a second way, not lines. Measured after: the chain 1.52 s
+  cold, 0.28 s an edit in the middle; covey/states2 2.3 s cold, 0.53 s a
+  leaf's edit, 1.18 s `main`'s; covey/sixteen 2.35 s cold (4.5 s before).
 
 ## Other standing decisions
 

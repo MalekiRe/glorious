@@ -185,6 +185,25 @@ impl Ord for Int {
     fn >=(a: Int, b: Int) -> Bool { not bool(int_lt(a, b)) }
 }
 
+// A tuple, by its length: the first of it and the rest, or none. What an
+// implementation for every length spreads of a list of values, `let (h,
+// ..r) = t` and `(h, ..r)`, is these functions: written out for the length
+// of what is spread where the implementations are known (`Elab.Specialize`),
+// that of `B` or, `.._as`, of `L`, the implementation's list (what `..`
+// written in it is: what it spreads is as long as that).
+trait Spread { fn spread_length() -> Int }
+impl Spread for () { fn spread_length() -> Int { 0 } }
+impl<H, ..R> Spread for (H, ..R) where (..R): Spread { fn spread_length() -> Int { 1 + <(..R) as Spread>::spread_length() } }
+fn spread_split<A, B>(t: (A, ..B)) -> (A, B) where B: Spread { spread_split(t) }
+fn spread_cons<A, B>(first: A, rest: B) -> (A, ..B) where B: Spread { spread_cons(first, rest) }
+fn spread_snoc<B, X>(rest: B, last: X) -> (..B, X) where B: Spread { spread_snoc(rest, last) }
+fn spread_split_as<L, A, B>(t: (A, ..B)) -> (A, B) where L: Spread { spread_split_as<L>(t) }
+fn spread_cons_as<L, A, B>(first: A, rest: B) -> (A, ..B) where L: Spread { spread_cons_as<L>(first, rest) }
+fn spread_snoc_as<L, B, X>(rest: B, last: X) -> (..B, X) where L: Spread { spread_snoc_as<L>(rest, last) }
+// A callable called with a tuple's parts, `f(..t)`.
+fn spread_call<B, O>(f: fn(..B) -> O, args: B) -> O where B: Spread { spread_call(f, args) }
+fn spread_call_as<L, B, O>(f: fn(..B) -> O, args: B) -> O where L: Spread { spread_call_as<L>(f, args) }
+
 "#
 
 /-- The operators of `Int` alone: for a program that is not checked. -/

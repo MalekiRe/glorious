@@ -149,14 +149,24 @@ def otherFields (t : Ty) (idx : Nat) : M (Option (List Ty)) := do
   | _ => pure none
 
 /-- The type of field `idx` of a value of type `t`, if `t` is known. -/
-def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
+partial def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
   match ← find t with
   | .var _ => pure none
   | .tuple ts =>
     match ts[idx]? with
     | some t => pure (some t)
     | none => throw s!"a tuple of {ts.length} values has no field {idx}"
-  | .con name args =>
+  -- (A tuple's first and the rest, `(H, ..R)`: the first, or of the rest.)
+  | .con name [h, rest] =>
+    if name == Traits.consHead then
+      match idx with
+      | 0 => pure (some h)
+      | k + 1 => fieldType rest k
+    else fieldOfCtor name [h, rest]
+  | .con name args => fieldOfCtor name args
+  | t => throw s!"`.{idx}` reads a field, but `{showTy (← zonk t)}` has none"
+where
+  fieldOfCtor (name : String) (args : List Ty) : M (Option Ty) := do
     match (← get).ctors[name]? with
     | some sig =>
       -- A field that is not `pub` is its module's to read and to borrow.
@@ -170,7 +180,6 @@ def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
       | some t => pure (some t)
       | none => throw s!"`{name}` has no field {idx}"
     | none => throw s!"`{bareName name}` has no fields to read with `.{idx}`"
-  | t => throw s!"`.{idx}` reads a field, but `{showTy (← zonk t)}` has none"
 
 /-- Which field of a value of type `t` a step is: its number, or the place of
 its name among the fields of the type's one constructor. None if the type is

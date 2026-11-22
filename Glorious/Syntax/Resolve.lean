@@ -699,10 +699,9 @@ def writeLayouts (items : List FItem) (memo : FrontMemo := {}) : List FItem × F
         else []
       | _ => []
     (nils ++ [Item.impl fresh layoutTrait head fresh ((fresh.filter (!·.startsWith "'")).map (·, layoutTrait))
-      -- (Checked only where something asks it, as a copy of an
-      -- implementation for every length is: `packCopyName`.)
+      -- (Checked only where something asks it: `askedOnlyName`.)
       [.fn sizeName [] [] (some int) [.mk [] [.expr sizeE]], .fn alignName [] [] (some int) [.mk [] [.expr alignE]],
-       .typeAlias packCopyName [] (.tuple [])]]).map ofItem
+       .typeAlias askedOnlyName [] (.tuple [])]]).map ofItem
   -- (After what is written out beside a declaration, `fieldNames`.)
   let rec beside : List FItem → List FItem × List FItem
     | (.other (.fieldNames m ns ps)) :: rest =>

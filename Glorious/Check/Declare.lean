@@ -27,7 +27,11 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
     -- `<T as Trait>::Item`: the same, with the trait said.
     if x == Syntax.assocOfMark then
       match args with
-      | [self, .name tr targs, .name name []] =>
+      -- (`<R as Item>::Got<'a>`: of a lifetime, as without it; what is asked
+      -- of a type is asked whatever it borrows from.)
+      | [self, .name tr targs, .name name nargs] =>
+        unless nargs.all (fun | .name l [] => l.startsWith "'" | _ => false) do
+          throw s!"`<.. as {Syntax.lastSegment tr}>::{name}<..>`: only lifetimes are written after what a trait leaves"
         let self ← resolveType params decl self
         match ((← get).traitShape[tr]?).map (fun x => (tr, x)) with
         | some (_, arity, assocs) =>

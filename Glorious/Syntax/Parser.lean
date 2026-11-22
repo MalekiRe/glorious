@@ -1253,50 +1253,17 @@ def joinFixities (prelude : Fixities) (texts : List TextSyntax) :
 
 /-! ## Lists of types as parameters
 
-`impl<H, ..R> Count for (H, ..R) where (..R): Count { .. }` is an
-implementation for tuples of every length: it is written out once for each
-length the program can need, before it is read, with `..R` standing for `R0, R1, ..`
-wherever it is written in parentheses or angle brackets: in types, in
-patterns (`let (h, ..rest) = t` binds `rest0`, `rest1`, ..), and in what is
-built (`(x, ..rest)`). What follows `..` may be more than a name: it is
-written once for each, the lists it names indexed, so `(..Option<R>)` is
-`(Option<R0>, Option<R1>, ..)` and `(..show(r))` calls `show` on each. A
-list of values is as long as the list of types of its name in other case,
-or the first. A `..` in square brackets is an array's rest, and one before
-no list is a pattern's, as before. -/
-
-/-- The most things written between one pair of brackets: a tuple's parts,
-a function's parameters or arguments. A list of types is written out for
-every length up to this, at first (see `compileSource` for when it is not
-enough). -/
-def longestList (toks : Array Token) : Nat := Id.run do
-  let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
-  -- (For each bracket open, how many parts it has so far.)
-  let mut open_ : List Nat := []
-  let mut most := 0
-  for i in [0:toks.size] do
-    match tok i with
-    | .punct "(" => open_ := 1 :: open_
-    | .punct "[" => open_ := 1 :: open_
-    | .punct "{" => open_ := 1 :: open_
-    | .punct "," =>
-      match open_ with
-      | n :: rest => open_ := (n + 1) :: rest
-      | [] => pure ()
-    | .punct ")" | .punct "]" | .punct "}" =>
-      match open_ with
-      | n :: rest =>
-        -- (Only parentheses: `[..]` and `{..}` are counted apart.)
-        if tok i == .punct ")" then most := max most n
-        open_ := rest
-      | [] => pure ()
-    | _ => pure ()
-  pure most
+`impl<H, ..R> Count for (H, ..R) where (..R): Count { .. }` is one
+implementation for tuples of every length: `(H, ..R)` is a tuple's first and
+the rest. What its functions spread of a list of values, `let (h, ..rest) =
+t`, `(x, ..rest)`, `f(..rest)`, is the prelude's spreads, as long as the
+implementation's list. A `..` in square brackets is an array's rest, and one
+before no list is a pattern's, as before. -/
 
 /-- The tokens with each implementation that has a list of types as a
-parameter written out for every length up to `most`: together, where it has
-more than one list. -/
-def expandPacks (toks : Array Token) (most : Nat) : Array Token := Id.run do
+parameter, `impl<H, ..R> Trait for (H, ..R)`, made one implementation for
+every length (`consOnly`); refused where its list is used one by one. -/
+def expandPacks (toks : Array Token) : Except String (Array Token) := do
   let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
   let isDots := fun (i : Nat) => tok i == .punct "." && tok (i + 1) == .punct "."
   let mut out : Array Token := #[]
@@ -1338,32 +1305,14 @@ def expandPacks (toks : Array Token) (most : Nat) : Array Token := Id.run do
       let body := toks.extract i e
       -- One whose lists are only the rest of a tuple, `(H, ..R)` or
       -- `(..R)`, is one implementation for every length: the rest is a type
-      -- parameter of its own (`Traits.consHead`).
-      if let some once := consOnly body (j - i) packs then
+      -- parameter of its own (`Traits.consHead`). (Its lists of values
+      -- spread written with the prelude's spreads, `spreadValues`.)
+      if let some once := consOnly (spreadValues body (j - i) packs) (j - i) packs then
         out := out ++ once
         i := e
         continue
-      -- Lists named together after one `..` are as long as each other.
-      let together := linked body packs
-      let leaders := packs.filter fun p => (together.lookup p).getD p == p
-      -- Every length for each list, as long as together they are no
-      -- longer than `most`.
-      let rec lengths : List String → Nat → List (List (String × Nat))
-        | [], _ => [[]]
-        | p :: ps, left => (List.range (left + 1)).flatMap fun n =>
-            (lengths ps (left - n)).map ((p, n) :: ·)
-      for choice in lengths leaders most do
-        let all := packs.map fun p => (p, (choice.lookup ((together.lookup p).getD p)).getD 0)
-        -- (Each copy says it is one, `type %pack = ();` last in its body,
-        -- before the `}` that closes it: one nothing uses need not be
-        -- checked, `Check.checkItems`.)
-        let copy := expandOne body all
-        let closes := copy.size - 1
-        let at_ := copy[closes]?.getD default
-        let mark : Array Token := #[.ident "type", .ident Syntax.packCopyName, .punct "=", .punct "(", .punct ")", .punct ";"].map
-          fun tk => { at_ with tok := tk }
-        out := out ++ copy.extract 0 closes ++ mark ++ copy.extract closes copy.size
-      i := e
+      let at_ := toks[i]!
+      throw s!"{at_.line}:{at_.col}: this implementation uses its list of types `..{packs.headD ""}` one by one (what is in it, `(..Option<R>)`; what each element has, `..R: Trait`; two lists in one tuple; or a list of values spread elsewhere than first or last of a tuple): write it for the list's first and rest, `impl<H, ..R> Trait for (H, ..R)`, each element a step of its own"
     else
       out := out.push toks[i]!
       i := i + 1
@@ -1373,10 +1322,9 @@ where
   whose lists of types are each a tuple, read as one: `..R` among its
   parameters written `R`, and what is spread read by the parser as types
   (`(H, ..R)`, `(..G, X)`, `Fn<(..P)>`: `parseType`, `parsePack`). None if
-  it spreads a list of values (`let (..t) = ..`, `(..g, x)`, `f(..p)`;
-  `std::tuple::Tuple` does those for every length), something of a list's
-  elements (`(..Option<T>)`, `..R::Got<'a>`), or asks something of each
-  element (`..S: Get<T>`): those are written out for each length. -/
+  it spreads a list of values (`spreadValues` writes those it can),
+  something of a list's elements (`(..Option<T>)`), or asks something of
+  each element (`..S: Get<T>`): those are refused (`expandPacks`). -/
   consOnly (body : Array Token) (params : Nat) (packs : List String) : Option (Array Token) := Id.run do
     let tok := fun (i : Nat) => (body[i]?.map (·.tok)).getD .eof
     let dots := fun (k : Nat) => tok k == .punct "." && tok (k + 1) == .punct "."
@@ -1424,172 +1372,188 @@ where
         out := out.push body[k]!
         k := k + 1
     pure (some (out ++ body.extract params body.size))
-  /-- For each list of types, the first of those it is named together with
-  after one `..` (`..P: Parameter<Asks = A>`), itself if none. -/
-  linked (body : Array Token) (packs : List String) : List (String × String) := Id.run do
-    let tok := fun (i : Nat) => (body[i]?.map (·.tok)).getD .eof
-    let mut leader : List (String × String) := packs.map fun p => (p, p)
-    let rec find (l : List (String × String)) (fuel : Nat) (p : String) : String :=
-      match fuel, l.lookup p with
-      | 0, _ => p
-      | _, none => p
-      | fuel + 1, some q => if q == p then p else find l fuel q
-    let mut i := 0
-    while i + 1 < body.size do
-      if tok i == .punct "." && tok (i + 1) == .punct "." then
-        let mut j := i + 2
-        let mut depth : Int := 0
-        let mut named : List String := []
-        while j < body.size && !(depth == 0 &&
-            (tok j == .punct "," || tok j == .punct ")" || tok j == .op ">" || tok j == .punct "]"
-              || tok j == .punct "{")) do
-          match tok j with
-          | .punct "(" => depth := depth + 1
-          | .punct "[" => depth := depth + 1
-          | .op "<" => depth := depth + 1
-          | .punct ")" => depth := depth - 1
-          | .punct "]" => depth := depth - 1
-          | .op ">" => depth := depth - 1
-          | .ident x => if packs.contains x && !named.contains x then named := named ++ [x]
-          | _ => pure ()
-          j := j + 1
-        match named with
-        | first :: rest =>
-          let root := find leader packs.length first
-          for p in rest do
-            let r := find leader packs.length p
-            if r != root then leader := leader.map fun (a, b) => if b == r then (a, root) else (a, b)
-        | [] => pure ()
-        i := j
-      else i := i + 1
-    return leader.map fun (p, _) => (p, find leader packs.length p)
-
-  /-- One implementation with every `..x` in parentheses or angle brackets
-  written as `x0, .., x{n-1}`. -/
-  expandOne (body : Array Token) (lengths : List (String × Nat)) : Array Token := Id.run do
-    let tok := fun (i : Nat) => (body[i]?.map (·.tok)).getD .eof
-    let keywords := ["for", "as", "return", "in", "else", "where", "let", "mut"]
-    -- How long a list is: a list of values `..xs` is as long as the list of
-    -- types of its name, or the first.
-    let lengthOf := fun (x : String) =>
-      match lengths.lookup x with
-      | some n => n
-      | none =>
-        match lengths.find? fun (p, _) => p.toLower == x.toLower with
-        | some (_, n) => n
-        | none => (lengths.head?.map (·.2)).getD 0
-    let mut out : Array Token := #[]
-    -- What each open bracket is, innermost last: its kind, where it is in
-    -- what is written out, and whether a list was spread in it.
-    let mut stack : List (String × Nat × Bool) := []
-    -- Lists of values, by the names they were given (`let (..xs) = t`).
-    let mut values : List String := []
-    -- Is the bracket opened `opened` in what is written out a call's or a function
-    -- type's arguments, rather than a tuple?
-    let callLike := fun (out : Array Token) (opened : Nat) =>
-      match (if opened == 0 then none else out[opened - 1]?.map (·.tok)) with
-      | some (.ident w) => !keywords.contains w
-      | some (.punct ")") => true
-      | some (.punct "]") => true
-      | some (.op ">") => true
-      | _ => false
-    let mut i := 0
-    while i < body.size do
-      let t := body[i]!
-      -- (In brackets, or in the conditions after `where`, outside any.)
-      let inside := match stack with
-        | ("(", _) :: _ => true
-        | ("<", _) :: _ => true
-        | ("[", _) :: _ => true
-        | [] => true
-        | _ => false
-      if inside && t.tok == .punct "." && tok (i + 1) == .punct "." then
-        -- What `..` stands before: to the next `,` or closing bracket.
-        let mut j := i + 2
-        let mut depth : Int := 0
-        while j < body.size && !(depth == 0 &&
-            (tok j == .punct "," || tok j == .punct ")" || tok j == .op ">" || tok j == .punct "]"
-              || tok j == .punct "{")) do
-          match tok j with
-          | .punct "(" => depth := depth + 1
-          | .punct "[" => depth := depth + 1
-          | .op "<" => depth := depth + 1
-          | .punct ")" => depth := depth - 1
-          | .punct "]" => depth := depth - 1
-          | .op ">" => depth := depth - 1
-          | _ => pure ()
-          j := j + 1
-        let span := body.extract (i + 2) j
-        -- (A name alone is a list of its own: of types if it is one, and
-        -- otherwise of values from here on.)
-        if let #[⟨.ident x, _, _⟩] := span then
-          unless lengths.any (·.1 == x) || values.contains x do values := values ++ [x]
-        let isPack := fun (x : String) => lengths.any (·.1 == x) || values.contains x
-        let mentioned := span.toList.filterMap fun tk => match tk.tok with
-          | .ident x => if isPack x then some x else none
-          | _ => none
-        match mentioned with
-        | [] =>
-          out := out.push t
-          i := i + 1
-        | x :: _ =>
-          stack := match stack with
-            | (k, opened, _) :: rest => (k, opened, true) :: rest
-            | [] => []
-          let n := lengthOf x
-          if n == 0 then
-            -- (and the comma after it, or the one before it; and a `where`
-            -- with nothing left after it)
-            if tok j == .punct "{" && (out.back?.map (·.tok)) == some (.ident "where") then
-              out := out.pop
-            if tok j != .punct "," && (out.back?.map (·.tok)) == some (.punct ",") then
-              out := out.pop
-            i := if tok j == .punct "," then j + 1 else j
-            continue
-          for k in [0:n] do
-            if k > 0 then out := out.push ⟨.punct ",", t.line, t.col⟩
-            for tk in span do
-              out := out.push (match tk.tok with
-                | .ident y => if isPack y then ⟨.ident s!"{y}{k}", tk.line, tk.col⟩ else tk
-                | _ => tk)
-          i := j
-          continue
-      match t.tok with
-      | .punct "(" => stack := ("(", out.size, false) :: stack
-      | .punct "[" => stack := ("[", out.size, false) :: stack
-      | .punct "{" => stack := ("{", out.size, false) :: stack
-      | .op "<" => stack := ("<", out.size, false) :: stack
-      | .punct ")" =>
-        -- A tuple a list was spread in that is left with one part is a
-        -- tuple of one: `(x0,)`.
-        match stack.dropWhile (·.1 != "(") with
-        | (_, opened, true) :: _ =>
-          let mut depth : Int := 0
-          let mut commas := 0
-          for k in [opened + 1:out.size] do
-            match (out[k]?.map (·.tok)).getD .eof with
-            | .punct "(" => depth := depth + 1
-            | .punct "[" => depth := depth + 1
-            | .punct "{" => depth := depth + 1
-            | .op "<" => depth := depth + 1
-            | .punct ")" => depth := depth - 1
-            | .punct "]" => depth := depth - 1
-            | .punct "}" => depth := depth - 1
-            -- (A type's arguments, `Query<Q, N, St>`, are inside it.)
-            | .op ">" => if depth > 0 then depth := depth - 1
-            | .punct "," => if depth == 0 then commas := commas + 1
-            | _ => pure ()
-          if commas == 0 && out.size > opened + 1 && !callLike out opened then
-            out := out.push ⟨.punct ",", t.line, t.col⟩
-        | _ => pure ()
-        stack := (stack.dropWhile (·.1 != "(")).drop 1
-      | .punct "]" => stack := (stack.dropWhile (·.1 != "[")).drop 1
-      | .punct "}" => stack := (stack.dropWhile (·.1 != "{")).drop 1
-      | .op ">" => if (stack.head?.map (·.1)) == some "<" then stack := stack.drop 1
+  /-- What an implementation for every length spreads of a list of values,
+  written with the prelude's `spread_split`, `spread_cons` and
+  `spread_snoc`, which are written out for the length each use has where the
+  implementations are known (`Elab.Specialize`), and `R: Spread` asked of
+  each of its lists of types for that: `let (p, ..r) = e` is `let (p, r) =
+  spread_split(e)`, `let (..r) = e` is `let r = e`, `(a, ..e)` is
+  `spread_cons(a, e)`, `(..e, a)` is `spread_snoc(e, a)`, and `(..e)` is
+  `(e)`. Others are left as they are (`consOnly` turns them away). -/
+  spreadValues (body : Array Token) (params : Nat) (packs : List String) : Array Token := Id.run do
+    -- (Not for one whose type is a list alone, `(..R)`: its first and rest
+    -- are not said.)
+    let headTok := fun (i : Nat) => (body[i]?.map (·.tok)).getD .eof
+    let mut f := params
+    while f < body.size && headTok f != .ident "for" do f := f + 1
+    if headTok (f + 1) == .punct "(" && headTok (f + 2) == .punct "." && headTok (f + 3) == .punct "."
+        && headTok (f + 5) == .punct ")" then
+      return body
+    let mut toks := body
+    let mut changed := false
+    for _ in [0:body.size] do
+      match spreadOne toks params packs with
+      | some t =>
+        toks := t
+        changed := true
+      | none => break
+    if !changed then return body
+    -- (`R: Spread` for each list, after what is asked of the rest: before the
+    -- body's `{`, the first outside `<..>`.)
+    let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
+    let mut b := params
+    let mut angle : Int := 0
+    let mut hasWhere := false
+    while b < toks.size do
+      match tok b with
+      | .op "<" => angle := angle + 1
+      | .op ">" => angle := angle - 1
+      | .op ">>" => angle := angle - 2
+      | .ident "where" => if angle <= 0 then hasWhere := true
+      | .punct "{" => if angle <= 0 then break
       | _ => pure ()
-      out := out.push t
-      i := i + 1
-    return out
+      b := b + 1
+    let at_ := toks[b]?.getD default
+    let mk := fun (t : Tok) => { at_ with tok := t }
+    let mut added : Array Token := if hasWhere then #[] else #[mk (.ident "where")]
+    for (p, k) in packs.zipIdx do
+      if hasWhere || k > 0 then added := added.push (mk (.punct ","))
+      added := added ++ #[mk (.ident p), mk (.punct ":"), mk (.ident "Spread")]
+    return toks.extract 0 b ++ added ++ toks.extract b toks.size
+  /-- The first list of values spread that `spreadValues` writes otherwise,
+  written so; none if none is left. -/
+  spreadOne (toks : Array Token) (params : Nat) (packs : List String) : Option (Array Token) := Id.run do
+    let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
+    let dots := fun (k : Nat) => tok k == .punct "." && tok (k + 1) == .punct "."
+      && tok (k + 2) != .punct "." && !(k > 0 && tok (k - 1) == .punct ".")
+    let keywords := ["for", "as", "return", "in", "else", "where", "let", "mut"]
+    let mk := fun (at_ : Token) (t : Tok) => { at_ with tok := t }
+    -- (Only in the functions' bodies, inside the implementation's braces
+    -- and theirs: what is outside is types.)
+    let mut braces : Nat := 0
+    let mut depthAt : Array Nat := Array.mkEmpty toks.size
+    for i in [0:toks.size] do
+      depthAt := depthAt.push braces
+      match tok i with
+      | .punct "{" => braces := braces + 1
+      | .punct "}" => braces := braces - 1
+      | _ => pure ()
+    for k in [params:toks.size] do
+      unless dots k && (depthAt[k]?.getD 0) ≥ 2 do continue
+      -- (`..` alone, a list of types, or what is asked of each: not values.)
+      if tok (k + 2) == .punct ")" || tok (k + 2) == .punct "," then continue
+      if let .ident x := tok (k + 2) then
+        if packs.contains x then continue
+      -- The bracket it is in, and where that closes.
+      let mut o := k
+      let mut depth : Nat := 0
+      let mut found := false
+      while o > 0 do
+        o := o - 1
+        match tok o with
+        | .punct ")" | .punct "]" | .punct "}" => depth := depth + 1
+        | .punct "(" | .punct "[" | .punct "{" =>
+          if depth == 0 then
+            found := true
+            break
+          depth := depth - 1
+        | _ => pure ()
+      unless found && tok o == .punct "(" do continue
+      let mut c := o + 1
+      depth := 0
+      let mut parts : Array (Nat × Nat) := #[]
+      let mut start := o + 1
+      while c < toks.size do
+        match tok c with
+        | .punct "(" | .punct "[" | .punct "{" => depth := depth + 1
+        | .punct ")" | .punct "]" | .punct "}" =>
+          if depth == 0 then break
+          depth := depth - 1
+        | .punct "," => if depth == 0 then
+            parts := parts.push (start, c)
+            start := c + 1
+        | _ => pure ()
+        c := c + 1
+      if start < c then parts := parts.push (start, c)
+      let spread := fun ((s, _) : Nat × Nat) => dots s
+      let at_ := toks[o]!
+      let piece := fun ((s, e) : Nat × Nat) => toks.extract s e
+      let inner := fun ((s, e) : Nat × Nat) => toks.extract (s + 2) e
+      let paren := fun (a : Array Token) => #[mk at_ (.punct "(")] ++ a ++ #[mk at_ (.punct ")")]
+      -- (As long as the implementation's one list: none where it has more.)
+      let some list := (match packs with | [p] => some p | _ => none) | continue
+      let named := fun (f : String) =>
+        (#[mk at_ (.ident s!"{f}_as"), mk at_ (.op "<"), mk at_ (.ident list), mk at_ (.op ">")] : Array Token)
+      let call := fun (f : String) (a b : Array Token) =>
+        named f ++ #[mk at_ (.punct "(")] ++ a ++ #[mk at_ (.punct ",")] ++ b ++ #[mk at_ (.punct ")")]
+      -- A pattern of a `let`: what it is given split first.
+      if o > 0 && (tok (o - 1) == .ident "let" || tok (o - 1) == .ident "mut") then
+        unless tok (c + 1) == .punct "=" do continue
+        -- (What is given, to the `;` that ends the statement.)
+        let mut e := c + 2
+        depth := 0
+        while e < toks.size do
+          match tok e with
+          | .punct "(" | .punct "[" | .punct "{" => depth := depth + 1
+          | .punct ")" | .punct "]" | .punct "}" =>
+            if depth == 0 then break
+            depth := depth - 1
+          | .punct ";" => if depth == 0 then break
+          | _ => pure ()
+          e := e + 1
+        let given := toks.extract (c + 2) e
+        match parts.toList with
+        | [r] =>
+          if spread r then
+            return some (toks.extract 0 o ++ inner r ++ #[mk at_ (.punct "=")] ++ given ++ toks.extract e toks.size)
+        | [p, r] =>
+          if !spread p && spread r then
+            return some (toks.extract 0 o ++ paren (piece p ++ #[mk at_ (.punct ",")] ++ inner r)
+              ++ #[mk at_ (.punct "=")] ++ named "spread_split" ++ paren given ++ toks.extract e toks.size)
+        | _ => pure ()
+        continue
+      -- A call given a tuple's parts and nothing else, `f(..t)` or
+      -- `(*f)(..t)`: `spread_call`.
+      let callee : Option Nat := if o == 0 then none else
+        match tok (o - 1) with
+        | .ident w => if keywords.contains w then none else some (o - 1)
+        | .punct ")" => Id.run do
+          let mut m := o - 1
+          let mut depth : Nat := 0
+          while m > 0 do
+            m := m - 1
+            match tok m with
+            | .punct ")" => depth := depth + 1
+            | .punct "(" =>
+              if depth == 0 then return some m
+              depth := depth - 1
+            | _ => pure ()
+          return none
+        | _ => none
+      if let some from_ := callee then
+        if let [r] := parts.toList then
+          if spread r then
+            return some (toks.extract 0 from_ ++ named "spread_call" ++ paren (toks.extract from_ o
+              ++ #[mk at_ (.punct ",")] ++ inner r) ++ toks.extract (c + 1) toks.size)
+        continue
+      if o > 0 then
+        match tok (o - 1) with
+        | .punct "]" | .op ">" => continue
+        | _ => pure ()
+      -- A tuple: the one list spread first, last or alone.
+      let spreads := parts.filter spread
+      unless spreads.size == 1 do continue
+      let some at' := parts.findIdx? spread | continue
+      let front := parts.extract 0 at'
+      let back := parts.extract (at' + 1) parts.size
+      let rest := paren (inner parts[at']!)
+      let made ← if back.isEmpty then
+          pure (front.foldr (fun p acc => call "spread_cons" (piece p) acc) rest)
+        else if front.isEmpty then
+          pure (back.foldl (fun acc p => call "spread_snoc" acc (piece p)) rest)
+        else continue
+      return some (toks.extract 0 o ++ made ++ toks.extract (c + 1) toks.size)
+    return none
 
 /-! ## What the compiler writes of each type: its `Reflect`
 
@@ -1694,8 +1658,7 @@ def reflectTexts (items : List Item) : List String := Id.run do
   out
 
 /-- Each declared type's `Reflect` among a module's items, read as its text
-is; checked only where something asks it, as a copy for each length of a
-list is. -/
+is; checked only where something asks it. -/
 def reflectionsOf (fix : Fixities) (items : List Item) (base : Nat) (records : List String)
     (tables : List (List String × Fixities)) (path : List String) (fixed : Bool) : Except String (List Item) := do
   let texts := reflectTexts items
@@ -1704,7 +1667,7 @@ def reflectionsOf (fix : Fixities) (items : List Item) (base : Nat) (records : L
   let fix := if tables.isEmpty then fix else ((tables.lookup path).getD fix)
   let (gitems, _, glocal) ← parseItems { toks := gtoks, fix, records, base, tables, path, fixed } 0 #[]
   pure ((gitems ++ glocal.toList).map fun
-    | .impl ps tr h args ctx ms => Item.impl ps tr h args ctx (ms ++ [.typeAlias packCopyName [] (.tuple [])])
+    | .impl ps tr h args ctx ms => Item.impl ps tr h args ctx (ms ++ [.typeAlias askedOnlyName [] (.tuple [])])
     | other => other)
 
 /-- Parse a source text, given the fixities already in scope. Returns the items
@@ -1714,15 +1677,13 @@ With `tables`, each module of the text has the operators the table gives it,
 and the text is the module `path`. -/
 def parseKept (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
     (tables : List (List String × Fixities) := []) (path : List String := [])
-    (fixed : Bool := false) (packs : Nat := 0) (lexed : Option (Array Token) := none)
+    (fixed : Bool := false) (lexed : Option (Array Token) := none)
     (reflect : Bool := true) (kept : Option ItemsKept := none) :
     Except String (List Item × Fixities × ItemsKept) := do
-  -- (`packs`: how long lists of types are written out to; by default, as
-  -- long as the longest list this text writes.)
   let toks ← match lexed with
     | some toks => pure toks
     | none => lex src
-  let toks := expandPacks toks (if packs == 0 then max 2 (longestList toks) else packs)
+  let toks ← expandPacks toks
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
   let ctx : PCtx := { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed }
   match kept with
@@ -1734,18 +1695,17 @@ def parseKept (fix : Fixities) (src : String) (base : Nat := 0) (records : List 
     let (items, _, local_) ← parseItems ctx 0 #[]
     let items := items ++ local_.toList
     -- (Each declared type's `Reflect`, read as the text is, after its items;
-    -- checked only where something asks it, as a copy for each length of a
-    -- list is.)
+    -- checked only where something asks it.)
     let made ← if reflect then reflectionsOf fix items (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
     pure (promoteItems (unmutItems (items ++ made)), fix, {})
 
 /-- `parseKept`, nothing taken from an earlier parse. -/
 def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
     (tables : List (List String × Fixities) := []) (path : List String := [])
-    (fixed : Bool := false) (packs : Nat := 0) (lexed : Option (Array Token) := none)
+    (fixed : Bool := false) (lexed : Option (Array Token) := none)
     (reflect : Bool := true) :
     Except String (List Item × Fixities) := do
-  let (items, fix, _) ← parseKept fix src base records tables path fixed packs lexed reflect
+  let (items, fix, _) ← parseKept fix src base records tables path fixed lexed reflect
   pure (items, fix)
 
 end Glorious.Syntax

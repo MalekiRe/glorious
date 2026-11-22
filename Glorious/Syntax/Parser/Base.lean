@@ -474,7 +474,9 @@ partial def parseType : P TypeExpr := do
     expectOp ">"
     expectPunct "::"
     let name ← expectIdent
-    pure (.name assocOfMark [self, .name trait targs, .name name []])
+    -- (`<R as Item>::Got<'a>`: what it leaves at its own parameters.)
+    let nargs ← angledList parseType
+    pure (.name assocOfMark [self, .name trait targs, .name name nargs])
   | .op "&" =>
     advance
     parseRefRest

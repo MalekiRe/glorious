@@ -448,9 +448,9 @@ def blanketHead : String := "(any)"
 is for, as what its type parameter `T` stands for in its functions. -/
 def blanketName (param : String) : String := s!"%blanket:{param}"
 
-/-- The name of the type alias that says an implementation is one of the
-copies written out for each length of a list of types (`expandPacks`). -/
-def packCopyName : String := "%pack"
+/-- The name of the type alias that says an implementation the compiler
+wrote is checked only where something asks it (`reflectionsOf`). -/
+def askedOnlyName : String := "%asked"
 
 /-- The type a tuple of one or more is as its first and the tuple of the
 rest, `(H, ..R)` (`Traits.consHead`, the same name). -/

@@ -29,11 +29,9 @@ public section
 
 namespace Glorious
 
-/-- What is read of a text before any text is parsed: what it declares, and
-the longest list of types it writes. -/
+/-- What is read of a text before any text is parsed: what it declares. -/
 structure TextRead where
   said : Syntax.TextSyntax
-  longest : Nat
 
 /-- Texts as an earlier compile read them, under each text and its path
 (`textKey`): one that is the same is not lexed again for this. -/
@@ -511,10 +509,6 @@ def lexTexts (src : String) (files : List (List String × String)) :
     Except String (List (List String × Array Syntax.Token)) :=
   (([], src) :: files).mapM fun (path, text) => do pure (path, ← Syntax.lex text)
 
-/-- The longest list of types any of them writes, and at least two. -/
-def longestOf (lexed : List (List String × Array Syntax.Token)) : Nat :=
-  lexed.foldl (fun m (_, toks) => max m (Syntax.longestList toks)) 2
-
 /-- A text read so: as `kept` has it, or from its tokens. -/
 def readText (fix : Syntax.Fixities) (kept : Texts) (path : List String) (text : String)
     (toks : Option (Array Syntax.Token)) : Except String (UInt64 × TextRead) := do
@@ -524,7 +518,7 @@ def readText (fix : Syntax.Fixities) (kept : Texts) (path : List String) (text :
     | some t => pure t
     | none => Syntax.lex text
   let _ ← Syntax.declaredSyntax fix text toks
-  pure (key, ⟨← Syntax.textSyntax path text toks, Syntax.longestList toks⟩)
+  pure (key, ⟨← Syntax.textSyntax path text toks⟩)
 
 /-- Modules' items as an earlier compile parsed them, under what each was
 parsed from (`parseKey`). -/
@@ -532,10 +526,10 @@ abbrev Parsed := Std.HashMap UInt64 (List Syntax.Item)
 
 /-- What a module's items are parsed from: its text, where its callables are
 numbered from, the constructors with named fields, its operators, its path,
-whether arrays have lengths, and how long lists of types are written out.
-(The prelude's operators are this compiler's, as is what keeps it.) -/
+and whether arrays have lengths. (The prelude's operators are this
+compiler's, as is what keeps it.) -/
 def parseKey (text : String) (base : Nat) (records : List String)
-    (tables : List (List String × Syntax.Fixities)) (path : List String) (fixed : Bool) (packs : Nat)
+    (tables : List (List String × Syntax.Fixities)) (path : List String) (fixed : Bool)
     (reflect : Bool := false) :
     UInt64 :=
   let fix := (tables.lookup path).map fun f =>
@@ -543,7 +537,7 @@ def parseKey (text : String) (base : Nat) (records : List String)
       | .left => (0 : Nat)
       | .right => 1
       | .non => 2)), f.prefixes, f.bound)
-  mixHash (hash text) (hash (base, records, fix, path, fixed, packs, reflect))
+  mixHash (hash text) (hash (base, records, fix, path, fixed, reflect))
 
 /-- Does a text name reflection, `std::reflect`, through which alone
 anything asks a type's `Reflect`. -/
@@ -553,18 +547,14 @@ def mentionsReflection (text : String) : Bool := hasText text "std::reflect"
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
 def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true)
-    (few : Bool := false) (packs : Nat := 0) (lexed : List (List String × Array Syntax.Token) := [])
+    (few : Bool := false) (lexed : List (List String × Array Syntax.Token) := [])
     (parsedKept : Parsed := {}) (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none)
     (texts : Texts := {}) (itemsKept : Option Syntax.ItemsKept := none) :
     Except String (List Syntax.Item × List Syntax.Item × List (UInt64 × List Syntax.Item) × List (UInt64 × TextRead)
       × Syntax.ItemsKept) := do
-  -- (The program's own texts lexed once, where they were not already, and
-  -- none told how long its lists are.)
-  let lexed ← if !lexed.isEmpty || packs != 0 then pure lexed else lexTexts src files
+  -- (The program's own texts lexed once, where they were not already.)
+  let lexed ← if !lexed.isEmpty then pure lexed else lexTexts src files
   let tokensOf := fun (path : List String) => lexed.lookup path
-  -- Lists of types are written out to the longest list the program's texts
-  -- write, unless told longer.
-  let packs := if packs != 0 then packs else longestOf lexed
   -- The library's texts are files of the program, before its own.
   -- (`#![no_std]`: without the library, whatever the text mentions.)
   let std := usesStd src files && !hasText src "#![no_std]"
@@ -618,7 +608,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- (Each group of its items as an earlier compile parsed it, where it is
   -- where it was, written alike: `itemsKept`.)
   let (items, _, itemsMade) ← Trace.timed "parse: the program's text" fun _ => Syntax.parseKept fix src (base := 1000000) (records := records) (tables := tables)
-    (fixed := fixed) (packs := packs) (lexed := tokensOf []) (reflect := reflect) (kept := itemsKept)
+    (fixed := fixed) (lexed := tokensOf []) (reflect := reflect) (kept := itemsKept)
   let declares := items.any fun
     | .module "std" _ | .pub _ (.module "std" _) => true
     | _ => false
@@ -654,13 +644,13 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
               let text := ((files[k]?).map (·.2)).getD ""
               let base := 1000000 * (k + 2)
               let fixed := fixed && k ≥ (if std then library.length else 0)
-              let key := parseKey text base records tables here fixed packs reflect
+              let key := parseKey text base records tables here fixed reflect
               let items ← match parsedKept[key]? with
                 | some items => pure items
                 | none =>
                   match Trace.timed s!"parse: module {shown}" fun _ => Syntax.parse fix text (base := base) (records := records)
                       (tables := tables) (path := here) (fixed := fixed)
-                      (packs := packs) (lexed := if k < library.length then stdTokens here text else tokensOf here) (reflect := reflect) with
+                      (lexed := if k < library.length then stdTokens here text else tokensOf here) (reflect := reflect) with
                   | .ok (items, _) => pure items
                   | .error e => throw s!"module `{shown}`: {e}"
               modify ((key, items) :: ·)
@@ -779,7 +769,7 @@ proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
 def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
-    (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
+    (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
     (lexed : List (List String × Array Syntax.Token) := []) (parsedKept : Parsed := {})
@@ -791,7 +781,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     (lowerKept : Option Elab.LowerMemo := none) :
     Except String Compiled := do
   let (prelude, items, parsedMade, textsMade, itemsMade) ← Trace.timed "parse" fun _ =>
-    parseProgram src files check few packs lexed parsedKept preludeKept texts itemsKept
+    parseProgram src files check few lexed parsedKept preludeKept texts itemsKept
   -- Every name is given its meaning: the modules become one list of items,
   -- each module a unit, after those it uses.
   -- (Resolved, and all that follows, from flat bodies.)
@@ -1224,36 +1214,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     | some b => if b.links.isEmpty then throw e else build (some { b with links := {} })
     | none => throw e
 
-/-- How many parts the first parentheses of a written type have at their top. -/
-def partsWritten (ty : List Char) : Nat :=
-  let inner := (ty.dropWhile (· != '(')).drop 1
-  let rec count (cs : List Char) (depth parts : Nat) : Nat :=
-    match cs with
-    | [] => parts
-    | c :: rest =>
-      if c == '(' || c == '<' || c == '[' then count rest (depth + 1) parts
-      else if c == ')' || c == '>' || c == ']' then
-        if depth == 0 then parts else count rest (depth - 1) parts
-      else if c == ',' && depth == 0 then count rest depth (parts + 1)
-      else count rest depth parts
-  if inner.isEmpty then 0 else count inner 0 1
-
-/-- How long a list of types an error says is missing an implementation may
-need: the parts of the type, and of the tuple the trait is given, together
-(one made by joining two is as long as both). -/
-def longestUnimplemented (e : String) : Nat :=
-  ((e.splitOn "` does not implement `").zip ((e.splitOn "` does not implement `").drop 1)).foldl
-    (fun most (before, after) =>
-      let ty := ((before.splitOn "`").getLastD "").toList
-      let trait := ((after.splitOn "`").headD "").toList
-      max most (partsWritten ty + partsWritten (trait.dropWhile (· != '<'))))
-    0
-
-/-- Compile a program. A list of types (`impl<..T>`) stands for a list of
-any length: it is written out, first, to the longest list the program's
-texts write; where the checker then finds a longer tuple or list of
-parameters with no implementation, as one made by joining two, the program
-is read again with lists that long. -/
+/-- Compile a program, its texts lexed once. -/
 def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
@@ -1273,29 +1234,10 @@ def compileSource (src : String) (check : Bool := true)
   let lexed ← Trace.timed "lex" fun _ =>
     (all.filter fun (path, text) => !texts.contains (textKey path text)).mapM fun (path, text) => do
       pure (path, ← Syntax.lex text)
-  let packs := all.foldl (fun m (path, text) => max m (match texts[textKey path text]? with
-    | some r => r.longest
-    | none => ((lexed.lookup path).map Syntax.longestList).getD 2)) 2
-  -- (An implementation over several lists, as one that joins two, is
-  -- written out to as many times as long: what it makes can be that long.)
-  let lists := ((src :: files.map (·.2)).flatMap fun text =>
-    ((text.splitOn "impl<").drop 1).map fun after =>
-      (((after.takeWhile (· != '>')).toString.splitOn "..").length - 1)).foldl max 0
-  let packs := packs * max 1 lists
-  -- (Only a program that has such an implementation is read again.)
-  let lists := lists != 0
-  let rec go (fuel packs : Nat) : Except String Compiled :=
-    match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
-        (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts)
-        (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) (frontKept := frontKept)
-        (itemsKept := itemsKept) (elabKept := elabKept) (lowerKept := lowerKept) with
-    | .error e =>
-      let wanted := longestUnimplemented e
-      match fuel with
-      | fuel + 1 => if lists && wanted > packs then go fuel (max wanted (2 * packs)) else .error e
-      | 0 => .error e
-    | .ok c => .ok c
-  go 8 packs
+  compileSourceAt src check files few known kept checkKept (search := search) (memo := memo)
+    (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts)
+    (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) (frontKept := frontKept)
+    (itemsKept := itemsKept) (elabKept := elabKept) (lowerKept := lowerKept)
 
 /-- Whether a program's Core was shown to follow the ownership rules: `some true`
 if so, `some false` if it was only shown to be well typed, `none` if it does not compile. -/

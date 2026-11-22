@@ -598,10 +598,9 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
     let blanket := fun (im : ImplDecl) => im.methods.any fun
       | .typeAlias n _ _ => (Syntax.blanketParam n).isSome
       | _ => false
-    -- (And the copies of an implementation written out for each length of a
-    -- list of types: of most lengths, nothing uses them.)
+    -- (And those the compiler writes that nothing may ask, `Reflect`.)
     let packed := fun (im : ImplDecl) => im.methods.any fun
-      | .typeAlias n _ _ => n == Syntax.packCopyName
+      | .typeAlias n _ _ => n == Syntax.askedOnlyName
       | _ => false
     let mut copies : Array (String × FnDecl × Bool) := #[]
     for im in ((← get).impls.toList.drop before).filter (fun im => blanket im || packed im) do
