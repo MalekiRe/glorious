@@ -6291,11 +6291,17 @@ covey/states2 5.74 s -> 4.04 s. Every covey program and example the same
 output as before.
 
 Still written out for each length up to the longest list: `Item` and
-`Fill` for tuples, whose items are borrowed for a lifetime of `item_at`'s
-own (`Got<'a>`): a tuple made of the first's and the rest's needs
-`Prepend` of `Got<'a>` at every `'a`, which a condition cannot say yet; and
-an implementation of a test program that spreads a list of values or asks
-of each element.
+`Fill` for tuples, and an implementation of a test program that spreads a
+list of values or asks of each element. `Item` once, tried: its items are
+borrowed for `item_at`'s own lifetime (`Got<'a>`), and the condition
+`R::Got<'_>: Prepend<H::Got<'_>, Out = (H::Got<'_>, ..R::Got<'_>)>` says
+it, but (1) what the rest's `Got` is, is asked again at each level for each
+lifetime, which the answers kept per function (by the type spelled) do not
+catch: covey/sixteen 4.4 s -> 88 s; and (2) a function generic in a
+tuple's first and rest that destroys such a value needs how `%Cons<H, R>`
+is destroyed, which only the tuple of the length it comes to can say (the
+specializer can put that in its place, but the proved solver's one-way
+check would have to leave `Destroy` out).
 
 ## A graph's nodes on threads of their own: where it is
 

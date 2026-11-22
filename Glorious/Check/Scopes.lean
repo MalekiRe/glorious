@@ -497,10 +497,21 @@ def settleAssocs : M Unit := do
     -- asked is known.)
     if let .con mark (_ :: _) ← find subject then
       if mark == Syntax.gatMark then
+        -- (Asked before of the same type, all known: the same answer.)
+        let zsubject ← zonk subject
+        let spelledG ← spellTy zsubject
+        let memoKey := if (freeTys zsubject).isEmpty then some s!"{tr}|{name}|{spelledG}" else none
+        if let some k := memoKey then
+          if let some found := (← get).assocMemo[k]? then
+            try unifyAt s!"`{name}` of `{Syntax.lastSegment tr}`" found a
+            catch e => throw (pos ++ e)
+            continue
         match ← assocAt tr subject name with
         | some found =>
           try unifyAt s!"`{name}` of `{Syntax.lastSegment tr}`" found a
           catch e => throw (pos ++ e)
+          if let some k := memoKey then
+            modify fun s => { s with assocMemo := s.assocMemo.insert k a }
         | none => left := left.push (tr, subject, name, a, owner, pos)
         continue
     let (self, args) ← subjectOf tr subject
