@@ -92,6 +92,9 @@ structure Compiled where
   /-- Each group of the program's own text's items, where `itemsKept` was
   given: for the next compile (`Syntax.ItemsKept`). -/
   itemsMade : Syntax.ItemsKept := {}
+  /-- What elaborating each top-level function made, where `elabKept` was
+  given: for the next compile (`Elab.ElabKept`). -/
+  elabMade : Elab.ElabMemo := {}
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -262,6 +265,23 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   if Typing.checkProgram cert p then pure (cert, none, {})
   else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
+/-- Does `text` have `pat` in it, byte for byte. -/
+def hasText (text pat : String) : Bool := Id.run do
+  let t := text.toUTF8
+  let p := pat.toUTF8
+  if p.size == 0 then return true
+  if p.size > t.size then return false
+  let first := p[0]!
+  for i in [0:t.size - p.size + 1] do
+    if t[i]! == first then
+      let mut ok := true
+      for j in [1:p.size] do
+        if t[i + j]! != p[j]! then
+          ok := false
+          break
+      if ok then return true
+  return false
+
 /-- The modules of the names of the library's prelude a text writes
 (`Syntax.Modules.libraryPrelude`) as names of their own, and neither
 declares nor brings itself: the program then reads the library, and those.
@@ -312,9 +332,9 @@ def mentionsPrelude (text : String) : Bool := !(preludeModules text).isEmpty
 module `std` of its own? -/
 def usesStd (src : String) (files : List (List String × String)) : Bool :=
   let named := fun (text : String) =>
-    text.contains "std" || text.contains "core::" || text.contains "alloc::"
+    hasText text "std" || hasText text "core::" || hasText text "alloc::"
   let own := fun (text : String) =>
-    text.contains "mod std {" || text.contains "mod std{"
+    hasText text "mod std {" || hasText text "mod std{"
   (named src || mentionsPrelude src || files.any fun (_, text) => named text || mentionsPrelude text)
     && !own src && !files.any fun (path, _) => path.head? == some "std"
 
@@ -525,7 +545,7 @@ def parseKey (text : String) (base : Nat) (records : List String)
 
 /-- Does a text name reflection, `std::reflect`, through which alone
 anything asks a type's `Reflect`. -/
-def mentionsReflection (text : String) : Bool := text.contains "std::reflect"
+def mentionsReflection (text : String) : Bool := hasText text "std::reflect"
 
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
@@ -545,7 +565,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   let packs := if packs != 0 then packs else longestOf lexed
   -- The library's texts are files of the program, before its own.
   -- (`#![no_std]`: without the library, whatever the text mentions.)
-  let std := usesStd src files && !src.contains "#![no_std]"
+  let std := usesStd src files && !hasText src "#![no_std]"
   let own := files
   -- (`few`: only the library's modules the program needs, read and checked
   -- with it, where it is one program that is compiled: the whole library
@@ -751,8 +771,9 @@ def lowered (b : Elab.Blocks) (written : List Syntax.Item) (all : List Syntax.Fl
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/
 def elaborate (items : List Syntax.Flat.FItem) (blocks : Option Elab.Blocks)
-    (lends : Nat → Nat := fun _ => 0) (root : String := "main") : Except String Elab.Output := do
-  Comptime.evaluate (← Elab.elabProgram items blocks lends root)
+    (lends : Nat → Nat := fun _ => 0) (root : String := "main") (kept : Option Elab.ElabMemo := none) :
+    Except String Elab.Output := do
+  Comptime.evaluate (← Elab.elabProgram items blocks lends root kept)
 
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
@@ -767,7 +788,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
     (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none)
-    (itemsKept : Option Syntax.ItemsKept := none) :
+    (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none) :
     Except String Compiled := do
   let (prelude, items, parsedMade, textsMade, itemsMade) ← Trace.timed "parse" fun _ =>
     parseProgram src files check few packs lexed parsedKept preludeKept texts itemsKept
@@ -800,9 +821,9 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- it rejects is elaborated without that.
   -- (Or that has a cleanup, which a resumption given up runs: what destroys
   -- a resumption that is let go is then written.)
-  let drops := hasDrop items || src.contains "defer"
+  let drops := hasDrop items || hasText src "defer"
   -- (The library read for this program alone is checked with it.)
-  let withStd := usesStd src files && !src.contains "#![no_std]"
+  let withStd := usesStd src files && !hasText src "#![no_std]"
     && !(few && (neededStd (src :: files.map (·.2))).isSome)
     -- (Where reflection is named, the library's types have their
     -- `Reflect`, which the library checked once has not.)
@@ -950,9 +971,9 @@ def compileSourceAt (src : String) (check : Bool := true)
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
        inferMade := made, firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade, frontMade := front.made,
-       parsedMade, textsMade, itemsMade } : Compiled)
+       parsedMade, textsMade, itemsMade, elabMade := out.made } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
-    let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks with
+    let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks (kept := elabKept) with
       | .ok out => do aside.get; pure out
       | .error e => do aside.get; throw e
     -- What is unsafe is outside what Core's rules are about: a program that
@@ -983,7 +1004,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- one of several cells, which a borrow's scope cannot give out, no place
   -- is tried alone.)
   let shownAtAll := fun (blocks : Option Elab.Blocks) (ranked : Bool) =>
-    match Trace.timed "elaborate (borrow scopes)" fun _ => elaborate all blocks (fun _ => 0) with
+    match Trace.timed "elaborate (borrow scopes)" fun _ => elaborate all blocks (fun _ => 0) (kept := elabKept) with
     | .ok out =>
       match Trace.timed "certify (borrow scopes)" fun _ =>
           certifyWith kept declared out.program true out.envSizes true true ranked false memo with
@@ -991,7 +1012,7 @@ def compileSourceAt (src : String) (check : Bool := true)
       | .error _ => none
     | .error _ => none
   let lending := fun (blocks : Option Elab.Blocks) (ways : List Bool) (sites : Nat → Nat) =>
-    match Trace.timed "elaborate (borrow scopes)" fun _ => elaborate all blocks sites with
+    match Trace.timed "elaborate (borrow scopes)" fun _ => elaborate all blocks sites (kept := elabKept) with
     | .ok out =>
       -- As it is, and then with callables taken to bind the regions of the
       -- references they are given: a function lent to by itself needs that.
@@ -1009,7 +1030,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   let placesKnown := known.filter fun (k, _) => k.1 != "%way"
   let build := fun (blocks : Option Elab.Blocks) => do
     if check then
-      if let .ok out := elaborate all blocks (fun _ => 1) then
+      if let .ok out := elaborate all blocks (fun _ => 1) (kept := elabKept) then
         if out.lent != 0 && !out.foreign then
           -- What an earlier compile found for each place is asked first, all
           -- at once; a place it did not see is asked alone first.
@@ -1048,7 +1069,7 @@ def compileSourceAt (src : String) (check : Bool := true)
           -- function, and the place it was made for, or every place of the
           -- function it is. Then each place taken out is tried back.
           let blame : List Nat → Sum Compiled (List Nat) := fun choice =>
-            match elaborate all blocks (fun j => choice[j]?.getD 0) with
+            match elaborate all blocks (fun j => choice[j]?.getD 0) (kept := elabKept) with
             | .error _ => Sum.inr []
             | .ok o =>
               let outcomes : List (Sum Compiled (List Nat)) := ways.map fun ranked =>
@@ -1239,7 +1260,7 @@ def compileSource (src : String) (check : Bool := true)
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
     (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none)
-    (itemsKept : Option Syntax.ItemsKept := none) :
+    (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none) :
     Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it;
   -- and each text lexed, once: each that an earlier compile read as it is,
@@ -1263,7 +1284,7 @@ def compileSource (src : String) (check : Bool := true)
     match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
         (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts)
         (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) (frontKept := frontKept)
-        (itemsKept := itemsKept) with
+        (itemsKept := itemsKept) (elabKept := elabKept) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with

@@ -6982,7 +6982,7 @@ number changed in the middle function. Wall time, on this machine (load
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
 | Glorious (then) | 5.1 s | 1.6 s | 0.89 s |
-| Glorious (now) | 1.48 s | 0.37 s | |
+| Glorious (now) | 1.48 s | 0.31 s | |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
 
@@ -7186,7 +7186,24 @@ The middle edit of the chain 0.43 s -> 0.37 s:
   what of the library it names go over its bytes, and `contains` stands
   for `splitOn` where only whether is asked.
 
-What an edit is made of now, on one thread, each a pass over the whole
+Then each top-level function's elaboration is kept (`Elab.ElabKept`, in
+`elab`): what it made (its clauses, the functions it lifted, what it added
+to each list and count of the elaborator's state) under a key of its body,
+of what the program declares, and of where each count stood when it began;
+and what it read that is not its own, each read through a helper that notes
+it (`lendAt`, `givenAt`, `linkAt`, `packAt`, `fnAt`, `layoutAt`), read again
+before what was kept is taken (`readHolds`). A place's way of lending is
+read only where the place has borrows, so that the elaboration a compile
+does first, every place lending, takes what the last compile kept of most
+functions too. Taken only where the checker ran. Elaborating on an edit
+30 ms -> 6 ms; the middle edit 0.37 s -> 0.31 s. (Tried and not kept: the
+groups put on one after another where all but a few were kept, to save
+marking the state they start from as shared between threads. One after
+another, each reads what those before it found of their bodies, not only
+the signatures, as it does side by side: on covey/states2, `main` then read
+another interface than it had, and was checked again on every edit.)
+
+What an edit is made of before that, on one thread, each a pass over the whole
 program: elaborating (50 ms), the check's parts that go one after another
 (the kept groups themselves are put on side by side, 8 ms), certifying
 (the proved checker 22 ms, inference 30 ms), lowering (40 ms), resolving

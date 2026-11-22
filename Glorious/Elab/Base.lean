@@ -392,6 +392,17 @@ structure Builder where
   other captured: each such activation and the local there, nearest first. -/
   origins : List (Atom × List (Nat × Atom)) := []
 
+/-- What elaborating one top-level function read that is not its own body:
+kept with what it made (`ElabKept`), and read again before that is taken. -/
+inductive ElabRead where
+  | lend (site mode : Nat)
+  | given (id : Nat) (v : Bool)
+  | link (id : Nat) (v : Option Nat)
+  | pack (id : Nat) (v : Option (List String))
+  | fn (name : String) (v : Option Nat)
+  | layout (owner : Nat) (v : UInt64)
+  deriving Inhabited
+
 structure St where
   fns : Array Core.Fn
   /-- A description of each function, for diagnostics. -/
@@ -444,6 +455,40 @@ structure St where
   of. What the elaborator writes out (a borrow named first, a block around a
   statement) is added to it. -/
   body : Flat.Body := {}
+  /-- What the top-level function being elaborated read that is not its own,
+  in order (`ElabRead`). -/
+  reads : Array ElabRead := #[]
+  /-- `layouts` as it was when the top-level function being elaborated began:
+  what is in front of it is the function's own. -/
+  layoutsAt : List (Nat × Nat × List (String × Atom × List (Nat × Atom))) := []
+
+/-- What elaborating a top-level function made, kept for the next compile: by
+the key of what it was elaborated from (its body, what the program declares,
+and where each count stood), what else it read, and what it added to each
+part of the state. Taken where the key is the same and each read is. -/
+structure ElabKept where
+  key : UInt64
+  reads : Array ElabRead
+  clauses : List Core.Clause
+  fns : Array Core.Fn
+  names : Array String
+  fnSites : Array (Option Nat)
+  siteOwners : Array String
+  layouts : List (Nat × Nat × List (String × Atom × List (Nat × Atom)))
+  envSizes : List (Nat × Nat × Nat)
+  under : List (Nat × Nat)
+  twoWays : List Nat
+  plain : List Borrow
+  drops : List (Nat × Nat)
+  activations : Nat
+  lent : Nat
+  sites : Nat
+  foreign : Bool
+  pos : Nat × Nat
+  deriving Inhabited
+
+/-- Each top-level function's `ElabKept`, by its name. -/
+abbrev ElabMemo := Std.HashMap String ElabKept
 
 abbrev M := ReaderT Globals (StateT St (Except String))
 
@@ -511,6 +556,74 @@ def useLocal (a : Atom) : M Atom := do
       | some (idx, captures) => emit (.let_ (.closure idx captures))
       | none => pure a
   | .int _ => pure a
+
+private unsafe def sameObjImpl {α : Type} (a b : α) : Bool := ptrAddrUnsafe a == ptrAddrUnsafe b
+
+/-- Are two values the same object (never, as the logic sees it). -/
+@[implemented_by sameObjImpl] def sameObj {α : Type} (_ _ : α) : Bool := false
+
+def noteRead (r : ElabRead) : M Unit := modify fun s => { s with reads := s.reads.push r }
+
+/-- How the place `site` is made a scope, noted. -/
+def lendAt (site : Nat) : M Nat := do
+  let m := (← read).lends site
+  noteRead (.lend site m)
+  pure m
+
+/-- Whether the checker found block `id` takes the argument it does not name, noted. -/
+def givenAt (id : Nat) : M Bool := do
+  let v := ((← read).blocks.getD {}).given.contains id
+  noteRead (.given id v)
+  pure v
+
+/-- The block that was not run whose environment block `id` takes, noted. -/
+def linkAt (id : Nat) : M (Option Nat) := do
+  let v := ((← read).blocks.getD {}).links[id]?
+  noteRead (.link id v)
+  pure v
+
+/-- The names block `id` has from an `is`, noted. -/
+def packAt (id : Nat) : M (Option (List String)) := do
+  let v := ((← read).blocks.getD {}).packs[id]?
+  noteRead (.pack id v)
+  pure v
+
+/-- The number of the top-level function `x`, noted. -/
+def fnAt (x : String) : M (Option Nat) := do
+  let v := (← read).fns[x]?
+  noteRead (.fn x v)
+  pure v
+
+/-- What the callable literal `owner` captured, noted where a function before
+this one made it (one this function made is its own). -/
+def layoutAt (owner : Nat) : M (Option (Nat × List (String × Atom × List (Nat × Atom)))) := do
+  let s ← get
+  let v := s.layouts.lookup owner
+  unless mine s.layoutsAt owner s.layouts do noteRead (.layout owner (hash v))
+  pure v
+where
+  mine (start : List (Nat × Nat × List (String × Atom × List (Nat × Atom)))) (owner : Nat) :
+      List (Nat × Nat × List (String × Atom × List (Nat × Atom))) → Bool
+    | [] => false
+    | l@((o, _) :: r) => if sameObj l start then false else if o == owner then true else mine start owner r
+
+/-- Is what `r` read still what it is? -/
+def readHolds : ElabRead → M Bool
+  | .lend site mode => do pure ((← read).lends site == mode)
+  | .given id v => do pure (((← read).blocks.getD {}).given.contains id == v)
+  | .link id v => do pure (((← read).blocks.getD {}).links[id]? == v)
+  | .pack id v => do pure (((← read).blocks.getD {}).packs[id]? == v)
+  | .fn x v => do pure ((← read).fns[x]? == v)
+  | .layout owner v => do pure (hash ((← get).layouts.lookup owner) == v)
+
+/-- What `after` has in front of `before`, where it is `before` with more in
+front of it (the same object after them); none where it is not. -/
+def prefixTo {α : Type} (after before : List α) : Option (List α) :=
+  go after []
+where
+  go : List α → List α → Option (List α)
+    | [], acc => if sameObj ([] : List α) before then some acc.reverse else none
+    | l@(x :: r), acc => if sameObj l before then some acc.reverse else go r (x :: acc)
 
 def addFn (f : Core.Fn) (name : String) : M Nat := do
   modifyGet fun s =>

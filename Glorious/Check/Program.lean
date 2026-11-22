@@ -683,8 +683,9 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
           match deltas with
           | some kept =>
             let keyOf := fun (k : Nat) => mixHash ((ownKeyAt[k]?).getD 0) (mixHash sigFrom (hash k))
-            pure (some (← checkSideBySideWith rest.toList (jump := false) fun (g, k) =>
-              checkGroupKept kept sigPre (keyOf k) k g ((calleesAt[k]?).getD []) localFns))
+            let one := fun ((g, k) : List FnDecl × Nat) =>
+              checkGroupKept kept sigPre (keyOf k) k g ((calleesAt[k]?).getD []) localFns
+            pure (some (← checkSideBySideWith rest.toList (jump := false) one))
           | none => do
             checkSideBySide (rest.toList.map (·.1))
             pure (some #[]))
