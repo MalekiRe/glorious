@@ -66,6 +66,47 @@ instance : Absorb (Array Nat) := ⟨fun z x y =>
 it was, written alike.) -/
 instance : Absorb Flat.Body := ⟨fun z x y => if x == z then some y else if x == y then some x else none⟩
 
+/-- (Written alike, all it holds: its variables, captures and reasons too.) -/
+partial def tyEq : Ty → Ty → Bool
+  | .var a, .var b => a == b
+  | .con n as, .con m bs => n == m && listEq as bs
+  | .tuple as, .tuple bs => listEq as bs
+  | .fn ps r es t c, .fn qs s fs u d =>
+    listEq ps qs && tyEq r s && t == u && c == d && es.length == fs.length
+      && (es.zip fs).all fun ((n, as), (m, bs)) => n == m && listEq as bs
+  | .ref h t c, .ref h' t' c' => tyEq h h' && tyEq t t' && c == c'
+  | _, _ => false
+where
+  listEq (as bs : List Ty) : Bool := as.length == bs.length && (as.zip bs).all fun (a, b) => tyEq a b
+
+def capturedEq : Captured → Captured → Bool
+  | .brand a, .brand b => a == b
+  | .ty a, .ty b => tyEq a b
+  | .once, .once => true
+  | .must, .must => true
+  | .loan a, .loan b => a == b
+  | .touch a w, .touch b v => a == b && w == v
+  | .inner a, .inner b => a == b
+  | _, _ => false
+
+def schemeEq (a b : Scheme) : Bool :=
+  let tys := fun (xs ys : List Ty) => tyEq.listEq xs ys
+  let why := fun (xs ys : List (Ty × String)) => xs.length == ys.length && (xs.zip ys).all fun ((t, w), (u, v)) => w == v && tyEq t u
+  a.tvars == b.tvars && a.rvars == b.rvars && a.cvars == b.cvars && tyEq a.ty b.ty
+    && a.edges.length == b.edges.length && (a.edges.zip b.edges).all (fun ((n, c), (m, d)) => n == m && capturedEq c d)
+    && why a.dups b.dups && why a.drops b.drops && why a.stays b.stays && why a.statics b.statics && why a.quiets b.quiets
+    && tys a.sites b.sites && a.ranked == b.ranked
+    && a.bounds.length == b.bounds.length && (a.bounds.zip b.bounds).all (fun ((n, t), (m, u)) => n == m && tyEq t u)
+    && a.assocs.length == b.assocs.length
+    && (a.assocs.zip b.assocs).all (fun ((n, t, k, u), (m, t', k', u')) => n == m && k == k' && tyEq t t' && tyEq u u')
+    && a.incls.length == b.incls.length && (a.incls.zip b.incls).all (fun ((t, u), (t', u')) => tyEq t t' && tyEq u u')
+
+instance : BEq Scheme := ⟨schemeEq⟩
+
+/-- (A function's type as its signature gives it, made again by this compile:
+the same as the one the kept check began with, if it is equal to it.) -/
+instance : Absorb Scheme := ⟨fun z x y => if x == z then some y else if x == y then some x else none⟩
+
 /-- What a check did to a store: segments of its own, entries pushed onto a
 segment that was there (its start, how many it had, and those), and entries
 changed (where, what it was, what it is). -/

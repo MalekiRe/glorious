@@ -646,23 +646,57 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
     -- (Where each group numbers from is part of what it is checked from.)
     let from_ := hash [pre.tys.size, pre.rows.size, pre.caps.size, pre.capEdges.size, pre.loans.size,
       pre.rigidKeys.size, pre.brands, pre.dropAsked]
-    let signed ← if !Trace.universesAsked then pure false else
-      tryCatchThe Elab.Said (do
+    -- (What the signatures added is kept too, under a key of them all and
+    -- of the declarations, their bodies not in it: put on where it fits.)
+    let sigKey := mixHash 2 (rest.foldl (fun h (g, _) => g.foldl (fun h d =>
+      mixHash h (hash (d.name, d.params, d.annots, d.ret, d.bounds))) h) (mixHash declKey from_))
+    let mut sigsKept := false
+    if Trace.universesAsked then
+      if let some kept := deltas then
+        if let some (d, _) := (kept[sigKey]?).bind (·.get) then
+          let cur ← get
+          if fitsDelta none cur d then
+            if let some st' := applyDelta none cur d then
+              set st'
+              sigsKept := true
+              groupDeltas := groupDeltas.push (sigKey, (d, #[]))
+    let signed ← if !Trace.universesAsked then pure false else if sigsKept then pure true else do
+      let done ← tryCatchThe Elab.Said (do
           for (g, _) in rest do
             for d in g do checkGroup [d] (signature := true)
           pure true)
         fun _ => do set pre; pure false
+      if done && deltas.isSome then
+        if let some d := diffStates pre (← get) then
+          groupDeltas := groupDeltas.push (sigKey, (d, #[]))
+      pure done
     let mut universes := false
     if signed && rest.size > 0 then
-      let sigs := (← get).fns
-      let ok ← tryCatchThe Elab.Said (do checkSideBySide (rest.toList.map (·.1)); pure true) fun _ => pure false
+      let sigPre ← get
+      let sigs := sigPre.fns
+      -- (Each group kept as on the other path, `checkGroupKept`, from the
+      -- state with every signature: keyed apart from those, which were
+      -- checked from the one before.)
+      let sigFrom := mixHash 1 (hash [sigPre.tys.size, sigPre.rows.size, sigPre.caps.size, sigPre.capEdges.size,
+        sigPre.loans.size, sigPre.rigidKeys.size, sigPre.brands, sigPre.dropAsked])
+      let checked ← tryCatchThe Elab.Said (do
+          match deltas with
+          | some kept =>
+            let keyOf := fun (k : Nat) => mixHash ((ownKeyAt[k]?).getD 0) (mixHash sigFrom (hash k))
+            pure (some (← checkSideBySideWith rest.toList (jump := false) fun (g, k) =>
+              checkGroupKept kept sigPre (keyOf k) k g ((calleesAt[k]?).getD []) localFns))
+          | none => do
+            checkSideBySide (rest.toList.map (·.1))
+            pure (some #[]))
+        fun _ => pure none
       let now := (← get).fns
-      let same := ok && rest.all fun (g, _) => g.all fun d =>
+      let same := checked.isSome && rest.all fun (g, _) => g.all fun d =>
         match sigs[d.name]?, now[d.name]? with
         | some a, some b => schemeShape a == schemeShape b
         | _, _ => false
       if same then
         universes := true
+        groupDeltas := groupDeltas ++ checked.getD #[]
         if let some (_, last) := rest.back? then
           made := (keys[last]!, forKeeping (← get)) :: made
       else

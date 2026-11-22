@@ -29,9 +29,11 @@ initialize enabled : Bool ← do pure (← IO.getEnv "GLORIOUS_TRACE").isSome
 its check starts, to see where a compile that does not end is. -/
 initialize groupsTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "groups")
 
-/-- `GLORIOUS_UNIVERSES=1`: each function's type taken from its signature
-first, and every body checked from those side by side (`checkItems`). -/
-initialize universesAsked : Bool ← do pure ((← IO.getEnv "GLORIOUS_UNIVERSES").isSome)
+/-- Each function's type taken from its signature first, and every body
+checked from those side by side (`checkItems`); where a body's type is not
+its signature's, callees first after all. `GLORIOUS_UNIVERSES=0`: callees
+first only. -/
+initialize universesAsked : Bool ← do pure ((← IO.getEnv "GLORIOUS_UNIVERSES") != some "0")
 
 @[noinline] unsafe def noteImpl (line : String) : Unit :=
   if !groupsTraced then () else

@@ -6982,7 +6982,7 @@ number changed in the middle function. Wall time, on this machine (load
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
 | Glorious (then) | 5.1 s | 1.6 s | 0.89 s |
-| Glorious (now) | 3.6 s | 0.43 s | |
+| Glorious (now) | 1.75 s | 0.43 s | |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
 
@@ -7120,6 +7120,39 @@ compared byte for byte with a `GLORIOUS_FRESH` one of the same text.
   different ones, now one object each (see "Measured against Zig"). Interning
   `Ty` itself would rewrite how the checker handles every type, for no hot
   spot measured now. Done as far as dictionaries; types dropped.
+
+## Fresh builds: what was in the way
+
+The generated chain of 2,000 functions (8,000 in Core: each `if` is a call
+given blocks) built fresh in 3.6 s; now 1.75 s, an edit of the middle as
+it was (0.43 s), covey/states2 fresh 3.75 s -> 2.55 s. Found by timing each
+thread (`perf` with `-Kprof=1`: the build as it is, frame pointers kept):
+the check, then certificate inference, then writing what is kept, one
+after another, and the process waiting at its end for the ways of finding
+a certificate it did not take.
+
+- **Signatures first, by default.** Each function's type is taken from its
+  signature, and every body checked from those side by side, on every core
+  (`GLORIOUS_UNIVERSES`, now on unless `=0`); where a body's type is not
+  its signature's, callees first, as before. Each group is kept as on the
+  other path (`checkGroupKept`, from the state with every signature, keyed
+  apart), and what the signatures added is kept under a key of them all.
+  A function's type in a kept group is the signature's, made again by this
+  compile: equal to the one kept, it fits (`Absorb Scheme`, `schemeEq`).
+  Without that, no kept group fitted and every edit checked all of them.
+- **Inference copied its whole table of types for each function.**
+  `declaredParams` bound each parameter with `try unify`, which holds the
+  state as it was to go back to; the binding then copied every type's
+  entry. The parameter is a variable made just before: bound directly.
+- **The inference memo is eight files**, by key, each written on a thread
+  of its own, and only those something was made anew in (one took 0.65 s,
+  more than all else kept); the other large ones each on a thread too.
+- **The process ends once what is kept is written** (`IO.Process.exit`),
+  not when the certificate searches it did not need are done.
+
+Where it is now: the check about 0.5 s on 24 cores, certificate inference
+1 s on one, then what is kept 0.2 s. Inference is the next: one state for
+the whole program, a group at a time.
 
 ## Other standing decisions
 

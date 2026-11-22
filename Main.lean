@@ -305,6 +305,13 @@ def showCore (names : Array String) (p : Core.Program) : String := Id.run do
 
 instance : Nonempty Syntax.Fixities := ⟨{}⟩
 
+/-- What certificate inference made is kept in this many files, by its keys
+(`shardOf`): each written on a thread of its own, and only those something
+was made anew in. One file took longer to write than all else kept. -/
+def inferShards : Nat := 8
+
+def shardOf (k : UInt64) : Nat := (k % inferShards.toUInt64).toNat
+
 /-- What compiles are writing to keep, waited for before the process ends. -/
 initialize keeping : IO.Ref (Array (Task (Except IO.Error Unit))) ← IO.mkRef #[]
 
@@ -339,8 +346,14 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     else pure ((← Store.load (α := Check.Kept) (library / "units") "units").getD [])
   let checkKept := checkKept ++ libraryKept
   -- (What certificate inference made the last time, by function and signature.)
-  let memo ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {}
-    else pure ((← Store.load (α := Infer.Memo) (dir / "infer") "infer").getD {})
+  let memo ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else do
+    let mut m : Infer.Memo := {}
+    for i in [0:inferShards] do
+      if let some part ← Store.load (α := Infer.Memo) (dir / s!"infer.{i}") "infer" then
+        m := if m.inst.isEmpty && m.schemes.isEmpty && m.faces.isEmpty then part else
+          { inst := part.inst.fold (·.insert) m.inst, schemes := part.schemes.fold (·.insert) m.schemes
+            faces := part.faces.fold (·.insert) m.faces }
+    pure m
   -- (The prelude and library as checked, by an earlier process of this
   -- compiler, for any program.)
   let firsts ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
@@ -391,10 +404,17 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     unless c.textsMade.all (texts.contains ·.1) do Trace.timedIO "save: texts" (Store.save (dir / "texts") "texts" c.textsMade)
     -- (Saved again only where something was made anew, pointing into what
     -- was read.)
-    let inferNew := c.inferMade.inst.any (fun (k, sig, _) => !((memo.inst.get? k).getD []).any (·.1 == sig))
-      || c.inferMade.schemes.any (fun (k, _) => !memo.schemes.contains k)
-      || c.inferMade.faces.any (fun (k, _) => !memo.faces.contains k)
-    if inferNew then Trace.timedIO "save: infer" (Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade) (chain := 64))
+    -- (The large ones each on a thread of its own, beside the others.)
+    -- (In `inferShards` files, each written on a thread of its own, and
+    -- only where something of it was made anew.)
+    for i in [0:inferShards] do
+      let made : Infer.Made :=
+        { inst := c.inferMade.inst.filter (shardOf ·.1 == i), schemes := c.inferMade.schemes.filter (shardOf ·.1 == i)
+          faces := c.inferMade.faces.filter (shardOf ·.1 == i) }
+      let inferNew := made.inst.any (fun (k, sig, _) => !((memo.inst.get? k).getD []).any (·.1 == sig))
+        || made.schemes.any (fun (k, _) => !memo.schemes.contains k)
+        || made.faces.any (fun (k, _) => !memo.faces.contains k)
+      if inferNew then keep <| Trace.timedIO "save: infer" (Store.save (dir / s!"infer.{i}") "infer" (Infer.toMemo made) (chain := 64))
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
     -- (The library's modules, and the program's modules that are files, as
@@ -408,7 +428,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     -- (Saved again only where something was made anew; pointing into what
     -- was read, up to 64 files, then all written again.)
     unless c.frontMade.all (fun (k, _) => frontKept.contains k) do
-      Trace.timedIO "save: front" (Store.save (dir / "front") "front" c.frontMade.toList (chain := 64))
+      keep <| Trace.timedIO "save: front" (Store.save (dir / "front") "front" c.frontMade.toList (chain := 64))
     -- (Not where the only unit made anew is the one the program's `main` is
     -- in: the text being edited, resolved again the next time it changes,
     -- which is each time; the others' are what a next compile finds.)
@@ -417,11 +437,11 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       | _ => false
     let anew := c.unitsMade.filter fun (k, _) => !unitsKept.contains k
     unless anew.isEmpty || anew.all (fun (_, items, _) => isMain items) do
-      Trace.timedIO "save: resolved" (Store.save (dir / "resolved") "resolved" c.unitsMade (chain := 64))
+      keep <| Trace.timedIO "save: resolved" (Store.save (dir / "resolved") "resolved" c.unitsMade (chain := 64))
     -- (Saved again only where a group was checked anew, pointing into what
     -- was read. Those of earlier versions of the program are kept, for an
     -- edit taken back: up to 4096, this compile's first.)
-    Trace.timedIO "save: groups" do
+    keep <| Trace.timedIO "save: groups" do
       let fresh := c.groupsMade.filter fun (k, _) => !groupsKept.contains k
       unless fresh.isEmpty do
         let made : Std.HashSet UInt64 := c.groupsMade.foldl (fun s (k, _) => s.insert k) {}
@@ -1052,10 +1072,18 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
 def main (args : List String) : IO UInt32 := do
   let code ← Trace.timedIO "glorious" (command args)
   -- (What a compile keeps is written while the program it made runs.)
-  for t in ← keeping.get do
+  -- (Until none is left: one may start others.)
+  let mut waited := 0
+  while waited < (← keeping.get).size do
+    let t := (← keeping.get)[waited]!
     let _ ← IO.wait t
+    waited := waited + 1
   Trace.report
-  pure code
+  -- (Ended here, not by returning: the ways of finding a certificate not
+  -- taken, each on a thread of its own, would be waited for to the end.)
+  (← IO.getStdout).flush
+  (← IO.getStderr).flush
+  IO.Process.exit code.toUInt8
 where
   command (args : List String) : IO UInt32 := do
   match args with

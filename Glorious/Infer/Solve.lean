@@ -59,7 +59,12 @@ def declaredParams (f : Nat) (params : List ITy) : M Unit := do
       -- (A type that says nothing here, a callable's, is not taken.)
       if says te then
         let t ← writtenTy vars te
-        try unify p t catch _ => pure ()
+        -- (Each parameter's type is a variable made for it just now, and
+        -- what is written is made of new ones: it is bound, and nothing
+        -- can fail. Not `try unify`: that holds the state as it was, for
+        -- going back to, and the binding then copies every type's.)
+        if let .var i ← find p then
+          unless ← occurs i t do bindTy i t
 where
   says : TypeExpr → Bool
     | .name _ _ => true
