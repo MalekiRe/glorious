@@ -707,9 +707,6 @@ def unitMarkOf : Syntax.Item → Option String
   | .fieldNames m [k] [] => if m == Syntax.unitMark then some k else none
   | _ => none
 
-def unitsOf (items : List Syntax.Item) (uses : List (String × List String)) :
-    List Syntax.Item × List (String × List Syntax.Item) := unitsOfBy unitMarkOf items uses
-
 def unitsOfFlat (items : List Syntax.Flat.FItem) (uses : List (String × List String)) :
     List Syntax.Flat.FItem × List (String × List Syntax.Flat.FItem) :=
   unitsOfBy (fun | .other i => unitMarkOf i | _ => none) items uses

@@ -144,12 +144,6 @@ theorem clean_place (o : Option Rgn) : (clean o).place = true := by
 
 theorem clean_free (o : Option Rgn) : (clean o).free = true := place_free (clean_place o)
 
-theorem clean_of_place {r : Rgn} (h : r.place = true) : clean (some r) = r := by
-  simp [clean, h]
-
-theorem clean_clean (o : Option Rgn) : clean (some (clean o)) = clean o :=
-  clean_of_place (clean_place o)
-
 theorem inst_free (θ : List Rgn) (r : Rgn) : (r.inst θ).free = r.free := by
   induction r with
   | var i => exact clean_free _
@@ -341,16 +335,6 @@ def novar : Rgn → Bool
   | .or a b => novar a && novar b
   | _ => true
 
-/-- A region with no variable in it is left as it is. -/
-theorem inst_novar {r : Rgn} (h : r.novar = true) (θ : List Rgn) : r.inst θ = r := by
-  induction r with
-  | var i => cases h
-  | wr r ih => exact congrArg Rgn.wr (ih h)
-  | or a b iha ihb =>
-    simp only [novar, Bool.and_eq_true] at h
-    simp [inst, iha h.1, ihb h.2]
-  | _ => rfl
-
 /-- Is the region none of the `n` regions a callable type binds, seen from
 inside it? -/
 def freeOf (n : Nat) : Rgn → Bool
@@ -415,12 +399,6 @@ theorem parts_of_mem {r x : Rgn} (h : x ∈ r.parts) : x.parts = [x] := atom_par
 theorem self_mem_parts {x : Rgn} (h : x.atom = true) : x ∈ x.parts := by
   rw [atom_parts h]
   exact List.mem_singleton_self x
-
-theorem parts_ne_nil (r : Rgn) : r.parts ≠ [] := by
-  induction r with
-  | or a b iha _ => simp [parts, iha]
-  | wr r ih => simp [parts, ih]
-  | _ => simp [parts]
 
 theorem parts_inst (θ : List Rgn) (r : Rgn) :
     (r.inst θ).parts = r.parts.flatMap fun x => (x.inst θ).parts := by

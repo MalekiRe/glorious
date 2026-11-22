@@ -92,9 +92,6 @@ theorem run_add (a b : Nat) (s : σ) :
     | halt v => rfl
     | stuck => rfl
 
-theorem run_one_next {s s' : σ} (h : step s = .next s') : run step (0 + 1) s = .next s' := by
-  simp [run_succ, h]
-
 theorem run_one_halt {s : σ} {v : ν} (h : step s = .halt v) : run step (0 + 1) s = .halt v := by
   simp [run_succ, h]
 
@@ -242,17 +239,6 @@ def exec (step : σ → Step σ ν) : Nat → σ → Step σ ν
     | .next s' => exec step n s'
     | .halt v => .halt v
     | .stuck => .stuck
-
-theorem exec_eq_run (n : Nat) (s : σ) : exec step n s = run step n s := by
-  induction n generalizing s with
-  | zero => rfl
-  | succ n ih =>
-    rw [run_succ]
-    simp only [exec]
-    cases step s with
-    | next s' => simpa using ih s'
-    | halt v => rfl
-    | stuck => rfl
 
 end Machine
 

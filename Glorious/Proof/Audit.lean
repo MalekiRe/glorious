@@ -4,7 +4,7 @@ public import Glorious.Core.Cleanup
 public import Glorious.Proof.Correct
 public import Glorious.Bytecode.Decode
 public import Glorious.Typing.Compiled
-public import Glorious.Typing.Witness
+public import Glorious.Typing.Certify
 public import Glorious.Traits
 
 /-!
@@ -56,10 +56,6 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 #guard_msgs in
 #print axioms Glorious.Typing.compiled_type_safety
 
-/-- info: 'Glorious.Typing.Witness.effects_ok' depends on axioms: [propext, Classical.choice, Quot.sound] -/
-#guard_msgs in
-#print axioms Glorious.Typing.Witness.effects_ok
-
 /-- info: 'Glorious.Typing.checked_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Typing.checked_safety
@@ -67,10 +63,6 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.Typing.checked_compiled_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Typing.checked_compiled_safety
-
-/-- info: 'Glorious.Typing.Witness.effects_checked' depends on axioms: [propext, Quot.sound] -/
-#guard_msgs in
-#print axioms Glorious.Typing.Witness.effects_checked
 
 /-- info: 'Glorious.Typing.owned_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
@@ -116,14 +108,6 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 #guard_msgs in
 #print axioms Glorious.Typing.checked_compiled_full_safety
 
-/-- info: 'Glorious.Typing.Witness.counter_borrows' depends on axioms: [propext, Classical.choice, Quot.sound] -/
-#guard_msgs in
-#print axioms Glorious.Typing.Witness.counter_borrows
-
-/-- info: 'Glorious.Typing.Witness.readers_borrows' depends on axioms: [propext, Classical.choice, Quot.sound] -/
-#guard_msgs in
-#print axioms Glorious.Typing.Witness.readers_borrows
-
 /-- info: 'Glorious.Typing.label_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Typing.label_safety
@@ -140,10 +124,6 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 #guard_msgs in
 #print axioms Glorious.Typing.checked_label_safety
 
-/-- info: 'Glorious.Typing.Witness.jumps_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
-#guard_msgs in
-#print axioms Glorious.Typing.Witness.jumps_sound
-
 /-- info: 'Glorious.Typing.exclusive_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Typing.exclusive_safety
@@ -151,14 +131,6 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.Typing.checked_exclusive_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Typing.checked_exclusive_safety
-
-/-- info: 'Glorious.Typing.Witness.lender_exclusive' depends on axioms: [propext, Classical.choice, Quot.sound] -/
-#guard_msgs in
-#print axioms Glorious.Typing.Witness.lender_exclusive
-
-/-- info: 'Glorious.Typing.Witness.alias_aliased' depends on axioms: [propext] -/
-#guard_msgs in
-#print axioms Glorious.Typing.Witness.alias_aliased
 
 /-- info: 'Glorious.Traits.solve_sound' depends on axioms: [propext] -/
 #guard_msgs in

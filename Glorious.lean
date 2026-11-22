@@ -14,7 +14,6 @@ public import Glorious.Proof.Simulation
 public import Glorious.Proof.CodeAt
 public import Glorious.Proof.Patterns
 public import Glorious.Proof.Correct
-public import Glorious.Proof.Witness
 public import Glorious.Typing.Types
 public import Glorious.Typing.Static
 public import Glorious.Typing.Subst
@@ -29,7 +28,6 @@ public import Glorious.Typing.Equality
 public import Glorious.Typing.Checker
 public import Glorious.Typing.Covers
 public import Glorious.Typing.Certify
-public import Glorious.Typing.Witness
 public import Glorious.Proof.Audit
 public import Glorious.Syntax.Ast
 public import Glorious.Syntax.Lexer

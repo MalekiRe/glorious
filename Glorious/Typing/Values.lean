@@ -27,11 +27,6 @@ theorem Row.le_trans {a b c : Row} (h₁ : Row.le a b) (h₂ : Row.le b c) : Row
 
 theorem Row.nil_le (ε : Row) : Row.le [] ε := fun op sig h => by simp [List.lookup] at h
 
-/-- Putting more handlers below does not change what the nearest ones offer. -/
-theorem Row.le_append_left (a b : Row) : Row.le a (a ++ b) := fun op sig h => by
-  rw [List.lookup_append, h]
-  rfl
-
 theorem StoreTy.Le.refl (S : StoreTy) : S.Le S :=
   ⟨fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
 
@@ -296,35 +291,6 @@ theorem HasVals.set {S : StoreTy} {v : Value} {σ : Ty} (hv : HasVal Δ S v σ) 
   | _, _, i + 1, .cons hx hs, h => by
     simp only [List.getElem?_cons_succ] at h
     exact .cons hx (HasVals.set hv i hs h)
-
-/-- Replacing what a typed field path leads to, by a value of the type found
-there, leaves a value of the type it had. -/
-theorem put_ok {S : StoreTy} {σ τ : Ty} {path : List Nat} (h : PlaceOk Δ σ path τ) :
-    ∀ {v w : Value}, HasVal Δ S v σ → HasVal Δ S w τ →
-      ∃ v', v.put path w = some v' ∧ HasVal Δ S v' σ := by
-  induction h with
-  | here => intro v w _ hw; exact ⟨w, by simp [Value.put], hw⟩
-  | tuple hi _ ih =>
-    intro v w hv hw
-    obtain ⟨t, fields, Fs', rfl, hc, hf⟩ := hv.ctor_inv (tag := 0) (.inl ⟨rfl, rfl⟩)
-    have e := CtorOf.unique hc (.inl ⟨(by
-      rcases hc with ⟨h0, _⟩ | ⟨_, _, _, hT, _⟩
-      · exact h0
-      · cases hT), rfl⟩)
-    subst e
-    obtain ⟨x, hx, hxt⟩ := hf.get hi
-    obtain ⟨x', hx', hxt'⟩ := ih hxt hw
-    exact ⟨_, by simp [Value.put, hx, hx'], .data hc (HasVals.set hxt' _ hf hi)⟩
-  | @field name args Fs i path σ τ hall hi _ ih =>
-    intro v w hv hw
-    cases hv with
-    | clo _ _ _ _ _ hτ => cases hτ
-    | data hc hf =>
-      have e := hall _ _ hc
-      subst e
-      obtain ⟨x, hx, hxt⟩ := hf.get hi
-      obtain ⟨x', hx', hxt'⟩ := ih hxt hw
-      exact ⟨_, by simp [Value.put, hx, hx'], .data hc (HasVals.set hxt' _ hf hi)⟩
 
 /-- A typed value at a step with no constructor in mind, which leads to a
 field: the field's type is the one the step's typing says, in each of the

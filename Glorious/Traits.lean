@@ -295,20 +295,6 @@ def ImplIndex.find (ix : ImplIndex) (tr head : String) (n : Nat) : Option (Nat �
     | none => none
   | none => none
 
-theorem ImplIndex.find_sound {ix : ImplIndex} {tr head : String} {n i : Nat} {I : Impl}
-    (h : ix.find tr head n = some (i, I)) :
-    ix.impls.toList[i]? = some I ∧ I.trait = tr ∧ I.head = head ∧ I.arity = n := by
-  unfold ImplIndex.find at h
-  split at h
-  · split at h
-    · split at h
-      · rename_i J hJ hc
-        cases h
-        exact ⟨by simpa using hJ, hc⟩
-      · cases h
-    · cases h
-  · cases h
-
 /-- The first implementation of `tr` for `head`, at any arity. -/
 def ImplIndex.firstFor (ix : ImplIndex) (tr head : String) : Option Impl :=
   ix.heads[(tr, head)]?.bind (ix.impls[·]?)
@@ -319,12 +305,6 @@ def ImplIndex.has (ix : ImplIndex) (tr head : String) : Bool := ix.heads.contain
 /-- `solve`, the implementations found by key. -/
 def solveIx (ix : ImplIndex) (givens : Givens) : Nat → String → STy → Option Dict :=
   solveBy ix.find givens
-
-/-- **What is found by key is evidence.** -/
-theorem solveIx_sound {ix : ImplIndex} {givens : Givens} (fuel : Nat) {tr : String}
-    {τ : STy} {d : Dict} (h : solveIx ix givens fuel tr τ = some d) :
-    Entails ix.impls.toList givens tr τ d :=
-  solveBy_sound (fun h => ImplIndex.find_sound h) fuel h
 
 /-! ## At most one way -/
 

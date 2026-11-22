@@ -450,9 +450,10 @@ What is proved (`Typing/Safety.lean`, `Typing/Compiled.lean`,
   `compile_correct`.
 - `checked_safety` and `checked_compiled_safety`: the same for any program the
   function `checkProgram` accepts, with nothing else assumed.
-- `Typing/Witness.lean` runs the checker, in the kernel, on a program with
+- `Typing/Witness.lean` ran the checker, in the kernel, on a program with
   nested handlers, a resumptive and a terminal operation, so the theorems are
-  not about an empty set of programs.
+  not about an empty set of programs. (Removed, with `Proof/Witness.lean`:
+  see "A smaller compiler".)
 
 The four faults are what types alone do not rule out: integer overflow, use of
 a released cell, a second use of a resumption, and a label applied after its
@@ -7223,6 +7224,23 @@ program: elaborating (50 ms), the check's parts that go one after another
 names (20 ms), writing the program (25 ms). Each would be kept by function
 to go further; elaboration numbers what it lifts across the program, so
 that is where it would start.
+
+## A smaller compiler
+
+Counted without comments or blank lines (`*.lean` tracked by git): 51,652
+lines at the start, of which the compiler 30,019, the proved checker and the
+proofs (`Typing/`, `Proof/`) 11,684, the library and prelude as Glorious
+source in Lean strings 6,021, and the test table 3,928.
+
+- **What nothing refers to, removed** (found by name, with comments left
+  out, until none was left): theorems no proof cites (`exec_eq_run`,
+  `put_ok`, `inst_novar`, `solveIx_sound`, ..) and `Driver.unitsOf`; and the
+  two witness files. `Proof/Witness.lean` no longer built (its programs
+  wrote functions as a list where Core now has an array), and
+  `Typing/Witness.lean`, which needed its programs, with it; so the axiom
+  audit (`Proof/Audit.lean`), which imported them, did not build either. It
+  builds again, without the five witness theorems it named, and every
+  theorem it names is checked again with each build of the library. -619.
 
 ## Other standing decisions
 

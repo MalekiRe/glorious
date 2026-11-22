@@ -25,11 +25,6 @@ theorem Rgn.mem_flat {l : List Rgn} {x : Rgn} : x ∈ Rgn.flat l ↔ ∃ r, r �
 theorem Rgn.flat_cons (r : Rgn) (l : List Rgn) : Rgn.flat (r :: l) = r.parts ++ Rgn.flat l := by
   simp [Rgn.flat]
 
-theorem Rgn.flat_append (a b : List Rgn) : Rgn.flat (a ++ b) = Rgn.flat a ++ Rgn.flat b := by
-  simp [Rgn.flat]
-
-theorem Rgn.flat_nil : Rgn.flat [] = [] := rfl
-
 theorem Rgn.flat_cons_atom {x : Rgn} (h : x.atom = true) (l : List Rgn) :
     Rgn.flat (x :: l) = x :: Rgn.flat l := by
   rw [Rgn.flat_cons, Rgn.atom_parts h]
@@ -120,9 +115,6 @@ theorem Sub.of_grants {a b : List Rgn} (h : ∀ r, r ∈ a → Grants b r) : Sub
   intro x hx
   obtain ⟨r, hr, hx⟩ := Rgn.mem_flat.mp hx
   exact h r hr x hx
-
-theorem Sub.grants {a b : List Rgn} (h : Sub a b) {r : Rgn} (hr : r ∈ a) : Grants b r :=
-  fun x hx => h x (Rgn.mem_flat.mpr ⟨r, hr, hx⟩)
 
 theorem Grants.sub {a b : List Rgn} {r : Rgn} (h : Grants a r) (hs : Sub a b) : Grants b r :=
   fun x hx => hs x (h x hx)
