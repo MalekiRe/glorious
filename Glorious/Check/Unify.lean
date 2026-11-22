@@ -30,10 +30,15 @@ partial def apart (a b : Ty) : M Bool := do
     if n != m || as.length != bs.length then pure true else anyApart as bs
   | .tuple as, .tuple bs => if as.length != bs.length then pure true else anyApart as bs
   | .con n [h, r], .tuple bs | .tuple bs, .con n [h, r] =>
-    if n != Traits.consHead then pure true
-    else match bs with
+    if n == Traits.consHead then
+      match bs with
       | [] => pure true
       | x :: xs => do pure ((← apart h x) || (← apart r (.tuple xs)))
+    else if n == Syntax.snocHead then
+      match bs.getLast? with
+      | none => pure true
+      | some y => do pure ((← apart h (.tuple bs.dropLast)) || (← apart r y))
+    else pure true
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
     if ps.length != qs.length then pure true else anyApart (r :: ps) (s :: qs)
   | .ref _ x _, .ref _ y _ => apart x y
@@ -88,9 +93,40 @@ partial def unify (a b : Ty) : M Unit := do
   | .tuple as, .tuple bs => if as.length == bs.length then unifyAll as bs else mismatch a b
   -- (A tuple's first and the rest, `(H, ..R)`, and a tuple of one or more.)
   | .con n [h, r], .tuple (x :: xs) =>
-    if n == Traits.consHead then do unify h x; unify r (.tuple xs) else mismatch a b
+    if n == Traits.consHead then do unify h x; unify r (.tuple xs)
+    else if n == Syntax.snocHead then do unify h (.tuple (x :: xs).dropLast); unify r ((x :: xs).getLast (by simp))
+    else mismatch a b
   | .tuple (x :: xs), .con n [h, r] =>
-    if n == Traits.consHead then do unify x h; unify (.tuple xs) r else mismatch a b
+    if n == Traits.consHead then do unify x h; unify (.tuple xs) r
+    else if n == Syntax.snocHead then do unify (.tuple (x :: xs).dropLast) h; unify ((x :: xs).getLast (by simp)) r
+    else mismatch a b
+  -- (A callable's arguments as many as a tuple has, `Fn<(..P)>`.)
+  | .fn [.con n [whole]] r e1 t1 c1, .fn qs s e2 t2 c2 =>
+    if n == Syntax.spreadParams then do
+      match qs with
+      | [.con m [other]] => if m == n then unify whole other else unify whole (.tuple qs)
+      | _ => unify whole (.tuple qs)
+      unify r s
+      unifyRow ⟨e1, t1⟩ ⟨e2, t2⟩
+      unifyCap c1 c2
+    else if qs.length == 1 then do
+      unifyAll [.con n [whole]] qs
+      unify r s
+      unifyRow ⟨e1, t1⟩ ⟨e2, t2⟩
+      unifyCap c1 c2
+    else mismatch a b
+  | .fn ps r e1 t1 c1, .fn [.con n [whole]] s e2 t2 c2 =>
+    if n == Syntax.spreadParams then do
+      unify (.tuple ps) whole
+      unify r s
+      unifyRow ⟨e1, t1⟩ ⟨e2, t2⟩
+      unifyCap c1 c2
+    else if ps.length == 1 then do
+      unifyAll ps [.con n [whole]]
+      unify r s
+      unifyRow ⟨e1, t1⟩ ⟨e2, t2⟩
+      unifyCap c1 c2
+    else mismatch a b
   | .fn ps r e1 t1 c1, .fn qs s e2 t2 c2 =>
     if ps.length == qs.length then do
       unifyAll ps qs

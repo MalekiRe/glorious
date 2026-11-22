@@ -372,6 +372,13 @@ the type's implementation gives the trait arguments made of its own type
 parameters (`impl<T> From<T> for Wrap<T>`), the arguments asked are made
 those, and the name is that implementation's. -/
 def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
+  -- (Of a type made of the function's own type parameters that the
+  -- function is said to have it of, `(H, ..R): PutEach<S>`: met so, not by
+  -- the implementation for its head.)
+  let zself ← zonk self
+  unless (Ty.rigidNames zself).isEmpty do
+    let key ← traitKey trait args
+    if (← get).implConds.contains (key, ← spellTy zself) then return key
   let head ← headFor trait (← find self)
   if let some (h, hargs) := head then
     let family := (← implsOfHead trait h).filter fun im => im.targs.length == args.length
@@ -446,6 +453,17 @@ def conditionUses (im : ImplDecl) (at_ : List (Nat × Ty)) (hargs : List Ty) (ow
     let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, owner, pos)
     modify fun s => { s with assocUses := s.assocUses.push use }
 
+/-- What an implementation's conditions say of the types other traits leave
+to implementations (`H: Parameter<Asks = HA>`), asked: its own type
+parameters that only those decide are answered as each is
+(`settleAssocs`). -/
+def equalUses (im : ImplDecl) (at_ : List (Nat × Ty)) (hargs : List Ty) (owner pos : String) : M Unit := do
+  for (j, asked, name, said) in im.equal do
+    if let some subject := hargs[j]? then
+      modify fun s => { s with assocUses := s.assocUses.push (asked, subject, name, subst at_ [] [] said, owner, pos) }
+  for (whole, asked, name, said) in im.extraEqual do
+    modify fun s => { s with assocUses := s.assocUses.push (asked, subst at_ [] [] whole, name, subst at_ [] [] said, owner, pos) }
+
 /-- The type a trait leaves to its implementations, for a type whose
 implementation is known: `Elem` of `Index` for an array of `Int`. Nothing
 where the type is not known enough to say which implementation is its. -/
@@ -463,6 +481,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   let some im := (← implsOfHead (Syntax.traitBase key) head).find? fun im => im.trait == key | return none
   let some said := im.assocs.lookup name | return none
   let some at_ ← fitHead im hargs args | return none
+  equalUses im at_ hargs (← get).owner (← get).pos
   conditionUses im at_ hargs (← get).owner (← get).pos
   pure (some (← unproject (gatAt at_ ((im.gatParams.lookup name).getD []) asked said)))
 
@@ -490,9 +509,25 @@ def settleAssocs : M Unit := do
       | other => headFor tr other
     let ground ← args.allM fun x => do pure (freeTys (← zonk x)).isEmpty
     let ground := ground || (← hasGenericImpl tr self)
+    -- (Asked before of the same type, all known: the same answer.)
+    let zsubject ← zonk subject
+    let spelled ← spellTy zsubject
+    let memoKey := if (freeTys zsubject).isEmpty then some s!"{tr}|{name}|{spelled}" else none
+    if let some k := memoKey then
+      if let some found := (← get).assocMemo[k]? then
+        try unifyAt s!"`{name}` of `{Syntax.lastSegment tr}`" found a
+        catch e => throw (pos ++ e)
+        continue
     match known, ground with
     | some (head, hargs), true =>
-      let key ← implKey tr self args
+      -- (Which of several it is, where the type is not all known yet: once
+      -- it is, `(HA, RN)` an implementation's conditions decide.)
+      let open_ := !(freeTys (← zonk self)).isEmpty
+      let key ← try implKey tr self args catch e => do
+        if open_ then
+          left := left.push (tr, subject, name, a, owner, pos)
+          continue
+        throw e
       let family ← implsOfHead (Syntax.traitBase key) head
       match family.find? fun im => im.trait == key with
       | some im =>
@@ -509,9 +544,12 @@ def settleAssocs : M Unit := do
           let at_ ← match ← fitHead im hargs args with
             | some at_ => pure at_
             | none => implAt im hargs
+          equalUses im at_ hargs owner pos
           conditionUses im at_ hargs owner pos
           try unifyAt s!"`{name}` of `{key}` for `{bareName head}`" (← unproject (subst at_ [] [] said)) a
           catch e => throw (pos ++ e)
+          if let some k := memoKey then
+            modify fun s => { s with assocMemo := s.assocMemo.insert k a }
         | none => left := left.push (tr, subject, name, a, owner, pos)
       | none => left := left.push (tr, subject, name, a, owner, pos)
     | _, _ => left := left.push (tr, subject, name, a, owner, pos)

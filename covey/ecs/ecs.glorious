@@ -33,7 +33,7 @@
 // resource that was not inserted, or for either twice, does not compile. When
 // the program runs, each of those calls is a call of a known function.
 
-use std::tuple::{Tuple, nest};
+use std::tuple::{Tuple, nest, Push, Prepend, SplitFirst, Apply, ApplyWaiting};
 use core::option::{as_ref, as_mut, is_none, is_some};
 use core::value::{Default, default, discard};
 use core::iter::{into_iter, next};
@@ -1041,19 +1041,56 @@ pub trait Bundle<S> {
     fn put_all(Self, &mut World<S>, Entity) -> Self::Had
     fn take_all(&mut World<S>, Entity) -> Self::Had
 }
-impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, ..T: Put<S>, (..T): BringsFor<S>, (..T): NamesOf, (..T): RequiresClash<(..T)>, (..T): MembersApart {
-    type Had = (..Option<T>);
-    fn names() -> [Str] { <(..T) as NamesOf>::names_of() }
-    fn put_all(bundle: (..T), world: &mut World<S>, entity: Entity) -> (..Option<T>) {
-        if(<(..T) as RequiresClash<(..T)>>::requires_clash()) {
+impl<S> Bundle<S> for () {
+    type Had = ();
+    fn names() -> [Str] { [] }
+    fn put_all(bundle: (), world: &mut World<S>, entity: Entity) -> () { () }
+    fn take_all(world: &mut World<S>, entity: Entity) -> () { () }
+}
+impl<H, ..R, S, All> Bundle<S> for (H, ..R) where (H, ..R): PutEach<S>, (H, ..R): HadOf, (H, ..R): BringsFor<S>, (H, ..R): NamesOf, (H, ..R): Itself<Out = All>, (H, ..R): RequiresClash<All>, (H, ..R): MembersApart {
+    type Had = <(H, ..R) as HadOf>::Had;
+    fn names() -> [Str] { <(H, ..R) as NamesOf>::names_of() }
+    fn put_all(bundle: (H, ..R), world: &mut World<S>, entity: Entity) -> <(H, ..R) as HadOf>::Had {
+        if(<(H, ..R) as RequiresClash<All>>::requires_clash()) {
             abort("put: a member of the bundle would remove a component another requires: they share a `OneOf` group")
         } else { () };
-        let (..t) = bundle;
-        let had = (..<T as Put<S>>::put_value(world, entity, t));
-        <(..T) as BringsFor<S>>::bring_for(world, entity);
+        let had = <(H, ..R) as PutEach<S>>::put_each(bundle, world, entity);
+        <(H, ..R) as BringsFor<S>>::bring_for(world, entity);
         had
     }
-    fn take_all(world: &mut World<S>, entity: Entity) -> (..Option<T>) { (..remove<T, S>(world, entity)) }
+    fn take_all(world: &mut World<S>, entity: Entity) -> <(H, ..R) as HadOf>::Had { <(H, ..R) as PutEach<S>>::take_each(world, entity) }
+}
+// A tuple as a type parameter of its own: what a tuple's members are asked
+// against, `All`.
+pub trait Itself { type Out; }
+impl Itself for () { type Out = (); }
+impl<H, ..R> Itself for (H, ..R) { type Out = (H, ..R); }
+// What putting a bundle's members gives back: for each, what it was put in
+// place of.
+pub trait HadOf { type Had; }
+impl HadOf for () { type Had = (); }
+impl<H, ..R, ..RH> HadOf for (H, ..R) where (..R): HadOf<Had = (..RH)> { type Had = (Option<H>, ..RH); }
+// Each member of a bundle put on an entity, first to last, with what each
+// put in place of (`put_value`); or taken off.
+pub trait PutEach<S>: HadOf {
+    fn put_each(Self, &mut World<S>, Entity) -> <Self as HadOf>::Had
+    fn take_each(&mut World<S>, Entity) -> <Self as HadOf>::Had
+}
+impl<S> PutEach<S> for () {
+    fn put_each(bundle: (), world: &mut World<S>, entity: Entity) -> () { () }
+    fn take_each(world: &mut World<S>, entity: Entity) -> () { () }
+}
+impl<H, ..R, S, ..RH> PutEach<S> for (H, ..R) where S: Get<H>, H: EvictOne<S>, H: Put<S>, (..R): PutEach<S>, (..R): HadOf<Had = (..RH)>,
+    (H, ..R): SplitFirst<First = H, Rest = (..R)>, (..RH): Prepend<Option<H>, Out = (Option<H>, ..RH)> {
+    fn put_each(bundle: (H, ..R), world: &mut World<S>, entity: Entity) -> (Option<H>, ..RH) {
+        let (h, rest) = <(H, ..R) as SplitFirst>::split_first(bundle);
+        let had = <H as Put<S>>::put_value(world, entity, h);
+        <(..RH) as Prepend<Option<H>>>::prepend(had, <(..R) as PutEach<S>>::put_each(rest, world, entity))
+    }
+    fn take_each(world: &mut World<S>, entity: Entity) -> (Option<H>, ..RH) {
+        let had = remove<H, S>(world, entity);
+        <(..RH) as Prepend<Option<H>>>::prepend(had, <(..R) as PutEach<S>>::take_each(world, entity))
+    }
 }
 
 // What putting a component on an entity takes from it: nothing, of one of
@@ -2183,6 +2220,10 @@ pub struct Owned<X>(X)
 pub struct Maybe<X>(X)
 pub struct MaybeOwned<X>(X)
 pub trait Parameter { type Asks; }
+// What a function's parameters ask, as pairs: each one's, then the rest's.
+pub trait Parameters { type Nested; }
+impl Parameters for () { type Nested = (); }
+impl<H, ..R, HA, RN> Parameters for (H, ..R) where H: Parameter<Asks = HA>, (..R): Parameters<Nested = RN> { type Nested = (HA, RN); }
 impl<A> Parameter for &mut Column<A> { type Asks = Writes<A>; }
 impl<A> Parameter for &Column<A> { type Asks = Read<A>; }
 impl<S> Parameter for &mut Commands<S> { type Asks = Asking; }
@@ -2476,8 +2517,8 @@ impl<H, R> AllTouches for (H, R) where H: Touches, R: AllTouches,
 pub struct Everything
 pub trait AnExclusiveSystemRunsAloneNotBesideAnother {}
 pub trait SystemTouches { type List; }
-impl<..P, ..A, L, Ts, F> SystemTouches for F where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts> { type List = Ts; }
-impl<..P, ..A, L, Ts, F> SystemTouches for Waits<F> where F: Fn<(..P), Output = (), Effects = {std::thread::Threads}>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts> { type List = Ts; }
+impl<..P, L, Ts, F> SystemTouches for F where F: Fn<(..P), Output = ()>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts> { type List = Ts; }
+impl<..P, L, Ts, F> SystemTouches for Waits<F> where F: Fn<(..P), Output = (), Effects = {std::thread::Threads}>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts> { type List = Ts; }
 impl SystemTouches for () { type List = (); }
 impl<X, Y> SystemTouches for (X, Y) where X: SystemTouches, Y: SystemTouches, <X as SystemTouches>::List: Concat<<Y as SystemTouches>::List> {
     type List = <<X as SystemTouches>::List as Concat<<Y as SystemTouches>::List>>::Out;
@@ -2530,7 +2571,7 @@ impl<P> SystemTouches for Parallel<P> where P: SystemTouches { type List = <P as
 impl<Ns> SystemTouches for Graph<Ns> where Ns: SystemTouches { type List = <Ns as SystemTouches>::List; }
 impl<N, P, D> SystemTouches for Node<N, P, D> where P: SystemTouches { type List = <P as SystemTouches>::List; }
 pub trait ConditionTouches { type List; }
-impl<..P, ..A, L, Ts> ConditionTouches for fn(..P) -> Bool where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts> { type List = Ts; }
+impl<..P, L, Ts> ConditionTouches for fn(..P) -> Bool where (..P): Parameters<Nested = L>, L: AllTouches<List = Ts> { type List = Ts; }
 // (Two at once: what is apart within a system, but a join is as what it
 // joins, and two that read one resource are apart.)
 pub trait ApartAcross {}
@@ -2583,13 +2624,6 @@ impl<K> ReadsOnly for Fan<K> where K: ReadsOnly {}
 impl<X> ReadsOnly for Shared<X> {}
 impl<X> ReadsOnly for Owned<X> where X: AConditionOnlyReads {}
 
-// A function called with what was gathered for it, its arguments in order.
-// What it gives back is what the call gives.
-pub trait CallWith<G, O> { fn call_with(&Self, G) -> O }
-impl<..P, O, F: Fn<(..P), Output = O>> CallWith<(..P), O> for F {
-    fn call_with(f: &F, g: (..P)) -> O { let (..p) = g; (*f)(..p) }
-}
-
 // What a list of things asked for is met with, one at a time: a column is
 // taken out of the world, lent, and put back when the function has run. What
 // has been gathered so far goes along, and at the end of the list the
@@ -2599,40 +2633,36 @@ impl<..P, O, F: Fn<(..P), Output = O>> CallWith<(..P), O> for F {
 pub trait Fetch<E, S, Gathered, F, O, Lc> {
     fn fetch(&E, &mut World<S>, &mut Commands<S>, &mut Lc, Gathered, &F) -> Option<O>
 }
-impl<E, S, ..G, F, O, Lc> Fetch<E, S, (..G), F, O, Lc> for () where F: CallWith<(..G), O> {
-    fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> { Some(call_with(f, gathered)) }
+impl<E, S, ..G, F, O, Lc> Fetch<E, S, (..G), F, O, Lc> for () where (..G): Apply<F, O> {
+    fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> { Some(<(..G) as Apply<F, O>>::apply_parts(f, gathered)) }
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Writes<A>, Rest)
-    where S: Get<A>, Rest: Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>, A: Writable {
+    where S: Get<A>, Rest: Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>, A: Writable, (..G): Push<&mut Column<A>, Out = (..G, &mut Column<A>)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
-        let (..g) = gathered;
         let a = lend_now<A, S>(&mut world.columns, world.tick);
-        <Rest as Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, unsafe { lent_mut(a) }), f)
+        <Rest as Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<&mut Column<A>>>::push(gathered, unsafe { lent_mut(a) }), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Read<A>, Rest)
-    where S: Get<A>, Rest: Fetch<E, S, (..G, &Column<A>), F, O, Lc> {
+    where S: Get<A>, Rest: Fetch<E, S, (..G, &Column<A>), F, O, Lc>, (..G): Push<&Column<A>, Out = (..G, &Column<A>)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
-        let (..g) = gathered;
         let a = lend_read<A, S>(&mut world.columns, world.tick);
-        <Rest as Fetch<E, S, (..G, &Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, unsafe { lent(a) }), f)
+        <Rest as Fetch<E, S, (..G, &Column<A>), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<&Column<A>>>::push(gathered, unsafe { lent(a) }), f)
     }
 }
 // A shared reference to the label's type is the value emitted; to any other
 // type, a resource.
-impl<E, S, ..G, F, O, Lc, Rest> Fetch<E, S, (..G), F, O, Lc> for (Shared<E>, Rest) where Rest: Fetch<E, S, (..G, &E), F, O, Lc> {
+impl<E, S, ..G, F, O, Lc, Rest> Fetch<E, S, (..G), F, O, Lc> for (Shared<E>, Rest) where Rest: Fetch<E, S, (..G, &E), F, O, Lc>, (..G): Push<&E, Out = (..G, &E)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
-        let (..g) = gathered;
-        <Rest as Fetch<E, S, (..G, &E), F, O, Lc>>::fetch(event, world, commands, state, (..g, event), f)
+        <Rest as Fetch<E, S, (..G, &E), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<&E>>::push(gathered, event), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Shared<X>, Rest)
-    where S: Holds<X>, Rest: Fetch<E, S, (..G, &X), F, O, Lc> {
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, &X), F, O, Lc>, (..G): Push<&X, Out = (..G, &X)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
-                let (..g) = gathered;
-                let made = <Rest as Fetch<E, S, (..G, &X), F, O, Lc>>::fetch(event, world, commands, state, (..g, &value), f);
+                        let made = <Rest as Fetch<E, S, (..G, &X), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<&X>>::push(gathered, &value), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
             None => discard(gathered); None
@@ -2640,13 +2670,12 @@ impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Shared<X>, 
     }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Owned<X>, Rest)
-    where S: Holds<X>, Rest: Fetch<E, S, (..G, &mut X), F, O, Lc>, X: Writable {
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, &mut X), F, O, Lc>, X: Writable, (..G): Push<&mut X, Out = (..G, &mut X)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
-                let (..g) = gathered;
-                let mut value = value;
-                let made = <Rest as Fetch<E, S, (..G, &mut X), F, O, Lc>>::fetch(event, world, commands, state, (..g, &mut value), f);
+                        let mut value = value;
+                let made = <Rest as Fetch<E, S, (..G, &mut X), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<&mut X>>::push(gathered, &mut value), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
             None => discard(gathered); None
@@ -2654,29 +2683,27 @@ impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Owned<X>, R
     }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Maybe<X>, Rest)
-    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&X>), F, O, Lc> {
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&X>), F, O, Lc>, (..G): Push<Option<&X>, Out = (..G, Option<&X>)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
-                let (..g) = gathered;
-                let made = <Rest as Fetch<E, S, (..G, Option<&X>), F, O, Lc>>::fetch(event, world, commands, state, (..g, Some(&value)), f);
+                        let made = <Rest as Fetch<E, S, (..G, Option<&X>), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<Option<&X>>>::push(gathered, Some(&value)), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
-            None => let (..g) = gathered; <Rest as Fetch<E, S, (..G, Option<&X>), F, O, Lc>>::fetch(event, world, commands, state, (..g, None), f)
+            None => <Rest as Fetch<E, S, (..G, Option<&X>), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<Option<&X>>>::push(gathered, None), f)
         }
     }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (MaybeOwned<X>, Rest)
-    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&mut X>), F, O, Lc> {
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&mut X>), F, O, Lc>, (..G): Push<Option<&mut X>, Out = (..G, Option<&mut X>)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
-                let (..g) = gathered;
-                let mut value = value;
-                let made = <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O, Lc>>::fetch(event, world, commands, state, (..g, Some(&mut value)), f);
+                        let mut value = value;
+                let made = <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<Option<&mut X>>>::push(gathered, Some(&mut value)), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
-            None => let (..g) = gathered; <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O, Lc>>::fetch(event, world, commands, state, (..g, None), f)
+            None => <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<Option<&mut X>>>::push(gathered, None), f)
         }
     }
 }
@@ -2695,11 +2722,10 @@ fn query_of<Q, N, S>(world: &mut World<S>) -> Query<Q, N, <Q as Item>::Store> wh
     Query { store: <Q as Fill<S>>::fill(&mut world.columns, world.tick), entities: found }
 }
 impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Querying<Q, N, St>, Rest)
-    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc> {
+    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc>, (..G): Push<&mut Query<Q, N, St>, Out = (..G, &mut Query<Q, N, St>)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
-        let (..g) = gathered;
         let mut query = query_of<Q, N, S>(world);
-        let made = <Rest as Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &mut query), f);
+        let made = <Rest as Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<&mut Query<Q, N, St>>>::push(gathered, &mut query), f);
         let Query { store, entities } = query;
         <Q as Fill<S>>::unfill(&mut world.columns, store);
         made
@@ -2707,7 +2733,7 @@ impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Quer
 }
 // (Not run unless the query is of exactly one entity.)
 impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Singling<Q, N, St>, Rest)
-    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc> {
+    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc>, (..G): Push<&mut Single<Q, N, St>, Out = (..G, &mut Single<Q, N, St>)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         let Query { store, entities: all } = query_of<Q, N, S>(world);
         let mut store = store;
@@ -2719,8 +2745,7 @@ impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Sing
         };
         if(len_at(&found) == 1) {
             let mut single = Single { query: Query { store: store, entities: found } };
-            let (..g) = gathered;
-            let made = <Rest as Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &mut single), f);
+                let made = <Rest as Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc>>::fetch(event, world, commands, state, <(..G) as Push<&mut Single<Q, N, St>>>::push(gathered, &mut single), f);
             let Single { query } = single;
             let Query { store, entities } = query;
             <Q as Fill<S>>::unfill(&mut world.columns, store);
@@ -2732,11 +2757,10 @@ impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Sing
         }
     }
 }
-impl<E, S, ..G, F, O, Lc, Rest> Fetch<E, S, (..G), F, O, Lc> for (Asking, Rest) where Rest: Fetch<E, S, (..G, &mut Commands<S>), F, O, Lc> {
+impl<E, S, ..G, F, O, Lc, Rest> Fetch<E, S, (..G), F, O, Lc> for (Asking, Rest) where Rest: Fetch<E, S, (..G, &mut Commands<S>), F, O, Lc>, (..G): Push<&mut Commands<S>, Out = (..G, &mut Commands<S>)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
-        let (..g) = gathered;
         let mut none = Commands { queue: [], next: 0, made: std::thread::AtomicInt::new(0), world: world.id };
-        <Rest as Fetch<E, S, (..G, &mut Commands<S>), F, O, Lc>>::fetch(event, world, &mut none, state, (..g, commands), f)
+        <Rest as Fetch<E, S, (..G, &mut Commands<S>), F, O, Lc>>::fetch(event, world, &mut none, state, <(..G) as Push<&mut Commands<S>>>::push(gathered, commands), f)
     }
 }
 
@@ -2746,10 +2770,9 @@ pub struct Local<T>(pub T)
 pub struct Localing<T>(T)
 impl<T> Parameter for &mut Local<T> { type Asks = Localing<T>; }
 impl<E, S, ..G, F, O, T, Lc, Rest> Fetch<E, S, (..G), F, O, (Local<T>, Lc)> for (Localing<T>, Rest)
-    where Rest: Fetch<E, S, (..G, &mut Local<T>), F, O, Lc> {
+    where Rest: Fetch<E, S, (..G, &mut Local<T>), F, O, Lc>, (..G): Push<&mut Local<T>, Out = (..G, &mut Local<T>)> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut (Local<T>, Lc), gathered: (..G), f: &F) -> Option<O> {
-        let (..g) = gathered;
-        <Rest as Fetch<E, S, (..G, &mut Local<T>), F, O, Lc>>::fetch(event, world, commands, &mut state.1, (..g, &mut state.0), f)
+        <Rest as Fetch<E, S, (..G, &mut Local<T>), F, O, Lc>>::fetch(event, world, commands, &mut state.1, <(..G) as Push<&mut Local<T>>>::push(gathered, &mut state.0), f)
     }
 }
 
@@ -2898,46 +2921,41 @@ impl<E, S, ..G, F, O, Lc> CallTaken<E, S, (..G), F, O, Lc> for () where F: CallW
 // performs nothing, or one made a system by `waits(f)`, which may wait at a
 // barrier or for a channel, as a graph's node beside others.
 pub trait CallWaiting<G, O> { fn call_waiting(&Self, G) -> O / {std::thread::Threads} }
-impl<..P, O, F: Fn<(..P), Output = O>> CallWaiting<(..P), O> for F {
-    fn call_waiting(f: &F, g: (..P)) -> O / {std::thread::Threads} { let (..p) = g; (*f)(..p) }
+impl<..P, O, F: Fn<(..P), Output = O>> CallWaiting<(..P), O> for F where (..P): Apply<F, O> {
+    fn call_waiting(f: &F, g: (..P)) -> O / {std::thread::Threads} { <(..P) as Apply<F, O>>::apply_parts(f, g) }
 }
 pub struct Waits<F> { f: F }
 pub fn waits<F>(f: F) -> Waits<F> { Waits { f: f } }
-impl<..P, O, F> CallWaiting<(..P), O> for Waits<F> where F: Fn<(..P), Output = O, Effects = {std::thread::Threads}> {
-    fn call_waiting(w: &Waits<F>, g: (..P)) -> O / {std::thread::Threads} { let (..p) = g; (w.f)(..p) }
+impl<..P, O, F> CallWaiting<(..P), O> for Waits<F> where F: Fn<(..P), Output = O, Effects = {std::thread::Threads}>, (..P): ApplyWaiting<F, O> {
+    fn call_waiting(w: &Waits<F>, g: (..P)) -> O / {std::thread::Threads} { <(..P) as ApplyWaiting<F, O>>::apply_parts_waiting(&w.f, g) }
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Writes<A>, Rest)
-    where S: Get<A>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Column<A>), F, O, Lc> {
+    where S: Get<A>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Column<A>), F, O, Lc>, (..G): Push<&mut Column<A>, Out = (..G, &mut Column<A>)> {
     fn call_taken(event: &E, taken: &mut (PtrMut<Column<A>>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
-        let (..g) = gathered;
         let a = taken.0;
-        <Rest as CallTaken<E, S, (..G, &mut Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, unsafe { lent_mut(a) }), f)
+        <Rest as CallTaken<E, S, (..G, &mut Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, <(..G) as Push<&mut Column<A>>>::push(gathered, unsafe { lent_mut(a) }), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Read<A>, Rest)
-    where S: Get<A>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &Column<A>), F, O, Lc> {
+    where S: Get<A>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &Column<A>), F, O, Lc>, (..G): Push<&Column<A>, Out = (..G, &Column<A>)> {
     fn call_taken(event: &E, taken: &mut (Ptr<Column<A>>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
-        let (..g) = gathered;
         let a = taken.0;
-        <Rest as CallTaken<E, S, (..G, &Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, unsafe { lent(a) }), f)
+        <Rest as CallTaken<E, S, (..G, &Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, <(..G) as Push<&Column<A>>>::push(gathered, unsafe { lent(a) }), f)
     }
 }
-impl<E, S, ..G, F, O, Lc, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Shared<E>, Rest) where (Shared<E>, Rest): Takes<E, S>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &E), F, O, Lc> {
+impl<E, S, ..G, F, O, Lc, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Shared<E>, Rest) where (Shared<E>, Rest): Takes<E, S>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &E), F, O, Lc>, (..G): Push<&E, Out = (..G, &E)> {
     fn call_taken(event: &E, taken: &mut <Rest as Takes<E, S>>::Taken, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
-        let (..g) = gathered;
-        <Rest as CallTaken<E, S, (..G, &E), F, O, Lc>>::call_taken(event, taken, commands, state, (..g, event), f)
+        <Rest as CallTaken<E, S, (..G, &E), F, O, Lc>>::call_taken(event, taken, commands, state, <(..G) as Push<&E>>::push(gathered, event), f)
     }
 }
-impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Shared<X>, Rest) where (Shared<X>, Rest): Takes<E, S>, S: Holds<X>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &X), F, O, Lc> {
+impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Shared<X>, Rest) where (Shared<X>, Rest): Takes<E, S>, S: Holds<X>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &X), F, O, Lc>, (..G): Push<&X, Out = (..G, &X)> {
     fn call_taken(event: &E, taken: &mut (X, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
-        let (..g) = gathered;
-        <Rest as CallTaken<E, S, (..G, &X), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &taken.0), f)
+        <Rest as CallTaken<E, S, (..G, &X), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, <(..G) as Push<&X>>::push(gathered, &taken.0), f)
     }
 }
-impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Owned<X>, Rest) where S: Holds<X>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut X), F, O, Lc> {
+impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Owned<X>, Rest) where S: Holds<X>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut X), F, O, Lc>, (..G): Push<&mut X, Out = (..G, &mut X)> {
     fn call_taken(event: &E, taken: &mut (X, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
-        let (..g) = gathered;
-        <Rest as CallTaken<E, S, (..G, &mut X), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &mut taken.0), f)
+        <Rest as CallTaken<E, S, (..G, &mut X), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, <(..G) as Push<&mut X>>::push(gathered, &mut taken.0), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Maybe<X>, Rest) {
@@ -2947,31 +2965,27 @@ impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (MaybeOw
     fn call_taken(event: &E, taken: &mut (), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} { discard(gathered); abort("an optional resource is not taken") }
 }
 impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Querying<Q, N, St>, Rest)
-    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc> {
+    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc>, (..G): Push<&mut Query<Q, N, St>, Out = (..G, &mut Query<Q, N, St>)> {
     fn call_taken(event: &E, taken: &mut (Query<Q, N, St>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
-        let (..g) = gathered;
-        <Rest as CallTaken<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &mut taken.0), f)
+        <Rest as CallTaken<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, <(..G) as Push<&mut Query<Q, N, St>>>::push(gathered, &mut taken.0), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Singling<Q, N, St>, Rest)
-    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc> {
+    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc>, (..G): Push<&mut Single<Q, N, St>, Out = (..G, &mut Single<Q, N, St>)> {
     fn call_taken(event: &E, taken: &mut (Single<Q, N, St>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
-        let (..g) = gathered;
-        <Rest as CallTaken<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &mut taken.0), f)
+        <Rest as CallTaken<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, <(..G) as Push<&mut Single<Q, N, St>>>::push(gathered, &mut taken.0), f)
     }
 }
-impl<E, S, ..G, F, O, Lc, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Asking, Rest) where Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Commands<S>), F, O, Lc> {
+impl<E, S, ..G, F, O, Lc, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Asking, Rest) where Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Commands<S>), F, O, Lc>, (..G): Push<&mut Commands<S>, Out = (..G, &mut Commands<S>)> {
     fn call_taken(event: &E, taken: &mut <Rest as Takes<E, S>>::Taken, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
-        let (..g) = gathered;
         let mut none = Commands { queue: [], next: 0, made: std::thread::AtomicInt::new(0), world: commands.world };
-        <Rest as CallTaken<E, S, (..G, &mut Commands<S>), F, O, Lc>>::call_taken(event, taken, &mut none, state, (..g, commands), f)
+        <Rest as CallTaken<E, S, (..G, &mut Commands<S>), F, O, Lc>>::call_taken(event, taken, &mut none, state, <(..G) as Push<&mut Commands<S>>>::push(gathered, commands), f)
     }
 }
 impl<E, S, ..G, F, O, Tl, Lc, Rest> CallTaken<E, S, (..G), F, O, (Local<Tl>, Lc)> for (Localing<Tl>, Rest)
-    where Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Local<Tl>), F, O, Lc> {
+    where Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Local<Tl>), F, O, Lc>, (..G): Push<&mut Local<Tl>, Out = (..G, &mut Local<Tl>)> {
     fn call_taken(event: &E, taken: &mut <Rest as Takes<E, S>>::Taken, commands: &mut Commands<S>, state: &mut (Local<Tl>, Lc), gathered: (..G), f: &F) -> O / {std::thread::Threads} {
-        let (..g) = gathered;
-        <Rest as CallTaken<E, S, (..G, &mut Local<Tl>), F, O, Lc>>::call_taken(event, taken, commands, &mut state.1, (..g, &mut state.0), f)
+        <Rest as CallTaken<E, S, (..G, &mut Local<Tl>), F, O, Lc>>::call_taken(event, taken, commands, &mut state.1, <(..G) as Push<&mut Local<Tl>>>::push(gathered, &mut state.0), f)
     }
 }
 // What a list of things asked for touches, by name, `w:` written or `r:`
@@ -3237,8 +3251,8 @@ impl<X, Rest, S> WhyAll<S> for (MaybeOwned<X>, Rest) where Rest: WhyAll<S> { fn 
 impl<T, Rest, S> WhyAll<S> for (Localing<T>, Rest) where Rest: WhyAll<S> { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why) } }
 
 pub struct Sys<F, Lc> { f: F, locals: Lc, last: Int, name: Str }
-impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
-    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Fetch<E, S, (), F, (), Lc>, L: WhyAll<S>,
+impl<E, S, ..P, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
+    where F: Fn<(..P), Output = ()>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Fetch<E, S, (), F, (), Lc>, L: WhyAll<S>,
           L: Takes<E, S>, L: CallTaken<E, S, (), F, (), Lc>, L: TouchNames {
     type Prepared = <L as Takes<E, S>>::Taken;
     fn touches(sys: &Sys<F, Lc>) -> [Str] { <L as TouchNames>::touch_names([]) }
@@ -3294,8 +3308,8 @@ impl<E, S, X, Y> IntoSystem<E, S> for (X, Y) where X: IntoSystem<E, S>, Y: IntoS
         (<X as IntoSystem<E, S>>::into_system(x), <Y as IntoSystem<E, S>>::into_system(y))
     }
 }
-impl<E, S, ..P, ..A, L, Ts, F, Lc> IntoSystem<E, S> for F
-    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+impl<E, S, ..P, L, Ts, F, Lc> IntoSystem<E, S> for F
+    where F: Fn<(..P), Output = ()>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Locals<State = Lc>, L: Fetch<E, S, (), F, (), Lc> {
     type Out = Sys<F, Lc>;
     fn into_system(f: F) -> Sys<F, Lc> {
@@ -3329,8 +3343,8 @@ fn run_waiting<E, S, F, L, Lc>(sys: &mut Sys<Waits<F>, Lc>, event: &E, world: &m
 // thread of its own beside the nodes it is apart from; anywhere else alone,
 // waiting among the threads of its own run. (Upstream's systems may block
 // as any Rust function may; a function here says it may wait.)
-impl<E, S, ..P, ..A, L, Ts, F, Lc> IntoSystem<E, S> for Waits<F>
-    where F: Fn<(..P), Output = (), Effects = {std::thread::Threads}>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+impl<E, S, ..P, L, Ts, F, Lc> IntoSystem<E, S> for Waits<F>
+    where F: Fn<(..P), Output = (), Effects = {std::thread::Threads}>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Locals<State = Lc>, L: Takes<E, S>, L: CallTaken<E, S, (), Waits<F>, (), Lc>, L: TouchNames {
     type Out = Sys<Waits<F>, Lc>;
     fn into_system(w: Waits<F>) -> Sys<Waits<F>, Lc> {
@@ -3339,8 +3353,8 @@ impl<E, S, ..P, ..A, L, Ts, F, Lc> IntoSystem<E, S> for Waits<F>
         Sys { f: Waits { f: f }, locals: <L as Locals>::start(), last: 0, name: name }
     }
 }
-impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<Waits<F>, Lc>
-    where F: Fn<(..P), Output = (), Effects = {std::thread::Threads}>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+impl<E, S, ..P, L, Ts, F, Lc> System<E, S> for Sys<Waits<F>, Lc>
+    where F: Fn<(..P), Output = (), Effects = {std::thread::Threads}>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Takes<E, S>, L: CallTaken<E, S, (), Waits<F>, (), Lc>, L: TouchNames {
     type Prepared = <L as Takes<E, S>>::Taken;
     fn touches(sys: &Sys<Waits<F>, Lc>) -> [Str] { <L as TouchNames>::touch_names([]) }
@@ -3381,8 +3395,8 @@ pub struct Cond<F, Lc> { f: F, locals: Lc }
 pub trait Condition<E, S> {
     fn holds(&mut Self, &E, &mut World<S>, &mut Commands<S>) -> Bool
 }
-impl<E, S, ..P, ..A, L, Ts, Lc> Condition<E, S> for Cond<fn(..P) -> Bool, Lc>
-    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Locals<State = Lc>,
+impl<E, S, ..P, L, Ts, Lc> Condition<E, S> for Cond<fn(..P) -> Bool, Lc>
+    where (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Locals<State = Lc>,
           L: Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc> {
     fn holds(c: &mut Cond<fn(..P) -> Bool, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) -> Bool {
         match(<L as Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc>>::fetch(event, world, commands, &mut c.locals, (), &c.f)) {
@@ -3392,8 +3406,8 @@ impl<E, S, ..P, ..A, L, Ts, Lc> Condition<E, S> for Cond<fn(..P) -> Bool, Lc>
     }
 }
 pub trait IntoCondition<E, S> { type Out; fn into_condition(Self) -> Self::Out; }
-impl<E, S, ..P, ..A, L, Ts, Lc> IntoCondition<E, S> for fn(..P) -> Bool
-    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, Ts: OnlyReads, L: Locals<State = Lc>,
+impl<E, S, ..P, L, Ts, Lc> IntoCondition<E, S> for fn(..P) -> Bool
+    where (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, Ts: OnlyReads, L: Locals<State = Lc>,
           L: Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc> {
     type Out = Cond<fn(..P) -> Bool, Lc>;
     fn into_condition(f: fn(..P) -> Bool) -> Cond<fn(..P) -> Bool, Lc> { Cond { f: f, locals: <L as Locals>::start() } }
@@ -4584,8 +4598,8 @@ fn drive_task<S>(task: &mut TaskOf<S>, label: Str, world: &mut World<S>) where S
 // Run a system-like function on a world: its parameters fetched as a
 // system's are; `None` if one of them is not there.
 pub trait RunsOnWorld<S, O> { fn run_on(&Self, &mut World<S>, &mut Commands<S>) -> Option<O> fn touch_list() -> [Str] }
-impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsOnWorld<S, O> for F
-    where F: Fn<(..P), Output = O>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+impl<S, O, ..P, L, Ts, Lc, F> RunsOnWorld<S, O> for F
+    where F: Fn<(..P), Output = O>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Locals<State = Lc>, L: Fetch<(), S, (), F, O, Lc>, L: TouchNames {
     fn touch_list() -> [Str] { <L as TouchNames>::touch_names([]) }
     fn run_on(f: &F, world: &mut World<S>, commands: &mut Commands<S>) -> Option<O> {
@@ -4638,12 +4652,12 @@ pub fn bridge_world<L, O, S>(world: &mut AsyncWorld<S>, label: L, f: fn(&mut Wor
 // it has seen changed (upstream's `world.state()`).
 pub struct Kept<F, Lc> { f: F, locals: Lc, last: Int }
 pub trait StartLocals<Lc> { fn start_locals() -> Lc }
-impl<..P, ..A, L, Lc, F> StartLocals<Lc> for F where F: Fn<(..P)>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: Locals<State = Lc> {
+impl<..P, L, Lc, F> StartLocals<Lc> for F where F: Fn<(..P)>, (..P): Parameters<Nested = L>, L: Locals<State = Lc> {
     fn start_locals() -> Lc { <L as Locals>::start() }
 }
 pub trait KeptRun<S, O, Lc> { fn run_kept(&Self, &mut World<S>, &mut Commands<S>, &mut Lc) -> Option<O> }
-impl<S, O, ..P, ..A, L, Ts, Lc, F> KeptRun<S, O, Lc> for F
-    where F: Fn<(..P), Output = O>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+impl<S, O, ..P, L, Ts, Lc, F> KeptRun<S, O, Lc> for F
+    where F: Fn<(..P), Output = O>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Fetch<(), S, (), F, O, Lc> {
     fn run_kept(f: &F, world: &mut World<S>, commands: &mut Commands<S>, locals: &mut Lc) -> Option<O> {
         <L as Fetch<(), S, (), F, O, Lc>>::fetch(&(), world, commands, locals, (), f)
@@ -4982,11 +4996,11 @@ pub struct Request<S> { point: Str, touches: [Str], run: for<'a, 'b> fn(&'a mut 
 // the threads of the point's run.
 // (What it touches within the envelope of the point `P` it is run at.)
 pub trait RemoteWithin<P> {}
-impl<P, Env, ..Q, ..A, L, Ts, F> RemoteWithin<P> for F where F: Fn<(..Q)>, ..Q: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, P: PointGroups<List = Env>, Ts: WithinEnvelope<Env> {}
-impl<P, Env, ..Q, ..A, L, Ts, F> RemoteWithin<P> for Waits<F> where F: Fn<(..Q)>, ..Q: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, P: PointGroups<List = Env>, Ts: WithinEnvelope<Env> {}
+impl<P, Env, ..Q, L, Ts, F> RemoteWithin<P> for F where F: Fn<(..Q)>, (..Q): Parameters<Nested = L>, L: AllTouches<List = Ts>, P: PointGroups<List = Env>, Ts: WithinEnvelope<Env> {}
+impl<P, Env, ..Q, L, Ts, F> RemoteWithin<P> for Waits<F> where F: Fn<(..Q)>, (..Q): Parameters<Nested = L>, L: AllTouches<List = Ts>, P: PointGroups<List = Env>, Ts: WithinEnvelope<Env> {}
 pub trait RunsRemote<S, O> { type Touched; fn run_remote(&Self, &mut World<S>, &mut Commands<S>) -> Option<O> / {Threads} fn remote_touches() -> [Str] }
-impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsRemote<S, O> for F
-    where F: Fn<(..P), Output = O>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+impl<S, O, ..P, L, Ts, Lc, F> RunsRemote<S, O> for F
+    where F: Fn<(..P), Output = O>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Locals<State = Lc>, L: Fetch<(), S, (), F, O, Lc>, L: TouchNames {
     type Touched = Ts;
     fn run_remote(f: &F, world: &mut World<S>, commands: &mut Commands<S>) -> Option<O> / {Threads} {
@@ -4995,8 +5009,8 @@ impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsRemote<S, O> for F
     }
     fn remote_touches() -> [Str] { <L as TouchNames>::touch_names([]) }
 }
-impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsRemote<S, O> for Waits<F>
-    where F: Fn<(..P), Output = O, Effects = {Threads}>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+impl<S, O, ..P, L, Ts, Lc, F> RunsRemote<S, O> for Waits<F>
+    where F: Fn<(..P), Output = O, Effects = {Threads}>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Locals<State = Lc>, L: Takes<(), S>, L: CallTaken<(), S, (), Waits<F>, O, Lc>, L: TouchNames {
     type Touched = Ts;
     fn run_remote(w: &Waits<F>, world: &mut World<S>, commands: &mut Commands<S>) -> Option<O> / {Threads} {

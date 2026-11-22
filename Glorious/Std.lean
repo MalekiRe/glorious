@@ -5508,6 +5508,25 @@ impl<{", ".intercalate (ps ++ ["R"])}> Callable for fn({", ".intercalate ps}) ->
     type Output = R;
     fn call_with(f: &fn({", ".intercalate ps}) -> R, args: {nested ps}) -> R \{ match(args) \{ {nested (places.map (s!"x{·}"))} => (*f)({", ".intercalate (places.map (s!"x{·}"))}) } }
 }
+impl<{", ".intercalate (ps ++ ["TX"])}> Push<TX> for {tuple ps} \{
+    type Out = {tuple (ps ++ ["TX"])};
+    fn push(t: {tuple ps}, x: TX) -> {tuple (ps ++ ["TX"])} \{ {tuple (places.map (s!"t.{·}") ++ ["x"])} }
+}
+impl<{", ".intercalate (ps ++ ["TX"])}> Prepend<TX> for {tuple ps} \{
+    type Out = {tuple ("TX" :: ps)};
+    fn prepend(x: TX, t: {tuple ps}) -> {tuple ("TX" :: ps)} \{ {tuple ("x" :: places.map (s!"t.{·}"))} }
+}
+{if n == 0 then "" else s!"impl{generics} SplitFirst for {tuple ps} \{
+    type First = {ps.headD "A"};
+    type Rest = {tuple ps.tail};
+    fn split_first(t: {tuple ps}) -> ({ps.headD "A"}, {tuple ps.tail}) \{ (t.0, {tuple ((places.drop 1).map (s!"t.{·}"))}) }
+}
+"}impl<{", ".intercalate (ps ++ ["TO", "TF"])}> Apply<TF, TO> for {tuple ps} where TF: Fn<{tuple ps}, Output = TO> \{
+    fn apply_parts(f: &TF, t: {tuple ps}) -> TO \{ (*f)({", ".intercalate (places.map (s!"t.{·}"))}) }
+}
+impl<{", ".intercalate (ps ++ ["TO", "TF"])}> ApplyWaiting<TF, TO> for {tuple ps} where TF: Fn<{tuple ps}, Output = TO, Effects = \{std::thread::Threads}> \{
+    fn apply_parts_waiting(f: &TF, t: {tuple ps}) -> TO / \{std::thread::Threads} \{ (*f)({", ".intercalate (places.map (s!"t.{·}"))}) }
+}
 "
   r#"// Tuples and functions of any length, through one form: the tuple
 // `(A, B, C)` as the pairs `(A, (B, (C, ())))`. What is written for `()` and
@@ -5526,6 +5545,27 @@ pub trait Tuple {
     fn nest(Self) -> Nested
     fn flat(Nested) -> Self
 }
+
+// A tuple with one more part last (`(..T, X)`), or first (`(X, ..T)`).
+pub trait Push<X> {
+    type Out;
+    fn push(Self, X) -> Out
+}
+pub trait Prepend<X> {
+    type Out;
+    fn prepend(X, Self) -> Out
+}
+// A tuple of one or more as its first and the tuple of the rest.
+pub trait SplitFirst {
+    type First;
+    type Rest;
+    fn split_first(Self) -> (First, Rest)
+}
+
+// A function called with a tuple's parts, `f(..t)`: one that performs
+// nothing, and one that may wait (`std::thread::Threads`).
+pub trait Apply<F, O> { fn apply_parts(&F, Self) -> O }
+pub trait ApplyWaiting<F, O> { fn apply_parts_waiting(&F, Self) -> O / {std::thread::Threads} }
 
 // A function, by what it takes, as pairs, and what it gives.
 pub trait Callable {

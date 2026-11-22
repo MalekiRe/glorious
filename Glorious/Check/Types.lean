@@ -822,6 +822,11 @@ structure St where
   made of its type parameters, `(..R): Registers<S>`: the trait at its
   arguments and the type, spelled, as this function names them. -/
   implConds : List (String × String) := []
+  /-- What a trait leaves to the implementation for a type all known, by the
+  trait, the name and the type spelled: found once in a function's check
+  (`settleAssocs`), not again for each question that comes to it (a list of
+  sixteen's each made of the rest's). -/
+  assocMemo : Std.HashMap String Ty := {}
   /-- The number of each type object numbered already (`internTy`), kept with
   it: a type all known stays so, so the same object is the same number. -/
   tyMemo : Std.HashMap USize (Ty × Nat) := {}
@@ -1097,11 +1102,23 @@ partial def find (t : Ty) : M Ty := do
     match (← get).tys.get? id with
     | some (some t') => find t'
     | _ => pure t
-  -- (A tuple's first and a rest that is known: the tuple.)
+  -- (A tuple's first and a rest that is known: the tuple; all but its last
+  -- known and its last, the same.)
   | .con n [first, rest] =>
     if n == Traits.consHead then
       match ← find rest with
       | .tuple more => pure (.tuple (first :: more))
+      | _ => pure t
+    else if n == Syntax.snocHead then
+      match ← find first with
+      | .tuple init => pure (.tuple (init ++ [rest]))
+      | _ => pure t
+    else pure t
+  -- (A callable's arguments as many as a tuple has, once the tuple is known.)
+  | .fn [.con n [whole]] r effs tail cap =>
+    if n == Syntax.spreadParams then
+      match ← find whole with
+      | .tuple ps => pure (.fn ps r effs tail cap)
       | _ => pure t
     else pure t
   | _ => pure t
@@ -1144,15 +1161,39 @@ arguments: `Ty.head`, but a tuple of one or more that has none of the
 trait for its length is its first and the tuple of the rest
 (`Traits.consHead`), where the trait has one for `(H, ..R)`. -/
 def headFor (trait : String) (t : Ty) : M (Option (String × List Ty)) := do
+  let base := Syntax.traitBase trait
+  let s ← get
+  let none_ := fun (h : String) => (s.implsByHead.getD (base, h) #[]).isEmpty
   match t with
   | .tuple (first :: rest) =>
-    let base := Syntax.traitBase trait
-    let s ← get
-    if (s.implsByHead.getD (base, s!"(tuple{rest.length + 1})") #[]).isEmpty
-        && !(s.implsByHead.getD (base, Traits.consHead) #[]).isEmpty then
+    if none_ s!"(tuple{rest.length + 1})" && !none_ Traits.consHead then
       pure (some (Traits.consHead, [first, .tuple rest]))
     else pure t.head
+  -- (A function, where the trait has one for every number of arguments.)
+  | .fn ps r _ _ _ =>
+    if none_ s!"(fn{ps.length})" && !none_ Traits.fnHead then
+      pure (some (Traits.fnHead, [.tuple ps, r]))
+    else pure t.head
   | _ => pure t.head
+
+/-- A type written with a list of a tuple's types beside one written out:
+the parts to match pairwise. `(H, ..R)` (`Syntax.consHead`) and a tuple of
+one or more, `H` with its first and `R` with the rest; `(..G, X)`
+(`Syntax.snocHead`), `G` with all but its last; `fn(..P) -> R`
+(`Syntax.spreadParams`) and a function, `P` with the tuple of what it is
+given. Either way round. -/
+def Ty.listView (a b : Ty) : Option (List Ty × List Ty) :=
+  let one := fun (a b : Ty) => match a, b with
+    | .con n [h, r], .tuple (x :: xs) =>
+      if n == Syntax.consHead then some ([h, r], [x, .tuple xs])
+      else if n == Syntax.snocHead then some ([h, r], [.tuple (x :: xs).dropLast, (x :: xs).getLast (by simp)])
+      else none
+    | .fn [.con n [p]] r _ _ _, .fn qs s _ _ _ =>
+      if n == Syntax.spreadParams then some ([p, r], [.tuple qs, s]) else none
+    | _, _ => none
+  match one a b with
+  | some v => some v
+  | none => (one b a).map fun (x, y) => (y, x)
 
 mutual
 
@@ -1162,6 +1203,9 @@ variable, in either, is only itself. What each variable is, is added to
 `found`. -/
 partial def Ty.fits (vars : List Nat) (pattern term : Ty) (found : List (Nat × Ty)) :
     Option (List (Nat × Ty)) :=
+  match Ty.listView pattern term with
+  | some (ps, ts) => Ty.fitsAll vars ps ts found
+  | none =>
   match pattern, term with
   | .var v, t =>
     if vars.contains v then
@@ -1200,6 +1244,9 @@ partial def Ty.meets (a b : Ty) (found : List (Nat × Ty)) : Option (List (Nat �
       | some u => walk u fuel
       | none => t
     | _, t => t
+  match Ty.listView (walk a 64) (walk b 64) with
+  | some (xs, ys) => Ty.meetAll xs ys found
+  | none =>
   match walk a 64, walk b 64 with
   | .var v, .var w => if v == w then some found else some ((v, .var w) :: found)
   | .var v, t => some ((v, t) :: found)
@@ -1249,6 +1296,9 @@ partial def Ty.openRigids (named : List (String × Ty)) : Ty → Ty
 type is, and whatever a function's own type parameters in it are? Yes
 unless the two are made with different names somewhere. -/
 partial def Ty.mayFit (pattern term : Ty) : Bool :=
+  match Ty.listView pattern term with
+  | some (ps, ts) => ps.length == ts.length && (ps.zip ts).all fun (x, y) => x.mayFit y
+  | none =>
   match pattern, term with
   | .var _, _ => true
   | _, .var _ => true

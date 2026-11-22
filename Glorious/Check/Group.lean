@@ -91,7 +91,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
     let (defs', reused') ← onError (do
         let mut defs := defs
         let mut reused := reused
-        modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [] }
+        modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [], assocMemo := {} }
         -- The function's own type parameters stand for themselves while it is
         -- checked, and so do its lifetimes: each is no other.
         let mut rigid : List (String × Ty) := []
@@ -385,6 +385,11 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
             -- A tuple is the tuple of its parts; any other is made with its name.
             let parts := im.params.filterMap fun p => rigid.lookup p
             let self ← if im.head.startsWith "(tuple" then pure (Ty.tuple parts)
+              -- (A function of as many arguments as a tuple has.)
+              else if im.head == Traits.fnHead then
+                match parts with
+                | [ps, r] => do pure (Ty.fn [.con Syntax.spreadParams [ps]] r [] none (← freshCap))
+                | _ => pure (Ty.con im.head parts)
               -- (A function that performs nothing; a reference with a
               -- lifetime of its own.)
               else if im.head.startsWith "(fn" then

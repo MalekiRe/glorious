@@ -6238,35 +6238,64 @@ one bridge from the flat tuple through `std::tuple::Tuple`.
 
 ## Variadic implementations checked once
 
-**Decision: a variadic implementation whose lists are only ever the rest of
-a tuple, `(H, ..R)` and `(..R)`, is one implementation for every length:
-`R` is a type parameter that stands for a tuple, `(H, ..R)` the type
-`%Cons<H, R>` (`Syntax.consHead`), and `(..R)` is `R`.** It is parsed,
-declared and checked once (`Syntax.expandPacks.consOnly` writes it so on
-tokens), and its dictionaries are made of each other one level at a time,
-as any implementation's conditions are: `Item` at `(A, B, C)` is the one
-for `%Cons` with `H = A` and `R = (B, C)`, whose condition `(..R): Item` is
-met by it again, down to the one for `()`.
+**Decision: a variadic implementation's lists of types are each a tuple,
+read as one type parameter: `(H, ..R)` is `%Cons<H, R>` (`Syntax.consHead`),
+`(..G, X)` is `%Snoc<G, X>` (`snocHead`), `(..R)` is `R`, and a callable of
+as many arguments as `P` has, `fn(..P) -> O` or `F: Fn<(..P)>`, takes
+`%Spread<P>` (`spreadParams`). Such an implementation is parsed, declared and
+checked once, and its dictionaries are made of each other one level at a
+time, as any implementation's conditions are. What needs code for each
+length, values spread or a callable called with a tuple's parts, is
+`std::tuple`'s, written for each length to sixteen once in the library
+(`Push`, `Prepend`, `SplitFirst`, `Apply`, `ApplyWaiting`).**
 
-- **Types.** `%Cons<H, R>` with `R` a tuple is that tuple with `H` first
-  (`find`, `resolveType`); it unifies with a tuple of one or more, `H` with
-  the first and `R` with the tuple of the rest (`unify`, `apart`).
-- **Finding implementations.** A tuple of one or more that has no
-  implementation of the trait for its length has the trait's one for
-  `%Cons`, its first and the rest its arguments (`Traits.consView`; in the
-  checker `headFor`). The proved solver says so (`Entails.cons`), and a
-  bound is still met in at most one way (`coherent`) where no trait has
-  one for `%Cons` beside one for a tuple of one or more
-  (`NoConsOverlap`, checked by `noConsOverlap`; an implementation for every
-  type leaves those tuples to the one for `%Cons`, `expandBlankets`).
-- **What is still written out per length**, up to the longest list, as
-  before: an implementation that spreads a list anywhere else, a list of
-  values (`let (..t) = bundle`, `(h, ..r)`, `(..f(t))`), a list in a
-  callable's arguments (`Fn<(..P)>`, `(*f)(..p)`), a list's elements
-  (`..R::Got<'a>`, `(..Option<T>)`), a condition for each element (`..S:
-  Get<T>`), or a list not last (`(..G, X)`). Those need code for each
-  length; the step after is the specializer writing them out at the lengths
-  the program's uses have.
+- **Syntax.** The parser reads the spreads of types (`parseType`, the
+  arguments of `fn(..)` and of `Fn<(..)>`); `Syntax.expandPacks.consOnly`
+  takes `..` off the parameters of an implementation whose lists are only
+  those.
+- **Types.** `%Cons<H, R>` with `R` a tuple is that tuple with `H` first;
+  `%Snoc<G, X>` with `G` a tuple, `G`'s parts and `X`; `fn(%Spread<P>)` with
+  `P` a tuple, a function of its parts (`find`, `resolveType`). They unify
+  with tuples and functions written out (`unify`, `apart`), and the
+  matching of implementations' heads sees them so too (`Ty.listView` in
+  `fits`, `meets`, `mayFit`).
+- **Finding implementations.** A tuple of one or more with no
+  implementation of a trait for its length has the trait's one for
+  `%Cons`, its first and the rest its arguments; a function with none for
+  its number of arguments, the trait's one for `fn(..P) -> O`
+  (`Traits.fnHead`), the tuple of what it is given and what it gives
+  (`Traits.consView`; in the checker `headFor`). The proved solver says so
+  (`Entails.cons`), and a bound is met in at most one way (`coherent`)
+  where no trait has one of those beside one for a tuple or a function of
+  one length (`NoConsOverlap`, checked by `noConsOverlap`; axioms as the
+  audit pins them). An implementation for every type leaves those to them
+  (`expandBlankets`).
+- **What the checker does for them.** A condition said of a type made of
+  the implementation's own parameters, `(H, ..R): PutEach<S>`, is met so
+  before the implementation for its head (`implKey`). What an
+  implementation's conditions say its own parameters are, `H:
+  Parameter<Asks = HA>`, is asked where what it leaves is settled
+  (`equalUses`), and a question about a type not all known waits for it
+  (`settleAssocs`). An answer about a type all known is kept for the
+  function's check (`St.assocMemo`): a list of sixteen's each made of the
+  rest's asked again at every level was exponential (twelve: 35 s; now 2 s).
+- **covey's ecs** says what was per element with recursion: what a
+  function's parameters ask (`Parameters`, for `..P: Parameter<Asks = A>`),
+  a bundle put member by member (`PutEach`, `HadOf`; `Itself` names the
+  whole bundle as a type parameter), what is gathered for a system pushed
+  (`std::tuple::Push`) and the function called with it (`Apply`,
+  `ApplyWaiting`).
+
+Measured cold (one target directory each): covey/sixteen 23.5 s -> 4.5 s,
+covey/states2 5.74 s -> 4.04 s. Every covey program and example the same
+output as before.
+
+Still written out for each length up to the longest list: `Item` and
+`Fill` for tuples, whose items are borrowed for a lifetime of `item_at`'s
+own (`Got<'a>`): a tuple made of the first's and the rest's needs
+`Prepend` of `Got<'a>` at every `'a`, which a condition cannot say yet; and
+an implementation of a test program that spreads a list of values or asks
+of each element.
 
 ## A graph's nodes on threads of their own: where it is
 

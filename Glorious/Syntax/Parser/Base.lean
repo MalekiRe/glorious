@@ -488,7 +488,14 @@ partial def parseType : P TypeExpr := do
   | .ident "fn" =>
     advance
     expectPunct "("
-    let params ← parseTypeList ")"
+    -- `fn(..P) -> R`: as many arguments as the tuple `P` has.
+    let params ← if (← peek) == .punct "." && (← peek 1) == .punct "." then do
+        advance
+        advance
+        let whole ← parseType
+        expectPunct ")"
+        pure [TypeExpr.name spreadParams [whole]]
+      else parseTypeList ")"
     let ret ← if ← acceptPunct "->" then parseResult else pure (.tuple [])
     pure (.fn params ret)
   | .ident x =>
@@ -512,10 +519,34 @@ partial def parseType : P TypeExpr := do
     pure (numberType n)
   | .punct "(" =>
     advance
-    let args ← parseTypeList ")"
-    match args with
+    -- (`..T` among them: the parts of the tuple `T`, first or last.)
+    let mut spread : Option (Nat × TypeExpr) := none
+    let mut parts : Array TypeExpr := #[]
+    repeat
+      if (← peek) == .punct ")" then break
+      if (← peek) == .punct "." && (← peek 1) == .punct "." then
+        advance
+        advance
+        if spread.isSome then failAt "a tuple type spreads one list: `(H, ..R)` or `(..G, X)`"
+        spread := some (parts.size, ← parseType)
+      else
+        if let (.ident _, .punct ":") := (← peek, ← peek 1) then
+          advance
+          advance
+        parts := parts.push (← parseType)
+      if !(← acceptPunct ",") then break
+    expectPunct ")"
+    match spread with
+    | some (at_, rest) =>
+      if at_ == parts.size then
+        pure (parts.foldr (fun p acc => TypeExpr.name consHead [p, acc]) rest)
+      else if at_ == 0 then
+        pure (parts.foldl (fun acc p => TypeExpr.name snocHead [acc, p]) rest)
+      else failAt "a tuple type spreads its list first or last: `(H, ..R)` or `(..G, X)`"
+    | none =>
+    match parts.toList with
     | [t] => if ← closedAfterComma then pure (.tuple [t]) else pure t
-    | _ => pure (.tuple args)
+    | args => pure (.tuple args)
   | .punct "[" =>
     -- `[T]`: an array of `T`.
     advance
@@ -656,6 +687,14 @@ partial def parsePack : P (List TypeExpr) := do
   let mut comma := false
   repeat
     if (← peek) == .punct ")" then break
+    -- `Fn<(..P)>`: as many as the tuple `P` has.
+    if (← peek) == .punct "." && (← peek 1) == .punct "." then
+      advance
+      advance
+      out := out.push (.name spreadParams [← parseType])
+      comma := true
+      let _ ← acceptPunct ","
+      break
     out := out.push (← parseType)
     comma := ← acceptPunct ","
     if !comma then break

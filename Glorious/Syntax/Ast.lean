@@ -456,6 +456,14 @@ def packCopyName : String := "%pack"
 rest, `(H, ..R)` (`Traits.consHead`, the same name). -/
 def consHead : String := "%Cons"
 
+/-- The type a tuple of one or more is as the tuple of all but its last and
+its last, `(..G, X)`. -/
+def snocHead : String := "%Snoc"
+
+/-- `..P` as a callable's arguments, `Fn<(..P)>`: as many as the tuple `P`
+has, of its types. -/
+def spreadParams : String := "%Spread"
+
 /-- The type parameter a name made by `blanketName` is for. -/
 def blanketParam (name : String) : Option String :=
   if name.startsWith "%blanket:" then some (name.drop 9).toString else none

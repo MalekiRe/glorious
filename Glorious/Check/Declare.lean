@@ -158,6 +158,17 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         | [first, .tuple rest] => pure (.tuple (first :: rest))
         | [first, rest] => pure (.con x [first, rest])
         | _ => throw "a tuple's rest is written last: `(H, ..R)`"
+      else if x == Syntax.snocHead then
+        -- (All but a tuple's last, and its last, `(..G, X)`.)
+        match ← args.mapM (resolveType params decl) with
+        | [.tuple init, last] => pure (.tuple (init ++ [last]))
+        | [init, last] => pure (.con x [init, last])
+        | _ => throw "a tuple's list is written first: `(..G, X)`"
+      else if x == Syntax.spreadParams then
+        -- (A callable's arguments as many as a tuple has, `Fn<(..P)>`.)
+        match ← args.mapM (resolveType params decl) with
+        | [t] => pure (.con x [t])
+        | _ => throw "`..` before one tuple: `Fn<(..P)>`"
       else if Syntax.isScalar x then
         if args.isEmpty then pure (.con x []) else throw s!"`{x}` takes no arguments"
       else
@@ -527,7 +538,7 @@ def declareTraits (items : List Item) : M Unit := do
         | none => throw s!"{what}: unknown trait `{base}`"
       let arity ← if head == "Int" || Syntax.isScalar head then pure 0
         else if head.startsWith "(tuple" then pure args.length
-        else if head == Syntax.consHead then pure 2
+        else if head == Syntax.consHead || head == Traits.fnHead then pure 2
         -- (A function's, with what it gives after what it is given; a
         -- reference's, with what it is to.)
         else if head.startsWith "(fn" then pure args.length
@@ -812,9 +823,8 @@ def declareTraits (items : List Item) : M Unit := do
     throw "two implementations are for the same trait and type"
   unless Traits.noConsOverlap (← get).kimpls.impls.toList do
     let impls := (← get).kimpls.impls.toList
-    let tr := ((impls.find? fun J => J.head == Traits.consHead
-      && impls.any fun I => I.trait == J.trait && Traits.isConsable I).map (·.trait)).getD ""
-    throw s!"`{bareName tr}` is implemented for `(H, ..R)` and for a tuple of a length: a tuple of one or more has one implementation"
+    let tr := ((impls.find? fun J => impls.any fun I => Traits.overlapsView I J).map (·.trait)).getD ""
+    throw s!"`{bareName tr}` is implemented for every length, `(H, ..R)` or `fn(..P) -> R`, and for a tuple or a function of one length: each has one implementation"
   -- A type that has a trait has the traits that one needs, on no more
   -- conditions than it has the first.
   let kimpls := (← get).kimpls

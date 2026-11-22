@@ -50,11 +50,27 @@ def consHead : String := "%Cons"
 /-- The head of a tuple of `n`. -/
 def tupleHead (n : Nat) : String := s!"(tuple{n})"
 
-/-- A tuple of one or more as its first and the tuple of the rest. -/
-def consView : String → List STy → Option (List STy)
+/-- The head a function of any number of arguments has, as the tuple of
+what it is given and what it gives: what an implementation for `fn(..P) -> R`
+is for. -/
+def fnHead : String := "%Fn"
+
+/-- The head of a function of `n` arguments (its arguments `n` and its
+result). -/
+def fnArityHead (n : Nat) : String := s!"(fn{n})"
+
+/-- A type as an implementation for every length sees it, with that head:
+a tuple of one or more as its first and the tuple of the rest
+(`consHead`); a function as the tuple of what it is given and what it
+gives (`fnHead`). -/
+def consView : String → List STy → Option (String × List STy)
   | _, [] => none
   | head, a :: rest =>
-    if head = tupleHead (rest.length + 1) then some [a, .con (tupleHead rest.length) rest] else none
+    if head = tupleHead (rest.length + 1) then some (consHead, [a, .con (tupleHead rest.length) rest])
+    else if head = fnArityHead rest.length then
+      let all := a :: rest
+      some (fnHead, [.con (tupleHead rest.length) all.dropLast, all.getLast (by simp)])
+    else none
 
 /-- How a bound is met: by an implementation, given how each of its conditions
 is met, or by something the function being checked assumes. -/
@@ -76,11 +92,11 @@ inductive Entails (impls : List Impl) (givens : Givens) : String → STy → Dic
       impls[i]? = some I → I.trait = tr → I.head = head → I.arity = args.length →
       EntailsAll impls givens I.context args subs →
       Entails impls givens tr (.con head args) (.impl i subs)
-  /-- A tuple of one or more by an implementation for its first and the rest
-  (`consView`). -/
+  /-- A tuple of one or more by an implementation for its first and the
+  rest, a function by one for every number of arguments (`consView`). -/
   | cons {i : Nat} {I : Impl} {tr head : String} {args args' : List STy} {subs : List Dict} :
-      impls[i]? = some I → I.trait = tr → I.head = consHead → I.arity = 2 →
-      consView head args = some args' →
+      impls[i]? = some I → I.trait = tr → I.arity = 2 →
+      consView head args = some (I.head, args') →
       EntailsAll impls givens I.context args' subs →
       Entails impls givens tr (.con head args) (.impl i subs)
 
@@ -170,8 +186,8 @@ def solveBy (find : String → String → Nat → Option (Nat × Impl)) (givens 
     | none =>
       match consView head args with
       | none => none
-      | some args' =>
-        match find tr consHead 2 with
+      | some (head', args') =>
+        match find tr head' 2 with
         | none => none
         | some (i, I) => (collect (solveBy find givens fuel) args' I.context).map (.impl i)
 
@@ -230,7 +246,7 @@ theorem solveBy_sound {impls : List Impl} {givens : Givens}
           (collect_sound (fun _ _ _ hd => solveBy_sound hf fuel hd) hc)
     · split at h
       · cases h
-      · rename_i args' hview
+      · rename_i head' args' hview
         split at h
         · cases h
         · rename_i i I hfind
@@ -240,7 +256,7 @@ theorem solveBy_sound {impls : List Impl} {givens : Givens}
           | some ds =>
             simp [hc] at h
             subst h
-            exact .cons hi htr hhead harity hview
+            exact .cons hi htr harity (by rw [hhead]; exact hview)
               (collect_sound (fun _ _ _ hd => solveBy_sound hf fuel hd) hc)
 
 /-- **What is found is evidence.** -/
@@ -321,23 +337,32 @@ def NoOverlap (impls : List Impl) : Prop :=
 for its first and the rest: a tuple is met by one or the other. -/
 def NoConsOverlap (impls : List Impl) : Prop :=
   ∀ (i j : Nat) (I J : Impl), impls[i]? = some I → impls[j]? = some J → I.trait = J.trait →
-    J.head = consHead → I.head = tupleHead I.arity → 0 < I.arity → False
+    0 < I.arity →
+    (J.head = consHead ∧ I.head = tupleHead I.arity ∨ J.head = fnHead ∧ I.head = fnArityHead (I.arity - 1)) → False
 
 /-- Nothing is assumed twice. -/
 def Distinct (givens : Givens) : Prop :=
   ∀ (k l : Nat) (x : String × Nat), givens[k]? = some x → givens[l]? = some x → k = l
 
-/-- A tuple seen as its first and the rest is a tuple of one or more. -/
-theorem tupleHead_of_view {head : String} {args args' : List STy} (h : consView head args = some args') :
-    head = tupleHead args.length ∧ 0 < args.length := by
+/-- A type seen as an implementation for every length sees it has a head of
+a tuple or a function of so many. -/
+theorem head_of_view {head head' : String} {args args' : List STy}
+    (h : consView head args = some (head', args')) :
+    0 < args.length ∧ (head' = consHead ∧ head = tupleHead args.length
+      ∨ head' = fnHead ∧ head = fnArityHead (args.length - 1)) := by
   cases args with
   | nil => simp [consView] at h
   | cons a rest =>
     simp only [consView] at h
     split at h
     · rename_i heq
-      exact ⟨by simpa using heq, by simp⟩
-    · cases h
+      simp only [Option.some.injEq, Prod.mk.injEq] at h
+      exact ⟨by simp, .inl ⟨h.1.symm, by simpa using heq⟩⟩
+    · split at h
+      · rename_i _ heq
+        simp only [Option.some.injEq, Prod.mk.injEq] at h
+        exact ⟨by simp, .inr ⟨h.1.symm, by simpa using heq⟩⟩
+      · cases h
 
 mutual
 
@@ -356,18 +381,21 @@ theorem coherent {impls : List Impl} {givens : Givens} (hn : NoOverlap impls)
       rw [hi] at hj
       cases hj
       rw [coherentAll hn hc hg hall hall']
-    | cons hj ht' hh' _ hview _ =>
-      obtain ⟨hv, hl⟩ := tupleHead_of_view hview
-      exact (hc _ _ _ _ hi hj (ht.trans ht'.symm) hh' (by rw [hh, ha]; exact hv) (by rw [ha]; exact hl)).elim
-  | _, _, _, _, .cons hi ht hh ha hview hall, h' => by
+    | cons hj ht' _ hview _ =>
+      obtain ⟨hl, hv⟩ := head_of_view hview
+      exact (hc _ _ _ _ hi hj (ht.trans ht'.symm) (by rw [ha]; exact hl)
+        (by rw [hh, ha]; exact hv)).elim
+  | _, _, _, _, .cons hi ht ha hview hall, h' => by
     cases h' with
     | impl hj ht' hh' ha' _ =>
-      obtain ⟨hv, hl⟩ := tupleHead_of_view hview
-      exact (hc _ _ _ _ hj hi (ht'.trans ht.symm) hh (by rw [hh', ha']; exact hv) (by rw [ha']; exact hl)).elim
-    | cons hj ht' hh' ha' hview' hall' =>
+      obtain ⟨hl, hv⟩ := head_of_view hview
+      exact (hc _ _ _ _ hj hi (ht'.trans ht.symm) (by rw [ha']; exact hl)
+        (by rw [hh', ha']; exact hv)).elim
+    | cons hj ht' ha' hview' hall' =>
       rw [hview] at hview'
-      cases hview'
-      have e := hn _ _ _ _ hi hj (ht.trans ht'.symm) (hh.trans hh'.symm) (ha.trans ha'.symm)
+      simp only [Option.some.injEq, Prod.mk.injEq] at hview'
+      obtain ⟨hh, rfl⟩ := hview'
+      have e := hn _ _ _ _ hi hj (ht.trans ht'.symm) hh (ha.trans ha'.symm)
       subst e
       rw [hi] at hj
       cases hj
@@ -430,25 +458,30 @@ theorem noOverlap_sound : ∀ {impls : List Impl}, noOverlap impls = true → No
         have := ih i j I J (by simpa using hi) (by simpa using hj) ht hh ha
         rw [this]
 
-/-- An implementation for a tuple of one or more? -/
-def isConsable (I : Impl) : Bool := decide (0 < I.arity) && decide (I.head = tupleHead I.arity)
+/-- An implementation for a tuple of one or more, or a function, that one
+for every length (`J`) would be for too? -/
+def overlapsView (I J : Impl) : Bool :=
+  decide (I.trait = J.trait) && decide (0 < I.arity) &&
+    (decide (J.head = consHead) && decide (I.head = tupleHead I.arity)
+      || decide (J.head = fnHead) && decide (I.head = fnArityHead (I.arity - 1)))
 
 /-- Has no trait an implementation for a tuple of one or more beside one for
-its first and the rest? -/
+its first and the rest, nor for a function of some number of arguments
+beside one for every number? -/
 def noConsOverlap (impls : List Impl) : Bool :=
-  impls.all fun J => !decide (J.head = consHead) || impls.all fun I => !(decide (I.trait = J.trait) && isConsable I)
+  impls.all fun J => impls.all fun I => !overlapsView I J
 
 theorem noConsOverlap_sound {impls : List Impl} (h : noConsOverlap impls = true) : NoConsOverlap impls := by
-  intro i j I J hi hj ht hJ hI hl
+  intro i j I J hi hj ht hl hv
   simp only [noConsOverlap, List.all_eq_true] at h
-  have hJ' := h J (List.mem_of_getElem? hj)
-  rw [decide_eq_true hJ, Bool.not_true, Bool.false_or, List.all_eq_true] at hJ'
-  have hI' := hJ' I (List.mem_of_getElem? hi)
-  have hc : isConsable I = true := by
-    unfold isConsable
-    rw [decide_eq_true hl, decide_eq_true hI]
-    rfl
-  rw [decide_eq_true ht, hc] at hI'
+  have hI' := h J (List.mem_of_getElem? hj) I (List.mem_of_getElem? hi)
+  have hc : overlapsView I J = true := by
+    unfold overlapsView
+    rw [decide_eq_true ht, decide_eq_true hl]
+    rcases hv with ⟨h1, h2⟩ | ⟨h1, h2⟩
+    · rw [decide_eq_true h1, decide_eq_true h2]; rfl
+    · rw [decide_eq_true h1, decide_eq_true h2]; simp
+  rw [hc] at hI'
   cases hI'
 
 /-- Is nothing assumed twice? -/
