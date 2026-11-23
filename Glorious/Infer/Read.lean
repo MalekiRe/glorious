@@ -393,16 +393,8 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
       sig := ← renSig (copyRen sch) m.sig
       hints := ← m.hints.mapM fun hs => hs.mapM (renHint (copyRen sch))
       refs := ← m.refs.mapM fun (g, s) => do pure (g, ← renSig (copyRen sch) s) }
-  let incls ← sch.incls.mapM (renIncl (copyRen sch))
-  let places ← sch.places.mapM (renPlace (copyRen sch))
-  let coerces ← sch.coerces.mapM fun (r, b, w) => do pure (← renTy (copyRen sch) r, ← renTy (copyRen sch) b, w)
-  let nevers ← sch.nevers.mapM (renTy (copyRen sch))
-  let onces ← sch.onces.mapM (renOnce (copyRen sch))
-  let shows ← sch.shows.mapM (renShow (copyRen sch))
-  let opens ← sch.opens.mapM fun (template, opened, chosen) => do
-    pure (← renTy (copyRen sch) template, ← renTy (copyRen sch) opened, ← chosen.mapM fun (bound, actual) => do
-      pure (← copyRg sch bound, ← copyRg sch actual))
-  let calls ← sch.calls.mapM (renCall (copyRen sch))
+  let (incls, places, coerces, nevers, onces, shows, opens, calls) ←
+    copyAsks sch sch.incls sch.places sch.coerces sch.nevers sch.onces sch.shows
   modify fun s =>
     { s with
       incls := incls, places := places, coerces := coerces, nevers := nevers, onces := onces

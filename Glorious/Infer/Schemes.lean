@@ -254,6 +254,23 @@ def copyRen (sch : Scheme) : Ren M :=
     rg := copyRg sch
     acc := copyAcc sch }
 
+/-- What a group asks besides its functions' types, named for a use
+(`copyRen`): the inclusions, places, coercions, nevers, onces and shows
+given (the whole group's, or what it exports), and its openings and calls. -/
+def copyAsks (sch : Scheme) (incls : Array Incl) (places : Array (ITy × Nat × ITy))
+    (coerces : Array (ITy × ITy × Bool)) (nevers : Array ITy) (onces : Array (ICls × List ITy))
+    (shows : Array (ITy × List ITy)) :
+    M (Array Incl × Array (ITy × Nat × ITy) × Array (ITy × ITy × Bool) × Array ITy × Array (ICls × List ITy)
+      × Array (ITy × List ITy) × Array (ITy × ITy × List (Nat × Nat)) × Array Call) := do
+  let r := copyRen sch
+  pure (← incls.mapM (renIncl r), ← places.mapM (renPlace r),
+    ← coerces.mapM (fun (a, b, w) => do pure (← renTy r a, ← renTy r b, w)), ← nevers.mapM (renTy r),
+    ← onces.mapM (renOnce r), ← shows.mapM (renShow r),
+    ← sch.opens.mapM (fun (template, opened, chosen) => do
+      pure (← renTy r template, ← renTy r opened, ← chosen.mapM fun (bound, actual) => do
+        pure (← copyRg sch bound, ← copyRg sch actual))),
+    ← sch.calls.mapM (renCall r))
+
 def startCopy : M Unit :=
   modify fun s => { s with renTy := {}, renRow := {}, renCls := {}, renRg := {}, renAcc := {} }
 

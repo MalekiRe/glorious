@@ -425,17 +425,8 @@ partial def refSig (fn : Nat) : M ISig := do
     | some m =>
       startCopy
       let sig ← renSig (copyRen sch) m.sig
-      let incls ← sch.exported.mapM (renIncl (copyRen sch))
-      let places ← sch.exportedPlaces.mapM (renPlace (copyRen sch))
-      let coerces ← sch.exportedCoerces.mapM fun (r, b, w) => do
-        pure (← renTy (copyRen sch) r, ← renTy (copyRen sch) b, w)
-      let nevers ← sch.exportedNevers.mapM (renTy (copyRen sch))
-      let onces ← sch.exportedOnces.mapM (renOnce (copyRen sch))
-      let shows ← sch.exportedShows.mapM (renShow (copyRen sch))
-      let opens ← sch.opens.mapM fun (template, opened, chosen) => do
-        pure (← renTy (copyRen sch) template, ← renTy (copyRen sch) opened, ← chosen.mapM fun (bound, actual) => do
-          pure (← copyRg sch bound, ← copyRg sch actual))
-      let calls ← sch.calls.mapM (renCall (copyRen sch))
+      let (incls, places, coerces, nevers, onces, shows, opens, calls) ← copyAsks sch sch.exported
+        sch.exportedPlaces sch.exportedCoerces sch.exportedNevers sch.exportedOnces sch.exportedShows
       let open_ ← sch.givenUpOpen.mapM fun (kt, amb, self) => do
         pure (← renTy (copyRen sch) kt, ← renRow (copyRen sch) amb, ← copyAcc sch self, true)
       modify fun s => { s with opens := s.opens ++ opens, calls := s.calls ++ calls
