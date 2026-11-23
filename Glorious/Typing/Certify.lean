@@ -99,17 +99,16 @@ theorem checkProgram_sound {p : Program} (h : checkProgram C p = true) : Program
     exact ⟨dropSig e.sig, ⟨e', he', hfn, hsig'⟩, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
   obtain ⟨e, he, rfl, rfl⟩ := hsig
   have hfn := List.all_eq_true.mp hfns e he
-  split at hfn
-  · rename_i F hF
-    simp only [checkFn, Bool.and_eq_true] at hfn
-    obtain ⟨⟨hwf, hclauses⟩, hcovers⟩ := hfn
-    have htyped := checkClauses_sound hclauses
-    refine ⟨hwf, F, hF, htyped, fun S vs θ hv => ?_⟩
-    refine select_of_match (fun c hc => ?_) (covers_sound _ hcovers θ hv)
-    obtain ⟨⟨Bs, hpats, _⟩, _⟩ := htyped c hc
-    rw [hpats.length_eq, hv.length_eq]
-    simp
-  · simp at hfn
+  split at hfn <;> try (simp at hfn; done)
+  rename_i F hF
+  simp only [checkFn, Bool.and_eq_true] at hfn
+  obtain ⟨⟨hwf, hclauses⟩, hcovers⟩ := hfn
+  have htyped := checkClauses_sound hclauses
+  refine ⟨hwf, F, hF, htyped, fun S vs θ hv => ?_⟩
+  refine select_of_match (fun c hc => ?_) (covers_sound _ hcovers θ hv)
+  obtain ⟨⟨Bs, hpats, _⟩, _⟩ := htyped c hc
+  rw [hpats.length_eq, hv.length_eq]
+  simp
 
 /-! ## Ownership -/
 
@@ -135,14 +134,12 @@ theorem data_fields_dup (hd : dataOk C = true) {name tag : Nat} {args Fs : List 
     rename_i hname
     simp only [hname, ↓reduceIte] at hdup
     unfold arrayFields at hF
-    split at hF
-    · split at hF
-      · cases hF
-        intro c hc
-        rw [List.eq_of_mem_replicate hc]
-        simpa [dupTys] using hdup
-      · cases hF
-    · cases hF
+    split at hF <;> try (cases hF; done)
+    split at hF <;> try (cases hF; done)
+    cases hF
+    intro c hc
+    rw [List.eq_of_mem_replicate hc]
+    simpa [dupTys] using hdup
   rename_i hname
   simp only [hname, ↓reduceIte] at hdup
   simp only [dataDup, findData] at hdup hF

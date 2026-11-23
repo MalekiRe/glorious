@@ -413,9 +413,8 @@ theorem prim_int {p : Prim} {m n : Int} {v : Value} (h : p.eval [.int m, .int n]
   have ok : ∀ {k : Int}, checked k = some v → ∃ k, v = .int k := by
     intro k hk
     simp only [checked] at hk
-    split at hk
-    · cases hk; exact ⟨_, rfl⟩
-    · cases hk
+    split at hk <;> try (cases hk; done)
+    cases hk; exact ⟨_, rfl⟩
   have opt : ∀ {o : Option Int}, checkedOpt o = some v → ∃ k, v = .int k := by
     intro o ho
     cases o with
@@ -424,9 +423,8 @@ theorem prim_int {p : Prim} {m n : Int} {v : Value} (h : p.eval [.int m, .int n]
   have wide : ∀ {k : Int}, checkedWide k = some v → ∃ k, v = .int k := by
     intro k hk
     simp only [checkedWide] at hk
-    split at hk
-    · cases hk; exact ⟨_, rfl⟩
-    · cases hk
+    split at hk <;> try (cases hk; done)
+    cases hk; exact ⟨_, rfl⟩
   have uns : ∀ {k : Nat}, ofUnsigned k = some v → ∃ k, v = .int k := by
     intro k hk
     simp only [ofUnsigned] at hk
@@ -477,12 +475,11 @@ theorem rhs_ok {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {τ : Ty}
     cases hvat with
     | data hc hf =>
       simp only [Prim.eval] at hp
-      split at hp
-      · obtain ⟨σ, hσ, hwt⟩ := HasVals.get' hf hp
-        have e := hu _ _ hc σ (List.mem_of_getElem? hσ)
-        subst e
-        exact hwt
-      · cases hp
+      split at hp <;> try (cases hp; done)
+      obtain ⟨σ, hσ, hwt⟩ := HasVals.get' hf hp
+      have e := hu _ _ hc σ (List.mem_of_getElem? hσ)
+      subst e
+      exact hwt
     | _ => simp [Prim.eval] at hp
   | @arrSet a i x T τ ha hi hx hu hd =>
     obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
@@ -495,10 +492,9 @@ theorem rhs_ok {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {τ : Ty}
     cases hvat with
     | data hc hf =>
       simp only [Prim.eval] at hp
-      split at hp
-      · cases hp
-        exact .data hc (HasVals.set_uniform hvxt _ hf (hu _ _ hc))
-      · cases hp
+      split at hp <;> try (cases hp; done)
+      cases hp
+      exact .data hc (HasVals.set_uniform hvxt _ hf (hu _ _ hc))
     | _ => simp [Prim.eval] at hp
   | @arrLen a b T σ ha hb =>
     obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
@@ -530,18 +526,17 @@ theorem rhs_ok {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {τ : Ty}
     cases hvat with
     | @data tag fields _ Fs hc hf =>
       simp only [Prim.eval] at hp
-      split at hp
-      · rename_i last hlast
-        cases hp
-        rw [List.getLast?_eq_getElem?] at hlast
-        obtain ⟨σ', hσ', hlt⟩ := HasVals.get' hf hlast
-        have e := hu _ _ hc σ' (List.mem_of_getElem? hσ')
-        subst e
-        have hne : Fs ≠ [] := fun e => by
-          rw [e] at hσ'
-          simp at hσ'
-        exact .data (.inl ⟨rfl, rfl⟩) (.cons (.data (hs _ _ hc hne) hf.dropLast) (.cons hlt .nil))
-      · cases hp
+      split at hp <;> try (cases hp; done)
+      rename_i last hlast
+      cases hp
+      rw [List.getLast?_eq_getElem?] at hlast
+      obtain ⟨σ', hσ', hlt⟩ := HasVals.get' hf hlast
+      have e := hu _ _ hc σ' (List.mem_of_getElem? hσ')
+      subst e
+      have hne : Fs ≠ [] := fun e => by
+        rw [e] at hσ'
+        simp at hσ'
+      exact .data (.inl ⟨rfl, rfl⟩) (.cons (.data (hs _ _ hc hne) hf.dropLast) (.cons hlt .nil))
     | _ => simp [Prim.eval] at hp
   | @prim p a b ha hb =>
     obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
@@ -666,11 +661,10 @@ theorem PatsOk.binds {S : StoreTy} :
     exact .nil
   | _, _, _, .cons hp hps, _, _, .cons hv hvs, hm => by
     simp only [Pat.matchVals] at hm
-    split at hm
-    · rename_i b bs' hb hbs
-      cases hm
-      exact (PatOk.binds hp hv hb).append (PatsOk.binds hps hvs hbs)
-    · cases hm
+    split at hm <;> try (cases hm; done)
+    rename_i b bs' hb hbs
+    cases hm
+    exact (PatOk.binds hp hv hb).append (PatsOk.binds hps hvs hbs)
 
 end
 

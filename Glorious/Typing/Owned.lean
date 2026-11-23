@@ -326,19 +326,18 @@ theorem occs_evalAtoms (id : Nat) (env : Env) : ∀ (as : List Atom) {vs : List 
     rfl
   | a :: as, vs, h => by
     simp only [evalAtoms] at h
-    split at h
-    · rename_i v vs' hv hvs
-      cases h
-      have ih := occs_evalAtoms id env as hvs
-      cases a with
-      | var i =>
-        have hv' : env[i]? = some v := hv
-        simp [occs, atomVars, sumAt, occAt_eq hv', ih]
-      | int n =>
-        simp only [Atom.eval, Option.some.injEq] at hv
-        subst hv
-        simp [occs, occ, atomVars, ih]
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i v vs' hv hvs
+    cases h
+    have ih := occs_evalAtoms id env as hvs
+    cases a with
+    | var i =>
+      have hv' : env[i]? = some v := hv
+      simp [occs, atomVars, sumAt, occAt_eq hv', ih]
+    | int n =>
+      simp only [Atom.eval, Option.some.injEq] at hv
+      subst hv
+      simp [occs, occ, atomVars, ih]
 
 theorem occ_eval (id : Nat) (env : Env) {a : Atom} {v : Value} (h : a.eval env = some v) :
     occ id v = sumAt id env (atomVars [a]) := by
@@ -434,14 +433,13 @@ theorem matchVals_occ (id : Nat) : ∀ (ps : List Pat) (vs : List Value) {bs : L
     simp [occs]
   | p :: ps, v :: vs, bs, h => by
     simp only [Pat.matchVals] at h
-    split at h
-    · rename_i b bs' hb hbs
-      cases h
-      have h1 := matchVal_occ id p v hb
-      have h2 := matchVals_occ id ps vs hbs
-      simp only [occs_append, occs]
-      omega
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i b bs' hb hbs
+    cases h
+    have h1 := matchVal_occ id p v hb
+    have h2 := matchVals_occ id ps vs hbs
+    simp only [occs_append, occs]
+    omega
   | [], _ :: _, _, h => by simp [Pat.matchVals] at h
   | _ :: _, [], _, h => by simp [Pat.matchVals] at h
 
@@ -473,28 +471,27 @@ theorem matchVals_wild_occ (id : Nat) : ∀ (ps : List Pat) (vs : List Value) {b
     simp [occs, total]
   | p :: ps, v :: vs, bs, h => by
     simp only [Pat.matchVals] at h
-    split at h
-    · rename_i b bs' hb hbs
-      cases h
-      have ih := matchVals_wild_occ id ps vs hbs
-      have hshift : total (fun i => wildOcc id (p :: ps) (v :: vs) (i + 1)) vs.length
-          = total (wildOcc id ps vs) vs.length :=
-        total_congr fun i _ => by simp [wildOcc]
-      rw [List.length_cons, total_succ_front, hshift]
-      have h0 : wildOcc id (p :: ps) (v :: vs) 0 = if isWild p then occ id v else 0 := by
-        simp [wildOcc]
-      rw [h0]
-      cases hq : isWild p with
-      | true =>
-        have e := matchVal_wild hq hb
-        subst e
-        simp only [occs_append, occs, ↓reduceIte]
-        omega
-      | false =>
-        have h1 := matchVal_occ id p v hb
-        simp only [occs_append, occs, Bool.false_eq_true, ↓reduceIte]
-        omega
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i b bs' hb hbs
+    cases h
+    have ih := matchVals_wild_occ id ps vs hbs
+    have hshift : total (fun i => wildOcc id (p :: ps) (v :: vs) (i + 1)) vs.length
+        = total (wildOcc id ps vs) vs.length :=
+      total_congr fun i _ => by simp [wildOcc]
+    rw [List.length_cons, total_succ_front, hshift]
+    have h0 : wildOcc id (p :: ps) (v :: vs) 0 = if isWild p then occ id v else 0 := by
+      simp [wildOcc]
+    rw [h0]
+    cases hq : isWild p with
+    | true =>
+      have e := matchVal_wild hq hb
+      subst e
+      simp only [occs_append, occs, ↓reduceIte]
+      omega
+    | false =>
+      have h1 := matchVal_occ id p v hb
+      simp only [occs_append, occs, Bool.false_eq_true, ↓reduceIte]
+      omega
   | [], _ :: _, _, h => by simp [Pat.matchVals] at h
   | _ :: _, [], _, h => by simp [Pat.matchVals] at h
 
@@ -811,10 +808,9 @@ theorem findHandler_split {op : Nat} : ∀ {st : List Frame} {d : Dispatch Frame
       cases fr with
       | handler id' h' =>
         simp only [handles, Frame.asHandler] at hx
-        split at hx
-        · cases hx
-          rfl
-        · cases hx
+        split at hx <;> try (cases hx; done)
+        cases hx
+        rfl
       | _ => simp [handles, Frame.asHandler] at hx
     | none =>
       cases hf : findHandler Frame.asHandler op st with

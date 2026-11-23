@@ -387,17 +387,16 @@ def atomFits (Γ : TEnv) (a : Atom) (σ : Ty) : Bool :=
 theorem atomFits_sound {Γ : TEnv} {a : Atom} {σ : Ty} (h : atomFits Γ a σ = true) :
     HasAtom Γ a σ := by
   simp only [atomFits] at h
-  split at h
-  · rename_i t ht
-    have hw := widenB_sound h
-    cases a with
-    | var i => exact .var ht hw
-    | int n =>
-      simp only [atomTy, Option.some.injEq] at ht
-      subst ht
-      cases hw
-      exact .int
-  · cases h
+  split at h <;> try (cases h; done)
+  rename_i t ht
+  have hw := widenB_sound h
+  cases a with
+  | var i => exact .var ht hw
+  | int n =>
+    simp only [atomTy, Option.some.injEq] at ht
+    subst ht
+    cases hw
+    exact .int
 
 def atomsFit (Γ : TEnv) : List Atom → List Ty → Bool
   | [], [] => true
@@ -428,11 +427,10 @@ theorem atomsTy_sound {Γ : TEnv} : ∀ {as : List Atom} {τs : List Ty},
     exact .nil
   | a :: as, τs, h => by
     simp only [atomsTy] at h
-    split at h
-    · rename_i t ts ht hts
-      cases h
-      exact .cons (atomTy_sound ht) (atomsTy_sound hts)
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i t ts ht hts
+    cases h
+    exact .cons (atomTy_sound ht) (atomsTy_sound hts)
 
 /-! ## Data -/
 
@@ -450,17 +448,15 @@ theorem ctorFieldsOf_sound {tag : Nat} {T : Ty} {Fs : List Ty}
   cases T with
   | tuple Fs' =>
     simp only [ctorFieldsOf] at h
-    split at h
-    · rename_i h0
-      cases h
-      exact .inl ⟨h0, rfl⟩
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i h0
+    cases h
+    exact .inl ⟨h0, rfl⟩
   | data name args =>
     simp only [ctorFieldsOf] at h
-    split at h
-    · cases h
-    · rename_i h0
-      exact .inr ⟨h0, name, args, rfl, h⟩
+    split at h <;> try (cases h; done)
+    rename_i h0
+    exact .inr ⟨h0, name, args, rfl, h⟩
   | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [ctorFieldsOf] at h
 
 theorem ctorFieldsOf_complete {tag : Nat} {T : Ty} {Fs : List Ty}
@@ -504,44 +500,40 @@ theorem placeTy_sound : ∀ {path : List Nat} {σ τ : Ty},
     exact .here
   | i :: path, σ, τ, h => by
     simp only [placeTy] at h
-    split at h
-    · rename_i Fs hF
-      split at h
-      · rename_i σ' hi
-        have hrest := placeTy_sound h
-        cases σ with
-        | tuple Fs' =>
-          simp only [fieldsOf, Option.some.injEq] at hF
-          subst hF
-          exact .tuple hi hrest
-        | data name args =>
-          simp only [fieldsOf] at hF
-          split at hF
-          · cases hF
-          rename_i hname
-          split at hF
-          · rename_i t Fs₀ rest hfind
-            split at hF
-            · rename_i hall
-              cases hF
-              refine .field (fun tag Fs' hc => ?_) hi hrest
-              have hc' := ctorFieldsOf_complete hc
-              simp only [ctorFieldsOf] at hc'
-              split at hc'
-              · cases hc'
-              · simp only [Cert.fields, hname, ↓reduceIte] at hc'
-                rw [hfind] at hc'
-                have hm := lookup_mem (show ((t, Fs) :: rest).lookup tag = some Fs' from hc')
-                rcases List.mem_cons.mp hm with he | hm
-                · cases he
-                  rfl
-                · have := List.all_eq_true.mp hall _ hm
-                  simpa using this
-            · cases hF
-          · cases hF
-        | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [fieldsOf] at hF
-      · cases h
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i Fs hF
+    split at h <;> try (cases h; done)
+    rename_i σ' hi
+    have hrest := placeTy_sound h
+    cases σ with
+    | tuple Fs' =>
+      simp only [fieldsOf, Option.some.injEq] at hF
+      subst hF
+      exact .tuple hi hrest
+    | data name args =>
+      simp only [fieldsOf] at hF
+      split at hF
+      · cases hF
+      rename_i hname
+      split at hF <;> try (cases hF; done)
+      rename_i t Fs₀ rest hfind
+      split at hF <;> try (cases hF; done)
+      rename_i hall
+      cases hF
+      refine .field (fun tag Fs' hc => ?_) hi hrest
+      have hc' := ctorFieldsOf_complete hc
+      simp only [ctorFieldsOf] at hc'
+      split at hc'
+      · cases hc'
+      · simp only [Cert.fields, hname, ↓reduceIte] at hc'
+        rw [hfind] at hc'
+        have hm := lookup_mem (show ((t, Fs) :: rest).lookup tag = some Fs' from hc')
+        rcases List.mem_cons.mp hm with he | hm
+        · cases he
+          rfl
+        · have := List.all_eq_true.mp hall _ hm
+          simpa using this
+    | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [fieldsOf] at hF
 
 /-! ## Regions -/
 
@@ -696,13 +688,11 @@ def arrayElem : Ty → Option Ty
 
 theorem arrayElem_eq {T t : Ty} (h : arrayElem T = some t) : T = .data arrayName [t] := by
   unfold arrayElem at h
-  split at h
-  · split at h
-    · rename_i hn
-      cases h
-      rw [hn]
-    · cases h
-  · cases h
+  split at h <;> try (cases h; done)
+  split at h <;> try (cases h; done)
+  rename_i hn
+  cases h
+  rw [hn]
 
 /-- A constructor of the type of arrays takes so many elements. -/
 theorem array_ctor {t : Ty} {tag : Nat} {Fs : List Ty}
@@ -854,22 +844,20 @@ theorem checkRhs_sound {Γ : TEnv} {θ : List Rgn} {rhs : Rhs} {σ : Ty}
     split at h
     · split at h
       · rename_i a i
-        split at h
-        · rename_i T hT
-          simp only [Bool.and_eq_true, beq_iff_eq] at h
-          obtain ⟨⟨he, hi⟩, hd⟩ := h
-          exact .arrGet (atomTy_sound hT) (atomTy_sound hi) (arrayElem_uniform he) (dupOk_sound hd)
-        · cases h
+        split at h <;> try (cases h; done)
+        rename_i T hT
+        simp only [Bool.and_eq_true, beq_iff_eq] at h
+        obtain ⟨⟨he, hi⟩, hd⟩ := h
+        exact .arrGet (atomTy_sound hT) (atomTy_sound hi) (arrayElem_uniform he) (dupOk_sound hd)
       · cases h
     · split at h
       · rename_i a i v
-        split at h
-        · rename_i t he
-          simp only [Bool.and_eq_true, beq_iff_eq] at h
-          obtain ⟨⟨⟨ha, hi⟩, hv⟩, hd⟩ := h
-          exact .arrSet (atomTy_sound ha) (atomTy_sound hi) (atomTy_sound hv)
-            (arrayElem_uniform he) (dupOk_sound hd)
-        · cases h
+        split at h <;> try (cases h; done)
+        rename_i t he
+        simp only [Bool.and_eq_true, beq_iff_eq] at h
+        obtain ⟨⟨⟨ha, hi⟩, hv⟩, hd⟩ := h
+        exact .arrSet (atomTy_sound ha) (atomTy_sound hi) (atomTy_sound hv)
+          (arrayElem_uniform he) (dupOk_sound hd)
       · cases h
     · split at h
       · rename_i a b
@@ -879,25 +867,22 @@ theorem checkRhs_sound {Γ : TEnv} {θ : List Rgn} {rhs : Rhs} {σ : Ty}
       · cases h
     · split at h
       · rename_i a v
-        split at h
-        · rename_i t he
-          simp only [Bool.and_eq_true, beq_iff_eq] at h
-          obtain ⟨⟨ha, hv⟩, hd⟩ := h
-          exact .arrPush (atomTy_sound ha) (atomTy_sound hv) (arrayElem_grows he) (dupOk_sound hd)
-        · cases h
+        split at h <;> try (cases h; done)
+        rename_i t he
+        simp only [Bool.and_eq_true, beq_iff_eq] at h
+        obtain ⟨⟨ha, hv⟩, hd⟩ := h
+        exact .arrPush (atomTy_sound ha) (atomTy_sound hv) (arrayElem_grows he) (dupOk_sound hd)
       · cases h
     · split at h
       · rename_i a b
-        split at h
-        · rename_i T hT
-          split at h
-          · rename_i t he
-            simp only [Bool.and_eq_true, beq_iff_eq, Option.isSome_iff_exists] at h
-            obtain ⟨⟨rfl, ⟨U, hb⟩⟩, hd⟩ := h
-            exact .arrPop (atomTy_sound hT) (atomTy_sound hb) (arrayElem_uniform he)
-              (arrayElem_shrinks he) (dupOk_sound hd)
-          · cases h
-        · cases h
+        split at h <;> try (cases h; done)
+        rename_i T hT
+        split at h <;> try (cases h; done)
+        rename_i t he
+        simp only [Bool.and_eq_true, beq_iff_eq, Option.isSome_iff_exists] at h
+        obtain ⟨⟨rfl, ⟨U, hb⟩⟩, hd⟩ := h
+        exact .arrPop (atomTy_sound hT) (atomTy_sound hb) (arrayElem_uniform he)
+          (arrayElem_shrinks he) (dupOk_sound hd)
       · cases h
     · split at h
       · simp only [Bool.and_eq_true, beq_iff_eq] at h
@@ -906,34 +891,30 @@ theorem checkRhs_sound {Γ : TEnv} {θ : List Rgn} {rhs : Rhs} {σ : Ty}
       · cases h
   | construct tag args =>
     simp only [checkRhs] at h
-    split at h
-    · rename_i Fs hF
-      exact .construct (ctorFieldsOf_sound hF) (atomsFit_sound h)
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i Fs hF
+    exact .construct (ctorFieldsOf_sound hF) (atomsFit_sound h)
   | place pl =>
     simp only [checkRhs] at h
-    split at h
-    · rename_i t ht
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      exact .place ht (placeTy_sound h.1) (dupOk_sound h.2)
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i t ht
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    exact .place ht (placeTy_sound h.1) (dupOk_sound h.2)
   | closure fn captures =>
     simp only [checkRhs] at h
-    split at h
-    · rename_i n Ps r e once env acc
-      obtain ⟨sig, hsig, hθ, hcaps, hσ, hdup, henv⟩ := closesFit_sound h
-      rw [hσ]
-      exact .closure hsig hθ hcaps hdup henv
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i n Ps r e once env acc
+    obtain ⟨sig, hsig, hθ, hcaps, hσ, hdup, henv⟩ := closesFit_sound h
+    rw [hσ]
+    exact .closure hsig hθ hcaps hdup henv
   | rebind a fn =>
     simp only [checkRhs] at h
-    split at h
-    · rename_i n' Ps' r' e' once' Cs acc' n Ps r e once env acc ha
-      obtain ⟨sig, hsig, hθ, hCs, hσ, hdup, henv⟩ := closes_sound h
-      rw [hσ]
-      subst hCs
-      exact .rebind (atomTy_sound ha) hsig hθ hdup henv
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i n' Ps' r' e' once' Cs acc' n Ps r e once env acc ha
+    obtain ⟨sig, hsig, hθ, hCs, hσ, hdup, henv⟩ := closes_sound h
+    rw [hσ]
+    subst hCs
+    exact .rebind (atomTy_sound ha) hsig hθ hdup henv
 
 /-! ## Handlers -/
 
@@ -1305,157 +1286,135 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
   case ret a =>
     exact .ret (atomFits_sound h)
   case let_ rhs body ih =>
-    split at h
-    · split at h
-      · simp only [Bool.and_eq_true] at h
-        exact .let_ (checkRhs_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
-      · simp at h
-    · simp at h
+    split at h <;> try (simp at h; done)
+    split at h <;> try (simp at h; done)
+    simp only [Bool.and_eq_true] at h
+    exact .let_ (checkRhs_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
   case call f args body ih =>
-    split at h
-    · rename_i n Ps σ ε' once env acc hf
-      split at h
-      · rename_i rs hs' htake
-        have hn := takeRgns_length htake
-        simp only [Bool.and_eq_true] at h
-        obtain ⟨⟨⟨⟨⟨hargs, hrow⟩, hacc⟩, hnd⟩, hlin⟩, hbody⟩ := h
-        split at hbody
-        · rename_i hσ
-          subst hσ
-          split at hbody
-          · exact .callNever (rs := rs) ⟨atomTy_sound hf, hn, atomsFit_sound hargs, rowLe_sound hrow,
-              subB_sound hacc, nodupOk_sound hnd⟩ (linearB_sound hlin) (ih hbody)
-          · simp at hbody
-        · exact .call (rs := rs) ⟨atomTy_sound hf, hn, atomsFit_sound hargs, rowLe_sound hrow,
-            subB_sound hacc, nodupOk_sound hnd⟩ (linearB_sound hlin) (ih hbody)
-      · simp at h
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i n Ps σ ε' once env acc hf
+    split at h <;> try (simp at h; done)
+    rename_i rs hs' htake
+    have hn := takeRgns_length htake
+    simp only [Bool.and_eq_true] at h
+    obtain ⟨⟨⟨⟨⟨hargs, hrow⟩, hacc⟩, hnd⟩, hlin⟩, hbody⟩ := h
+    split at hbody
+    · rename_i hσ
+      subst hσ
+      split at hbody <;> try (simp at hbody; done)
+      exact .callNever (rs := rs) ⟨atomTy_sound hf, hn, atomsFit_sound hargs, rowLe_sound hrow,
+        subB_sound hacc, nodupOk_sound hnd⟩ (linearB_sound hlin) (ih hbody)
+    · exact .call (rs := rs) ⟨atomTy_sound hf, hn, atomsFit_sound hargs, rowLe_sound hrow,
+        subB_sound hacc, nodupOk_sound hnd⟩ (linearB_sound hlin) (ih hbody)
   case tail f args =>
-    split at h
-    · rename_i n Ps σ ε' once env acc hf
-      split at h
-      · rename_i rs hs' htake
-        have hn := takeRgns_length htake
-        simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at h
-        obtain ⟨⟨⟨⟨⟨hσ, hargs⟩, hrow⟩, hacc⟩, hnd⟩, hlin⟩ := h
-        rcases hσ with hσ | rfl
-        · exact .tail (rs := rs) ⟨atomTy_sound hf, hn, atomsFit_sound hargs, rowLe_sound hrow,
-            subB_sound hacc, nodupOk_sound hnd⟩ hσ (linearB_sound hlin)
-        · exact .tailNever (rs := rs) ⟨atomTy_sound hf, hn, atomsFit_sound hargs, rowLe_sound hrow,
-            subB_sound hacc, nodupOk_sound hnd⟩ (linearB_sound hlin)
-      · simp at h
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i n Ps σ ε' once env acc hf
+    split at h <;> try (simp at h; done)
+    rename_i rs hs' htake
+    have hn := takeRgns_length htake
+    simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨⟨⟨hσ, hargs⟩, hrow⟩, hacc⟩, hnd⟩, hlin⟩ := h
+    rcases hσ with hσ | rfl
+    · exact .tail (rs := rs) ⟨atomTy_sound hf, hn, atomsFit_sound hargs, rowLe_sound hrow,
+        subB_sound hacc, nodupOk_sound hnd⟩ hσ (linearB_sound hlin)
+    · exact .tailNever (rs := rs) ⟨atomTy_sound hf, hn, atomsFit_sound hargs, rowLe_sound hrow,
+        subB_sound hacc, nodupOk_sound hnd⟩ (linearB_sound hlin)
   case handle ret ops captures thunk body ih =>
-    split at h
-    · rename_i ρ H Φ θs hs' σ εt once env acc Cs hthunk hcaps
-      simp only [Bool.and_eq_true] at h
-      obtain ⟨⟨⟨⟨⟨⟨hh, hrow⟩, hacc⟩, hΦ⟩, hnd⟩, hlin⟩, hbody⟩ := h
-      exact .handle ⟨atomTy_sound hthunk, atomsTy_sound hcaps, checkHandler_sound hh,
-        rowLe_sound hrow, subB_sound hacc, subB_sound hΦ, nodupOk_sound hnd⟩ (linearB_sound hlin)
-        (ih hbody)
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i ρ H Φ θs hs' σ εt once env acc Cs hthunk hcaps
+    simp only [Bool.and_eq_true] at h
+    obtain ⟨⟨⟨⟨⟨⟨hh, hrow⟩, hacc⟩, hΦ⟩, hnd⟩, hlin⟩, hbody⟩ := h
+    exact .handle ⟨atomTy_sound hthunk, atomsTy_sound hcaps, checkHandler_sound hh,
+      rowLe_sound hrow, subB_sound hacc, subB_sound hΦ, nodupOk_sound hnd⟩ (linearB_sound hlin)
+      (ih hbody)
   case handleTail ret ops captures thunk =>
-    split at h
-    · rename_i ρ H Φ θs hs' σ εt once env acc Cs hthunk hcaps
-      simp only [Bool.and_eq_true] at h
-      obtain ⟨⟨⟨⟨hh, hrow⟩, hacc⟩, hΦ⟩, hnd⟩ := h
-      exact .handleTail ⟨atomTy_sound hthunk, atomsTy_sound hcaps, checkHandler_sound hh,
-        rowLe_sound hrow, subB_sound hacc, subB_sound hΦ, nodupOk_sound hnd⟩
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i ρ H Φ θs hs' σ εt once env acc Cs hthunk hcaps
+    simp only [Bool.and_eq_true] at h
+    obtain ⟨⟨⟨⟨hh, hrow⟩, hacc⟩, hΦ⟩, hnd⟩ := h
+    exact .handleTail ⟨atomTy_sound hthunk, atomsTy_sound hcaps, checkHandler_sound hh,
+      rowLe_sound hrow, subB_sound hacc, subB_sound hΦ, nodupOk_sound hnd⟩
   case raise op args =>
-    split at h
-    · rename_i targs hl
-      split at h
-      · rename_i Ps hop
-        simp only [Bool.and_eq_true, beq_iff_eq] at h
-        exact .raise hl hop (atomsTy_sound h.1) (linearB_sound h.2)
-      · simp at h
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i targs hl
+    split at h <;> try (simp at h; done)
+    rename_i Ps hop
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    exact .raise hl hop (atomsTy_sound h.1) (linearB_sound h.2)
   case perform op args body ih =>
-    split at h
-    · rename_i targs hl
-      split at h
-      · rename_i Ps σ hop
-        simp only [Bool.and_eq_true, beq_iff_eq] at h
-        exact .perform hl hop (atomsTy_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
-      · simp at h
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i targs hl
+    split at h <;> try (simp at h; done)
+    rename_i Ps σ hop
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    exact .perform hl hop (atomsTy_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
   case label thunk body ih =>
-    split at h
-    · rename_i n σ' ρ εl once' accl σ εt once env acc hthunk
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨⟨rfl, hlab⟩, hrow⟩, hlin⟩, hbody⟩ := h
-      obtain ⟨hσ, hε, hn, hreg, hacc, hnd⟩ := labelOk_sound hlab
-      exact .label ⟨atomTy_sound hthunk, hσ, hε, hn, hreg, hacc, hnd, rowLe_sound hrow⟩
-        (linearB_sound hlin) (ih hbody)
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i n σ' ρ εl once' accl σ εt once env acc hthunk
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨⟨rfl, hlab⟩, hrow⟩, hlin⟩, hbody⟩ := h
+    obtain ⟨hσ, hε, hn, hreg, hacc, hnd⟩ := labelOk_sound hlab
+    exact .label ⟨atomTy_sound hthunk, hσ, hε, hn, hreg, hacc, hnd, rowLe_sound hrow⟩
+      (linearB_sound hlin) (ih hbody)
   case labelTail thunk =>
-    split at h
-    · rename_i n σ' ρ εl once' accl σ εt once env acc hthunk
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨rfl, rfl⟩, hlab⟩, hrow⟩ := h
-      obtain ⟨hσ, hε, hn, hreg, hacc, hnd⟩ := labelOk_sound hlab
-      exact .labelTail ⟨atomTy_sound hthunk, hσ, hε, hn, hreg, hacc, hnd, rowLe_sound hrow⟩
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i n σ' ρ εl once' accl σ εt once env acc hthunk
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨rfl, rfl⟩, hlab⟩, hrow⟩ := h
+    obtain ⟨hσ, hε, hn, hreg, hacc, hnd⟩ := labelOk_sound hlab
+    exact .labelTail ⟨atomTy_sound hthunk, hσ, hε, hn, hreg, hacc, hnd, rowLe_sound hrow⟩
   case guard cleanup thunk body ih =>
-    split at h
-    · rename_i σc once' env' accc σ εt once env acc hcl hthunk
-      simp only [Bool.and_eq_true] at h
-      obtain ⟨⟨⟨⟨⟨⟨hrow, haccc⟩, hacc⟩, hnd1⟩, hnd2⟩, hlin⟩, hbody⟩ := h
-      exact .guard ⟨atomTy_sound hcl, atomTy_sound hthunk, rowLe_sound hrow, subB_sound haccc,
-        subB_sound hacc, (fun hL => ⟨nodupOk_sound hnd1 hL, nodupOk_sound hnd2 hL⟩)⟩
-        (linearB_sound hlin) (ih hbody)
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i σc once' env' accc σ εt once env acc hcl hthunk
+    simp only [Bool.and_eq_true] at h
+    obtain ⟨⟨⟨⟨⟨⟨hrow, haccc⟩, hacc⟩, hnd1⟩, hnd2⟩, hlin⟩, hbody⟩ := h
+    exact .guard ⟨atomTy_sound hcl, atomTy_sound hthunk, rowLe_sound hrow, subB_sound haccc,
+      subB_sound hacc, (fun hL => ⟨nodupOk_sound hnd1 hL, nodupOk_sound hnd2 hL⟩)⟩
+      (linearB_sound hlin) (ih hbody)
   case guardTail cleanup thunk =>
-    split at h
-    · rename_i σc once' env' accc σ εt once env acc hcl hthunk
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨⟨⟨⟨rfl, hrow⟩, haccc⟩, hacc⟩, hnd1⟩, hnd2⟩, hlin⟩ := h
-      exact .guardTail ⟨atomTy_sound hcl, atomTy_sound hthunk, rowLe_sound hrow, subB_sound haccc,
-        subB_sound hacc, (fun hL => ⟨nodupOk_sound hnd1 hL, nodupOk_sound hnd2 hL⟩)⟩
-        (linearB_sound hlin)
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i σc once' env' accc σ εt once env acc hcl hthunk
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨⟨⟨⟨rfl, hrow⟩, haccc⟩, hacc⟩, hnd1⟩, hnd2⟩, hlin⟩ := h
+    exact .guardTail ⟨atomTy_sound hcl, atomTy_sound hthunk, rowLe_sound hrow, subB_sound haccc,
+      subB_sound hacc, (fun hL => ⟨nodupOk_sound hnd1 hL, nodupOk_sound hnd2 hL⟩)⟩
+      (linearB_sound hlin)
   case cancel k body ih =>
-    split at h
-    · rename_i n Ps ρ ε' once env acc hk
-      simp only [Bool.and_eq_true] at h
-      exact .cancel (atomTy_sound hk) (rowLe_sound h.1.1.1.1) (subFreeB_sound h.1.1.1.2)
-        (nodupOk_sound h.1.1.2) (linearB_sound h.1.2) (ih h.2)
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i n Ps ρ ε' once env acc hk
+    simp only [Bool.and_eq_true] at h
+    exact .cancel (atomTy_sound hk) (rowLe_sound h.1.1.1.1) (subFreeB_sound h.1.1.1.2)
+      (nodupOk_sound h.1.1.2) (linearB_sound h.1.2) (ih h.2)
   case cell init thunk body ih =>
-    split at h
-    · rename_i σ n r σ' ρ εt once env acc hinit hthunk
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨⟨rfl, hcell⟩, hrow⟩, hlin⟩, hbody⟩ := h
-      obtain ⟨hσ, hρ, hε, hn, hreg, hacc, hnd⟩ := cellOk_sound hcell
-      exact .cell ⟨atomTy_sound hinit, atomTy_sound hthunk, hσ, hρ, hε, hn, hreg, hacc, hnd,
-        rowLe_sound hrow⟩ (linearB_sound hlin) (ih hbody)
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i σ n r σ' ρ εt once env acc hinit hthunk
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨⟨rfl, hcell⟩, hrow⟩, hlin⟩, hbody⟩ := h
+    obtain ⟨hσ, hρ, hε, hn, hreg, hacc, hnd⟩ := cellOk_sound hcell
+    exact .cell ⟨atomTy_sound hinit, atomTy_sound hthunk, hσ, hρ, hε, hn, hreg, hacc, hnd,
+      rowLe_sound hrow⟩ (linearB_sound hlin) (ih hbody)
   case cellTail init thunk =>
-    split at h
-    · rename_i σ n r σ' ρ εt once env acc hinit hthunk
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨⟨rfl, rfl⟩, hcell⟩, hrow⟩, hlin⟩ := h
-      obtain ⟨hσ, hρ, hε, hn, hreg, hacc, hnd⟩ := cellOk_sound hcell
-      exact .cellTail ⟨atomTy_sound hinit, atomTy_sound hthunk, hσ, hρ, hε, hn, hreg, hacc, hnd,
-        rowLe_sound hrow⟩ (linearB_sound hlin)
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i σ n r σ' ρ εt once env acc hinit hthunk
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨⟨rfl, rfl⟩, hcell⟩, hrow⟩, hlin⟩ := h
+    obtain ⟨hσ, hρ, hε, hn, hreg, hacc, hnd⟩ := cellOk_sound hcell
+    exact .cellTail ⟨atomTy_sound hinit, atomTy_sound hthunk, hσ, hρ, hε, hn, hreg, hacc, hnd,
+      rowLe_sound hrow⟩ (linearB_sound hlin)
   case lend uniq r thunk pre post body ih =>
-    split at h
-    · rename_i ρ σ n Ps ρt εt once env acc hr hthunk
-      split at h
-      · rename_i κ σ' Post hdrop
-        simp only [Bool.and_eq_true, beq_iff_eq, List.all_eq_true] at h
-        obtain ⟨⟨⟨⟨⟨⟨⟨rfl, hpre⟩, hpost⟩, hlc⟩, hlend⟩, hrow⟩, hlin⟩, hbody⟩ := h
-        obtain ⟨hσ, hρ, hε, hn, hreg, hloan, hacc⟩ := lendOk_sound hlend
-        have hPs : Ps = Ps.take pre.length ++ .ref κ σ' :: Post := by
-          rw [← hdrop, List.take_append_drop]
-        have hthunk' := atomTy_sound hthunk
-        rw [hPs] at hthunk'
-        exact .lend ⟨atomTy_sound hr, hthunk', atomsTy_sound hpre, atomsTy_sound hpost, hlc,
-          hσ, hρ, hε, hn, hreg, hloan, hacc, rowLe_sound hrow⟩ (linearB_sound hlin) (ih hbody)
-      · simp at h
-    · simp at h
+    split at h <;> try (simp at h; done)
+    rename_i ρ σ n Ps ρt εt once env acc hr hthunk
+    split at h <;> try (simp at h; done)
+    rename_i κ σ' Post hdrop
+    simp only [Bool.and_eq_true, beq_iff_eq, List.all_eq_true] at h
+    obtain ⟨⟨⟨⟨⟨⟨⟨rfl, hpre⟩, hpost⟩, hlc⟩, hlend⟩, hrow⟩, hlin⟩, hbody⟩ := h
+    obtain ⟨hσ, hρ, hε, hn, hreg, hloan, hacc⟩ := lendOk_sound hlend
+    have hPs : Ps = Ps.take pre.length ++ .ref κ σ' :: Post := by
+      rw [← hdrop, List.take_append_drop]
+    have hthunk' := atomTy_sound hthunk
+    rw [hPs] at hthunk'
+    exact .lend ⟨atomTy_sound hr, hthunk', atomsTy_sound hpre, atomsTy_sound hpost, hlc,
+      hσ, hρ, hε, hn, hreg, hloan, hacc, rowLe_sound hrow⟩ (linearB_sound hlin) (ih hbody)
   case mem op args body ih =>
     split at h
     · split at h
@@ -1482,25 +1441,22 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       · simp at h
     · split at h
       · rename_i r σ ha
-        split at h
-        · rename_i σ' hf
-          simp only [Bool.and_eq_true] at h
-          rcases focusTy_sound hf with ⟨i, rfl, hpl⟩ | ⟨hix, hu⟩
-          · exact .focus (atomTy_sound ha) (regionOk_sound h.1) hpl (ih h.2)
-          · exact .focusAt (atomTy_sound ha) hix (regionOk_sound h.1) hu (ih h.2)
-        · simp at h
+        split at h <;> try (simp at h; done)
+        rename_i σ' hf
+        simp only [Bool.and_eq_true] at h
+        rcases focusTy_sound hf with ⟨i, rfl, hpl⟩ | ⟨hix, hu⟩
+        · exact .focus (atomTy_sound ha) (regionOk_sound h.1) hpl (ih h.2)
+        · exact .focusAt (atomTy_sound ha) hix (regionOk_sound h.1) hu (ih h.2)
       · simp at h
     · split at h
       · rename_i r σ ha
-        split at h
-        · rename_i Fs hc
-          split at h
-          · rename_i σ' hi
-            simp only [Bool.and_eq_true] at h
-            exact .focusIn (atomTy_sound ha) (regionOk_sound h.1) (ctorFieldsOf_sound hc) hi
-              (ih h.2)
-          · simp at h
-        · simp at h
+        split at h <;> try (simp at h; done)
+        rename_i Fs hc
+        split at h <;> try (simp at h; done)
+        rename_i σ' hi
+        simp only [Bool.and_eq_true] at h
+        exact .focusIn (atomTy_sound ha) (regionOk_sound h.1) (ctorFieldsOf_sound hc) hi
+          (ih h.2)
       · simp at h
     · simp at h
   case host id args body ih =>
@@ -1550,18 +1506,16 @@ theorem patTys_sound : ∀ {p : Pat} {τ : Ty} {Bs : List Ty},
     exact .bind
   | .int n, τ, _, h => by
     simp only [patTys] at h
-    split at h
-    · rename_i hτ
-      subst hτ
-      cases h
-      exact .int
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i hτ
+    subst hτ
+    cases h
+    exact .int
   | .ctor tag ps, T, _, h => by
     simp only [patTys] at h
-    split at h
-    · rename_i Fs hF
-      exact .ctor (ctorFieldsOf_sound hF) (patsTys_sound h)
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i Fs hF
+    exact .ctor (ctorFieldsOf_sound hF) (patsTys_sound h)
 
 theorem patsTys_sound : ∀ {ps : List Pat} {τs Bs : List Ty},
     patsTys C ps τs = some Bs → PatsOk C.ctx ps τs Bs
@@ -1571,11 +1525,10 @@ theorem patsTys_sound : ∀ {ps : List Pat} {τs Bs : List Ty},
     exact .nil
   | p :: ps, τ :: τs, _, h => by
     simp only [patsTys] at h
-    split at h
-    · rename_i B Bs' hB hBs
-      cases h
-      exact .cons (patTys_sound hB) (patsTys_sound hBs)
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i B Bs' hB hBs
+    cases h
+    exact .cons (patTys_sound hB) (patsTys_sound hBs)
   | [], _ :: _, _, h => by simp [patsTys] at h
   | _ :: _, [], _, h => by simp [patsTys] at h
 

@@ -147,11 +147,10 @@ theorem matchVals_append : ∀ {as : List Pat} {xs : List Value} {bs : List Pat}
   | [], [], bs, ys, r, _, h => ⟨[], r, by simp [Pat.matchVals], h⟩
   | a :: as, x :: xs, bs, ys, r, hlen, h => by
     simp only [List.cons_append, Pat.matchVals] at h
-    split at h
-    · rename_i b rest hb hrest
-      obtain ⟨r₁, r₂, h₁, h₂⟩ := matchVals_append (by simpa using hlen) hrest
-      exact ⟨b ++ r₁, r₂, by simp [Pat.matchVals, hb, h₁], h₂⟩
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i b rest hb hrest
+    obtain ⟨r₁, r₂, h₁, h₂⟩ := matchVals_append (by simpa using hlen) hrest
+    exact ⟨b ++ r₁, r₂, by simp [Pat.matchVals, hb, h₁], h₂⟩
   | [], _ :: _, _, _, _, hlen, _ => by simp at hlen
   | _ :: _, [], _, _, _, hlen, _ => by simp at hlen
 

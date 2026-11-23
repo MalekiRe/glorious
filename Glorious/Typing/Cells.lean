@@ -148,10 +148,9 @@ theorem callFn_next {p : Program} {fn : Nat} {captures vs : List Value} {st : Li
     {store : Store Frame} {s' : State} (h : callFn p fn captures vs st store = .next s') :
     s'.stack = st ∧ s'.store = store := by
   simp only [callFn] at h
-  split at h
-  · cases h
-    exact ⟨rfl, rfl⟩
-  · cases h
+  split at h <;> try (cases h; done)
+  cases h
+  exact ⟨rfl, rfl⟩
 
 /-- Delivering a value and leaving for a target keep every scope's cell live.
 Proved together, as the two are defined together. -/
@@ -255,13 +254,12 @@ theorem takeCont_spec {α : Type} : ∀ {cs : List (Option α)} {id : Nat} {x : 
       simp
   | c :: cs, id + 1, x, cs', h => by
     simp only [takeCont] at h
-    split at h
-    · rename_i y cs'' hr
-      simp at h
-      obtain ⟨rfl, rfl⟩ := h
-      obtain ⟨h1, h2⟩ := takeCont_spec hr
-      simp [h1, h2]
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i y cs'' hr
+    simp at h
+    obtain ⟨rfl, rfl⟩ := h
+    obtain ⟨h1, h2⟩ := takeCont_spec hr
+    simp [h1, h2]
 
 /-- Putting a resumption's frames back on the stack. -/
 theorem OwnsAt.resume {st seg : List Frame} {conts : Conts Frame} {labels : Nat}
@@ -287,16 +285,14 @@ theorem apply_owns {p : Program} {c : Callee} {st : List Frame} {store : Store F
   | cont id v =>
     obtain ⟨conts, labels, cells⟩ := store
     simp only [apply] at h
-    split at h
-    · rename_i seg conts' hr
-      obtain ⟨hk, rfl⟩ := takeCont_spec hr
-      exact (deliver_leave_owns p _ (ho.resume hk)).1 h
-    · cases h
+    split at h <;> try (cases h; done)
+    rename_i seg conts' hr
+    obtain ⟨hk, rfl⟩ := takeCont_spec hr
+    exact (deliver_leave_owns p _ (ho.resume hk)).1 h
   | label id v =>
     simp only [apply] at h
-    split at h
-    · exact (deliver_leave_owns p _ ho).2 h
-    · cases h
+    split at h <;> try (cases h; done)
+    exact (deliver_leave_owns p _ ho).2 h
 
 theorem live_set {cells : Cells} {a b : Nat} {x : Value} (h : Live cells a) :
     Live (cells.setIfInBounds b (some x)) a := by
@@ -361,22 +357,20 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
   cases tm with
   | perform op args body =>
     simp only [step] at h
-    split at h
-    · cases h
-    · split at h
-      · cases h
-      · rename_i vs _ d hfind
-        obtain ⟨h1, h2⟩ := callFn_next h
-        show OwnsAt s'.stack s'.store
-        rw [h1, h2]
-        refine ho'.of_le (fun a => ?_) (fun _ hl => hl)
-        have hsplit := congrArg (ownStack a) (findHandler_split hfind)
-        simp only [ownStack_append, ownStack, ownFrame] at hsplit
-        show ownStack a d.below + osum (ownStack a)
-            (conts ++ [some (.call env body :: d.above ++ [.handler d.id d.handler])])
-          ≤ ownStack a stack + osum (ownStack a) conts
-        simp only [osum_append, osum, ownStack, ownFrame, ownStack_append]
-        omega
+    split at h <;> try (cases h; done)
+    split at h <;> try (cases h; done)
+    rename_i vs _ d hfind
+    obtain ⟨h1, h2⟩ := callFn_next h
+    show OwnsAt s'.stack s'.store
+    rw [h1, h2]
+    refine ho'.of_le (fun a => ?_) (fun _ hl => hl)
+    have hsplit := congrArg (ownStack a) (findHandler_split hfind)
+    simp only [ownStack_append, ownStack, ownFrame] at hsplit
+    show ownStack a d.below + osum (ownStack a)
+        (conts ++ [some (.call env body :: d.above ++ [.handler d.id d.handler])])
+      ≤ ownStack a stack + osum (ownStack a) conts
+    simp only [osum_append, osum, ownStack, ownFrame, ownStack_append]
+    omega
   | cancel k body =>
     simp only [step] at h
     split at h
@@ -397,20 +391,17 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
       · cases h
   | cell init thunk body =>
     simp only [step] at h
-    split at h
-    · exact apply_owns (st := .cell cells.size :: .call env body :: stack)
-        (OwnsAt.alloc (st := .call env body :: stack) (store := ⟨conts, labels, cells⟩)
-          (ho'.push (fun _ => rfl)) _) h
-    · cases h
+    split at h <;> try (cases h; done)
+    exact apply_owns (st := .cell cells.size :: .call env body :: stack)
+      (OwnsAt.alloc (st := .call env body :: stack) (store := ⟨conts, labels, cells⟩)
+        (ho'.push (fun _ => rfl)) _) h
   | mem op args body =>
     simp only [step] at h
-    split at h
-    · cases h
-    · split at h
-      · cases h
-      · rename_i vs _ r cells' hev
-        cases h
-        exact ho'.of_le (fun _ => Nat.le_refl _) (mem_live hev)
+    split at h <;> try (cases h; done)
+    split at h <;> try (cases h; done)
+    rename_i vs _ r cells' hev
+    cases h
+    exact ho'.of_le (fun _ => Nat.le_refl _) (mem_live hev)
   | _ =>
     simp only [step] at h
     repeat' split at h
@@ -435,12 +426,10 @@ theorem stepIO_owns {p : Program} {c c' : Config} (ho : Owns c.state)
   by_cases hh : ∃ id args body, tm = .host id args body
   · obtain ⟨id, args, body, rfl⟩ := hh
     simp only [stepIO] at h
-    split at h
-    · cases h
-    · split at h
-      · cases h
-      · cases h
-        exact ho
+    split at h <;> try (cases h; done)
+    split at h <;> try (cases h; done)
+    cases h
+    exact ho
   · have hnh : ∀ id args body, tm ≠ .host id args body :=
       fun id args body e => hh ⟨id, args, body, e⟩
     rw [stepIO_eq_lift hnh] at h
