@@ -522,11 +522,7 @@ compiler, they build it themselves. -/
 
 /-- Where a running server says it is: its port and the compiler it is. -/
 def serverFile : IO System.FilePath := do
-  let home := (← IO.getEnv "HOME").getD "/tmp"
-  let base := match ← IO.getEnv "XDG_CACHE_HOME" with
-    | some dir => System.FilePath.mk dir
-    | none => System.FilePath.mk home / ".cache"
-  pure (base / "glorious" / "server")
+  pure ((← Target.cacheDir) / "server")
 
 /-- This compiler: its file, by size and time. -/
 def compilerIdentity : IO String := do
