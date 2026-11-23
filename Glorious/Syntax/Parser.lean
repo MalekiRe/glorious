@@ -978,8 +978,8 @@ def fixKey (f : Fixities) : UInt64 :=
 /-- `parseItems`, each group of items taken from `kept` where it began at the
 same token, its tokens and the one after the same, read with the same: the
 items are numbered by where their tokens are, so they are what parsing them
-again would give. Each group's items as `unmutItems` and `promoteItems` make
-them, which go item by item; the functions written in blocks as parsed. Gives
+again would give. Each group's items as `unmutItems` makes them, which goes
+item by item; the functions written in blocks as parsed. Gives
 each group, for the next. -/
 private partial def parseItemsKept (kept : ItemsKept) : P (List Item × ItemsKept) := do
   let ctx ← read
@@ -998,7 +998,7 @@ private partial def parseItemsKept (kept : ItemsKept) : P (List Item × ItemsKep
         made := made.insert i (j, h, items, locals)
         continue
     let before := (← getThe (Array Item)).size
-    let group := promoteItems (unmutItems (← parseItemGroup))
+    let group := unmutItems (← parseItemGroup)
     let j ← getThe Nat
     let m ← getThe (Array Item)
     out := out ++ group.toArray
@@ -1679,14 +1679,14 @@ def parseKept (fix : Fixities) (src : String) (base : Nat := 0) (records : List 
   | some kept =>
     let ((items, groups), _, local_) ← parseItemsKept kept ctx 0 #[]
     let made ← if reflect then reflectionsOf fix (items ++ local_.toList) (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
-    pure (items ++ promoteItems (unmutItems (local_.toList ++ made)), fix, groups)
+    pure (items ++ unmutItems (local_.toList ++ made), fix, groups)
   | none =>
     let (items, _, local_) ← parseItems ctx 0 #[]
     let items := items ++ local_.toList
     -- (Each declared type's `Reflect`, read as the text is, after its items;
     -- checked only where something asks it.)
     let made ← if reflect then reflectionsOf fix items (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
-    pure (promoteItems (unmutItems (items ++ made)), fix, {})
+    pure (unmutItems (items ++ made), fix, {})
 
 /-- `parseKept`, nothing taken from an earlier parse. -/
 def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])

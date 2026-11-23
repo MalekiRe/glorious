@@ -1000,77 +1000,10 @@ partial def selfPattern (self : String) : Pattern → Pattern
   | .tuple args => .tuple (args.map (selfPattern self))
   | p => p
 
-/-- `Self` written out as the type an implementation is for: `Self::f`,
-`Self { .. }` and `Self(..)`. In an implementation of a trait `Self::f(..)`
-is the trait's function for that type, `<Self as Trait>::f(..)`. -/
-def selfRewrite (self : String) (trait : Option (String × Expr)) : Rewrite where
-  onExpr go
-    | .name qual z =>
-      some (.name (if qual == some "Self" then some ((trait.map (·.1)).getD self) else qual)
-        (if z == "Self" then self else z))
-    | .call id (.name (some "Self") z) args =>
-      trait.map fun (tr, at_) => .call 0 (.name none instMark) [.call id (.name (some tr) z) (args.map go.ex), at_]
-    | _ => none
-  onPat := selfPattern self
-
-def selfClause (self : String) (trait : Option (String × Expr)) : Clause → Clause := (selfRewrite self trait).clause
-
-
 /-- `&value` and `&mut value` where the value has no name. -/
 def borrowMark : String := "%borrow"
 def borrowMutMark : String := "%borrow_mut"
 
-mutual
-
-/-- A value that is borrowed where it is made, `&f(x)`, is given a name first:
-the statement it is in is preceded by the `let` that binds it, and what was
-written is a borrow of that name. The value then lasts to the end of the
-block the statement is in, or, where the statement is an expression, to
-the end of the statement. -/
-partial def nameBorrowsM : Expr → StateM (List Stmt) Expr
-  | .call id (.name none mark) [e] => do
-    let e ← nameBorrowsM e
-    if mark != borrowMark && mark != borrowMutMark then return .call id (.name none mark) [e]
-    let x := s!"borrowed%{id}"
-    let uniq := mark == borrowMutMark
-    modify (· ++ [if uniq then Stmt.letMut x e else .let_ (.var x) e])
-    pure (.ref uniq x)
-  | .handle subject arms => do
-    -- What is handled is run under the handler: so is what it borrows.
-    let (subject, before) := (nameBorrowsM subject).run []
-    let subject := if before.isEmpty then subject else .labelScope "%block" (before ++ [.expr subject])
-    pure (.handle subject (arms.map nameBorrowsClause))
-  | e => e.traverse nameBorrowsM fun _ b => pure (nameBorrowsStmts b)
-
-partial def nameBorrows (e : Expr) : Expr × List Stmt := (nameBorrowsM e).run []
-
-partial def nameBorrowsClause : Clause → Clause
-  | .mk pats body => .mk pats (nameBorrowsStmts body)
-
-partial def nameBorrowsStmt : Stmt → List Stmt
-  | .let_ pat e => let (e, before) := nameBorrows e; before ++ [.let_ pat e]
-  | .letMut x e => let (e, before) := nameBorrows e; before ++ [.letMut x e]
-  -- (Of a statement that is an expression, the values named are let go
-  -- where it ends: a block of its own.)
-  | .expr e =>
-    let (e, before) := nameBorrows e
-    if before.isEmpty then [.expr e] else [.expr (.labelScope "%block" (before ++ [.expr e]))]
-  | .defer e => let (e, before) := nameBorrows e; before ++ [.defer e]
-  | .assign target e =>
-    let (target, first) := nameBorrows target
-    let (e, second) := nameBorrows e
-    first ++ second ++ [.assign target e]
-  | .located line col s =>
-    -- (Each `let` made where the statement is: what a value so named holds
-    -- is let go where its block ends, found by that place.)
-    (nameBorrowsStmt s).map fun
-      | .expr (.labelScope "%block" body) => .located line col (.expr (.labelScope "%block" (body.map (.located line col))))
-      | s => .located line col s
-
-partial def nameBorrowsStmts (body : List Stmt) : List Stmt :=
-  body.flatMap nameBorrowsStmt
-
-end
 
 /-- How a name is used in what follows where it is bound: borrowed with `&`,
 changed or borrowed with `&mut`, a field of it borrowed, bound again. -/
@@ -1092,77 +1025,39 @@ def NameUse.or (a b : NameUse) : NameUse :=
   ⟨a.shared || b.shared, a.changed || b.changed, a.fielded || b.fielded, a.rebound || b.rebound,
     a.valued || b.valued, a.valuedInside || b.valuedInside, a.looked || b.looked⟩
 
+/-- The label `@f` a function is also known by: the last part of its name,
+`f` of `m::f` or `T::f`, and of a function written in a block, `f%12`. -/
+def labelShort (name : String) : String :=
+  let s := lastSegment name
+  match s.splitOn "%" with
+  | p :: _ :: _ => if p.isEmpty then s else p
+  | _ => s
+
+/-- `Self` written out as the type an implementation is for: `Self::f`,
+`Self { .. }` and `Self(..)`. In an implementation of a trait `Self::f(..)`
+is the trait's function for that type, `<Self as Trait>::f(..)`. -/
+def selfRewrite (self : String) (trait : Option (String × Expr)) : Rewrite where
+  onExpr go
+    | .name qual z =>
+      some (.name (if qual == some "Self" then some ((trait.map (·.1)).getD self) else qual)
+        (if z == "Self" then self else z))
+    | .call id (.name (some "Self") z) args =>
+      trait.map fun (tr, at_) => .call 0 (.name none instMark) [.call id (.name (some tr) z) (args.map go.ex), at_]
+    | _ => none
+  onPat := selfPattern self
+
+def selfClause (self : String) (trait : Option (String × Expr)) : Clause → Clause := (selfRewrite self trait).clause
+
+/-- The name and the place such a name is of. -/
+def partOf (name : String) : Option (String × Nat) :=
+  match name.splitOn ".%" with
+  | [x, i] => i.toNat?.map (x, ·)
+  | _ => none
+
 /-- What a callable's uses are to the code it is written in. -/
 def NameUse.inside (u : NameUse) : NameUse :=
   { u with valued := false, valuedInside := u.valued || u.valuedInside }
 
-/-- The variable a place that is assigned to is a place of, if it is one of a
-variable's own and not of what a reference points to. -/
-partial def placeRoot : Expr → Option String
-  | .name none x => some x
-  | .fieldOf _ e _ => placeRoot e
-  | .proj e _ => placeRoot e
-  | _ => none
-
-mutual
-
-partial def nameUseExpr (x : String) : Expr → NameUse
-  | .name none y => if y == x then { valued := true } else {}
-  | .ref uniq y => if y != x then {} else if uniq then { changed := true } else { shared := true }
-  | .refField _ uniq y _ _ => if y == x then { fielded := true, changed := uniq } else {}
-  | .call _ f args => (f :: args).foldl (fun u e => u.or (nameUseExpr x e)) {}
-  | .tailCall _ f args => (f :: args).foldl (fun u e => u.or (nameUseExpr x e)) {}
-  | .tuple args => args.foldl (fun u e => u.or (nameUseExpr x e)) {}
-  -- A part of the variable read where it is: a look at it, as through a
-  -- borrow, and not a use of the whole.
-  | .proj e _ => if placeRoot e == some x then { looked := true } else nameUseExpr x e
-  | .deref e => nameUseExpr x e
-  | .reborrow _ e => nameUseExpr x e
-  | .fieldOf _ e _ => if placeRoot e == some x then { looked := true } else nameUseExpr x e
-  | .closure _ clauses =>
-    NameUse.inside (clauses.foldl (fun u c => u.or (nameUseClause x c)) ({} : NameUse))
-  | .handle subject arms =>
-    (NameUse.inside (arms.foldl (fun u c => u.or (nameUseClause x c)) ({} : NameUse))).or
-      (nameUseExpr x subject)
-  | .labelScope _ body => nameUseStmts x body
-  | _ => {}
-
-partial def nameUseClause (x : String) : Clause → NameUse
-  | .mk pats body =>
-    -- (A clause that binds the name again: what it does is of that one.)
-    if (pats.flatMap patternNames).contains x then { rebound := true } else nameUseStmts x body
-
-partial def nameUseStmts (x : String) (body : List Stmt) : NameUse :=
-  -- (What follows a statement that binds the name again is of that one.)
-  match body with
-  | [] => {}
-  | s :: rest =>
-    let u := nameUseStmt x s
-    if bindsAgain x s then u else u.or (nameUseStmts x rest)
-
-/-- Is this statement itself one that binds the name again? -/
-partial def bindsAgain (x : String) : Stmt → Bool
-  | .let_ pat _ => (patternNames pat).contains x
-  | .letMut y _ => y == x
-  | .located _ _ s => bindsAgain x s
-  | _ => false
-
-partial def nameUseStmt (x : String) : Stmt → NameUse
-  | .let_ pat e =>
-    let u := nameUseExpr x e
-    if (patternNames pat).contains x then { u with rebound := true } else u
-  | .letMut y e =>
-    let u := nameUseExpr x e
-    if y == x then { u with rebound := true } else u
-  | .expr e => nameUseExpr x e
-  | .defer e => nameUseExpr x e
-  | .located _ _ s => nameUseStmt x s
-  | .assign target e =>
-    -- (The variable written, or a part of it, is not its value used.)
-    if placeRoot target == some x then { nameUseExpr x e with changed := true }
-    else (nameUseExpr x target).or (nameUseExpr x e)
-
-end
 
 /-- The variable that says whether what a variable held has been given away,
 and the name the variable's cleanup is known by where it is one that asks. -/
@@ -1176,129 +1071,6 @@ def partUnknown : Nat := 1000000000
 /-- The name a part of a name's value is destroyed under, where the part is
 never read: the name and the part's place among the fields. -/
 def partName (x : String) (i : Nat) : String := s!"{x}.%{i}"
-
-/-- The name and the place such a name is of. -/
-def partOf (name : String) : Option (String × Nat) :=
-  match name.splitOn ".%" with
-  | [x, i] => i.toNat?.map (x, ·)
-  | _ => none
-
-/-- Is a name bound here one that what follows borrows with `&` and never
-changes? It is then kept where a reference can point: as a variable is. -/
-def borrowedOnly (x : String) (after : List Stmt) : Bool :=
-  let u := nameUseStmts x after
-  -- (A field of it may be borrowed too: it is kept where a reference can
-  -- point either way.)
-  !x.startsWith "%" && u.shared && !u.changed
-
-/-- Is a name bound here one of which what follows borrows a field with `&`,
-and never changes? If what it is bound to is a value and not a reference, it
-is kept where a reference can point, as one borrowed whole is. -/
-def fieldBorrowedOnly (x : String) (after : List Stmt) : Bool :=
-  let u := nameUseStmts x after
-  !x.startsWith "%" && u.fielded && !u.changed
-
-/-- The label `@f` a function is also known by: the last part of its name,
-`f` of `m::f` or `T::f`, and of a function written in a block, `f%12`. -/
-def labelShort (name : String) : String :=
-  let s := lastSegment name
-  match s.splitOn "%" with
-  | p :: _ :: _ => if p.isEmpty then s else p
-  | _ => s
-
-/-- May what an expression gives be a value and not a reference, by how it is
-written: a tuple, what a call gives, or something given a type that is not a
-reference's? (A call can give a reference. A name bound to one and kept
-where a reference can point holds that reference, and a field is then
-borrowed through it: the checker tells the two apart by the type.) -/
-def valueLike : Expr → Bool
-  | .tuple (_ :: _) => true
-  -- (A whole number, or a name written with a capital: a constructor without
-  -- fields or a constant.)
-  | .int _ => true
-  | .name _ x => (lastSegment x).front.isUpper
-  | .call _ (.name none mark) [_, ty] =>
-    mark != ascribeMark || (match TypeExpr.ofExpr ty with
-      | .ref _ _ _ => false
-      | _ => true)
-  | .call _ _ _ => true
-  | _ => false
-
-/-- `&list[i]` of a parameter `list` written with a reference's type: the
-element through `list`, as `element_at(list, i)`. -/
-def throughParamsRewrite (refs : List String) : Rewrite where
-  onExpr go
-    | .call id f args =>
-      let args := args.map go.ex
-      let args := match f, args with
-        | .name _ "element_at", [.ref false x, i] => if refs.contains x then [Expr.name none x, i] else args
-        | .name _ "place_at", [i, .ref true x] => if refs.contains x then [i, Expr.name none x] else args
-        | _, _ => args
-      some (.call id (go.ex f) args)
-    | _ => none
-
-/-- The names a clause binds that are only borrowed in it, or (of `values`,
-the parameters whose written types are not references') only borrowed by
-field, each kept in a variable of the same name where the clause starts. -/
-def promoteHeld (values : List String) : Clause → Clause
-  | .mk pats body =>
-    let held := ((pats.flatMap patternNames).eraseDups).filter fun x =>
-      borrowedOnly x body || (values.contains x && fieldBorrowedOnly x body)
-    -- (Each is where the clause's first statement is: what the variable
-    -- holds when the clause is done is destroyed by that place's name.)
-    let placed := fun (s : Stmt) => match body with
-      | .located line col _ :: _ => Stmt.located line col s
-      | _ => s
-    .mk pats (held.map (fun x => placed (.letMut x (.name none x))) ++ body)
-
-/-- A value that is given a name and then borrowed with `&` has to be
-somewhere a reference can point. Where the name is never changed, borrowed
-for writing or bound again, the binding is made a variable's, which is such a
-place; the checker still sees no assignment to it, since there is none. -/
-def promoteRewrite : Rewrite where
-  onExpr go
-    | .call id f args =>
-      -- (`if(e is Some(n)) { .. &n .. }`: the names an `is` among the
-      -- arguments binds are the blocks' after it, and are kept where a
-      -- reference can point as a clause's are.)
-      let isNames := fun (e : Expr) => match e with
-        | .call _ (.name none m) [_, .closure _ [.mk [pat] []]] =>
-          if m == isMark then patternNames pat else []
-        | .closure _ [.mk [] [.expr (.call _ (.name none m) [_, .closure _ [.mk [pat] []]])]] =>
-          if m == isMark then patternNames pat else []
-        | _ => []
-      let named := args.flatMap isNames
-      let args := args.map go.ex
-      let args := if named.isEmpty then args else args.map fun
-        | .closure cid [.mk [] body] =>
-          let held := named.eraseDups.filter (borrowedOnly · body)
-          let placed := fun (s : Stmt) => match body with
-            | .located line col _ :: _ => Stmt.located line col s
-            | _ => s
-          .closure cid [.mk [] (held.map (fun x => placed (.letMut x (.name none x))) ++ body)]
-        | a => a
-      some (.call id (go.ex f) args)
-    | _ => none
-  onClause go c := some (promoteHeld [] (match c with | .mk pats body => .mk pats (go.stmts body)))
-  onStmts go
-    | [] => none
-    | s :: rest =>
-      let rest := go.stmts rest
-      let rec here : Stmt → List Stmt
-        | .located line col s => (here s).map (.located line col)
-        | .let_ (.var x) e =>
-          if borrowedOnly x rest || (valueLike e && fieldBorrowedOnly x rest) then [.letMut x (go.ex e)]
-          else [.let_ (.var x) (go.ex e)]
-        | .let_ pat e =>
-          let held := (patternNames pat).eraseDups.filter (borrowedOnly · rest)
-          .let_ pat (go.ex e) :: held.map fun x => Stmt.letMut x (.name none x)
-        | s => [go.st s]
-      some (here s ++ rest)
-
-/-- A clause made so (`promoteRewrite`), with `values` as its parameters
-whose written types are not references'. -/
-def promoteClause (values : List String) : Clause → Clause
-  | .mk pats body => promoteHeld values (.mk pats (promoteRewrite.stmts body))
 
 /-- The names `mut name` binds in a pattern, and the pattern with each a
 plain name. -/
@@ -1335,33 +1107,5 @@ def unmutRewrite : Rewrite where
     | [] => none
 
 def unmutItems (items : List Item) : List Item := unmutRewrite.items items
-
-/-- A clause of a function whose parameters are written with `annots`, made
-so (`promoteClause`). -/
-def promoteFnClause (annots : List (Option TypeExpr)) (c : Clause) : Clause :=
-  -- A parameter written with a type that is no reference's is a value.
-  let values := match c with
-    | .mk pats _ => (pats.zip annots).filterMap fun
-      | (.var _, some (.ref _ _ _)) => none
-      | (.var x, some _) => some x
-      | _ => none
-  -- (One written with a reference's type, `list: &[T]`: `&list[0]` is the
-  -- element through that reference, not through one to it.)
-  let refs := match c with
-    | .mk pats _ => (pats.zip annots).filterMap fun
-      | (.var x, some (.ref _ _ _)) => some x
-      | _ => none
-  let c := if refs.isEmpty then c else match c with
-    | .mk pats body => .mk pats ((throughParamsRewrite refs).stmts body)
-  promoteClause values (nameBorrowsClause c)
-
-/-- The same for every function of a text. -/
-partial def promoteItems (items : List Item) : List Item :=
-  items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (promoteFnClause annots))
-    | .pub parent item => .pub parent ((promoteItems [item]).headD item)
-    | .module name (some inner) => .module name (some (promoteItems inner))
-    | .impl ps tr head args context methods => .impl ps tr head args context (promoteItems methods)
-    | item => item
 
 end Glorious.Syntax

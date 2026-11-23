@@ -442,16 +442,6 @@ partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (Strin
 
 end
 
-/-- Does a body call, on what it is called on, a function that takes
-a reference (`taken`), so that `receiverExpr` may borrow it? -/
-def Body.borrowsReceiver (b : Body) (taken : Std.HashMap String Bool) (body : Array StmtId) : Bool :=
-  body.any fun s => b.anyStmt (fun n => match n with
-    | .call _ f args =>
-      match b.name? f, args[0]?.map b.expr with
-      | some (_, name), some (.call _ m _) => b.bare? m == some receiverMark && taken.contains name
-      | _, _ => false
-    | _ => false) s
-
 /-- What the front end's passes made of items before (`kept`), and what
 they make now (`made`, where `keep`): each pass's result for one item, under
 a key of the pass, what it reads of the program besides the item, and the
@@ -475,8 +465,8 @@ def FrontMemo.take (m : FrontMemo) (key : UInt64) (make : Unit → List FItem) :
 /-- Every dotted call of a program with what it is called on borrowed where
 the function takes a reference: see `receiverExpr`. A name that is then
 borrowed and was not a variable is kept where a reference can point, as one
-borrowed with `&` in the text is (`promoteFnClause`): in each function's
-clause where a borrow may be made, the rest as the text's were made so. -/
+borrowed with `&` in the text is: each function's clauses made so,
+`promoteFnClause`, after its receivers are borrowed. -/
 partial def borrowReceivers (items : List FItem) (memo : FrontMemo := {}) : List FItem × FrontMemo :=
   let decls := items.map FItem.declared
   let taken : Std.HashMap String Bool :=
@@ -489,7 +479,7 @@ partial def borrowReceivers (items : List FItem) (memo : FrontMemo := {}) : List
     | .fn name ps annots ret b =>
       let (roots, b) := (b.roots.mapM fun c => (do
         let b ← get
-        let ⟨pats, body⟩ := b.clause c
+        let ⟨pats, _⟩ := b.clause c
         let values := (pats.zip annots).filterMap fun
           | (.var _, some (.ref _ _ _)) => none
           | (.var x, some _) => some x
@@ -499,9 +489,8 @@ partial def borrowReceivers (items : List FItem) (memo : FrontMemo := {}) : List
         let refs : List String := (pats.zip annots).filterMap fun
           | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
           | _ => none
-        let borrows := b.borrowsReceiver taken body
         let c' ← nameBorrowsClause (← receiverClause taken (refs.map (·, 3)) values c)
-        if promote && borrows then promoteFnClause annots c' else pure c' : Build ClauseId)).run b
+        if promote then promoteFnClause annots c' else pure c' : Build ClauseId)).run b
       .fn name ps annots ret { b with roots }
     | .impl ps tr head args context methods => .impl ps tr head args context (methods.map (go promote))
     | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map (go false)) params assocs
