@@ -328,8 +328,7 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
       HasAtom Γ x (.ref r σ) → x.eval env = some (.ref a b pth) → Tagged S r a b := by
     intro x r σ a b pth hx hw
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hx
-    rw [hw] at hv
-    cases hv
+    rw [hw] at hv; cases hv
     obtain ⟨a', b', _, _, he, _, _, _, htag⟩ := hvt.ref_inv
     cases he
     exact htag hR hL

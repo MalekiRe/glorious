@@ -101,8 +101,7 @@ theorem ArmsOk.lookup_none {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
     intro hl
     by_cases he : op = op'
     · subst he
-      rw [lookup_cons_eq] at hl
-      cases hl
+      rw [lookup_cons_eq] at hl; cases hl
     · rw [lookup_cons_ne he] at hl ⊢
       exact ih hl
 
@@ -118,8 +117,7 @@ theorem ArmsOk.lookup_some {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
     intro hl
     by_cases he : op = op'
     · subst he
-      rw [lookup_cons_eq] at hl
-      cases hl
+      rw [lookup_cons_eq] at hl; cases hl
       exact ⟨arm, Ps', none, lookup_cons_eq .., hop, hent⟩
     · rw [lookup_cons_ne he] at hl
       obtain ⟨arm', Ps, r, hl', hop', hent'⟩ := ih hl
@@ -128,8 +126,7 @@ theorem ArmsOk.lookup_some {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
     intro hl
     by_cases he : op = op'
     · subst he
-      rw [lookup_cons_eq] at hl
-      cases hl
+      rw [lookup_cons_eq] at hl; cases hl
       exact ⟨arm, Ps', some o, lookup_cons_eq .., hop, hent⟩
     · rw [lookup_cons_ne he] at hl
       obtain ⟨arm', Ps, r, hl', hop', hent'⟩ := ih hl
@@ -294,8 +291,7 @@ theorem StackOk.label_target {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row
     cases e
     simp [Frame.isTarget] at ht
     subst ht
-    rw [hl] at hid
-    cases hid
+    rw [hl] at hid; cases hid
     exact ⟨_, _, hrest⟩
   | never _ ih => intro fr st' id σ e ht hl; exact ih e ht hl
   | _ => intro fr st' id σ e ht _; cases e <;> simp [Frame.isTarget] at ht
@@ -311,8 +307,7 @@ theorem StackOk.handler_target {S : StoreTy} {st : List Frame} {τ : Ty} {ε : R
     cases e
     simp [Frame.isTarget] at ht
     subst ht
-    rw [hl] at hid
-    cases hid
+    rw [hl] at hid; cases hid
     exact ⟨_, _, hrest, hrow, hsub⟩
   | never _ ih => intro fr st' id ρ ε₀ Φ e ht hl; exact ih e ht hl
   | _ => intro fr st' id ρ ε₀ Φ e ht _; cases e <;> simp [Frame.isTarget] at ht

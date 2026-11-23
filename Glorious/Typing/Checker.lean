@@ -329,8 +329,7 @@ theorem lookup_mem {β : Type} : ∀ {l : List (Nat × β)} {k : Nat} {v : β},
   | (k', v') :: l, k, v, h => by
     by_cases he : k = k'
     · subst he
-      rw [lookup_cons_eq] at h
-      cases h
+      rw [lookup_cons_eq] at h; cases h
       exact List.mem_cons_self ..
     · rw [lookup_cons_ne he] at h
       exact List.mem_cons_of_mem _ (lookup_mem h)
@@ -653,8 +652,7 @@ theorem closes_sound {fn : Nat} {Cs : List Ty} {θ : List Rgn} {σ : Ty} {once :
   obtain ⟨⟨⟨⟨⟨hfn, hθ⟩, hcs⟩, hσ⟩, hdup⟩, henv⟩ := hc
   refine ⟨e.sig, ⟨e, Cert.sigsOf_mem he, hfn, rfl⟩, hθ, hcs, hσ, fun ho => ?_, envOk_sound henv⟩
   rcases hdup with h2 | h2
-  · rw [ho] at h2
-    cases h2
+  · rw [ho] at h2; cases h2
   · exact dupOk_all h2
 
 /-- The same for a closure made here: its captures fit the types the
@@ -677,8 +675,7 @@ theorem closesFit_sound {Γ : TEnv} {fn : Nat} {captures : List Atom} {θ : List
   obtain ⟨⟨⟨⟨⟨hfn, hθ⟩, hcs⟩, hσ⟩, hdup⟩, henv⟩ := hc
   refine ⟨e.sig, ⟨e, Cert.sigsOf_mem he, hfn, rfl⟩, hθ, atomsFit_sound hcs, hσ, fun ho => ?_, envOk_sound henv⟩
   rcases hdup with h2 | h2
-  · rw [ho] at h2
-    cases h2
+  · rw [ho] at h2; cases h2
   · exact dupOk_all h2
 
 /-- The type of an array's elements, if this is the type of arrays of some. -/
@@ -1010,8 +1007,7 @@ theorem cellOk_sound {ϕ : List Rgn} {n : Nat} {r : Rgn} {σ ρ : Ty} {εt : Row
     fun x hx => (hacc x hx).imp id fun h => ⟨h.1, grantsB_sound h.2⟩, nodupOk_sound hnd⟩
   have hR' : C.regions = true := hR
   rcases hreg with h | h
-  · rw [hR'] at h
-    cases h
+  · rw [hR'] at h; cases h
   · exact h
 
 /-- The conditions on the callable a label's scope runs: under the region rules
@@ -1038,8 +1034,7 @@ theorem labelOk_sound {ϕ : List Rgn} {n : Nat} {σ : Ty} {εt : Row} {accl acc 
     fun x hx => (hacc x hx).imp id fun h => ⟨h.1, grantsB_sound h.2⟩, nodupOk_sound hnd⟩
   have hR' : C.regions = true := hR
   rcases hreg with h | h
-  · rw [hR'] at h
-    cases h
+  · rw [hR'] at h; cases h
   · exact h
 
 /-- The conditions on the callable a borrow's scope runs. Without the rules for
@@ -1078,24 +1073,20 @@ theorem lendOk_sound {ϕ : List Rgn} {uniq : Bool} {n : Nat} {ρ κ : Rgn} {σ �
   refine ⟨hσ, hρ, hε, hn, regionOk_sound hreg, fun hL => ?_, fun x hx => ?_⟩
   · have hL' : C.loans = true := hL
     rcases hloan with h | ⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩
-    · rw [hL'] at h
-      cases h
+    · rw [hL'] at h; cases h
     · refine ⟨h1, grantsB_sound h2, fun hu => ?_, h4, List.isEmpty_iff.mp h5⟩
       rcases h3 with h | h
-      · rw [hu] at h
-        cases h
+      · rw [hu] at h; cases h
       · exact grantsB_sound h
   · rcases hacc x hx with h | ⟨⟨hfree, hmem⟩, hne⟩
     · exact .inl h
     · refine .inr ⟨hfree, grantsB_sound hmem, fun hL y hy => ?_⟩
       have hL' : C.loans = true := hL
       rcases hne with h | h
-      · rw [hL'] at h
-        cases h
+      · rw [hL'] at h; cases h
       · have hy' := h y hy
         have notIn : ∀ {l : List Rgn}, l.contains y = false → y ∉ l := fun hl hm => by
-          rw [List.contains_iff_mem.mpr hm] at hl
-          cases hl
+          rw [List.contains_iff_mem.mpr hm] at hl; cases hl
         refine ⟨notIn hy'.1, fun hu => ?_⟩
         rcases hy'.2 with h' | h'
         · rw [hu] at h'
@@ -1547,8 +1538,7 @@ theorem wildOk_sound {pats : List Pat} {live : List Nat} (h : wildOk pats live =
   have hlt : i < pats.length := by
     rcases Nat.lt_or_ge i pats.length with h | h
     · exact h
-    · rw [List.getElem?_eq_none h] at hp
-      cases hp
+    · rw [List.getElem?_eq_none h] at hp; cases hp
   have := List.all_eq_true.mp h i (List.mem_range.mpr hlt)
   simpa [hp, hw] using this
 

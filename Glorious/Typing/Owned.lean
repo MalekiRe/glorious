@@ -203,8 +203,7 @@ theorem occEnv_ge {id : Nat} {env : Env} {live : List Nat} {i : Nat} {v : Value}
   have hlt : i < env.length := by
     rcases Nat.lt_or_ge i env.length with h | h
     · exact h
-    · rw [List.getElem?_eq_none h] at hv
-      cases hv
+    · rw [List.getElem?_eq_none h] at hv; cases hv
   have := total_ge (f := fun i => if i ∈ live then occAt id env i else 0) hlt
   unfold occEnv
   simpa [hi, occAt_eq hv] using this
@@ -662,8 +661,7 @@ theorem Unique.fresh {s s' : State} {seg : List Frame} (hu : Unique s)
     have hlt : id < s.store.conts.length := by
       rcases Nat.lt_or_ge id s.store.conts.length with h | h
       · exact h
-      · rw [List.getElem?_eq_none h] at hseg
-        cases hseg
+      · rw [List.getElem?_eq_none h] at hseg; cases hseg
     rw [hc, List.getElem?_append_left hlt]
     exact hseg
 
@@ -785,8 +783,7 @@ theorem Unique.not_resumed {s : State} (hu : Unique s) : ¬ Resumed s := by
       simp only [occState]
       omega
     obtain ⟨seg, hseg⟩ := hlive hpos
-    rw [hseg] at hnone
-    cases hnone
+    rw [hseg] at hnone; cases hnone
 
 /-- The frames a handler search splits the stack into are the stack. -/
 theorem findHandler_split {op : Nat} : ∀ {st : List Frame} {d : Dispatch Frame},

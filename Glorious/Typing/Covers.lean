@@ -269,8 +269,7 @@ theorem select_of_match {vs : List Value} : ∀ {cs : List Clause},
       refine select_of_match (fun c' hc' => hlen c' (List.mem_cons_of_mem _ hc')) ?_
       obtain ⟨row, hrow, bs, hbs⟩ := h
       rcases List.mem_cons.mp hrow with rfl | hrow
-      · rw [hm] at hbs
-        cases hbs
+      · rw [hm] at hbs; cases hbs
       · exact ⟨row, hrow, bs, hbs⟩
 
 end Glorious.Typing

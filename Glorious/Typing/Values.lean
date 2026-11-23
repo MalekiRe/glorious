@@ -573,23 +573,19 @@ theorem rhs_occ {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {σ : Ty} {v :
   have copied : ∀ {τ' : Ty}, HasRhs Δ Γ rhs τ' → Δ.dup τ' → occ id v ≤ sumAt id env (rhsMoves rhs) := by
     intro τ' h' hd
     rcases rhs_ok (S := S) henv h' with ⟨w, hw, hwt⟩ | ⟨_, _, _, _, _, _, hnone⟩
-    · rw [hv] at hw
-      cases hw
+    · rw [hv] at hw; cases hw
       simp [hD _ _ _ hwt hd id]
-    · rw [hv] at hnone
-      cases hnone
+    · rw [hv] at hnone; cases hnone
   cases h with
   | atom ha => exact Nat.le_of_eq (occ_eval id env hv)
   | arrGet ha hi hu hd => exact copied (.arrGet ha hi hu hd) hd
   | arrSet ha hi hx hu hd => exact copied (.arrSet ha hi hx hu hd) hd
   | arrLen ha hb =>
     rcases rhs_ok (S := S) henv (.arrLen ha hb) with ⟨w, hw, hwt⟩ | ⟨_, _, _, _, _, _, hnone⟩
-    · rw [hv] at hw
-      cases hw
+    · rw [hv] at hw; cases hw
       obtain ⟨k, rfl⟩ := hwt.int_inv
       simp [occ]
-    · rw [hv] at hnone
-      cases hnone
+    · rw [hv] at hnone; cases hnone
   | arrPush ha hx hg hd => exact copied (.arrPush ha hx hg hd) hd
   | arrPop ha hb hu hs hd => exact copied (.arrPop ha hb hu hs hd) hd
   | @prim p a b ha hb =>

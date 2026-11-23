@@ -151,8 +151,7 @@ theorem extend_keeps {α : Type} {f : Nat → Option α} {k : Nat} {x : α} (hfr
   intro i y h
   by_cases he : i = k
   · subst he
-    rw [hfresh] at h
-    cases h
+    rw [hfresh] at h; cases h
   · simp [he, h]
 
 theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
@@ -339,8 +338,7 @@ theorem StoreOk.set_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cel
   rw [Array.getElem?_setIfInBounds] at hg
   by_cases he : a = a'
   · subst he
-    rw [ha] at h
-    cases h
+    rw [ha] at h; cases h
     simp at hg
     exact hx v hg.2
   · simp [he] at hg
@@ -1399,8 +1397,7 @@ theorem type_safety {p : Program} (hp : ProgramOk Δ p) (input : List Int)
     | ⟨m, c', _, hc', hs', hf, _⟩
   · rw [hn] at hc'
     cases hc'
-  · rw [hn] at hr
-    cases hr
+  · rw [hn] at hr; cases hr
   · exact ⟨c', ⟨m, hc'⟩, hs', hf⟩
 
 /--
@@ -1418,8 +1415,7 @@ theorem owned_safety {p : Program} (hp : ProgramOk Δ p) (hD : DupSound Δ) (inp
     | ⟨m, c', _, hc', hs', hf, hu⟩
   · rw [hn] at hc'
     cases hc'
-  · rw [hn] at hr
-    cases hr
+  · rw [hn] at hr; cases hr
   · exact ⟨c', ⟨m, hc'⟩, hs', hf, (hu hD (unique_init p)).not_resumed⟩
 
 end Glorious.Typing

@@ -43,8 +43,7 @@ theorem run_next (sim : ForwardSim stepS stepT R) :
   induction n with
   | zero =>
     intro s t s' hR h
-    rw [run_zero] at h
-    cases h
+    rw [run_zero] at h; cases h
     exact ⟨0, t, Nat.le_refl 0, rfl, hR⟩
   | succ n ih =>
     intro s t s' hR h
@@ -68,8 +67,7 @@ theorem run_halt (sim : ForwardSim stepS stepT R) :
   induction n with
   | zero =>
     intro s t v _ h
-    rw [run_zero] at h
-    cases h
+    rw [run_zero] at h; cases h
   | succ n ih =>
     intro s t v hR h
     rw [run_succ] at h
@@ -82,8 +80,7 @@ theorem run_halt (sim : ForwardSim stepS stepT R) :
       rw [run_add, hk, Step.bind_next]
       exact hm
     | halt w =>
-      rw [hs, Step.bind_halt] at h
-      cases h
+      rw [hs, Step.bind_halt] at h; cases h
       obtain ⟨k, hk⟩ := sim.halt hR hs
       exact ⟨k + 1, hk⟩
     | stuck => rw [hs] at h; simp at h
@@ -130,8 +127,7 @@ theorem not_goesWrong (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} (
     obtain ⟨m', hm'⟩ := sim.run_halt m hR hs
     have a := run_stuck_mono hm (Nat.le_max_left m m')
     have b := run_halt_mono hm' (Nat.le_max_right m m')
-    rw [a] at b
-    cases b
+    rw [a] at b; cases b
   | stuck => exact safe ⟨m, hs⟩
 
 /-- Divergence is reflected for source programs that never go wrong. -/
@@ -180,8 +176,7 @@ theorem obs_reflect {α : Type} (sim : ForwardSim stepS stepT R)
   | halt v =>
     obtain ⟨m', hm'⟩ := sim.run_halt m hR hs
     by_cases hle : m' ≤ m
-    · rw [run_halt_mono hm' hle] at hm
-      cases hm
+    · rw [run_halt_mono hm' hle] at hm; cases hm
     · have e : m' = m + (m' - m) := by omega
       rw [e, run_add, hm, Step.bind_next] at hm'
       exact Or.inr ⟨v, ⟨m, hs⟩, run_obs_prefix_halt obsT final hstep hhalt _ hm'⟩
@@ -213,8 +208,7 @@ theorem reflect (sim : ForwardSimThrough stepS stepT R I) (m : Nat) {s : σ₁} 
     ∃ c, Reaches stepS s c ∧ I c d := by
   cases m with
   | zero =>
-    rw [run_zero] at hm
-    cases hm
+    rw [run_zero] at hm; cases hm
     exact ⟨s, ⟨0, rfl⟩, sim.rel hR⟩
   | succ m =>
     cases hs : stepS s with
@@ -229,8 +223,7 @@ theorem reflect (sim : ForwardSimThrough stepS stepT R I) (m : Nat) {s : σ₁} 
         safe ⟨n + 1, by rw [run_succ, hs, Step.bind_next]; exact hn⟩
       by_cases hle : m ≤ k
       · obtain ⟨tj, htj, hI⟩ := hthrough.2 m hle
-        rw [htj] at hm
-        cases hm
+        rw [htj] at hm; cases hm
         exact ⟨s', ⟨1, by simp [run_succ, hs]⟩, hI⟩
       · have e : m = k + (m - k) := by omega
         rw [e, run_add, hthrough.1, Step.bind_next] at hm

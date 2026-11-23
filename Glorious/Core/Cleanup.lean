@@ -249,8 +249,7 @@ theorem callFn_next {p : Program} {fn : Nat} {captures vs : List Value} {stack :
   | none => rw [hi] at h; cases h
   | some r =>
     obtain ⟨body, ρ⟩ := r
-    rw [hi] at h
-    cases h
+    rw [hi] at h; cases h
     exact ⟨rfl, rfl⟩
 
 theorem callFn_not_halt {p : Program} {fn : Nat} {captures vs : List Value} {stack : List Frame}
@@ -528,8 +527,7 @@ theorem stepIO_accounts {p : Program} {c c' : Config} (h : stepIO p c = .next c'
       cases hc : Host.call w id vs with
       | none => rw [hc] at h; cases h
       | some x =>
-        rw [hc] at h
-        cases h
+        rw [hc] at h; cases h
         simp [owed, starts, installs, e]
   · have e : stepIO p ⟨s, w⟩ = lift w (step p s) := by
       unfold stepIO
@@ -540,8 +538,7 @@ theorem stepIO_accounts {p : Program} {c c' : Config} (h : stepIO p c = .next c'
     rw [e] at h
     cases hs : step p s with
     | next s' =>
-      rw [hs] at h
-      cases h
+      rw [hs] at h; cases h
       exact step_accounts hs
     | halt v => rw [hs] at h; cases h
     | stuck => rw [hs] at h; cases h
@@ -588,8 +585,7 @@ theorem run_accounts (p : Program) (n : Nat) {c c' : Config}
     owed c'.state + started p n c = owed c.state + installed p n c := by
   induction n generalizing c with
   | zero =>
-    rw [Machine.run_zero] at h
-    cases h
+    rw [Machine.run_zero] at h; cases h
     simp [started, installed]
   | succ n ih =>
     rw [Machine.run_succ] at h

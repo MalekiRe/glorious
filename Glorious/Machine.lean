@@ -140,8 +140,7 @@ theorem halt_last {n : Nat} {s : σ} {v : ν} (h : run step n s = .halt v) :
       obtain ⟨m, c, hm, hc⟩ := ih h
       exact ⟨m + 1, c, by rw [run_succ, hs, Step.bind_next]; exact hm, hc⟩
     | halt w =>
-      rw [hs, Step.bind_halt] at h
-      cases h
+      rw [hs, Step.bind_halt] at h; cases h
       exact ⟨0, s, rfl, hs⟩
     | stuck => rw [hs] at h; simp at h
 
@@ -195,8 +194,7 @@ theorem run_obs_prefix {α : Type} (obs : σ → List α)
   induction n with
   | zero =>
     intro s s' h
-    rw [run_zero] at h
-    cases h
+    rw [run_zero] at h; cases h
     exact List.prefix_refl _
   | succ n ih =>
     intro s s' h
@@ -216,8 +214,7 @@ theorem run_obs_prefix_halt {α : Type} (obs : σ → List α) (final : ν → L
   induction n with
   | zero =>
     intro s v h
-    rw [run_zero] at h
-    cases h
+    rw [run_zero] at h; cases h
   | succ n ih =>
     intro s v h
     rw [run_succ] at h
@@ -226,8 +223,7 @@ theorem run_obs_prefix_halt {α : Type} (obs : σ → List α) (final : ν → L
       rw [hs, Step.bind_next] at h
       exact (hstep hs).trans (ih h)
     | halt w =>
-      rw [hs, Step.bind_halt] at h
-      cases h
+      rw [hs, Step.bind_halt] at h; cases h
       exact hhalt hs
     | stuck => rw [hs] at h; simp at h
 

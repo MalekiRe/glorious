@@ -180,8 +180,7 @@ theorem dup_occ (hs : C.strict = true) (hd : dataOk C = true) :
     obtain ⟨c₀, hc₀, rfl⟩ := List.mem_map.mp hcm
     rw [dupTy_inst]
     rcases hq hdup c₀ hc₀ with h | h
-    · rw [hs] at h
-      cases h
+    · rw [hs] at h; cases h
     · exact h
   | _, _, _, .cont _, hdup, _ => by simp [dupTy] at hdup
   | _, _, _, .label _ _, _, id => by simp [occ]
@@ -204,8 +203,7 @@ theorem dupSound_of_check {p : Program} (h : checkProgram C p = true) (hs : C.st
   simp only [checkProgram, Bool.and_eq_true, hs, Bool.not_true, Bool.false_or] at h
   intro S v τ hv hdup id
   rcases hdup with hf | hd
-  · rw [hs] at hf
-    cases hf
+  · rw [hs] at hf; cases hf
   · exact dup_occ hs h.1.2 hv hd id
 
 /--

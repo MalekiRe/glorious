@@ -389,8 +389,7 @@ theorem stepIO_owns {p : Program} {c c' : Config} (ho : Owns c.state)
     rw [stepIO_eq_lift hnh] at h
     cases hr : step p ⟨tm, env, stack, store⟩ with
     | next s' =>
-      rw [hr] at h
-      cases h
+      rw [hr] at h; cases h
       exact step_owns ho hr
     | halt v => rw [hr] at h; cases h
     | stuck => rw [hr] at h; cases h
@@ -602,8 +601,7 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
       ∀ {w : Value}, x.eval env = some w → w = .ref a tag pth → False := by
     intro x r σ hx hr w hw hwa
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hx
-    rw [hw] at hv
-    cases hv
+    rw [hw] at hv; cases hv
     subst hwa
     obtain ⟨b, _, _, _, hb, _, _, hreg, _⟩ := hvt.ref_inv
     cases hb
@@ -612,8 +610,7 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
     obtain ⟨u, hu⟩ := ((ho a).2 (by
       show 0 < ownStack a stack + osum (ownStack a) store.conts
       omega))
-    rw [hu] at hnone
-    cases hnone
+    rw [hu] at hnone; cases hnone
   cases hty with
   | @load _ x _ r σ _ _ ha hr _ _ | @tag _ x _ _ r σ _ _ _ ha hr _ _ | @focus _ x _ _ r σ _ _ _ ha hr _ _
   | @focusIn _ x _ _ _ r σ _ _ _ _ ha hr _ _ _ | @focusAt _ x _ _ r σ _ _ _ ha _ hr _ _ =>
@@ -657,8 +654,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     intro x n Ps σ εf once fenv acc hx hf
     subst hx
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hf
-    rw [hev] at hv
-    cases hv
+    rw [hev] at hv; cases hv
     rcases hvt.fn_inv with ⟨_, _, _, _, h, _⟩ | ⟨_, _, h, _⟩ | ⟨id', _, h, hn, _, _, hreg⟩
     · cases h
     · cases h

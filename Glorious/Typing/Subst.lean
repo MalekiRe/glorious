@@ -259,8 +259,7 @@ theorem InjOn.nodup_scope {ϕ θ : List Rgn} (h : InjOn ϕ θ) {l : List Rgn}
         rw [Rgn.inst_atom_bound hya hfy', Rgn.atom_parts hya] at hzy
         exact List.mem_singleton.mp hzy
       · have := hfree y x hfy' hzy
-        rw [hfx] at this
-        cases this
+        rw [hfx] at this; cases this
     · rw [hey] at hzy
       rw [List.mem_singleton.mp hzy] at hzx
       cases hfx' : x.free
@@ -270,8 +269,7 @@ theorem InjOn.nodup_scope {ϕ θ : List Rgn} (h : InjOn ϕ θ) {l : List Rgn}
         rw [Rgn.inst_atom_bound hxa hfx', Rgn.atom_parts hxa] at hzx
         exact (List.mem_singleton.mp hzx).symm
       · have := hfree x y hfx' hzx
-        rw [hfy] at this
-        cases this
+        rw [hfy] at this; cases this
     · exact h.2 x y hmx hmy z hzx hzy
 
 /-- The same of what a callable type binding `n` regions touches, of which
@@ -427,8 +425,7 @@ theorem CtorOf.of_inst (hΔ : Δ.Stable) {tag name : Nat} {args Fs' : List Ty} {
     rw [hΔ.ctor] at hF
     cases hc : Δ.ctorFields tag name args with
     | none =>
-      rw [hc] at hF
-      cases hF
+      rw [hc] at hF; cases hF
     | some Fs =>
       rw [hc] at hF
       exact ⟨Fs, .inr ⟨h0, name, args, rfl, hc⟩, (Option.some.inj hF).symm⟩

@@ -550,8 +550,7 @@ theorem run_lift (w : World) : ∀ (k : Nat) {t t' : Bytecode.State},
   induction k with
   | zero =>
     intro t t' h
-    rw [run_zero] at h
-    cases h
+    rw [run_zero] at h; cases h
     rfl
   | succ k ih =>
     intro t t' h

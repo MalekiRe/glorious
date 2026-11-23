@@ -358,8 +358,7 @@ theorem coherent {impls : List Impl} {givens : Givens} (hn : NoOverlap impls)
     | impl hj ht' hh' ha' hall' =>
       have e := hn _ _ _ _ hi hj (ht.trans ht'.symm) (hh.trans hh'.symm) (ha.trans ha'.symm)
       subst e
-      rw [hi] at hj
-      cases hj
+      rw [hi] at hj; cases hj
       rw [coherentAll hn hc hg hall hall']
     | cons hj ht' _ hview _ =>
       obtain ⟨hl, hv⟩ := head_of_view hview
@@ -377,8 +376,7 @@ theorem coherent {impls : List Impl} {givens : Givens} (hn : NoOverlap impls)
       obtain ⟨hh, rfl⟩ := hview'
       have e := hn _ _ _ _ hi hj (ht.trans ht'.symm) hh (ha.trans ha'.symm)
       subst e
-      rw [hi] at hj
-      cases hj
+      rw [hi] at hj; cases hj
       rw [coherentAll hn hc hg hall hall']
 
 theorem coherentAll {impls : List Impl} {givens : Givens} (hn : NoOverlap impls)
