@@ -278,34 +278,12 @@ theorem deliver_leave_next (p : Program) (stack : List Frame) :
   | cons fr stack ih =>
     obtain ⟨ihd, ihl⟩ := ih
     refine ⟨fun v store s' h => ?_, fun target after store s' h => ?_⟩
-    · cases fr with
-      | call ρ body =>
-        simp only [deliver, Step.next.injEq] at h
-        subst h
-        simp [deliverStarts, guards]
-      | handler id hd =>
-        simp only [deliver] at h
-        obtain ⟨e₁, e₂⟩ := callFn_next h
-        simp [deliverStarts, guards, e₁, e₂]
-      | label id =>
-        simp only [deliver] at h
-        simpa [deliverStarts, guards] using ihd v store s' h
-      | guard fn captures =>
-        simp only [deliver] at h
-        obtain ⟨e₁, e₂⟩ := callFn_next h
-        simp [deliverStarts, guards, e₁, e₂]
-      | cell a =>
-        simp only [deliver] at h
-        simpa [deliverStarts, guards, Store.release] using ihd v (store.release a) s' h
-      | lend u a b =>
-        simp only [deliver] at h
-        simpa [deliverStarts, guards] using ihd v store s' h
-      | yield w =>
-        simp only [deliver] at h
-        simpa [deliverStarts, guards] using ihd w store s' h
-      | exit target after =>
-        simp only [deliver] at h
-        simpa [deliverStarts, guards] using ihl target after store s' h
+    · cases fr <;> simp only [deliver] at h <;>
+        first
+        | (cases h; simp [deliverStarts, guards]; done)
+        | exact (fun ⟨e₁, e₂⟩ => by simp [deliverStarts, guards, e₁, e₂]) (callFn_next h)
+        | simpa [deliverStarts, guards, Store.release] using ihd _ _ s' h
+        | simpa [deliverStarts, guards] using ihl _ _ _ s' h
     · simp only [leave] at h
       cases ht : fr.isTarget target with
       | true =>
@@ -323,33 +301,10 @@ theorem deliver_leave_next (p : Program) (stack : List Frame) :
           simp [leaveStarts, ht, hg, e₁, e₂]
       | false =>
         simp only [ht, Bool.false_eq_true, ↓reduceIte] at h
-        cases fr with
-        | guard fn captures =>
-          simp only at h
-          obtain ⟨e₁, e₂⟩ := callFn_next h
-          simp [leaveStarts, ht, guards, e₁, e₂]
-        | cell a =>
-          simp only at h
-          simpa [leaveStarts, ht, guards, Store.release] using
-            ihl target after (store.release a) s' h
-        | call ρ body =>
-          simp only at h
-          simpa [leaveStarts, ht, guards] using ihl target after store s' h
-        | handler id hd =>
-          simp only at h
-          simpa [leaveStarts, ht, guards] using ihl target after store s' h
-        | label id =>
-          simp only at h
-          simpa [leaveStarts, ht, guards] using ihl target after store s' h
-        | lend u a b =>
-          simp only at h
-          simpa [leaveStarts, ht, guards] using ihl target after store s' h
-        | yield w =>
-          simp only at h
-          simpa [leaveStarts, ht, guards] using ihl target after store s' h
-        | exit t a =>
-          simp only at h
-          simpa [leaveStarts, ht, guards] using ihl target after store s' h
+        cases fr <;> simp only at h <;>
+          first
+          | exact (fun ⟨e₁, e₂⟩ => by simp [leaveStarts, ht, guards, e₁, e₂]) (callFn_next h)
+          | simpa [leaveStarts, ht, guards, Store.release] using ihl target after _ s' h
 
 /-- A machine does not finish past a guard: finishing means the stack held none. -/
 theorem deliver_leave_halt (p : Program) (stack : List Frame) :
@@ -364,17 +319,12 @@ theorem deliver_leave_halt (p : Program) (stack : List Frame) :
   | cons fr stack ih =>
     obtain ⟨ihd, ihl⟩ := ih
     refine ⟨fun v w store h => ?_, fun target after store w h => ?_⟩
-    · cases fr with
-      | call ρ body => simp [deliver] at h
-      | handler id hd => simp only [deliver] at h; exact absurd h callFn_not_halt
-      | label id => simp only [deliver] at h; simpa [guards] using ihd v w store h
-      | guard fn captures => simp only [deliver] at h; exact absurd h callFn_not_halt
-      | cell a => simp only [deliver] at h; simpa [guards] using ihd v w _ h
-      | lend u a b => simp only [deliver] at h; simpa [guards] using ihd v w store h
-      | yield x => simp only [deliver] at h; simpa [guards] using ihd x w store h
-      | exit target after =>
-        simp only [deliver] at h
-        simpa [guards] using ihl target after store w h
+    · cases fr <;> simp only [deliver] at h <;>
+        first
+        | exact absurd h callFn_not_halt
+        | simpa [guards] using ihd _ w _ h
+        | simpa [guards] using ihl _ _ _ w h
+        | simp at h
     · simp only [leave] at h
       cases ht : fr.isTarget target with
       | true =>
@@ -386,15 +336,10 @@ theorem deliver_leave_halt (p : Program) (stack : List Frame) :
         | invoke fn captures args => simp only at h; exact absurd h callFn_not_halt
       | false =>
         simp only [ht, Bool.false_eq_true, ↓reduceIte] at h
-        cases fr with
-        | guard fn captures => simp only at h; exact absurd h callFn_not_halt
-        | cell a => simp only at h; simpa [guards] using ihl target after _ w h
-        | call ρ body => simp only at h; simpa [guards] using ihl target after store w h
-        | handler id hd => simp only at h; simpa [guards] using ihl target after store w h
-        | label id => simp only at h; simpa [guards] using ihl target after store w h
-        | lend u a b => simp only at h; simpa [guards] using ihl target after store w h
-        | yield x => simp only at h; simpa [guards] using ihl target after store w h
-        | exit t a => simp only at h; simpa [guards] using ihl target after store w h
+        cases fr <;> simp only at h <;>
+          first
+          | exact absurd h callFn_not_halt
+          | simpa [guards] using ihl target after _ w h
 
 theorem apply_next {p : Program} {c : Callee} {stack : List Frame} {store : Store Frame}
     {s' : State} (h : apply p c stack store = .next s') :
@@ -433,27 +378,14 @@ theorem apply_next {p : Program} {c : Callee} {stack : List Frame} {store : Stor
 
 theorem apply_halt {p : Program} {c : Callee} {stack : List Frame} {store : Store Frame}
     {w : Value} (h : apply p c stack store = .halt w) : guards stack = 0 := by
-  cases c with
-  | fn fn captures vs => simp only [apply] at h; exact absurd h callFn_not_halt
-  | cont id v =>
-    simp only [apply] at h
-    cases ht : takeCont store.conts id with
-    | none => rw [ht] at h; cases h
-    | some r =>
-      obtain ⟨segment, conts⟩ := r
-      rw [ht] at h
-      simp only at h
-      have := (deliver_leave_halt p (segment ++ stack)).1 v w _ h
-      rw [guards_append] at this
-      omega
-  | label id v =>
-    simp only [apply] at h
-    cases hf : findLabel Frame.asLabel id stack with
-    | none => rw [hf] at h; cases h
-    | some r =>
-      rw [hf] at h
-      simp only at h
-      exact (deliver_leave_halt p stack).2 _ _ store w h
+  cases c <;> simp only [apply] at h <;> (repeat' split at h) <;>
+    first
+    | exact absurd h callFn_not_halt
+    | (cases h; done)
+    | exact (deliver_leave_halt p stack).2 _ _ store w h
+    | (have := (deliver_leave_halt p _).1 _ w _ h
+       rw [guards_append] at this
+       omega)
 
 /-- **One step keeps the account.** The guards still owed, and the cleanups the
 step started, are the guards that were owed and the one it may have installed. -/
@@ -471,53 +403,6 @@ theorem step_accounts {p : Program} {s s' : State} (h : step p s = .next s') :
       simp only [owed, starts, installs]
       rw [e₂]
       omega
-  | let_ rhs body =>
-    simp only [step] at h
-    cases hr : rhs.eval env with
-    | none => rw [hr] at h; cases h
-    | some v => rw [hr] at h; cases h; simp [owed, starts, installs]
-  | call f args body =>
-    simp only [step] at h
-    cases hc : evalCall env f args with
-    | none => rw [hc] at h; cases h
-    | some c =>
-      rw [hc] at h
-      have := apply_next h
-      simp only [owed, starts, installs, hc, guards] at this ⊢
-      omega
-  | tail f args =>
-    simp only [step] at h
-    cases hc : evalCall env f args with
-    | none => rw [hc] at h; cases h
-    | some c =>
-      rw [hc] at h
-      have := apply_next h
-      simp only [owed, starts, installs, hc] at this ⊢
-      omega
-  | handle ret ops captures thunk body =>
-    simp only [step] at h
-    cases hcaps : evalAtoms env captures with
-    | none => rw [hcaps] at h; cases h
-    | some caps =>
-      cases hc : evalCall env thunk [] with
-      | none => rw [hcaps, hc] at h; cases h
-      | some c =>
-        rw [hcaps, hc] at h
-        have := apply_next h
-        simp only [owed, starts, installs, hcaps, hc, guards] at this ⊢
-        omega
-  | handleTail ret ops captures thunk =>
-    simp only [step] at h
-    cases hcaps : evalAtoms env captures with
-    | none => rw [hcaps] at h; cases h
-    | some caps =>
-      cases hc : evalCall env thunk [] with
-      | none => rw [hcaps, hc] at h; cases h
-      | some c =>
-        rw [hcaps, hc] at h
-        have := apply_next h
-        simp only [owed, starts, installs, hcaps, hc, guards] at this ⊢
-        omega
   | raise op args =>
     simp only [step] at h
     cases hvs : evalAtoms env args with
@@ -550,50 +435,6 @@ theorem step_accounts {p : Program} {s s' : State} (h : step p s = .next s') :
           show guards (.call env body :: (d.above ++ [.handler d.id d.handler])) = guards d.above
           simp [guards, guards_append]
         simp only [owed, starts, installs, e₁, e₂]
-        omega
-  | label thunk body =>
-    simp only [step] at h
-    cases hc : evalScope env thunk (.label store.labels) with
-    | none => rw [hc] at h; cases h
-    | some c =>
-      rw [hc] at h
-      have := apply_next h
-      simp only [owed, starts, installs, hc, guards] at this ⊢
-      omega
-  | labelTail thunk =>
-    simp only [step] at h
-    cases hc : evalScope env thunk (.label store.labels) with
-    | none => rw [hc] at h; cases h
-    | some c =>
-      rw [hc] at h
-      have := apply_next h
-      simp only [owed, starts, installs, hc, guards] at this ⊢
-      omega
-  | guard cleanup thunk body =>
-    simp only [step] at h
-    cases hcl : evalClosure env cleanup with
-    | none => rw [hcl] at h; cases h
-    | some r =>
-      obtain ⟨fn, captures⟩ := r
-      cases hc : evalCall env thunk [] with
-      | none => rw [hcl, hc] at h; cases h
-      | some c =>
-        rw [hcl, hc] at h
-        have := apply_next h
-        simp only [owed, starts, installs, hcl, hc, guards] at this ⊢
-        omega
-  | guardTail cleanup thunk =>
-    simp only [step] at h
-    cases hcl : evalClosure env cleanup with
-    | none => rw [hcl] at h; cases h
-    | some r =>
-      obtain ⟨fn, captures⟩ := r
-      cases hc : evalCall env thunk [] with
-      | none => rw [hcl, hc] at h; cases h
-      | some c =>
-        rw [hcl, hc] at h
-        have := apply_next h
-        simp only [owed, starts, installs, hcl, hc, guards] at this ⊢
         omega
   | cancel k body =>
     simp only [step] at h
@@ -630,54 +471,27 @@ theorem step_accounts {p : Program} {s s' : State} (h : step p s = .next s') :
           simp only at e₂
           rw [e₂]
           omega
-  | cell init thunk body =>
+  | call _ _ _
+  | tail _ _
+  | handle _ _ _ _ _
+  | handleTail _ _ _ _
+  | label _ _
+  | labelTail _
+  | guard _ _ _
+  | guardTail _ _
+  | cell _ _ _
+  | cellTail _ _
+  | lend _ _ _ _ _ _
+  | let_ _ _
+  | mem _ _ _ =>
     simp only [step] at h
-    cases hv : init.eval env with
-    | none => rw [hv] at h; cases h
-    | some v =>
-      cases hc : evalScope env thunk (.ref store.cells.size 0 []) with
-      | none => rw [hv, hc] at h; cases h
-      | some c =>
-        rw [hv, hc] at h
-        have := apply_next h
-        simp only [owed, starts, installs, hv, hc, guards, Store.alloc] at this ⊢
-        omega
-  | cellTail init thunk =>
-    simp only [step] at h
-    cases hv : init.eval env with
-    | none => rw [hv] at h; cases h
-    | some v =>
-      cases hc : evalScope env thunk (.ref store.cells.size 0 []) with
-      | none => rw [hv, hc] at h; cases h
-      | some c =>
-        rw [hv, hc] at h
-        have := apply_next h
-        simp only [owed, starts, installs, hv, hc, guards, Store.alloc] at this ⊢
-        omega
-  | lend uniq r thunk pre post body =>
-    simp only [step] at h
-    cases hl : evalLend env r thunk pre post (store.labels + 1) with
-    | none => rw [hl] at h; cases h
-    | some x =>
-      obtain ⟨a, c⟩ := x
-      rw [hl] at h
-      have := apply_next h
-      simp only [owed, starts, installs, hl, guards] at this ⊢
-      omega
-  | mem op args body =>
-    simp only [step] at h
-    cases hvs : evalAtoms env args with
-    | none => rw [hvs] at h; cases h
-    | some vs =>
-      rw [hvs] at h
-      simp only at h
-      cases ho : op.eval store.cells vs with
-      | none => rw [ho] at h; cases h
-      | some x =>
-        obtain ⟨r, cells⟩ := x
-        rw [ho] at h
-        cases h
-        simp [owed, starts, installs]
+    repeat' split at h
+    all_goals first
+      | (cases h; done)
+      | (cases h; simp [owed, starts, installs]; done)
+      | (have := apply_next h
+         simp_all only [owed, starts, installs, guards, Store.alloc]
+         omega)
   | host id args body => simp [step] at h
 
 /-- A machine that finishes has no guard left on its stack, and its last step
@@ -685,152 +499,18 @@ installs none. -/
 theorem step_halt {p : Program} {s : State} {w : Value} (h : step p s = .halt w) :
     guards s.stack = 0 := by
   obtain ⟨tm, env, stack, store⟩ := s
-  cases tm with
-  | ret a =>
-    simp only [step] at h
-    cases ha : a.eval env with
-    | none => rw [ha] at h; cases h
-    | some v => rw [ha] at h; exact (deliver_leave_halt p stack).1 v w store h
-  | let_ rhs body =>
-    simp only [step] at h
-    cases hr : rhs.eval env with
-    | none => rw [hr] at h; cases h
-    | some v => rw [hr] at h; cases h
-  | call f args body =>
-    simp only [step] at h
-    cases hc : evalCall env f args with
-    | none => rw [hc] at h; cases h
-    | some c => rw [hc] at h; simpa [guards] using apply_halt h
-  | tail f args =>
-    simp only [step] at h
-    cases hc : evalCall env f args with
-    | none => rw [hc] at h; cases h
-    | some c => rw [hc] at h; exact apply_halt h
-  | handle ret ops captures thunk body =>
-    simp only [step] at h
-    cases hcaps : evalAtoms env captures with
-    | none => rw [hcaps] at h; cases h
-    | some caps =>
-      cases hc : evalCall env thunk [] with
-      | none => rw [hcaps, hc] at h; cases h
-      | some c => rw [hcaps, hc] at h; simpa [guards] using apply_halt h
-  | handleTail ret ops captures thunk =>
-    simp only [step] at h
-    cases hcaps : evalAtoms env captures with
-    | none => rw [hcaps] at h; cases h
-    | some caps =>
-      cases hc : evalCall env thunk [] with
-      | none => rw [hcaps, hc] at h; cases h
-      | some c => rw [hcaps, hc] at h; simpa [guards] using apply_halt h
-  | raise op args =>
-    simp only [step] at h
-    cases hvs : evalAtoms env args with
-    | none => rw [hvs] at h; cases h
-    | some vs =>
-      rw [hvs] at h
-      cases hd : findHandler Frame.asHandler op stack with
-      | none => rw [hd] at h; cases h
-      | some d => rw [hd] at h; exact (deliver_leave_halt p stack).2 _ _ store w h
-  | perform op args body =>
-    simp only [step] at h
-    cases hvs : evalAtoms env args with
-    | none => rw [hvs] at h; cases h
-    | some vs =>
-      rw [hvs] at h
-      cases hd : findHandler Frame.asHandler op stack with
-      | none => rw [hd] at h; cases h
-      | some d => rw [hd] at h; exact absurd h callFn_not_halt
-  | label thunk body =>
-    simp only [step] at h
-    cases hc : evalScope env thunk (.label store.labels) with
-    | none => rw [hc] at h; cases h
-    | some c => rw [hc] at h; simpa [guards] using apply_halt h
-  | labelTail thunk =>
-    simp only [step] at h
-    cases hc : evalScope env thunk (.label store.labels) with
-    | none => rw [hc] at h; cases h
-    | some c => rw [hc] at h; simpa [guards] using apply_halt h
-  | guard cleanup thunk body =>
-    simp only [step] at h
-    cases hcl : evalClosure env cleanup with
-    | none => rw [hcl] at h; cases h
-    | some r =>
-      obtain ⟨fn, captures⟩ := r
-      cases hc : evalCall env thunk [] with
-      | none => rw [hcl, hc] at h; cases h
-      | some c => rw [hcl, hc] at h; have := apply_halt h; simp [guards] at this
-  | guardTail cleanup thunk =>
-    simp only [step] at h
-    cases hcl : evalClosure env cleanup with
-    | none => rw [hcl] at h; cases h
-    | some r =>
-      obtain ⟨fn, captures⟩ := r
-      cases hc : evalCall env thunk [] with
-      | none => rw [hcl, hc] at h; cases h
-      | some c => rw [hcl, hc] at h; have := apply_halt h; simp [guards] at this
-  | cancel k body =>
-    simp only [step] at h
-    cases hd : dropOf p.drops env k with
-    | some r =>
-      obtain ⟨d, captures⟩ := r
-      rw [hd] at h
-      exact absurd h callFn_not_halt
-    | none =>
-    rw [hd] at h
-    cases hk : evalCont env k with
-    | none => rw [hk] at h; cases h
-    | some o =>
-      cases o with
-      | none => rw [hk] at h; cases h
-      | some id =>
-        rw [hk] at h
-        simp only at h
-        cases ht : takeCont store.conts id with
-        | none => rw [ht] at h; cases h
-        | some r =>
-          obtain ⟨segment, conts⟩ := r
-          rw [ht] at h
-          simp only at h
-          have := (deliver_leave_halt p _).2 _ _ _ w h
-          rw [guards_append] at this
-          simp only [guards] at this
-          show guards stack = 0
-          omega
-  | cell init thunk body =>
-    simp only [step] at h
-    cases hv : init.eval env with
-    | none => rw [hv] at h; cases h
-    | some v =>
-      cases hc : evalScope env thunk (.ref store.cells.size 0 []) with
-      | none => rw [hv, hc] at h; cases h
-      | some c => rw [hv, hc] at h; simpa [guards] using apply_halt h
-  | cellTail init thunk =>
-    simp only [step] at h
-    cases hv : init.eval env with
-    | none => rw [hv] at h; cases h
-    | some v =>
-      cases hc : evalScope env thunk (.ref store.cells.size 0 []) with
-      | none => rw [hv, hc] at h; cases h
-      | some c => rw [hv, hc] at h; simpa [guards] using apply_halt h
-  | lend uniq r thunk pre post body =>
-    simp only [step] at h
-    cases hl : evalLend env r thunk pre post (store.labels + 1) with
-    | none => rw [hl] at h; cases h
-    | some x =>
-      obtain ⟨a, c⟩ := x
-      rw [hl] at h
-      simpa [guards] using apply_halt h
-  | mem op args body =>
-    simp only [step] at h
-    cases hvs : evalAtoms env args with
-    | none => rw [hvs] at h; cases h
-    | some vs =>
-      rw [hvs] at h
-      simp only at h
-      cases ho : op.eval store.cells vs with
-      | none => rw [ho] at h; cases h
-      | some x => rw [ho] at h; cases h
-  | host id args body => simp [step] at h
+  cases tm <;> simp only [step] at h <;> (repeat' split at h) <;>
+    first
+    | (cases h; done)
+    | exact absurd h callFn_not_halt
+    | exact (deliver_leave_halt p stack).1 _ w _ h
+    | exact (deliver_leave_halt p stack).2 _ _ _ w h
+    | simpa [guards] using apply_halt h
+    | (have := (deliver_leave_halt p _).2 _ _ _ w h
+       rw [guards_append] at this
+       simp only [guards] at this
+       show guards stack = 0
+       omega)
 
 /-! ## A whole run -/
 
