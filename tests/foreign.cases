@@ -1,0 +1,368 @@
+#### case
+extern "C" { fn abs(n: i32) -> i32; fn getpid() -> i32; }
+fn main() -> Bool { unsafe { say(abs(0 - 5i32)); getpid() > 0i32 } }
+#### expect
+5
+Ok(())
+#### case
+extern "C" { fn malloc(n: usize) -> usize; fn free(p: usize); fn strlen(s: usize) -> usize; fn puts(s: usize) -> i32; }
+fn main() -> Int { unsafe { let p = malloc(6usize); ptr_write(p, 8, 72); ptr_write(p + 1usize, 8, 105); ptr_write(p + 2usize, 8, 0); puts(p); say(strlen(p)); say(ptr_read(p + 1usize, 8)); ptr_write(p, 32, 0 - 2); say(ptr_read(p, 32)); say(ptr_read(p, -32)); free(p); 0 } }
+#### expect
+Hi
+2
+105
+-2
+4294967294
+0
+#### case
+use std::c::{c_string, text_at, free};
+use std::text::{utf8, from_utf8};
+extern "C" { fn puts(s: usize) -> i32; fn toupper(c: i32) -> i32; fn getenv(name: usize) -> usize; }
+fn main() -> i32 { say(utf8("h\u{e9}\u{20ac}")); say(from_utf8(utf8("h\u{e9}llo \u{1F600}")) == Some("h\u{e9}llo \u{1F600}")); unsafe { let s = c_string("hello from C"); puts(s); say(text_at(s)); free(s); let name = c_string("GLORIOUS_TEST"); say(getenv(name) == 0usize); free(name); toupper(97i32) } }
+#### expect
+[104, 195, 169, 226, 130, 172]
+true
+hello from C
+Ok(hello from C)
+true
+65
+#### case
+#### Floats are given to C and taken from it where C keeps floats.
+extern "C" { fn sqrt(x: f64) -> f64; fn pow(x: f64, y: f64) -> f64; }
+fn main() -> Int { unsafe { say(sqrt(2.0)); say(pow(2.0, 10.0)); 0 } }
+#### expect
+1.4142135623730951
+1024.0
+0
+#### case
+extern "C" { fn sqrtf(x: f32) -> f32; }
+fn main() -> Int { unsafe { say(sqrtf(9.0f32)); 0 } }
+#### expect
+3.0
+0
+#### case
+#### Addresses: `*const T` and `*mut T`.
+extern "C" { fn strlen(s: *const u8) -> usize; fn malloc(n: usize) -> *mut u8; fn free(p: *mut u8); }
+fn main() -> Int { unsafe { let p = malloc(8usize); ptr_write(ptr_mut_address(p), 8, 65); ptr_write(ptr_mut_address(p) + 1usize, 8, 0); let n = strlen(ptr_const(p)); free(p); say(n); 0 } }
+#### expect
+1
+0
+#### case
+extern "C" { fn memset(p: *mut u8, c: i32, n: usize) -> *mut u8; fn malloc(n: usize) -> *mut u8; fn free(p: *mut u8); }
+fn main() -> Int { unsafe { let p = malloc(4usize); let q = memset(p, 7i32, 4usize); say(ptr_read(ptr_mut_address(q) + 3usize, 8)); free(p); 0 } }
+#### expect
+7
+0
+#### case
+#### C's names for its types.
+extern "C" { fn abs(n: c_int) -> c_int; }
+fn main() -> Int { unsafe { say(abs(0i32 - 7i32)); 0 } }
+#### expect
+7
+0
+#### case
+use std::c::{c_int, c_long};
+extern "C" { fn labs(n: c_long) -> c_long; fn abs(n: c_int) -> c_int; }
+fn twice(n: c_int) -> c_int { n + n }
+fn main() -> Int { unsafe { say(labs(0 - 9)); say(twice(abs(0i32 - 4i32))); 0 } }
+#### expect
+9
+8
+0
+#### case
+#### Whole numbers and floats together, to a function that takes any number of them.
+extern "C" { fn ldexp(x: f64, e: i32) -> f64; fn snprintf(buf: *mut u8, n: usize, fmt: *const u8, x: f64, k: i32) -> i32; fn malloc(n: usize) -> *mut u8; fn free(p: *mut u8); fn puts(s: *const u8) -> i32; }
+use std::c::{c_string};
+fn main() -> Int { unsafe { say(ldexp(1.5, 4i32)); let buf = malloc(64usize); let fmt = c_string("%.3f and %d"); let n = snprintf(buf, 64usize, ptr_at(fmt), 3.14159, 42i32); puts(ptr_const(buf)); free(buf); say(n); 0 } }
+#### expect
+24.0
+3.142 and 42
+12
+0
+#### case
+#### C calls back: a function, and a block that holds a value.
+extern "C" { fn qsort(base: usize, n: usize, size: usize, cmp: usize); fn malloc(n: usize) -> usize; fn free(p: usize); }
+fn order(a: usize, b: usize) -> Int { unsafe { let x = ptr_read(a, 64); let y = ptr_read(b, 64); if(x < y) { 0 - 1 } else { if(x > y) { 1 } else { 0 } } } }
+fn main() -> Int { unsafe {
+    let p = malloc(40usize);
+    ptr_write(p, 64, 30); ptr_write(p + 8usize, 64, 10); ptr_write(p + 16usize, 64, 50); ptr_write(p + 24usize, 64, 20); ptr_write(p + 32usize, 64, 40);
+    let cmp = c_callback(order, 2);
+    qsort(p, 5usize, 8usize, cmp);
+    say(ptr_read(p, 64)); say(ptr_read(p + 8usize, 64)); say(ptr_read(p + 32usize, 64));
+    free(p); 0 } }
+#### expect
+10
+20
+50
+0
+#### case
+extern "C" { fn qsort(base: usize, n: usize, size: usize, cmp: usize); fn malloc(n: usize) -> usize; fn free(p: usize); }
+fn main() -> Int { unsafe {
+    let p = malloc(24usize);
+    ptr_write(p, 64, 3); ptr_write(p + 8usize, 64, 1); ptr_write(p + 16usize, 64, 2);
+    let sign = 0 - 1;
+    let cmp = c_callback({ (a, b) => unsafe { sign * (ptr_read(a, 64) - ptr_read(b, 64)) } }, 2);
+    qsort(p, 3usize, 8usize, cmp);
+    say(ptr_read(p, 64)); say(ptr_read(p + 16usize, 64));
+    free(p); 0 } }
+#### expect
+3
+1
+0
+#### case
+#### Threads of the system's (`spawn_os`, started through C): four
+#### machines at once, sharing an atomic and a mutex; each increment is
+#### seen, and what each gave is joined.
+use std::thread::{spawn_os, join_os, AtomicInt, fetch_add, load, Mutex, lock, share};
+fn sum_range(from: Int, to: Int) -> Int { let mut s = 0; let mut i = from; while({ i < to }) { s = s + i; i = i + 1 }; s }
+fn main() -> Int {
+    let counter = AtomicInt::new(0);
+    let total = Mutex::new(0);
+    let mut threads = [];
+    let mut k = 0;
+    while({ k < 4 }) {
+        let c = share(&counter);
+        let m = share(&total);
+        let from = k * 1000;
+        push_at(&mut threads, spawn_os(fn() -> Int { let c2 = c; let m2 = m; let mut i = 0; while({ i < 500 }) { lock(&m2, fn(n: &mut Int) { *n = *n + 1 }); i = i + 1 }; discard(fetch_add(&c2, 1)); sum_range(from, from + 1000) }));
+        k = k + 1
+    };
+    let mut sum = 0;
+    let mut ts = threads;
+    while({ len_at(&ts) > 0 }) { sum = sum + join_os(remove_at(&mut ts, 0)) };
+    say(sum);
+    say(load(&counter));
+    say(lock(&total, fn(n: &mut Int) -> Int { *n }));
+    0
+}
+#### expect
+7998000
+4
+2000
+0
+#### case
+#### What a program asks of the machine it runs on is effects, which `run_host` answers with the operating system.
+use std::host::{run_host, println, read_text, write_text, env, now, monotonic, random_bytes, current_dir, args};
+fn main() -> Int { run_host({
+    println("hello, host");
+    let wrote = write_text("/tmp/glorious-host-test.txt", "one\ntwo\n");
+    let back = read_text("/tmp/glorious-host-test.txt");
+    println(match(back) { Ok(text) => text, Err(e) => "error" });
+    let missing = read_text("/tmp/glorious-no-such-file");
+    println(match(missing) { Ok(_) => "found", Err(e) => "no file: " ++ show(e.code) });
+    let home = env("HOME");
+    println(match(home) { Ok(Some(_)) => "HOME is set", _ => "no HOME" });
+    let a = monotonic(); let b = monotonic();
+    println(if(b >= a) { "the clock goes on" } else { "the clock went back" });
+    println(match(random_bytes(8)) { Ok(bytes) => show(len(bytes)), Err(_) => "no chance" });
+    println(match(current_dir()) { Ok(_) => "somewhere", Err(_) => "nowhere" });
+    println(match(args()) { Ok(a) => if(len(a) > 0) { "started" } else { "?" }, Err(_) => "?" });
+    0 }) }
+#### expect
+hello, host
+one
+two
+
+no file: 2
+HOME is set
+the clock goes on
+8
+somewhere
+started
+0
+#### case
+#### The same under the names the specification gives the modules.
+use std::io::{println};
+use std::fs::{read_text, write_text};
+use std::host::{run_host};
+fn main() -> Int { run_host({ write_text("/tmp/glorious-ns-test.txt", "names"); println(match(read_text("/tmp/glorious-ns-test.txt")) { Ok(t) => t, Err(_) => "?" }); 0 }) }
+#### expect
+names
+0
+#### case
+#### A `#[repr(C)]` struct is written to memory and read from it as C lays it out.
+#[repr(C)]
+struct Timespec { sec: i64, nsec: i64 }
+#[repr(C)]
+struct Mixed { a: u8, b: i32, c: f64, d: u16 }
+extern "C" { fn malloc(n: usize) -> usize; fn free(p: usize); fn clock_gettime(clock: i32, at: usize) -> i32; }
+fn main() -> Int { unsafe {
+    say(Mixed::c_size());
+    let p = malloc(Mixed::c_size());
+    Mixed::c_write(Mixed { a: 7u8, b: 0i32 - 5i32, c: 2.5, d: 65535u16 }, p);
+    say(ptr_read(p + 4usize, 32));
+    let m = Mixed::c_read(p);
+    say(m.a); say(m.b); say(m.c); say(m.d);
+    free(p);
+    let t = malloc(Timespec::c_size());
+    clock_gettime(0i32, t);
+    let now = Timespec::c_read(t);
+    free(t);
+    say(now.sec > 1000000000);
+    0 } }
+#### expect
+24
+-5
+7
+-5
+2.5
+65535
+true
+0
+#### case
+#### Memory that has to be given back: an `Allocation` is borrowed for its address and then released.
+use std::ffi::{Layout, Allocation, allocate, write_bytes, read_bytes};
+fn sum_at(at: usize) -> Int {
+    unsafe { write_bytes(at, [1u8, 2u8, 3u8]) };
+    let back = unsafe { read_bytes(at, 3) };
+    int(back[0]) + int(back[1]) + int(back[2])
+}
+fn work(memory: Allocation) -> Int {
+    let n = sum_at(Allocation::as_ptr(&memory));
+    Allocation::release(memory);
+    n
+}
+fn main() -> Int {
+    match(Layout::from_size_align(16, 8)) {
+        Ok(layout) => match(allocate(layout)) { Ok(memory) => work(memory), Err(_) => 0 - 1 },
+        Err(_) => 0 - 2
+    }
+}
+#### expect
+6
+#### case
+#### One function over a stream in memory, which performs nothing, and the host's standard output.
+use std::stream::{Write, Stdout, MemoryCursor, write_str};
+use std::host::{run_host};
+fn greet<W: Write>(w: &mut W) / { | <W as Write>::Effects } { write_str(w, "hi from a stream\n"); () }
+fn main() -> Int {
+    let mut memory = MemoryCursor::new([]);
+    greet(&mut memory);
+    let n = len(MemoryCursor::into_inner(memory));
+    run_host({ let mut out = Stdout; greet(&mut out); n }) }
+#### expect
+hi from a stream
+17
+#### case
+#### The same with the release written as a cleanup, before the memory is used.
+use std::ffi::{Layout, Allocation, allocate, write_bytes, read_bytes};
+fn sum_at(at: usize) -> Int {
+    unsafe { write_bytes(at, [1u8, 2u8, 3u8]) };
+    let back = unsafe { read_bytes(at, 3) };
+    int(back[0]) + int(back[1]) + int(back[2])
+}
+fn work(memory: Allocation) -> Int {
+    defer { Allocation::release(memory); }
+    sum_at(Allocation::as_ptr(&memory))
+}
+fn main() -> Int {
+    match(Layout::from_size_align(16, 8)) {
+        Ok(layout) => match(allocate(layout)) { Ok(memory) => work(memory), Err(_) => 0 - 1 },
+        Err(_) => 0 - 2
+    }
+}
+#### expect
+6
+#### case
+#### One stream in memory and one of the host's: the function over both performs what the host's does.
+use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};
+use std::host::{IoError, run_host};
+use std::stream::{Stdout};
+fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {
+    match(read(reader, 4)) {
+        Ok(got) =>
+            if(len(got) == 0) { Ok(done) }
+            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },
+        Err(e) => Err(e)
+    }
+}
+fn main() -> Int {
+    let mut from = MemoryCursor::new([]);
+    write_str(&mut from, "0123456789");
+    run_host({ let mut to = Stdout; match(copy(&mut from, &mut to, 0)) { Ok(n) => n, Err(_) => 0 - 1 } }) }
+#### expect
+012345678910
+#### case
+#### `copy_stream`, up to a limit, and then onto the host's output.
+use std::stream::{MemoryCursor, Stdout, write_str, copy_stream};
+use std::host::{run_host};
+fn main() -> Int {
+    let mut from = MemoryCursor::new([]);
+    write_str(&mut from, "copied across\n");
+    let mut to = MemoryCursor::new([]);
+    let a = match(copy_stream(&mut from, &mut to, 6)) { Ok(n) => n, Err(_) => 0 - 1 };
+    let mut again = MemoryCursor::new(MemoryCursor::into_inner(to));
+    run_host({ let mut out = Stdout; match(copy_stream(&mut again, &mut out, 100)) { Ok(n) => a * 100 + n, Err(_) => 0 - 1 } }) }
+#### expect
+copied606
+#### case
+#### A function over two streams called from another over two.
+use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};
+use std::host::{IoError, run_host};
+use std::stream::{Stdout};
+fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {
+    match(read(reader, 4)) {
+        Ok(got) =>
+            if(len(got) == 0) { Ok(done) }
+            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },
+        Err(e) => Err(e)
+    }
+}
+fn twice<A: Read, B: Write>(a: &mut A, b: &mut B) -> Int { match(copy(a, b, 0)) { Ok(n) => n * 2, Err(_) => 0 } }
+fn main() -> Int {
+    let mut from = MemoryCursor::new([]);
+    write_str(&mut from, "0123456789");
+    run_host({ let mut to = Stdout; twice(&mut from, &mut to) }) }
+#### expect
+012345678920
+#### case
+#### Texts for C in memory of their own, C's truth value, and memory filled and copied (library 22.2, 22.4).
+use std::ffi::{CString, CStr, CStrError, NulError, c_bool_from_bool, bool_from_c_bool, null, ptr_is_null, ptr_add, ptr_write_bytes, ptr_copy, read_bytes, bytes_at, Layout, allocate, Allocation};
+use std::slice::{Slice};
+use std::value::{Rejected};
+extern "C" { fn strlen(s: usize) -> usize; fn toupper(c: i32) -> i32; }
+fn main() -> Int {
+    // A text given to C, and its bytes taken back.
+    match(CString::from_str("hello")) {
+        Err(_) => 0 - 1,
+        Ok(text) =>
+            say(unsafe { strlen(CString::as_ptr(&text)) });
+            say(match(unsafe { bytes_at(CString::as_ptr(&text), 100) }) { Ok(bytes) => len(bytes), Err(_) => 0 - 1 });
+            say(CString::into_bytes(text));
+            // A zero inside is refused, and says where.
+            say(match(CString::from_vec([104u8, 0u8, 105u8])) { Ok(made) => CString::release(made); 0 - 1, Err(Rejected { value, error }) => error.position * 10 + len(value) });
+            let raw = [111u8, 107u8, 0u8];
+            say(match(CStr::from_bytes_with_nul(Slice::of(&raw))) { Ok(view) => match(CStr::to_str(view)) { Some(s) => s, None => "?" }, Err(_) => "bad" });
+            let cut = [111u8, 107u8];
+            say(match(CStr::from_bytes_with_nul(Slice::of(&cut))) { Ok(_) => "ok", Err(CStrError::MissingTerminator) => "no zero", Err(_) => "bad" });
+            say(bool_from_c_bool(c_bool_from_bool(true)));
+            say(ptr_is_null(null()));
+            // Memory filled, and copied along itself.
+            match(Layout::from_size_align(8, 1)) {
+                Err(_) => 0 - 2,
+                Ok(layout) => match(allocate(layout)) {
+                    Err(_) => 0 - 3,
+                    Ok(memory) =>
+                        let at = Allocation::as_ptr(&memory);
+                        unsafe { ptr_write_bytes(at, 7u8, 8) };
+                        unsafe { ptr_write_bytes(at, 1u8, 2) };
+                        unsafe { ptr_copy(at, ptr_add(at, 1), 4) };
+                        say(unsafe { read_bytes(at, 8) });
+                        Allocation::release(memory);
+                        0
+                }
+            }
+    }
+}
+
+#### expect
+5
+6
+[104, 101, 108, 108, 111]
+13
+ok
+no zero
+true
+true
+[1, 1, 1, 7, 7, 7, 7, 7]
+0

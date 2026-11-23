@@ -30,14 +30,19 @@ input_dir librarySources where
   path := "library"
   text := true
 
+/-- The test programs (`Glorious.Cases` reads each file with `include_str`). -/
+input_dir testSources where
+  path := "tests"
+  text := true
+
 @[default_target]
 lean_lib Glorious
 
 -- (Declared after `Glorious`: of the libraries a module could be in, Lake
 -- takes the last.)
 lean_lib GloriousLibrary where
-  roots := #[`Glorious.Std, `Glorious.Prelude]
-  needs := #[librarySources]
+  roots := #[`Glorious.Std, `Glorious.Prelude, `Glorious.Cases]
+  needs := #[librarySources, testSources]
 
 @[default_target]
 lean_exe glorious where

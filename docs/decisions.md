@@ -7359,6 +7359,11 @@ source in Lean strings 6,021, and the test table 3,928.
   e}>`; `Spread` of `(H, ..R)` asks `R: Spread`. What it would need: a
   spread whose length is found when the program runs, which Core has no
   operation for.
+- **The test programs are files** (`tests/cases.cases`, `foreign.cases`,
+  `long.cases`: 3,928 lines of `Cases.lean`), each case after `#### case`
+  with what it is for, its program, `#### input` and `#### expect`;
+  `Cases.readCases` reads them, `include_str` and an input of the lakefile
+  as the library's. A reclassification, as the library's.
 - **The library's and the prelude's texts are files** (`library/`,
   `library/prelude/`: 5,013 lines of `Std.lean` and 881 of `Prelude.lean`
   that were Glorious in Lean strings): not a cut, the same text counted as
