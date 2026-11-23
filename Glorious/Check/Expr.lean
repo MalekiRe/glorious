@@ -2204,6 +2204,16 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
   -- The borrows the handled computation makes. While it is suspended in an
   -- arm, its resumption holds them: the arm must not use what they exclude.
   let suspendedLoans := List.range' loansBefore ((← get).loans.size - loansBefore)
+  -- (What holds the suspended computation: its loans, and all it uses.)
+  let suspended := fun (must : Bool) => do
+    let held ← freshCap
+    captures held .once
+    if must then captures held .must
+    for id in suspendedLoans do
+      captures held (.inner id)
+    captureAll scope held (b.fvExpr [] whole) fun x =>
+      assignsExpr b x whole
+    pure held
   let result ← freshTy
   if completions.isEmpty then unify result subjectTy
   else
@@ -2248,13 +2258,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
       if ps.length == payload.length + 1 then
         -- The resumption holds the handled computation and, because resuming
         -- reinstalls the handler, the arms too: everything either of them uses.
-        let held ← freshCap
-        captures held .once
-        if sig.must then captures held .must
-        for id in suspendedLoans do
-          captures held (.inner id)
-        captureAll scope held (b.fvExpr [] whole) fun x =>
-          assignsExpr b x whole
+        let held ← suspended sig.must
         -- (A resumption the arm does not use is given up as the arm starts,
         -- by the elaborator: nothing destroys it when the arm is done.)
         let resumptionTy := Ty.func [o] result amb held
@@ -2279,12 +2283,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
         let here := (← get).pos
         -- The arm resumes with what it gives: the computation is suspended,
         -- holding its borrows, for as long as the arm runs.
-        let held ← freshCap
-        captures held .once
-        for id in suspendedLoans do
-          captures held (.inner id)
-        captureAll scope held (b.fvExpr [] whole) fun x =>
-          assignsExpr b x whole
+        let held ← suspended false
         let resumption := ("%resumed", Binding.val (.func [o] result amb held))
         unifyAt s!"the value the arm for `{x}` resumes with" o
           (← withLater ["%resumed"] (inferStmts (binds ++ resumption :: scope) amb body))
