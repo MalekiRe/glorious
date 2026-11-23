@@ -1472,44 +1472,39 @@ def diagnose (src : String) (input : List Int := []) (fuel : Nat := 200000) : St
         | .stuck => explainStuck c cfg
     go fuel (Core.initIO c.core input)
 
-/-- The deepest the bytecode machine's stack gets while running a program. -/
-def peakStack (src : String) (input : List Int := []) (fuel : Nat := 4000000) : Option Nat :=
+/-- A program run on the bytecode machine to its end: `seen` of each state
+before its step, carried along, and `last` of it and the state the last step
+leaves. None where it does not compile, is stuck or runs out of `fuel`. -/
+def runBytecode {α β : Type} (src : String) (input : List Int) (fuel : Nat) (init : α)
+    (seen : α → Bytecode.Config → α) (last : α → Bytecode.Config → β) : Option β :=
   match compileSource src with
   | .error _ => none
   | .ok c =>
     let bytecode := compile c.core
-    let rec go : Nat → Bytecode.Config → Nat → Option Nat
+    let rec go : Nat → Bytecode.Config → α → Option β
       | 0, _, _ => none
-      | n + 1, cfg, peak =>
-        let peak := max peak cfg.state.frames.length
+      | n + 1, cfg, acc =>
+        let acc := seen acc cfg
         match Bytecode.stepIO bytecode cfg with
-        | .next cfg' => go n cfg' peak
-        | .halt _ => some peak
+        | .next cfg' => go n cfg' acc
+        | .halt _ => some (last acc cfg)
         | .stuck => none
-    go fuel (Bytecode.initIO bytecode input) 0
+    go fuel (Bytecode.initIO bytecode input) init
+
+/-- The deepest the bytecode machine's stack gets while running a program. -/
+def peakStack (src : String) (input : List Int := []) (fuel : Nat := 4000000) : Option Nat :=
+  runBytecode src input fuel 0 (fun peak cfg => max peak cfg.state.frames.length) fun peak _ => peak
 
 /-- How many memory cells are still live when a program finishes. The step that
 ends the program also leaves the scopes still on the stack, so their cells do
 not count. -/
 def liveCells (src : String) (input : List Int := []) (fuel : Nat := 4000000) : Option Nat :=
-  match compileSource src with
-  | .error _ => none
-  | .ok c =>
-    let bytecode := compile c.core
-    let rec go : Nat → Bytecode.Config → Option Nat
-      | 0, _ => none
-      | n + 1, cfg =>
-        match Bytecode.stepIO bytecode cfg with
-        | .next cfg' => go n cfg'
-        | .halt _ =>
-          let leaving := cfg.state.frames.filterMap fun
-            | .cell a => some a
-            | _ => none
-          let cells := cfg.state.store.cells
-          some ((List.range cells.size).filter fun a =>
-            (cells[a]?.getD none).isSome && !leaving.contains a).length
-        | .stuck => none
-    go fuel (Bytecode.initIO bytecode input)
+  runBytecode src input fuel () (fun _ _ => ()) fun _ cfg =>
+    let leaving := cfg.state.frames.filterMap fun
+      | .cell a => some a
+      | _ => none
+    let cells := cfg.state.store.cells
+    ((List.range cells.size).filter fun a => (cells[a]?.getD none).isSome && !leaving.contains a).length
 
 /-- The cleanups of a finished program: how many guards it installed, how many
 cleanups it started, and how many guards were left in resumptions never taken.
