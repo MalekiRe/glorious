@@ -6882,8 +6882,16 @@ something to do in them; `FRewrite` keeps the place of every node that does
 not change.
 
 **What stays trees, and why.**
-- The parser builds a function's clauses as trees and makes them flat when
-  the function is parsed; its desugarings run on the flat bodies (`mut`
+- The parser reads a function's code straight into its flat body: each
+  expression, statement and clause is a node of the body being read
+  (`PState.body`) as it is read, and what the parser writes out of what is
+  written (`a[i] = v`, borrows through an expression, rest patterns, field
+  borrows) it writes there too, looking at the nodes it read. A body is
+  compacted as its function is done (what the reading left behind is not
+  kept). Measured against reading trees and making them flat after, each
+  alone, alternating: parsing a fresh `covey/states2` with its library
+  0.133 s against 0.146; a fresh `states2` 2.41 s against 2.40, `sixteen`
+  2.45 against 2.45, a leaf edit 0.53 against 0.54. Its desugarings run on the flat bodies (`mut`
   patterns, `Flat.unmutRewrite`; `Self` in implementations, `selfRewrite`;
   callables written in, `mapTypes`; the functions a block writes named as
   the module's, `renameInBody`), and the parsed modules are kept flat.
@@ -6894,7 +6902,9 @@ not change.
   edit of a leaf 0.57 against 0.55, `covey/sixteen` 2.54 against 2.48; the
   kept parsed modules of `states2` are 2.8 MB against 1.9 (the build
   directory 61 MB against 56).
-- What is made rather than written stays a tree until it is put in a body:
+- What is made rather than written stays a tree until it is put in a body
+  (and the parser's types among expressions, scalars and texts, made with
+  `tree`):
   constants (`aliases`), what the checker chose to give as an argument
   (`argsChosen`), the clauses of a `refPats` decision, implementations as
   values (`dictExpr`), destroyers and layouts.

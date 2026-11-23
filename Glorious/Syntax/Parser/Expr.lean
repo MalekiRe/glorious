@@ -6,6 +6,8 @@ public section
 
 namespace Glorious.Syntax.Parse
 
+open Flat (ExprId StmtId ClauseId FExpr FStmt FClause)
+
 mutual
 
 partial def parsePatternRest : P Pattern := do
@@ -89,12 +91,12 @@ partial def parsePatternRest : P Pattern := do
       pure (.int v)
     | .typed _ _ =>
       advance
-      match (← scalarLiteral true).bind literalPattern with
+      match ← literalOf (← scalarLiteral true) with
       | some p => pure p
       | none => failAt "expected a pattern"
     | _ => failAt "expected a pattern"
   | .typed _ _ | .char _ | .str _ =>
-    match (← scalarLiteral false).bind literalPattern with
+    match ← literalOf (← scalarLiteral false) with
     | some p => pure p
     | none => failAt "expected a pattern"
   | .float _ _ _ => failAt "a floating point number is not a pattern: compare it instead"
@@ -147,7 +149,7 @@ partial def parsePatternList : P (List Pattern) := do
   pure out
 
 /-- Expressions separated by commas up to and including the closing `)`. -/
-partial def parseArgs : P (List Expr) := do
+partial def parseArgs : P (List ExprId) := do
   let out ← listUntil (atPunct ")") (parseBinary 0 false)
   expectPunct ")"
   pure out
@@ -155,7 +157,7 @@ partial def parseArgs : P (List Expr) := do
 /-- Binary operators by precedence climbing. With `noBlock`, a `{` after a call
 is not taken as a trailing block. -/
 partial def parseBinary (minPrec : Nat) (noBlock : Bool)
-    (before : Option (Nat × Assoc) := none) : P Expr := do
+    (before : Option (Nat × Assoc) := none) : P ExprId := do
   let mut lhs ← parseUnary noBlock
   -- The operator this operand follows, at its precedence.
   let mut last := before
@@ -185,9 +187,9 @@ partial def parseBinary (minPrec : Nat) (noBlock : Bool)
       -- (The block is known by the place of `else`, which nothing else is.)
       let blockId := id - 1
       let rhs ← parseBinary next noBlock (some (prec, assoc))
-      let rhs := if elseIf then Expr.closure blockId [.mk [] [.expr rhs]] else rhs
+      let rhs ← if elseIf then mk (.closure blockId #[← mkC [] #[← mkS (.expr rhs)]]) else pure rhs
       let (qual, f) := splitPath (((← read).fix.function name false).splitOn "::")
-      lhs := .call id (.name qual f) [lhs, rhs]
+      lhs ← callOf id qual f #[lhs, rhs]
     | none =>
       match t with
       | .op s =>
@@ -200,11 +202,11 @@ partial def parseBinary (minPrec : Nat) (noBlock : Bool)
         let id := (← read).base + (← get) + 1
         advance
         let pat ← parsePattern
-        lhs := .call id (.name none isMark) [lhs, .closure 0 [.mk [pat] []]]
+        lhs ← callOf id none isMark #[lhs, ← mk (.closure 0 #[← mkC [pat] #[]])]
       | _ => break
   pure lhs
 
-partial def parseUnary (noBlock : Bool) : P Expr := do
+partial def parseUnary (noBlock : Bool) : P ExprId := do
   let t ← peek
   let fix := (← read).fix
   -- `-` straight before a number is part of the number.
@@ -214,7 +216,7 @@ partial def parseUnary (noBlock : Bool) : P Expr := do
       advance
       let v ← plainInt true n
       advance
-      return .int v
+      return ← mk (.int v)
     | .typed _ _ | .float _ _ _ =>
       advance
       match ← scalarLiteral true with
@@ -233,7 +235,7 @@ partial def parseUnary (noBlock : Bool) : P Expr := do
       advance
       let operand ← parseBinary prec noBlock
       let (qual, f) := splitPath ((fix.function s true).splitOn "::")
-      pure (.call id (.name qual f) [operand])
+      callOf id qual f #[operand]
     | none =>
       if t == .op "-" then failAt "operator `-` has no prefix fixity"
       else if t == .op "&" then
@@ -242,38 +244,39 @@ partial def parseUnary (noBlock : Bool) : P Expr := do
         if uniq then advance
         if (← peek) == .op "*" then
           advance
-          pure (.reborrow uniq (← parseUnary noBlock))
+          mk (.reborrow uniq (← parseUnary noBlock))
         else
           let id := (← read).base + (← get) + 1
+          let mark := if uniq then borrowMutMark else borrowMark
           -- `&x`, `&x.0.1`, `&(*p).0`, or `&f().0` through what an
           -- expression gives.
-          match ← parsePostfix true with
+          let e ← parsePostfix true
+          match ← node e with
           -- (A name written with a capital is a constructor or a constant, a
           -- value and no variable: it is borrowed as any value is, below.)
           | .name none x =>
-            if (x.front.isUpper) then
-              pure (.call id (.name none (if uniq then borrowMutMark else borrowMark)) [.name none x])
-            else pure (.ref uniq x)
-          | e =>
-            if let some at_ := elementBorrow uniq e then return at_
-            match fieldRoot e with
+            if x.front.isUpper then callOf id none mark #[e]
+            else mk (.ref uniq x)
+          | _ =>
+            if let some at_ ← elementBorrow uniq e then return at_
+            match ← fieldRoot e with
             -- (A field of an array's element, `&a[i].f`: through a borrow of
             -- the element.)
             | some (.through b, path) =>
-              match elementBorrow uniq b with
-              | some r => pure (fieldBorrow id uniq (.through r) path)
-              | none => pure (fieldBorrow id uniq (.through b) path)
-            | some (root, path) => pure (fieldBorrow id uniq root path)
+              match ← elementBorrow uniq b with
+              | some r => fieldBorrow id uniq (.through r) path
+              | none => fieldBorrow id uniq (.through b) path
+            | some (root, path) => fieldBorrow id uniq root path
             -- A value with no name: it is given one where the statement
             -- starts, and that is borrowed.
-            | none => pure (.call id (.name none (if uniq then borrowMutMark else borrowMark)) [e])
+            | none => callOf id none mark #[e]
       else if t == .op "&*" then
         -- `&*e`, which the lexer reads as one symbol.
         advance
-        pure (.reborrow false (← parseUnary noBlock))
+        mk (.reborrow false (← parseUnary noBlock))
       else if t == .op "*" then
         advance
-        pure (.deref (← parseUnary noBlock))
+        mk (.deref (← parseUnary noBlock))
       else
         -- `&**e` and `**e`, which the lexer reads as one symbol each: a
         -- borrow through, or a reading through, as many references.
@@ -283,14 +286,15 @@ partial def parseUnary (noBlock : Bool) : P Expr := do
           let amps := s.length - stars.length
           if amps ≤ 1 && stars.length ≥ 2 && stars.all (· == '*') then
             advance
-            let inner ← parseUnary noBlock
-            let derefs := (List.range (stars.length - amps)).foldl (fun e _ => Expr.deref e) inner
-            pure (if amps == 1 then .reborrow false derefs else derefs)
+            let mut e ← parseUnary noBlock
+            for _ in [0:stars.length - amps] do
+              e ← mk (.deref e)
+            if amps == 1 then mk (.reborrow false e) else pure e
           else parsePostfix noBlock
         | _ => parsePostfix noBlock
   | none => parsePostfix noBlock
 
-partial def parsePostfix (noBlock : Bool) : P Expr := do
+partial def parsePostfix (noBlock : Bool) : P ExprId := do
   let mut e ← parsePrimary noBlock
   repeat
     match ← peek with
@@ -301,7 +305,7 @@ partial def parsePostfix (noBlock : Bool) : P Expr := do
       -- It is that, and not a comparison, if what follows reads as types
       -- closed by `>` with `(` straight after.
       -- (`value.f<A>(args)` too.)
-      let isName := match e with
+      let isName := match ← node e with
         | .name _ _ => true
         | .fieldOf _ _ _ => true
         | _ => false
@@ -326,47 +330,47 @@ partial def parsePostfix (noBlock : Bool) : P Expr := do
         let mut args ← parseArgs
         while !noBlock && (← peek) == .punct "{" do
           args := args ++ [← parseBraces]
-        e := .call 0 (.name none instMark) [.call id e args, (TypeExpr.tuple tys).asExpr]
+        e ← callOf 0 none instMark #[← mk (.call id e args.toArray), ← tree (TypeExpr.tuple tys).asExpr]
     | .punct "(" =>
       let id := (← read).base + (← get) + 1
       advance
       let mut args ← parseArgs
       while !noBlock && (← peek) == .punct "{" do
         args := args ++ [← parseBraces]
-      e := .call id e args
+      e ← mk (.call id e args.toArray)
     | .punct "{" =>
       -- `Point { x: 1, y: 2 }` builds a value of a type declared with names.
       let records := (← read).records
-      let isRecord := match e with
+      let isRecord := match ← node e with
         | .name _ x => records.contains x
         | _ => false
       if isRecord then
         let id := (← read).base + (← get) + 1
         advance
-        let mut given : Array Expr := #[.name none recordMark]
+        let mut given : Array ExprId := #[← mkName none recordMark]
         repeat
           if (← peek) == .punct "}" then break
           let field ← expectIdent
-          let value ← if ← acceptPunct ":" then parseBinary 0 false else pure (.name none field)
-          given := given.push (.call 0 (.name none (fieldMark field)) [value])
+          let value ← if ← acceptPunct ":" then parseBinary 0 false else mkName none field
+          given := given.push (← callOf 0 none (fieldMark field) #[value])
           if !(← acceptPunct ",") then break
         expectPunct "}"
-        e := .call id e given.toList
+        e ← mk (.call id e given)
         continue
       -- `f { body }` is `f({ body })`.
       if noBlock then break
       let id := (← read).base + (← get) + 1
-      let mut args : List Expr := []
+      let mut args : Array ExprId := #[]
       while (← peek) == .punct "{" do
-        args := args ++ [← parseBraces]
-      e := .call id e args
+        args := args.push (← parseBraces)
+      e ← mk (.call id e args)
     | .punct "[" =>
       -- `a[i]`: the element at a place.
       let id := (← read).base + (← get) + 1
       advance
       let place ← parseBinary 0 false
       expectPunct "]"
-      e := .call id (preludeFn "index") [e, place]
+      e ← mk (.call id (← preludeFn "index") #[e, place])
     | .punct "." =>
       match ← peek 1 with
       | .int n =>
@@ -376,19 +380,19 @@ partial def parsePostfix (noBlock : Bool) : P Expr := do
         let id := (← read).base + (← get) + 1
         advance
         advance
-        e := match e with
-          | .name none _ | .call .. => .fieldOf id e (toString n)
-          | _ => .proj e n
+        e ← match ← node e with
+          | .name none _ | .call .. => mk (.fieldOf id e (toString n))
+          | _ => mk (.proj e n)
       | .ident field =>
         let id := (← read).base + (← get) + 1
         advance
         advance
-        e := .fieldOf id e field
+        e ← mk (.fieldOf id e field)
       | _ => failAt "expected a field after `.`"
     | _ => break
   pure e
 
-partial def parsePrimary (noBlock : Bool) : P Expr := do
+partial def parsePrimary (noBlock : Bool) : P ExprId := do
   -- (`println!(..)`: a Rust macro; there are none.)
   if let .ident m ← peek then
     if (← peek 1) == .op "!" && ((← peek 2) == .punct "(" || (← peek 2) == .punct "[") then
@@ -398,13 +402,13 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     if (← read).consts.contains x && (← peek 1) != .punct "::" then
       let id := (← read).base + (← get) + 1
       advance
-      return .call 0 (.name none instMark)
-        [.call id (.name (some knownTrait) "VALUE") [], (TypeExpr.tuple [.name x []]).asExpr]
+      return ← callOf 0 none instMark
+        #[← mk (.call id (← mkName (some knownTrait) "VALUE") #[]), ← tree (TypeExpr.tuple [.name x []]).asExpr]
   match ← peek with
   | .int n =>
     let v ← plainInt false n
     advance
-    pure (.int v)
+    mk (.int v)
   | .typed _ _ | .float _ _ _ | .char _ | .str _ | .bytes _ =>
     match ← scalarLiteral false with
     | some e => pure e
@@ -424,36 +428,33 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     let opened ← get
     let empty := numbered opened 600000
     advance
+    -- Where the program has arrays of a fixed length, the literal is an
+    -- array or one of exactly so many: whichever is wanted of it.
+    let fixedOf := fun (value : ExprId) (n : Nat) => do
+      callOf 0 none instMark #[← mk (.call (numbered opened 800000) (← preludeFn "array_literal") #[value]),
+        ← tree (TypeExpr.tuple [numberType n]).asExpr]
     if ← acceptPunct "]" then
-      if (← read).fixed then
-        return .call 0 (.name none instMark)
-          [.call (numbered opened 800000) (preludeFn "array_literal") [arrayValue [] empty],
-           (TypeExpr.tuple [numberType 0]).asExpr]
-      return arrayValue [] empty
+      let value ← arrayValue [] empty
+      return ← if (← read).fixed then fixedOf value 0 else pure value
     let mut starts : Array Nat := #[numbered (← get) 700000]
     let first ← parseBinary 0 false
     if ← acceptPunct ";" then
       let count ← parseBinary 0 false
       expectPunct "]"
-      return .call (numbered opened 900000) (preludeFn "array_repeat") [first, count]
-    let mut elements : Array Expr := #[first]
+      return ← mk (.call (numbered opened 900000) (← preludeFn "array_repeat") #[first, count])
+    let mut elements : Array ExprId := #[first]
     while ← acceptPunct "," do
       if (← peek) == .punct "]" then break
       starts := starts.push (numbered (← get) 700000)
       elements := elements.push (← parseBinary 0 false)
     expectPunct "]"
-    let value := arrayValue elements.toList empty starts.toList
-    -- Where the program has arrays of a fixed length, the literal is an
-    -- array or one of exactly so many: whichever is wanted of it.
-    if (← read).fixed then
-      let id := numbered opened 800000
-      return .call 0 (.name none instMark)
-        [.call id (preludeFn "array_literal") [value], (TypeExpr.tuple [numberType elements.size]).asExpr]
-    pure value
+    let value ← arrayValue elements.toList empty starts.toList
+    if (← read).fixed then fixedOf value elements.size else pure value
   | .ident "tail" =>
     advance
-    match ← parsePostfix noBlock with
-    | .call id f args => pure (.tailCall id f args)
+    let e ← parsePostfix noBlock
+    match ← node e with
+    | .call id f args => mk (.tailCall id f args)
     | _ => failAt "`tail` must be followed by a call"
   | .op "<" =>
     -- `<Type as Trait>::function(args)`: the trait's function, for that type.
@@ -472,7 +473,7 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     let name ← expectIdent
     -- `<Type as Trait>::NAME`: a value the trait leaves to implementations,
     -- which is its function of that name called with nothing.
-    let mut args : List Expr := []
+    let mut args : List ExprId := []
     let mut id := nameAt
     if (← peek) == .punct "(" then
       id := (← read).base + (← get) + 1
@@ -480,8 +481,8 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
       args ← parseArgs
       while !noBlock && (← peek) == .punct "{" do
         args := args ++ [← parseBraces]
-    pure (.call 0 (.name none instMark)
-      [.call id (.name (some trait) name) args, (TypeExpr.tuple (self :: targs)).asExpr])
+    callOf 0 none instMark #[← mk (.call id (← mkName (some trait) name) args.toArray),
+      ← tree (TypeExpr.tuple (self :: targs)).asExpr]
   | .ident "move" =>
     advance
     -- `move (a, b) { body }`: the block, holding the values `a` and `b`
@@ -505,13 +506,13 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
         advance
         let id := (← read).base + (← get) + 1
         let block ← parseBraces
-        return .call id (.closure 0 [.mk (names.toList.map Pattern.var) [.expr block]])
-          (names.toList.map (Expr.name none))
+        let f ← mk (.closure 0 #[← mkC (names.toList.map Pattern.var) #[← mkS (.expr block)]])
+        return ← mk (.call id f (← names.mapM (mkName none)))
       set saved
     -- `move place`: the value, handed on; the place is not used after.
     let id := (← read).base + (← get) + 1
     let operand ← parseUnary noBlock
-    pure (.call id (.name none moveMark) [operand])
+    callOf id none moveMark #[operand]
   | .ident "handle" =>
     advance
     let subject ← parseBinary 0 true
@@ -520,7 +521,7 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     expectPunct "{"
     let arms ← parseClauses
     expectPunct "}"
-    pure (.handle subject arms)
+    mk (.handle subject arms.toArray)
   | .ident "const" =>
     -- `const { .. }`: a block worked out at compile time, as a constant is,
     -- by a function of the module (it uses nothing of where it is written).
@@ -528,19 +529,21 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     let id := (← read).base + (← get)
     advance
     let (types, bounds) := (← read).enclosing
-    match ← parseBraces with
+    match ← node (← parseBraces) with
     | .closure _ clauses =>
       let fn := constFnName s!"const%{id}"
       -- (Generic in the type parameters of the function it is in, with what
       -- is written of them: each copy of that function at known types has
       -- one at those types.)
       let wanted := bounds.filter (types.contains ·.subject)
+      -- (Its clauses, out of the body they were read in.)
+      let body := { (← getThe Flat.Body) with roots := clauses }.compact
       modifyThe (Array Item) fun made =>
-        (made.push (Item.fnOf fn types [] none clauses)) ++ (if wanted.isEmpty then #[] else #[.bounds fn wanted])
+        (made.push (Item.fn fn types [] none body)) ++ (if wanted.isEmpty then #[] else #[.bounds fn wanted])
       -- (Known by the place of `const`: what it needs is given there.)
-      let call := Expr.call id (.name none fn) []
+      let call ← mk (.call id (← mkName none fn) #[])
       if types.isEmpty then pure call
-      else pure (.call 0 (.name none instMark) [call, (TypeExpr.tuple (types.map (TypeExpr.name · []))).asExpr])
+      else callOf 0 none instMark #[call, ← tree (TypeExpr.tuple (types.map (TypeExpr.name · []))).asExpr]
     | _ => failAt "expected a block after `const`"
   | .ident "fn" =>
     -- `fn(a: A, b) -> R / {E} { body }`: a callable written out. A type may
@@ -559,12 +562,12 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     expectPunct "{"
     let body ← parseStmts
     expectPunct "}"
-    let written := Expr.closure 0 [.mk pats.toList body]
+    let written ← mk (.closure 0 #[← mkC pats.toList body])
     if annots.all Option.isNone && ret.isNone then pure written
     else
       -- With types written it is the callable, of the type they make.
       let ty := TypeExpr.fn (annots.toList.map (·.getD .hole)) (ret.getD .hole)
-      pure (.call 0 (.name none ascribeMark) [written, ty.asExpr])
+      callOf 0 none ascribeMark #[written, ← tree ty.asExpr]
   | .ident x =>
     if x.startsWith "'" then failAt "a lifetime is not a value"
     if x == "unsafe" && (← peek 1) == .punct "{" then
@@ -574,17 +577,18 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
       advance
       advance
       let id := (← read).base + (← get)
+      let marked ← mkS (.expr (← mkName none unsafeMark))
       let body ← parseStmts
       expectPunct "}"
-      return .call call (.closure id [.mk [] (.expr (.name none unsafeMark) :: body)]) []
+      return ← mk (.call call (← mk (.closure id #[← mkC [] (#[marked] ++ body)])) #[])
     advance
     let (qual, name) := splitPath (← parsePathRest x)
     -- `Type::NAME`, in capitals and not called: perhaps a value a trait
     -- leaves to implementations. What it is, is found with the names.
     let capitals := name.any Char.isUpper && name.all fun c => c.isUpper || c.isDigit || c == '_'
     if qual.isSome && capitals && (← peek) != .punct "(" && (← peek) != .punct "{" then
-      return .call ((← read).base + (← get)) (.name none pathMark) [.name qual name]
-    pure (.name qual name)
+      return ← callOf ((← read).base + (← get)) none pathMark #[← mkName qual name]
+    mkName qual name
   | .punct "@" =>
     advance
     let l ← expectIdent
@@ -595,55 +599,55 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
       expectPunct "{"
       let body ← parseStmts
       expectPunct "}"
-      return .call 0 (.name none ascribeMark) [.labelScope l body, ty.asExpr]
+      return ← callOf 0 none ascribeMark #[← mk (.labelScope l body), ← tree ty.asExpr]
     if !noBlock && (← peek) == .punct "{" then
       advance
       let body ← parseStmts
       expectPunct "}"
-      pure (.labelScope l body)
-    else pure (.label l)
+      mk (.labelScope l body)
+    else mk (.label l)
   | .punct "(" =>
     advance
     let args ← parseArgs
     match args with
     | [e] =>
-      if ← closedAfterComma then pure (.tuple [e])
+      if ← closedAfterComma then mk (.tuple #[e])
       -- `(s.f)(..)`: the field, a callable, called; not the function of the
       -- name of what `s` is. (A block of its own, which a dot call is not.)
       else if (← peek) == .punct "(" then
-        match e with
-        | .fieldOf .. => pure (.labelScope "%paren" [.expr e])
+        match ← node e with
+        | .fieldOf .. => mk (.labelScope "%paren" #[← mkS (.expr e)])
         | _ => pure e
       else pure e
-    | _ => pure (.tuple args)
+    | _ => mk (.tuple args.toArray)
   | .punct "{" => parseBraces
   | .op "|" => failAt "a callable is written `{ x => body }`, or `fn(x) { body }`; `|x| body` is not read"
   | .op "||" => failAt "a callable is written `{ => body }`, or `fn() { body }`; `|| body` is not read"
   | _ => failAt "expected an expression"
 
 /-- A callable literal in braces. -/
-partial def parseBraces : P Expr := do
+partial def parseBraces : P ExprId := do
   expectPunct "{"
   let ctx ← read
   let id := ctx.base + (← get)
   if scanClauseForm ctx.toks (← get) 0 then
     let clauses ← parseClauses
     expectPunct "}"
-    pure (.closure id clauses)
+    mk (.closure id clauses.toArray)
   else
     let body ← parseStmts
     expectPunct "}"
-    pure (.closure id [.mk [] body])
+    mk (.closure id #[← mkC [] body])
 
 /-- Clauses separated by commas, up to but not including the closing `}`. -/
-partial def parseClauses : P (List Clause) := do
-  pure (restClauses (← listUntil (atPunct "}") parseClause))
+partial def parseClauses : P (List ClauseId) := do
+  restClauses (← listUntil (atPunct "}") parseClause)
 
 /-- One clause: a pattern for the argument, or none for a callable taking no
 arguments. Several patterns, `{ a, b, c => .. }`, are one tuple taken apart,
 `{ (a, b, c) => .. }`: given one tuple, its parts; wanted where a callable of
 several arguments is, the arguments (5.4). -/
-partial def parseClause : P Clause := do
+partial def parseClause : P ClauseId := do
   let pats ←
     if (← peek) == .punct "=>" then pure []
     else do
@@ -661,15 +665,16 @@ partial def parseClause : P Clause := do
     failAt "a pattern has no ranges: test in the clause, `x => if(x <= 9) { .. } else { .. }`"
   expectPunct "=>"
   let body ← parseStmts
-  pure (.mk pats body)
+  mkC pats body
 
 /-- Statements up to a `}` or a `,`. A trailing `;` makes the value unit. -/
-partial def parseStmts : P (List Stmt) := do
-  let mut out : Array Stmt := #[]
+partial def parseStmts : P (Array StmtId) := do
+  let mut out : Array StmtId := #[]
   -- The functions written in this block, each with the name it has as a
   -- function of the module.
   let mut local_ : Array (String × String) := #[]
   let madeBefore := (← getThe (Array Item)).size
+  let unit := fun (_ : Unit) => do mkS (.expr (← mk (.tuple #[])))
   repeat
     let t ← peek
     if t == .punct "}" || t == .punct "," || t == .eof then break
@@ -682,9 +687,9 @@ partial def parseStmts : P (List Stmt) := do
         let (item, bounds) ← parseFn
         let _ ← acceptPunct ";"
         match item with
-        | .fn _ ps annots ret clauses =>
+        | .fn _ ps annots ret body =>
           modifyThe (Array Item) fun made =>
-            (made.push (.fn own ps annots ret clauses)) ++ (if bounds.isEmpty then #[] else #[.bounds own bounds])
+            (made.push (.fn own ps annots ret body)) ++ (if bounds.isEmpty then #[] else #[.bounds own bounds])
           local_ := local_.push (name, own)
         | _ => pure ()
         continue
@@ -714,12 +719,12 @@ partial def parseStmts : P (List Stmt) := do
         failAt "`if` is given its condition in parentheses: `if(c) { .. } else { .. }`"
     | _, _ => pure ()
     let here ← peekTok
-    let mark := fun (s : Stmt) => Stmt.located here.line here.col s
     -- A borrow of a field of what an expression points to: the reference is
-    -- given a name first.
-    let settle := fun (s : Stmt) => (match hoistStmt s with
-      | some (lets, s) => pure (lets.map mark ++ [mark s])
-      | none => throw s!"{here.line}:{here.col}: a field is borrowed of what an expression points to, after something else in the statement is computed: give the reference a `let` of its own first" : P (List Stmt))
+    -- given a name first; each statement placed where it starts.
+    let settle := fun (s : FStmt) => (do
+      match ← hoistStmt s with
+      | some ss => ss.toArray.mapM fun s => do mkS (.located here.line here.col (← mkS s))
+      | none => throw s!"{here.line}:{here.col}: a field is borrowed of what an expression points to, after something else in the statement is computed: give the reference a `let` of its own first" : P (Array StmtId))
     if t == .ident "let" then
       advance
       let mutName ← if (← peek) == .ident "mut" then do advance; some <$> expectIdent else pure none
@@ -728,96 +733,98 @@ partial def parseStmts : P (List Stmt) := do
       let typed ← if ← acceptPunct ":" then some <$> parseType else pure none
       expectPunct "="
       let value ← parseBinary 0 false
-      let value := match typed with
-        | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
-        | none => value
+      let value ← match typed with
+        | some ty => callOf 0 none ascribeMark #[value, ← tree ty.asExpr]
+        | none => pure value
       expectPunct ";"
       if let some name := mutName then
-        out := out ++ (← settle (.letMut name value)).toArray
+        out := out ++ (← settle (.letMut name value))
       else
         match pat with
         | .wild =>
           -- `let _ = value;` is the value computed and let go, as `value;`
           -- is: what it is has its `drop` run, where a name would keep it.
-          out := out ++ (← settle (.expr value)).toArray
+          out := out ++ (← settle (.expr value))
           let t' ← peek
           if t' == .punct "}" || t' == .punct "," then
-            out := out.push (.expr (.tuple []))
+            out := out.push (← unit ())
         | _ =>
           -- `let [a, b, c] = xs`, where the program has arrays of a fixed
           -- length: `xs` is one of exactly three, taken apart as a tuple.
           let here ← get
           let ctx ← read
           let id := if here < 100000 then ctx.base + here + 900000 else 0
-          let (pat, value) := match pat, ctx.fixed with
+          let (pat, value) ← match pat, ctx.fixed with
             | .ctor name none args, true =>
               if (arrayPatLen name).isSome then
-                (Pattern.tuple args, Expr.call id (preludeFn "elements") [value])
-              else (pat, value)
-            | _, _ => (pat, value)
-          out := out ++ (← settle (.let_ pat value)).toArray
+                pure (Pattern.tuple args, ← mk (.call id (← preludeFn "elements") #[value]))
+              else pure (pat, value)
+            | _, _ => pure (pat, value)
+          out := out ++ (← settle (.let_ pat value))
     else if t == .ident "defer" then
       advance
       let e ← parseBinary 0 false
       -- `defer { .. }`: the block is what is run on the way out, not a
       -- callable to be made then and let go.
-      let (e, block) := match e with
-        | .closure _ [.mk [] _] => (Expr.call 0 e [], true)
-        | e => (e, false)
+      let block ← match ← node e with
+        | .closure _ #[c] => pure ((← getThe Flat.Body).clause c).pats.isEmpty
+        | _ => pure false
+      let e ← if block then mk (.call 0 e #[]) else pure e
       if block then
         let _ ← acceptPunct ";"
       else expectPunct ";"
-      out := out ++ (← settle (.defer e)).toArray
+      out := out ++ (← settle (.defer e))
     else
       let e ← parseBinary 0 false
       if ← acceptPunct "=" then
         let id := (← read).base + (← get) + 1
-        let value ← parseBinary 0 false
+        let mut value ← parseBinary 0 false
         -- `x.0 = v` and `(*p).0 = v` assign through a borrow of the field.
         -- `a[i] = v` makes `a` the array with `v` at that place: `a =
         -- index_set(a, i, v)`, and so on outwards for `a[i][j] = v`.
-        let rec lower (fuel : Nat) (target value : Expr) : Expr × Expr :=
-          match fuel, indexed? target with
-          | fuel + 1, some (at_, inner, place) =>
-            -- Known by the identity of the `[`, moved clear of every token's.
-            lower fuel inner (.call (at_ + 500000) (preludeFn "index_set") [inner, place, value])
-          | _, _ => (target, value)
         -- Where the array is a place, the element is written where it is:
         -- what was there is destroyed, and nothing is read out of the array.
-        let (e, value) := match elementBorrow true e with
-          | some place => (Expr.deref place, value)
-          | none => lower 16 e value
+        let mut e := e
+        match ← elementBorrow true e with
+        | some place => e ← mk (.deref place)
+        | none =>
+          for _ in [0:16] do
+            let some (at_, inner, place) ← indexed? e | break
+            -- Known by the identity of the `[`, moved clear of every token's.
+            value ← mk (.call (at_ + 500000) (← preludeFn "index_set") #[← copy inner, place, value])
+            e := inner
         -- (A field of an array's element, `a[i].f = v`, is written through
         -- a borrow of the element.)
-        let target := match fieldRoot e with
+        let target ← match ← fieldRoot e with
           | some (.through b, path) =>
-            match elementBorrow true b with
-            | some r => Expr.deref (fieldBorrow id true (.through r) path)
-            | none => Expr.deref (fieldBorrow id true (.through b) path)
-          | some (root, path) => Expr.deref (fieldBorrow id true root path)
-          | none => e
-        out := out ++ (← settle (.assign target value)).toArray
+            match ← elementBorrow true b with
+            | some r => mk (.deref (← fieldBorrow id true (.through r) path))
+            | none => mk (.deref (← fieldBorrow id true (.through b) path))
+          | some (root, path) => mk (.deref (← fieldBorrow id true root path))
+          | none => pure e
+        out := out ++ (← settle (.assign target value))
         -- An assignment may end a block; its value is unit.
         if !(← acceptPunct ";") then break
       else
-        out := out ++ (← settle (.expr e)).toArray
+        out := out ++ (← settle (.expr e))
         if ← acceptPunct ";" then
           let t' ← peek
           if t' == .punct "}" || t' == .punct "," then
-            out := out.push (.expr (.tuple []))
+            out := out.push (← unit ())
         else break
   -- The functions written in this block are named, in it and in each
   -- other, by the names they have as functions of the module.
-  if local_.isEmpty then return out.toList
-  let named := fun (stmts : List Stmt) =>
-    local_.foldl (fun stmts (name, own) => renameStmts name own [] stmts) stmts
+  if local_.isEmpty then return out
   modifyThe (Array Item) fun made =>
     made.mapIdx fun k item =>
       if k < madeBefore then item
       else match item with
         | .fn f ps annots ret b => .fn f ps annots ret (Flat.renameInBody local_.toList b)
         | other => other
-  pure (named out.toList)
+  let mut stmts := out.toList
+  for (name, own) in local_ do
+    stmts ← build (Flat.renameStmts name own [] stmts)
+  pure stmts.toArray
 
 
 /-- A function, and what is written of its type parameters. -/
@@ -884,7 +891,9 @@ partial def parseFn : P (Item × List Bound) := do
     expectPunct "{"
     let consts := (bounds.filter (·.trait == knownTrait)).map (·.subject)
     let types := params.filter (!·.startsWith "'")
-    let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts, enclosing := (types, bounds ++ more) }) parseStmts
+    let body ← bodyOf do
+      let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts, enclosing := (types, bounds ++ more) }) parseStmts
+      pure #[← mkC pats.toList body]
     expectPunct "}"
     -- `-> !`: a function that does not come back gives whatever is wanted
     -- of it, which only a body that does not come back can.
@@ -893,7 +902,7 @@ partial def parseFn : P (Item × List Bound) := do
       | some (.performs .never effects) =>
         (params ++ [neverParam], some (TypeExpr.performs (.name neverParam []) effects))
       | other => (params, other)
-    pure (Item.fnOf name (allParams ++ lifetimes) annots.toList ret [.mk pats.toList body], bounds ++ more)
+    pure (Item.fn name (allParams ++ lifetimes) annots.toList ret body, bounds ++ more)
   else
     failAt s!"`{name}` is written as clauses, which say no types: write `fn {name}(x: T) -> R \{ match(x) \{ .. } }`"
 

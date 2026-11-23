@@ -20,6 +20,16 @@ private def defaultAliases (name : String) (params : List String)
     .typeAlias (defaultName name i) earlier ty
       :: (if lives == 0 then [] else [.typeAlias (defaultName name (i - lives) ++ "~") earlier ty])
 
+/-- A constant's value, `const NAME: T = value`: worked out at compile time,
+of that type (`constItems`), in a body of its own. -/
+private def constValue (ty : TypeExpr) : P (Flat.Body × Flat.ExprId) := valueOf do
+  let value ← callOf 0 none ascribeMark #[← parseBinary 0 false, ← tree ty.asExpr]
+  callOf 0 none comptimeMark #[value]
+
+/-- A function that takes nothing and gives the value written. -/
+private def valueFn : P Flat.Body := bodyOf do
+  pure #[← mkC [] #[← mkS (.expr (← parseBinary 0 false))]]
+
 private partial def parseItem : P Item := do
   match ← peek with
   | .ident "effect" =>
@@ -76,11 +86,13 @@ private partial def parseItem : P Item := do
     -- `let NAME: Type = value;`: the value, of that type.
     let ty ← if ← acceptPunct ":" then some <$> parseType else pure none
     expectPunct "="
-    let value ← parseBinary 0 false
+    let (body, value) ← valueOf do
+      let value ← parseBinary 0 false
+      match ty with
+      | some ty => callOf 0 none ascribeMark #[value, ← tree ty.asExpr]
+      | none => pure value
     expectPunct ";"
-    pure (Item.aliasOf name (match ty with
-      | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
-      | none => value))
+    pure (.alias name body value)
   | .ident "const" =>
     -- `const NAME: Type = value;`: worked out once, at compile time
     -- (`constItems`).
@@ -89,9 +101,9 @@ private partial def parseItem : P Item := do
     expectPunct ":"
     let ty ← parseType
     expectPunct "="
-    let value ← parseBinary 0 false
+    let (body, value) ← constValue ty
     expectPunct ";"
-    pure (Item.aliasOf name (Expr.call 0 (.name none comptimeMark) [Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]]))
+    pure (.alias name body value)
   | .ident "impl" =>
     advance
     -- (`impl<T: Show> ..`: what is asked of a parameter, as `where T: Show`.)
@@ -170,10 +182,9 @@ private partial def parseItem : P Item := do
           expectPunct ":"
           let ty := TypeExpr.withSelf self (← parseType)
           expectPunct "="
-          let value ← parseBinary 0 false
+          let (body, value) ← constValue ty
           expectPunct ";"
-          let c := Item.aliasOf s!"{tr}::{name}"
-            (Expr.call 0 (.name none comptimeMark) [Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]])
+          let c := Item.alias s!"{tr}::{name}" body value
           items := items.push (match vis with
             | some parent => .pub parent c
             | none => c)
@@ -364,9 +375,9 @@ private partial def parseItem : P Item := do
         expectPunct ":"
         let ty ← parseType
         expectPunct "="
-        let value ← parseBinary 0 false
+        let body ← valueFn
         let _ ← acceptPunct ";"
-        methods := methods.push (Item.fnOf name [] [] (some ty) [.mk [] [.expr value]])
+        methods := methods.push (Item.fn name [] [] (some ty) body)
       | _ => failAt "expected `fn`: an implementation gives the trait's functions"
     expectPunct "}"
     -- `Self` is the type the implementation is for.
@@ -531,8 +542,7 @@ private partial def parseTrait : P (List Item) := do
       methods := methods.push (c, [], some ty)
       if ← acceptPunct "=" then
         -- What an implementation has if it does not say.
-        let value ← parseBinary 0 false
-        defaults := defaults.push (Item.fnOf c [] [] none [.mk [] [.expr value]])
+        defaults := defaults.push (Item.fn c [] [] none (← valueFn))
       let _ ← acceptPunct ";"
       continue
     match ← peek with
@@ -581,9 +591,9 @@ private partial def parseTrait : P (List Item) := do
         | some x => pure (Pattern.var x)
         | none => failAt s!"`{m}` has a body, so its parameters have names: `{m}(a: Self)`"
       advance
-      let body ← parseStmts
+      let body ← bodyOf do pure #[← mkC pats (← parseStmts)]
       expectPunct "}"
-      defaults := defaults.push (Item.fnOf m [] [] none [.mk pats body])
+      defaults := defaults.push (Item.fn m [] [] none body)
     let _ ← acceptPunct ";"
   expectPunct "}"
   let info : List Item :=
@@ -1653,7 +1663,7 @@ def reflectionsOf (fix : Fixities) (items : List Item) (base : Nat) (records : L
   if texts.isEmpty then return []
   let gtoks ← lex (String.join texts)
   let fix := if tables.isEmpty then fix else ((tables.lookup path).getD fix)
-  let (gitems, _, glocal) ← parseItems { toks := gtoks, fix, records, base, tables, path, fixed } 0 #[]
+  let (gitems, ⟨_, glocal, _⟩) ← parseItems { toks := gtoks, fix, records, base, tables, path, fixed } ⟨0, #[], {}⟩
   pure ((gitems ++ glocal.toList).map fun
     | .impl ps tr h args ctx ms => Item.impl ps tr h args ctx (ms ++ [.typeAlias askedOnlyName [] (.tuple [])])
     | other => other)
@@ -1676,11 +1686,11 @@ def parseKept (fix : Fixities) (src : String) (base : Nat := 0) (records : List 
   let ctx : PCtx := { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed }
   match kept with
   | some kept =>
-    let ((items, groups), _, local_) ← parseItemsKept kept ctx 0 #[]
+    let ((items, groups), ⟨_, local_, _⟩) ← parseItemsKept kept ctx ⟨0, #[], {}⟩
     let made ← if reflect then reflectionsOf fix (items ++ local_.toList) (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
     pure (items ++ unmutItems (local_.toList ++ made), fix, groups)
   | none =>
-    let (items, _, local_) ← parseItems ctx 0 #[]
+    let (items, ⟨_, local_, _⟩) ← parseItems ctx ⟨0, #[], {}⟩
     let items := items ++ local_.toList
     -- (Each declared type's `Reflect`, read as the text is, after its items;
     -- checked only where something asks it.)

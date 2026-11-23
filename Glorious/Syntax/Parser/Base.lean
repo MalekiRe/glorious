@@ -48,49 +48,68 @@ structure PCtx where
   them, worked out at compile time at the types each copy is made at. -/
   enclosing : List String × List Bound := ([], [])
 
-/-- What the parser does: given what it reads from, where it is, and the
-functions written inside blocks so far (on their way to the module the block
-is in), it fails or gives a value with where it then is and those functions.
-One monad of its own and not four stacked: what Lean compiles of this file
-is a third the size. -/
-@[expose] def P (α : Type) : Type := PCtx → Nat → Array Item → Except String (α × Nat × Array Item)
+/-- What the parser holds as it reads: where it is, the functions written
+inside blocks so far (on their way to the module the block is in), and the
+body of the declaration being read, which what it reads is put in as it is
+read (`Flat.Body`). -/
+structure PState where
+  pos : Nat
+  made : Array Item
+  body : Flat.Body
+
+/-- What the parser does: given what it reads from and what it holds, it fails
+or gives a value with what it then holds. One monad of its own and not four
+stacked: what Lean compiles of this file is a third the size. -/
+@[expose] def P (α : Type) : Type := PCtx → PState → Except String (α × PState)
 
 instance : Monad P where
-  pure a := fun _ i made => .ok (a, i, made)
-  bind x f := fun ctx i made =>
-    match x ctx i made with
-    | .ok (a, i, made) => f a ctx i made
+  pure a := fun _ s => .ok (a, s)
+  bind x f := fun ctx s =>
+    match x ctx s with
+    | .ok (a, s) => f a ctx s
     | .error e => .error e
 
 instance : MonadReaderOf PCtx P where
-  read := fun ctx i made => .ok (ctx, i, made)
+  read := fun ctx s => .ok (ctx, s)
 
 instance : MonadWithReaderOf PCtx P where
-  withReader f x := fun ctx i made => x (f ctx) i made
+  withReader f x := fun ctx s => x (f ctx) s
 
 instance : MonadStateOf (Array Item) P where
-  get := fun _ i made => .ok (made, i, made)
-  set made := fun _ i _ => .ok ((), i, made)
-  modifyGet f := fun _ i made =>
+  get := fun _ s => .ok (s.made, s)
+  set made := fun _ s => .ok ((), { s with made })
+  modifyGet f := fun _ s =>
+    -- (Taken out first, so that it is changed in place.)
+    let made := s.made
+    let s := { s with made := #[] }
     let (a, made) := f made
-    .ok (a, i, made)
+    .ok (a, { s with made })
+
+instance : MonadStateOf Flat.Body P where
+  get := fun _ s => .ok (s.body, s)
+  set body := fun _ s => .ok ((), { s with body })
+  modifyGet f := fun _ s =>
+    let body := s.body
+    let s := { s with body := {} }
+    let (a, body) := f body
+    .ok (a, { s with body })
 
 /-- (Declared last: `get` and `set` with nothing said are of where the
 parser is.) -/
 instance : MonadStateOf Nat P where
-  get := fun _ i made => .ok (i, i, made)
-  set i := fun _ _ made => .ok ((), i, made)
-  modifyGet f := fun _ i made =>
-    let (a, i) := f i
-    .ok (a, i, made)
+  get := fun _ s => .ok (s.pos, s)
+  set pos := fun _ s => .ok ((), { s with pos })
+  modifyGet f := fun _ s =>
+    let (a, pos) := f s.pos
+    .ok (a, { s with pos })
 
 /-- What is tried and fails leaves the parser where it was. -/
 instance : MonadExceptOf String P where
-  throw e := fun _ _ _ => .error e
-  tryCatch x handle := fun ctx i made =>
-    match x ctx i made with
+  throw e := fun _ _ => .error e
+  tryCatch x handle := fun ctx s =>
+    match x ctx s with
     | .ok r => .ok r
-    | .error e => handle e ctx i made
+    | .error e => handle e ctx s
 
 instance {α : Type} : Inhabited (P α) := ⟨throw "parser: unreachable"⟩
 
@@ -184,45 +203,97 @@ def floatBits (neg : Bool) (digits : Nat) (exp10 : Int) (suffix : String) :
   if bits == format.infBits neg then failAt "this number is too large for its type"
   pure (if suffix == "f32" then "f32_of" else "f64_of", Ieee.ofBits bits)
 
+/-! ## The body being read
+
+What is read is put in the body of the declaration it is in as it is read:
+each expression, statement and clause a node there, named by its place. -/
+
+open Flat (ExprId StmtId ClauseId FExpr FStmt FClause)
+
+/-- Something made with the body being read. -/
+def build {α : Type} (x : Flat.Build α) : P α := modifyGetThe Flat.Body fun b => x.run b
+
+def mk (e : FExpr) : P ExprId := build (Flat.pushExpr e)
+def mkS (s : FStmt) : P StmtId := build (Flat.pushStmt s)
+def mkC (pats : List Pattern) (body : Array StmtId) : P ClauseId := build (Flat.pushClause ⟨pats, body⟩)
+
+/-- What an expression read is. -/
+def node (e : ExprId) : P FExpr := do pure ((← getThe Flat.Body).expr e)
+
+def mkName (qual : Option String) (x : String) : P ExprId := mk (.name qual x)
+
+/-- A call of the function named `f`. -/
+def callOf (id : Nat) (qual : Option String) (f : String) (args : Array ExprId) : P ExprId := do
+  mk (.call id (← mkName qual f) args)
+
+/-- A value written out as a tree: a type among expressions, a scalar. -/
+def tree (e : Expr) : P ExprId := build (Flat.flatExpr e)
+
+/-- Another copy of an expression read, for a second place it is written in:
+no node is in two places. -/
+def copy (e : ExprId) : P ExprId := do tree (Flat.treeExpr (← getThe Flat.Body) e)
+
+/-- A declaration's clauses read into a body of their own. -/
+def bodyOf (clauses : P (Array ClauseId)) : P Flat.Body := do
+  let outer ← modifyGetThe Flat.Body fun b => (b, {})
+  let roots ← clauses
+  let b ← modifyGetThe Flat.Body fun b => (b, outer)
+  -- (Without what the reading made and left: what is kept is what is
+  -- written.)
+  pure { b with roots }.compact
+
+/-- An expression read into a body of its own: a constant's value. -/
+def valueOf (value : P ExprId) : P (Flat.Body × ExprId) := do
+  let outer ← modifyGetThe Flat.Body fun b => (b, {})
+  let e ← value
+  let b ← modifyGetThe Flat.Body fun b => (b, outer)
+  pure (b, e)
+
 /-- A function of the prelude that the compiler writes a literal or an index
 with, whatever the program has in scope. -/
-def preludeFn (name : String) : Expr := .name (some "%prelude") name
+def preludeFn (name : String) : P ExprId := mkName (some "%prelude") name
 
 /-- `[a, b, c]` as a value: the empty array with each pushed on. The calls
 have identities where they are given, so that they are known to return: an
 element computed before the next is then not one that could be left
 behind. -/
-def arrayValue (elements : List Expr) (empty : Nat := 0) (pushes : List Nat := []) : Expr :=
-  (elements.zipIdx.foldl (fun acc (e, i) => .call (pushes.getD i 0) (preludeFn "push") [acc, e])
-    (.call empty (preludeFn "array_empty") []))
+def arrayValue (elements : List ExprId) (empty : Nat := 0) (pushes : List Nat := []) : P ExprId := do
+  let mut acc ← mk (.call empty (← preludeFn "array_empty") #[])
+  for (e, i) in elements.zipIdx do
+    acc ← mk (.call (pushes.getD i 0) (← preludeFn "push") #[acc, e])
+  pure acc
 
 /-- `a[i]`, if this is one: the array and the place. -/
-def indexed? : Expr → Option (Nat × Expr × Expr)
-  | .call id (.name (some "%prelude") "index") [a, i] => some (id, a, i)
-  | _ => none
+def indexed? (e : ExprId) : P (Option (Nat × ExprId × ExprId)) := do
+  match ← node e with
+  | .call id f #[a, i] =>
+    match ← node f with
+    | .name (some "%prelude") "index" => pure (some (id, a, i))
+    | _ => pure none
+  | _ => pure none
 
 /-- A literal other than a plain whole number, if one is next, perhaps after
 a `-` already read. -/
-def scalarLiteral (neg : Bool) : P (Option Expr) := do
+def scalarLiteral (neg : Bool) : P (Option ExprId) := do
   match ← peek with
   | .typed n suffix =>
     let (name, v) ← typedInt neg n suffix
     advance
-    pure (some (match name with
+    some <$> tree (match name with
       | some name => scalarValue name v
-      | none => .int v))
+      | none => .int v)
   | .float digits exp10 suffix =>
     let (name, bits) ← floatBits neg digits exp10 suffix
     advance
-    pure (some (scalarValue name bits))
+    some <$> tree (scalarValue name bits)
   | .char code =>
     if neg then failAt "a character has no sign"
     advance
-    pure (some (scalarValue "char_of" code))
+    some <$> tree (scalarValue "char_of" code)
   | .str codes =>
     if neg then failAt "a text has no sign"
     advance
-    pure (some (textValue codes))
+    some <$> tree (textValue codes)
   | .bytes codes =>
     if neg then failAt "bytes have no sign"
     -- (Each push numbered, by the text's place, the token and the byte, in
@@ -232,164 +303,148 @@ def scalarLiteral (neg : Bool) : P (Option Expr) := do
     advance
     let pushes := (List.range codes.length).map fun i =>
       if i < 1000 then 850000000000000000 + (base / 1000000) * 100000000000 + at_ * 1000 + i else 0
-    pure (some (arrayValue (codes.map fun (c : Nat) => scalarValue "u8_of" (c : Int)) 0 pushes))
+    let bytes ← codes.mapM fun (c : Nat) => tree (scalarValue "u8_of" (c : Int))
+    some <$> arrayValue bytes 0 pushes
   | _ => pure none
 
 /-- A literal as a pattern: the value it is, to be compared with. -/
-partial def literalPattern : Expr → Option Pattern
-  | .int n => some (.int n)
-  | .call _ (.name qual name) args => (args.mapM literalPattern).map (.ctor name qual)
-  | .name (some qual) name => some (.ctor name (some qual) [])
-  | _ => none
+partial def literalPattern (e : ExprId) : P (Option Pattern) := do
+  match ← node e with
+  | .int n => pure (some (.int n))
+  | .call _ f args =>
+    match ← node f with
+    | .name qual name => pure (((← args.toList.mapM literalPattern).mapM id).map (.ctor name qual))
+    | _ => pure none
+  | .name (some qual) name => pure (some (.ctor name (some qual) []))
+  | _ => pure none
+
+/-- A literal read, if one was, as a pattern. -/
+def literalOf : Option ExprId → P (Option Pattern)
+  | some e => literalPattern e
+  | none => pure none
 
 /-- What a field is a field of: a named variable, a named reference written
 `(*p)`, or what an expression that gives a reference points to. -/
 inductive FieldRoot where
   | named (x : String) (star : Bool)
-  | through (base : Expr)
+  | through (base : ExprId)
 
 /-- `root.a.0` as its root and the way to the field, if it is a field. -/
-partial def fieldRoot : Expr → Option (FieldRoot × List String)
+partial def fieldRoot (e : ExprId) : P (Option (FieldRoot × List String)) := do
+  match ← node e with
   | .proj e idx => step e (toString idx)
   | .fieldOf _ e name => step e name
-  | _ => none
+  | _ => pure none
 where
-  step (e : Expr) (s : String) : Option (FieldRoot × List String) :=
-    match e with
-    | .name none x => some (.named x false, [s])
-    | .deref (.name none x) => some (.named x true, [s])
-    | .proj _ _ => (fieldRoot e).map fun (root, path) => (root, path ++ [s])
-    | .fieldOf _ _ _ => (fieldRoot e).map fun (root, path) => (root, path ++ [s])
-    | .deref base => some (.through base, [s])
-    | base => some (.through base, [s])
+  step (e : ExprId) (s : String) : P (Option (FieldRoot × List String)) := do
+    match ← node e with
+    | .name none x => pure (some (.named x false, [s]))
+    | .deref inner =>
+      match ← node inner with
+      | .name none x => pure (some (.named x true, [s]))
+      | _ => pure (some (.through inner, [s]))
+    | .proj _ _ | .fieldOf _ _ _ => pure ((← fieldRoot e).map fun (root, path) => (root, path ++ [s]))
+    | _ => pure (some (.through e, [s]))
 
 /-- A borrow of a field: of a variable or a named reference as it is, of what
 an expression points to as a mark for its statement to settle. -/
-def fieldBorrow (id : Nat) (uniq : Bool) (root : FieldRoot) (path : List String) : Expr :=
+def fieldBorrow (id : Nat) (uniq : Bool) (root : FieldRoot) (path : List String) : P ExprId := do
   match root with
-  | .named x star => .refField id uniq x path star
+  | .named x star => mk (.refField id uniq x path star)
   | .through base =>
-    .call id (.name none throughMark)
-      [base, .tuple (path.map fun s => Expr.name none s), .int (if uniq then 1 else 0)]
+    let steps ← mk (.tuple (← path.toArray.mapM (mkName none)))
+    callOf id none throughMark #[base, steps, ← mk (.int (if uniq then 1 else 0))]
 
 /-- `&a[i]` and `&mut a[i]`: a reference to the element where it is, if `a`
 is a place: a variable, a field, what a reference points to, or an element
 in turn. Of anything else the element is a value with no name. -/
-partial def elementBorrow (uniq : Bool) (e : Expr) : Option Expr :=
-  match indexed? e with
-  | none => none
-  | some (id, a, i) =>
-    let base : Option Expr := match a with
-      | .name none x => some (.ref uniq x)
-      | .deref r => some (.reborrow uniq r)
-      | a =>
-        match fieldRoot a with
-        | some (root, path) => some (fieldBorrow (id + 800000) uniq root path)
-        | none => elementBorrow uniq a
-    -- (For writing, the place is worked out before the array is borrowed:
-    -- `a[len(a) - 1]` reads `a` to say where.)
-    base.map fun b =>
-      if uniq then .call id (preludeFn "place_at") [i, b] else .call id (preludeFn "element_at") [b, i]
+partial def elementBorrow (uniq : Bool) (e : ExprId) : P (Option ExprId) := do
+  let some (id, a, i) ← indexed? e | return none
+  let base ← match ← node a with
+    | .name none x => some <$> mk (.ref uniq x)
+    | .deref r => some <$> mk (.reborrow uniq r)
+    | _ =>
+      match ← fieldRoot a with
+      | some (root, path) => some <$> fieldBorrow (id + 800000) uniq root path
+      | none => elementBorrow uniq a
+  -- (For writing, the place is worked out before the array is borrowed:
+  -- `a[len(a) - 1]` reads `a` to say where.)
+  match base with
+  | some b =>
+    if uniq then some <$> mk (.call id (← preludeFn "place_at") #[i, b])
+    else some <$> mk (.call id (← preludeFn "element_at") #[b, i])
+  | none => pure none
 
 /-- What a statement's expression leaves to settle: the references to be
 named first, whether anything that does something has been come to, and
 whether a reference would be computed out of turn. -/
 structure Hoist where
-  lets : Array (String × Expr) := #[]
+  lets : Array (String × ExprId) := #[]
   seen : Bool := false
   bad : Bool := false
 
 /-- Is a borrow through an expression written anywhere in this, outside the
 statements of a block or a callable? -/
-partial def hasThrough : Expr → Bool
-  | .call _ (.name none f) args => f == throughMark || args.any hasThrough
-  | .call _ f args => hasThrough f || args.any hasThrough
-  | .tailCall _ f args => hasThrough f || args.any hasThrough
-  | .tuple es => es.any hasThrough
-  | .proj e _ => hasThrough e
-  | .fieldOf _ e _ => hasThrough e
-  | .deref e => hasThrough e
-  | .reborrow _ e => hasThrough e
-  | .handle subject _ => hasThrough subject
+partial def hasThrough (b : Flat.Body) (e : ExprId) : Bool :=
+  match b.expr e with
+  | .call _ f args =>
+    (match b.expr f with
+      | .name none g => g == throughMark
+      | _ => hasThrough b f) || args.any (hasThrough b)
+  | .tailCall _ f args => hasThrough b f || args.any (hasThrough b)
+  | .tuple es => es.any (hasThrough b)
+  | .proj e _ | .fieldOf _ e _ | .deref e | .reborrow _ e | .handle e _ => hasThrough b e
   | _ => false
 
-/-- An expression with each borrow through an expression made a borrow
-through a name, the expressions to be given those names noted in the order
-they are computed. Nothing that does something may come before one: its
-reference is computed before the statement it is in. -/
-partial def hoistExpr (h : Hoist) : Expr → Expr × Hoist
-  | .call id (.name none f) args =>
-    if f == throughMark then
-      match args with
-      | [base, .tuple steps, .int uniq] =>
-        let before := h.seen
-        let (base, h) := hoistExpr { h with seen := false } base
-        let name := s!"%through{id}"
-        let path := steps.filterMap fun
-          | .name none s => some s
-          | _ => none
-        (.refField id (uniq == 1) name path true,
-          { h with lets := h.lets.push (name, base), seen := before, bad := h.bad || before })
-      | _ => (.call id (.name none f) args, h)
-    else
-      let (args, h) := hoistAll h args
-      (.call id (.name none f) args, { h with seen := true })
+/-- Each borrow through an expression made, in place, a borrow through a
+name, the expressions to be given those names noted in the order they are
+computed. Nothing that does something may come before one: its reference is
+computed before the statement it is in. -/
+partial def hoistExpr (h : Hoist) (e : ExprId) : P Hoist := do
+  match ← node e with
   | .call id f args =>
-    let (f, h) := hoistExpr h f
-    let (args, h) := hoistAll h args
-    (.call id f args, { h with seen := true })
-  | .tailCall id f args =>
-    let (parts, h) := hoistAll h (f :: args)
-    (.tailCall id (parts.headD f) (parts.drop 1), { h with seen := true })
-  | .tuple es =>
-    let (es, h) := hoistAll h es
-    (.tuple es, h)
-  | .proj e i =>
-    let (e, h) := hoistExpr h e
-    (.proj e i, h)
-  | .fieldOf id e name =>
-    let (e, h) := hoistExpr h e
-    (.fieldOf id e name, h)
-  | .deref e =>
-    let (e, h) := hoistExpr h e
-    (.deref e, { h with seen := true })
-  | .reborrow u e =>
-    let (e, h) := hoistExpr h e
-    (.reborrow u e, h)
-  | .handle subject arms =>
+    if let .name none g := ← node f then
+      if g == throughMark then
+        if let #[base, steps, uniq] := args then
+          if let (.tuple steps, .int uniq) := (← node steps, ← node uniq) then
+            let before := h.seen
+            let h ← hoistExpr { h with seen := false } base
+            let name := s!"%through{id}"
+            let path ← steps.toList.filterMapM fun s => do
+              match ← node s with
+              | .name none s => pure (some s)
+              | _ => pure none
+            modifyThe Flat.Body fun b => { b with exprs := b.exprs.set! e (.refField id (uniq == 1) name path true) }
+            return { h with lets := h.lets.push (name, base), seen := before, bad := h.bad || before }
+        return h
+      let h ← args.foldlM hoistExpr h
+      return { h with seen := true }
+    let h ← hoistExpr h f
+    let h ← args.foldlM hoistExpr h
+    pure { h with seen := true }
+  | .tailCall _ f args =>
+    let h ← (#[f] ++ args).foldlM hoistExpr h
+    pure { h with seen := true }
+  | .tuple es => es.foldlM hoistExpr h
+  | .proj e _ | .fieldOf _ e _ | .reborrow _ e => hoistExpr h e
+  | .deref e => pure { (← hoistExpr h e) with seen := true }
+  | .handle subject _ =>
     -- What is handled is computed under the handler, not before it.
-    (.handle subject arms, { h with seen := true, bad := h.bad || hasThrough subject })
-  | .name q x => (.name q x, { h with seen := true })
-  | e => (e, h)
-where
-  hoistAll (h : Hoist) (es : List Expr) : List Expr × Hoist :=
-    es.foldl (fun (acc : List Expr × Hoist) e =>
-      let (e, h) := hoistExpr acc.2 e
-      (acc.1 ++ [e], h)) ([], h)
+    pure { h with seen := true, bad := h.bad || hasThrough (← getThe Flat.Body) subject }
+  | .name _ _ => pure { h with seen := true }
+  | _ => pure h
 
 /-- A statement, and before it the references its borrows go through, each
 given a name. In an assignment the place is found before the value is
 computed. None if a reference would be computed out of turn. -/
-def hoistStmt (s : Stmt) : Option (List Stmt × Stmt) :=
-  let done := fun (h : Hoist) (s : Stmt) =>
-    if h.bad then none
-    else some (h.lets.toList.map fun (name, base) => Stmt.let_ (.var name) base, s)
-  match s with
-  | .let_ pat value =>
-    let (value, h) := hoistExpr {} value
-    done h (.let_ pat value)
-  | .letMut x value =>
-    let (value, h) := hoistExpr {} value
-    done h (.letMut x value)
-  | .expr e =>
-    let (e, h) := hoistExpr {} e
-    done h (.expr e)
-  | .assign target value =>
-    let (target, h) := hoistExpr {} target
-    let (value, h) := hoistExpr { h with seen := true } value
-    done h (.assign target value)
-  | .defer e => if hasThrough e then none else some ([], .defer e)
-  | s => some ([], s)
+def hoistStmt (s : FStmt) : P (Option (List FStmt)) := do
+  let h ← match s with
+    | .let_ _ e | .letMut _ e | .expr e => hoistExpr {} e
+    | .assign target value => do hoistExpr { (← hoistExpr {} target) with seen := true } value
+    | .defer e => pure { bad := hasThrough (← getThe Flat.Body) e }
+    | .located .. => pure {}
+  if h.bad then return none
+  pure (some (h.lets.toList.map (fun (name, base) => FStmt.let_ (.var name) base) ++ [s]))
 
 /-- Does the block starting at token `i` have clauses (`... => ...`) rather than statements? -/
 partial def scanClauseForm (toks : Array Token) (i depth : Nat) : Bool :=
@@ -911,54 +966,61 @@ refuses if they do not cover every case. With that, `never` is not reached.
 
 The identities of the calls and callables this makes are those of the
 pattern's own tokens and the `=>` after it, which nothing else has. -/
-partial def restClausesOf (all : List Pattern) : List Clause → List Clause
-  | [] => []
-  | .mk [.ctor name none args] body :: following =>
-    match restPatParts name with
-    | none => .mk [.ctor name none args] body :: restClausesOf all following
-    | some (k, id, line, col) =>
-      let rest := args[k]?.getD .wild
-      let first := args.take k
-      let last := args.drop (k + 1)
-      let count := first.length + last.length
-      let named := fun (j : Nat) => s!"%rest{id}:{j}"
-      let prelude := fun (f : String) => Expr.name (some "%prelude") f
-      -- Without an element named, the pattern is the array.
-      if count == 0 then .mk [rest] body :: restClausesOf all following
-      else
-        -- (Each statement has a place of its own in the pattern: what it
-        -- lets go of is known by it.)
-        let firsts : List Stmt := first.zipIdx.map fun (p, j) =>
-          Stmt.located line (col + 1 + j) (.let_ (.tuple [p, .var (named (j + 1))])
-            (.call (id + 4 + j) (prelude "rest_first") [.name none (named j)]))
-        -- (The last element comes off first.)
-        let lasts : List Stmt := last.reverse.zipIdx.map fun (p, j) =>
-          Stmt.located line (col + 1 + k + j) (.let_ (.tuple [.var (named (k + j + 1)), p])
-            (.call (id + 4 + k + j) (prelude "rest_last") [.name none (named (k + j))]))
-        let whole := named count
-        let fits := Clause.mk [.ctor "RestFits" none [.var (named 0)]]
-          (firsts ++ lasts ++ [Stmt.located line (col + 1 + count) (.let_ rest (.name none whole))] ++ body)
-        let covered : List Stmt := (List.range count).map fun j =>
-          let clauses := (all.filterMap (asTupleOf j)).map fun p => Clause.mk [p] [.expr (.tuple [])]
-          -- (No clause for the length: a callable that covers nothing.)
-          let clauses := if clauses.isEmpty then
-              [Clause.mk [.ctor (arrayPatName 0) none []] [.expr (.tuple [])]]
-            else clauses
-          Stmt.let_ .wild (.closure (id + 4 + count + j) clauses)
-        let never := s!"%rest{id}:never"
-        let unreached := Clause.mk [.var never]
-          (covered ++ [.expr (.call (id + 3) (prelude "rest_unreached") [.name none never])])
-        let back := s!"%rest{id}:back"
-        let short := Clause.mk [.ctor "RestShort" none [.var back]]
-          [.expr (.call 0 (.closure (id + 2) (restClausesOf all following ++ [unreached])) [.name none back])]
-        let taken := s!"%rest{id}:whole"
-        [.mk [.var taken] [.expr (.call 0 (.closure (id + 1) [fits, short])
-          [.call id (prelude "rest_fits") [.name none taken, .int count]])]]
-  | clause :: following => clause :: restClausesOf all following
+partial def restClausesOf (all : List Pattern) : List ClauseId → P (List ClauseId)
+  | [] => pure []
+  | c :: following => do
+    let ⟨pats, body⟩ := (← getThe Flat.Body).clause c
+    let some (.ctor name none args) := (match pats with | [p] => some p | _ => none)
+      | return c :: (← restClausesOf all following)
+    let some (k, id, line, col) := restPatParts name
+      | return c :: (← restClausesOf all following)
+    let rest := args[k]?.getD .wild
+    let first := args.take k
+    let last := args.drop (k + 1)
+    let count := first.length + last.length
+    let named := fun (j : Nat) => s!"%rest{id}:{j}"
+    let callPrelude := fun (id : Nat) (f : String) (args : Array ExprId) => do
+      mk (.call id (← preludeFn f) args)
+    -- Without an element named, the pattern is the array.
+    if count == 0 then return (← mkC [rest] body) :: (← restClausesOf all following)
+    -- (Each statement has a place of its own in the pattern: what it lets
+    -- go of is known by it.)
+    let located := fun (col : Nat) (s : FStmt) => do mkS (.located line col (← mkS s))
+    let firsts ← first.zipIdx.toArray.mapM fun (p, j) => do
+      located (col + 1 + j) (.let_ (.tuple [p, .var (named (j + 1))])
+        (← callPrelude (id + 4 + j) "rest_first" #[← mkName none (named j)]))
+    -- (The last element comes off first.)
+    let lasts ← last.reverse.zipIdx.toArray.mapM fun (p, j) => do
+      located (col + 1 + k + j) (.let_ (.tuple [.var (named (k + j + 1)), p])
+        (← callPrelude (id + 4 + k + j) "rest_last" #[← mkName none (named (k + j))]))
+    let whole := named count
+    let fits ← mkC [.ctor "RestFits" none [.var (named 0)]]
+      (firsts ++ lasts ++ #[← located (col + 1 + count) (.let_ rest (← mkName none whole))] ++ body)
+    let covered ← (List.range count).toArray.mapM fun j => do
+      let clauses ← (all.filterMap (asTupleOf j)).toArray.mapM fun p => do
+        mkC [p] #[← mkS (.expr (← mk (.tuple #[])))]
+      -- (No clause for the length: a callable that covers nothing.)
+      let clauses ← if clauses.isEmpty then
+          pure #[← mkC [.ctor (arrayPatName 0) none []] #[← mkS (.expr (← mk (.tuple #[])))]]
+        else pure clauses
+      mkS (.let_ .wild (← mk (.closure (id + 4 + count + j) clauses)))
+    let never := s!"%rest{id}:never"
+    let unreached ← mkC [.var never]
+      (covered.push (← mkS (.expr (← callPrelude (id + 3) "rest_unreached" #[← mkName none never]))))
+    let back := s!"%rest{id}:back"
+    let after ← mk (.closure (id + 2) ((← restClausesOf all following).toArray.push unreached))
+    let short ← mkC [.ctor "RestShort" none [.var back]]
+      #[← mkS (.expr (← mk (.call 0 after #[← mkName none back])))]
+    let taken := s!"%rest{id}:whole"
+    let both ← mk (.closure (id + 1) #[fits, short])
+    let fitsCall ← callPrelude id "rest_fits" #[← mkName none taken, ← mk (.int count)]
+    pure [← mkC [.var taken] #[← mkS (.expr (← mk (.call 0 both #[fitsCall])))]]
 
-def restClauses (clauses : List Clause) : List Clause :=
-  restClausesOf (clauses.filterMap fun
-    | .mk [p] _ => some p
-    | _ => none) clauses
+def restClauses (clauses : List ClauseId) : P (List ClauseId) := do
+  let b ← getThe Flat.Body
+  let pats := clauses.filterMap fun c => match (b.clause c).pats with
+    | [p] => some p
+    | _ => none
+  restClausesOf pats clauses
 
 end Glorious.Syntax.Parse

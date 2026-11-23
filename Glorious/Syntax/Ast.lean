@@ -893,66 +893,12 @@ inductive Item where
 
 deriving instance Hashable for OpDecl, Bound, Item
 
-/-- An expression with each expression directly inside it made by `fe`, and
-each block inside it (with the patterns of its clause) by `fb`. -/
-def Expr.traverse {m : Type → Type} [Monad m] (fe : Expr → m Expr)
-    (fb : List Pattern → List Stmt → m (List Stmt)) : Expr → m Expr
-  | .call i g args => do pure (.call i (← fe g) (← args.mapM fe))
-  | .tailCall i g args => do pure (.tailCall i (← fe g) (← args.mapM fe))
-  | .tuple args => .tuple <$> args.mapM fe
-  | .proj e n => (.proj · n) <$> fe e
-  | .deref e => .deref <$> fe e
-  | .reborrow u e => .reborrow u <$> fe e
-  | .fieldOf i e n => (.fieldOf i · n) <$> fe e
-  | .closure i clauses => .closure i <$> clauses.mapM fun | .mk ps b => .mk ps <$> fb ps b
-  | .handle s arms => do pure (.handle (← fe s) (← arms.mapM fun | .mk ps b => .mk ps <$> fb ps b))
-  | .labelScope l b => .labelScope l <$> fb [] b
-  | e => pure e
-
-/-- A statement with each expression in it made by `fe`, in order. -/
-def Stmt.traverse {m : Type → Type} [Monad m] (fe : Expr → m Expr) : Stmt → m Stmt
-  | .let_ p v => .let_ p <$> fe v
-  | .expr e => .expr <$> fe e
-  | .defer e => .defer <$> fe e
-  | .letMut x v => .letMut x <$> fe v
-  | .assign t v => do pure (.assign (← fe t) (← fe v))
-  | .located l c s => .located l c <$> s.traverse fe
-
 /-- Every name a pattern could bind. -/
 partial def patternNames : Pattern → List String
   | .var x => [x]
   | .ctor _ _ args => args.flatMap patternNames
   | .tuple args => args.flatMap patternNames
   | _ => []
-
-mutual
-
-/-- An expression with `x` written `y` wherever it means what it means
-outside: not under a pattern, a `let` or a parameter that names `x` anew. -/
-partial def renameExpr (x y : String) (bound : List String) : Expr → Expr
-  | .name none z => if z == x && !bound.contains x then .name none y else .name none z
-  | .ref uniq z => .ref uniq (if z == x && !bound.contains x then y else z)
-  | .refField id uniq z path star =>
-    .refField id uniq (if z == x && !bound.contains x then y else z) path star
-  | e => Id.run (e.traverse (pure <| renameExpr x y bound ·)
-      fun ps b => pure (renameStmts x y (ps.flatMap patternNames ++ bound) b))
-
-partial def renameStmts (x y : String) (bound : List String) : List Stmt → List Stmt
-  | [] => []
-  | .let_ pat value :: rest =>
-    .let_ pat (renameExpr x y bound value) :: renameStmts x y (patternNames pat ++ bound) rest
-  | .letMut z value :: rest =>
-    .letMut z (renameExpr x y bound value) :: renameStmts x y (z :: bound) rest
-  | .expr e :: rest => .expr (renameExpr x y bound e) :: renameStmts x y bound rest
-  | .defer e :: rest => .defer (renameExpr x y bound e) :: renameStmts x y bound rest
-  | .located line col s :: rest =>
-    match renameStmts x y bound (s :: rest) with
-    | first :: more => .located line col first :: more
-    | [] => []
-  | .assign target value :: rest =>
-    .assign (renameExpr x y bound target) (renameExpr x y bound value) :: renameStmts x y bound rest
-
-end
 
 /-- A pattern with `Self` written out as the type an implementation is for. -/
 partial def selfPattern (self : String) : Pattern → Pattern
