@@ -527,6 +527,19 @@ def checkSealed (ctx : Ctx) (written : String) (e : Entry) : R Unit := do
       throw s!"`{written}` has private fields: only {showPath e.home} can build one or take one apart"
   | none => pure ()
 
+/-- What module `m` has named `name`, as seen from where `ctx` is. -/
+def namedInModule (ctx : Ctx) (m : List String) (name : String) : R (List Bound) := do
+  noteEdge ctx.here m
+  if m == ctx.here then pure ((ctx.of name).filter fun b => b.name == name && b.rank == 0)
+  else exported ctx.here m name
+
+/-- A name the prelude has, where the prelude is not brought in: said so. -/
+def preludeNotIn (ctx : Ctx) (space : Space) (name : String) : R Unit := do
+  if (← get).bare && ctx.here.head? != preludePath.head? && ctx.here.head? != some "std" then
+    if let some prelude ← unitOf preludePath then
+      if prelude.own.any fun b => b.name == name && b.entry.kind.space == space then
+        throw s!"unknown name `{name}`: the prelude is not brought in here (`use prelude::{name};`)"
+
 /-- What a value's name means: the name it is written with from here on, its
 qualifier if it keeps one, and the declaration if it is one. A qualifier is a
 module, or a type, effect or trait, itself perhaps in a module. -/
@@ -550,19 +563,12 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
         let ways := " or ".intercalate (shared.map fun b => s!"`{b.name}`")
         throw s!"`{name}` is a constructor of more than one type here: write {ways}"
       -- Without the prelude brought in, its names are not there to write.
-      if (← get).bare && ctx.here.head? != preludePath.head? && ctx.here.head? != some "std" then
-        if let some prelude ← unitOf preludePath then
-          if prelude.own.any fun b => b.name == name && b.entry.kind.space == .value then
-            throw s!"unknown name `{name}`: the prelude is not brought in here (`use prelude::{name};`)"
+      preludeNotIn ctx .value name
       pure (none, name, none)
   | some q =>
     let segs := q.splitOn "::"
     if let some m ← moduleAt ctx.here ctx.of segs then
-      noteEdge ctx.here m
-      let found ← if m == ctx.here then
-          pure ((ctx.of name).filter fun b => b.name == name && b.rank == 0)
-        else exported ctx.here m name
-      match found.find? fun b => b.entry.kind.space == .value with
+      match (← namedInModule ctx m name).find? fun b => b.entry.kind.space == .value with
       | some b =>
         noteUse ctx.here b.entry
         checkSealed ctx name b.entry
@@ -577,11 +583,7 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
       else
         match ← moduleAt ctx.here ctx.of before with
         | some m =>
-          noteEdge ctx.here m
-          let found ← if m == ctx.here then
-              pure ((ctx.of last).filter fun b => b.name == last && b.rank == 0)
-            else exported ctx.here m last
-          match found.find? fun b =>
+          match (← namedInModule ctx m last).find? fun b =>
               b.entry.kind == .type || b.entry.kind == .effect || b.entry.kind == .trait with
           | some b => pure (some b.entry)
           | none => throw s!"{showPath m} has no `{last}`"
@@ -621,10 +623,7 @@ def resolveNamed (ctx : Ctx) (space : Space) (generics : List String) (written :
       noteUse ctx.here e
       pure (e.global, some e)
     | none =>
-      if (← get).bare && ctx.here.head? != preludePath.head? && ctx.here.head? != some "std" then
-        if let some prelude ← unitOf preludePath then
-          if prelude.own.any fun b => b.name == written && b.entry.kind.space == space then
-            throw s!"unknown name `{written}`: the prelude is not brought in here (`use prelude::{written};`)"
+      preludeNotIn ctx space written
       pure (written, none)
   else
     let last := segs.getLast!
@@ -635,11 +634,7 @@ def resolveNamed (ctx : Ctx) (space : Space) (generics : List String) (written :
       if generics.contains p then return (written, none)
     let some m ← moduleAt ctx.here ctx.of before
       | throw s!"`{written}`: there is no module `{"::".intercalate before}`"
-    noteEdge ctx.here m
-    let found ← if m == ctx.here then
-        pure ((ctx.of last).filter fun b => b.name == last && b.rank == 0)
-      else exported ctx.here m last
-    match found.find? fun b => b.entry.kind.space == space with
+    match (← namedInModule ctx m last).find? fun b => b.entry.kind.space == space with
     | some b =>
       noteUse ctx.here b.entry
       pure (b.entry.global, some b.entry)
