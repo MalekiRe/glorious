@@ -427,27 +427,6 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
     | some v =>
       simp only [Core.step, hr, Bytecode.step, hcode.head]
       exact .next (RunsThrough.refl rfl) (.mk hcode.tail hfr hks)
-  case call f args body =>
-    cases he : evalCall ρ f args with
-    | none => simp only [Core.step, he]; exact .stuck
-    | some c =>
-      simp only [Core.step, he, Bytecode.step, hcode.head]
-      exact apply_sim (.cons (.call hcode.tail) hfr) hks
-  case tail f args =>
-    cases he : evalCall ρ f args with
-    | none => simp only [Core.step, he]; exact .stuck
-    | some c =>
-      simp only [Core.step, he, Bytecode.step, hcode.head]
-      exact apply_sim hfr hks
-  case handle ret ops captures thunk body =>
-    cases hcap : evalAtoms ρ captures with
-    | none => simp only [Core.step, hcap]; exact .stuck
-    | some caps =>
-      cases he : evalCall ρ thunk [] with
-      | none => simp only [Core.step, hcap, he]; exact .stuck
-      | some c =>
-        simp only [Core.step, hcap, he, Bytecode.step, hcode.head]
-        exact apply_sim (.cons .handler (.cons (.call hcode.tail) hfr)) (.mk hcs)
   case raise op args =>
     cases hv : evalAtoms ρ args with
     | none => simp only [Core.step, hv]; exact .stuck
@@ -469,72 +448,6 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         simp only [Core.step, hv, hf, Bytecode.step, hcode.head, hf', hcs.length_eq]
         exact callFn_sim hbelow
           (.mk (hcs.snoc (.full (.cons (.call hcode.tail) (habove.append (.cons .handler .nil))))))
-  case label thunk body =>
-    cases he : evalScope ρ thunk (.label labels) with
-    | none => simp only [Core.step, he]; exact .stuck
-    | some c =>
-      simp only [Core.step, he, Bytecode.step, hcode.head]
-      exact apply_sim (.cons .label (.cons (.call hcode.tail) hfr)) (.mk hcs)
-  case lend uniq r thunk pre post body =>
-    cases he : evalLend ρ r thunk pre post (labels + 1) with
-    | none => simp only [Core.step, he]; exact .stuck
-    | some x =>
-      obtain ⟨a, c⟩ := x
-      simp only [Core.step, he, Bytecode.step, hcode.head]
-      exact apply_sim (.lend (.cons (.call hcode.tail) hfr)) (.mk hcs)
-  case handleTail ret ops captures thunk =>
-    cases hcap : evalAtoms ρ captures with
-    | none => simp only [Core.step, hcap]; exact .stuck
-    | some caps =>
-      cases he : evalCall ρ thunk [] with
-      | none => simp only [Core.step, hcap, he]; exact .stuck
-      | some c =>
-        simp only [Core.step, hcap, he, Bytecode.step, hcode.head]
-        exact apply_sim (.cons .handler hfr) (.mk hcs)
-  case labelTail thunk =>
-    cases he : evalScope ρ thunk (.label labels) with
-    | none => simp only [Core.step, he]; exact .stuck
-    | some c =>
-      simp only [Core.step, he, Bytecode.step, hcode.head]
-      exact apply_sim (.cons .label hfr) (.mk hcs)
-  case cell init thunk body =>
-    cases hv : init.eval ρ with
-    | none => simp only [Core.step, hv]; exact .stuck
-    | some v =>
-      cases he : evalScope ρ thunk (.ref cells.size 0 []) with
-      | none => simp only [Core.step, hv, he]; exact .stuck
-      | some c =>
-        simp only [Core.step, hv, he, Bytecode.step, hcode.head]
-        exact apply_sim (.cons .cell (.cons (.call hcode.tail) hfr)) (hks.alloc v)
-  case cellTail init thunk =>
-    cases hv : init.eval ρ with
-    | none => simp only [Core.step, hv]; exact .stuck
-    | some v =>
-      cases he : evalScope ρ thunk (.ref cells.size 0 []) with
-      | none => simp only [Core.step, hv, he]; exact .stuck
-      | some c =>
-        simp only [Core.step, hv, he, Bytecode.step, hcode.head]
-        exact apply_sim (.cons .cell hfr) (hks.alloc v)
-  case guard cleanup thunk body =>
-    cases hcl : evalClosure ρ cleanup with
-    | none => simp only [Core.step, hcl]; exact .stuck
-    | some r =>
-      obtain ⟨fn, captures⟩ := r
-      cases he : evalCall ρ thunk [] with
-      | none => simp only [Core.step, hcl, he]; exact .stuck
-      | some c =>
-        simp only [Core.step, hcl, he, Bytecode.step, hcode.head]
-        exact apply_sim (.cons .guard (.cons (.call hcode.tail) hfr)) hks
-  case guardTail cleanup thunk =>
-    cases hcl : evalClosure ρ cleanup with
-    | none => simp only [Core.step, hcl]; exact .stuck
-    | some r =>
-      obtain ⟨fn, captures⟩ := r
-      cases he : evalCall ρ thunk [] with
-      | none => simp only [Core.step, hcl, he]; exact .stuck
-      | some c =>
-        simp only [Core.step, hcl, he, Bytecode.step, hcode.head]
-        exact apply_sim (.cons .guard hfr) hks
   case cancel k body =>
     -- A closure that says how it is destroyed: both machines call its
     -- destructor as a call.
@@ -582,6 +495,24 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
     have h1 : Core.step p ⟨.host id args body, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := rfl
     rw [h1]
     exact .stuck
+  all_goals
+    simp only [Core.step, Bytecode.step, hcode.head]
+    repeat' split
+    all_goals try simp_all only [Option.some.injEq, Prod.mk.injEq, reduceCtorEq]
+    all_goals first
+      | exact .stuck
+      | exact apply_sim (.cons (.call hcode.tail) hfr) hks
+      | exact apply_sim hfr hks
+      | exact apply_sim (.cons .handler (.cons (.call hcode.tail) hfr)) (.mk hcs)
+      | exact apply_sim (.cons .label (.cons (.call hcode.tail) hfr)) (.mk hcs)
+      | exact apply_sim (.lend (.cons (.call hcode.tail) hfr)) (.mk hcs)
+      | exact apply_sim (.cons .handler hfr) (.mk hcs)
+      | exact apply_sim (.cons .label hfr) (.mk hcs)
+      | exact apply_sim (.cons .cell (.cons (.call hcode.tail) hfr)) (hks.alloc _)
+      | exact apply_sim (.cons .cell hfr) (hks.alloc _)
+      | exact apply_sim (.cons .guard (.cons (.call hcode.tail) hfr)) hks
+      | exact apply_sim (.cons .guard hfr) hks
+      | (exfalso; rename_i h; first | exact h _ _ rfl rfl | exact h _ _ _ rfl rfl | exact h _ _ _ ⟨rfl, rfl⟩ rfl)
 
 /-! ## Programs in their world -/
 
