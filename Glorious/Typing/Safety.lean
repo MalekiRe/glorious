@@ -145,6 +145,16 @@ theorem occs_clo (id : Nat) {env : Env} {f : Atom} {fn : Nat} {caps : List Value
 
 /-! ## Growing the store -/
 
+/-- A map given a value at a key it had none at keeps what it had. -/
+theorem extend_keeps {α : Type} {f : Nat → Option α} {k : Nat} {x : α} (hfresh : f k = none) :
+    ∀ i y, f i = some y → (if i = k then some x else f i) = some y := by
+  intro i y h
+  by_cases he : i = k
+  · subst he
+    rw [hfresh] at h
+    cases h
+  · simp [he, h]
+
 theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (x : Ty × Row × List Rgn) :
     ∃ S', S.Le S' ∧ S'.handlers labels = some x ∧ StoreOk Δ S' ⟨conts, labels + 1, cells⟩ := by
@@ -154,13 +164,7 @@ theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} 
     | some y => exact absurd (hs.handlers _ _ h) (Nat.lt_irrefl _)
   let S' : StoreTy :=
     { S with handlers := fun i => if i = labels then some x else S.handlers i }
-  have hle : S.Le S' := ⟨fun _ _ h => h, fun _ _ h => h, fun i y h => by
-    show (if i = labels then some x else S.handlers i) = some y
-    by_cases he : i = labels
-    · subst he
-      rw [hfresh] at h
-      cases h
-    · simp [he, h], fun _ _ h => h, fun _ _ h => h⟩
+  have hle : S.Le S' := ⟨fun _ _ h => h, fun _ _ h => h, extend_keeps hfresh, fun _ _ h => h, fun _ _ h => h⟩
   refine ⟨S', hle, by show (if labels = labels then some x else _) = some x; simp, ?_⟩
   refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id τ h => ?_, fun id y h => ?_, fun a τ h => ?_,
     fun b a h => Nat.le_succ_of_le (hs.loans b a h), hs.quiet⟩
@@ -194,13 +198,7 @@ theorem StoreOk.push_loan {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
   let S' : StoreTy :=
     { S with loans := fun i => if i = labels + 1 then some a else S.loans i }
   have hle : S.Le S' := ⟨fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h,
-    fun i y h => by
-      show (if i = labels + 1 then some a else S.loans i) = some y
-      by_cases he : i = labels + 1
-      · subst he
-        rw [hfresh] at h
-        cases h
-      · simp [he, h]⟩
+    extend_keeps hfresh⟩
   refine ⟨S', hle, by show (if labels + 1 = labels + 1 then some a else _) = some a; simp, ?_⟩
   refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id τ h => Nat.lt_succ_of_lt (hs.labels id τ h),
     fun id y h => Nat.lt_succ_of_lt (hs.handlers id y h), fun a' τ h => ?_, fun b a' h => ?_,
@@ -224,13 +222,7 @@ theorem StoreOk.push_label {S : StoreTy} {conts : Conts Frame} {labels : Nat} {c
     | none => rfl
     | some y => exact absurd (hs.labels _ _ h) (Nat.lt_irrefl _)
   let S' : StoreTy := { S with labels := fun i => if i = labels then some x else S.labels i }
-  have hle : S.Le S' := ⟨fun _ _ h => h, fun i y h => by
-    show (if i = labels then some x else S.labels i) = some y
-    by_cases he : i = labels
-    · subst he
-      rw [hfresh] at h
-      cases h
-    · simp [he, h], fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
+  have hle : S.Le S' := ⟨fun _ _ h => h, extend_keeps hfresh, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
   refine ⟨S', hle, by show (if labels = labels then some x else _) = some x; simp, ?_⟩
   refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id y h => ?_, fun id τ h => ?_, fun a τ h => ?_,
     fun b a h => Nat.le_succ_of_le (hs.loans b a h), hs.quiet⟩
@@ -260,13 +252,7 @@ theorem StoreOk.push_cont {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
       exact absurd (hs.conts _ _ _ _ _ h).1 (Nat.lt_irrefl _)
   let S' : StoreTy :=
     { S with conts := fun i => if i = conts.length then some (o, ρ, ε₀, Φ) else S.conts i }
-  have hle : S.Le S' := ⟨fun i y h => by
-    show (if i = conts.length then some (o, ρ, ε₀, Φ) else S.conts i) = some y
-    by_cases he : i = conts.length
-    · subst he
-      rw [hfresh] at h
-      cases h
-    · simp [he, h], fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
+  have hle : S.Le S' := ⟨extend_keeps hfresh, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
   refine ⟨S', hle,
     by show (if conts.length = conts.length then some (o, ρ, ε₀, Φ) else _) = _; simp, ?_⟩
   refine ⟨fun id o' ρ' ε' Φ' h => ?_, hs.labels, hs.handlers, fun a τ h => ?_, hs.loans,
@@ -315,13 +301,7 @@ theorem StoreOk.push_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
     | some y => exact absurd (hs.cells _ _ h).1 (Nat.lt_irrefl _)
   let S' : StoreTy :=
     { S with cells := fun i => if i = cells.size then some σ else S.cells i }
-  have hle : S.Le S' := ⟨fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun i y h => by
-    show (if i = cells.size then some σ else S.cells i) = some y
-    by_cases he : i = cells.size
-    · subst he
-      rw [hfresh] at h
-      cases h
-    · simp [he, h], fun _ _ h => h⟩
+  have hle : S.Le S' := ⟨fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, extend_keeps hfresh, fun _ _ h => h⟩
   refine ⟨S', hle, by show (if cells.size = cells.size then some σ else _) = _; simp, ?_⟩
   refine ⟨fun id o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, fun a τ h => ?_, hs.loans, hs.quiet⟩
   · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
