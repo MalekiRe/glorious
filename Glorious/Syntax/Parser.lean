@@ -1105,30 +1105,6 @@ def declaredSyntax (fix : Fixities) (src : String) (lexed : Option (Array Token)
     | none => lex src
   pure (← collectFixities toks fix, collectRecords toks)
 
-/-- The modules a text says are files of their own, `mod name;`: each as its
-path from the module the text is, through the modules written in the text. -/
-def fileModules (src : String) : Except String (List (List String)) := do
-  -- (A text that never writes `mod` declares none: not read as tokens.)
-  if (src.splitOn "mod").length == 1 then return []
-  let toks ← lex src
-  let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
-  let mut out : Array (List String) := #[]
-  -- The modules being read, each with how deep in braces its own are.
-  let mut inside : List (String × Nat) := []
-  let mut depth := 0
-  for i in [0:toks.size] do
-    match tok i, tok (i + 1), tok (i + 2) with
-    | .ident "mod", .ident name, .punct ";" =>
-      out := out.push ((inside.map (·.1)).reverse ++ [name])
-    | .ident "mod", .ident name, .punct "{" =>
-      inside := (name, depth + 1) :: inside
-    | .punct "{", _, _ => depth := depth + 1
-    | .punct "}", _, _ =>
-      if (inside.head?.map (·.2)) == some depth then inside := inside.drop 1
-      depth := depth - 1
-    | _, _, _ => pure ()
-  pure out.toList
-
 /-- The module each token of a text is written in, as a path from the text's
 own module. -/
 private def tokenModules (toks : Array Token) : Array (List String) := Id.run do
@@ -1150,6 +1126,19 @@ private def tokenModules (toks : Array Token) : Array (List String) := Id.run do
       out := out.push (inside.map (·.1)).reverse
     | _, _, _ => out := out.push (inside.map (·.1)).reverse
   out
+
+/-- The modules a text says are files of their own, `mod name;`: each as its
+path from the module the text is, through the modules written in the text. -/
+def fileModules (src : String) : Except String (List (List String)) := do
+  -- (A text that never writes `mod` declares none: not read as tokens.)
+  if (src.splitOn "mod").length == 1 then return []
+  let toks ← lex src
+  let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
+  let at_ := tokenModules toks
+  pure ((List.range toks.size).filterMap fun i =>
+    match tok i, tok (i + 1), tok (i + 2) with
+    | .ident "mod", .ident name, .punct ";" => some ((at_[i]?).getD [] ++ [name])
+    | _, _, _ => none)
 
 /-- What a `use` written from token `i` on brings: each path, and whether it
 is everything of a module. -/
