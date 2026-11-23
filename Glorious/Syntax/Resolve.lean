@@ -313,6 +313,42 @@ partial def selfAssocs (self : TypeExpr) (tr : String) (targs : List TypeExpr) :
 
 namespace Flat
 
+/-- The name a path of fields starts at, and the path, where the name is
+known to hold a value (`receiverExpr`'s `known`). -/
+partial def placeOf (b : Body) (known : List (String × Nat)) (e : ExprId) : Nat → Option (String × List String × Nat)
+  | 0 => none
+  | fuel + 1 =>
+    match b.expr e with
+    | .name none x => if (known.lookup x).any (fun k => k != 0 && k != 3) then some (x, [], 0) else none
+    | .fieldOf fid e field => (placeOf b known e fuel).map fun (x, path, _) => (x, path ++ [field], fid)
+    | .proj e n => (placeOf b known e fuel).map fun (x, path, fid) => (x, path ++ [toString n], fid)
+    | _ => none
+
+/-- A field of what a reference a name holds points to, `p.items`. -/
+partial def throughRefOf (b : Body) (known : List (String × Nat)) (e : ExprId) : Nat → Option (String × List String × Nat)
+  | 0 => none
+  | fuel + 1 =>
+    match b.expr e with
+    | .fieldOf fid inner field =>
+      match b.bare? inner with
+      | some x => if known.lookup x == some 3 then some (x, [field], fid) else none
+      | none => (throughRefOf b known inner fuel).map fun (x, path, _) => (x, path ++ [field], fid)
+    | _ => none
+
+/-- `a[i]` of a place that is not copied for it: what reads the element
+where it is, `*element_at(&a, i)`; none where `a` is not such a place. -/
+def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : ExprId) : Build (Option ExprId) := do
+  let base ← match placeOf b known a 64, throughRefOf b known a 64 with
+    | some (x, [], _), _ => if known.lookup x == some 1 then some <$> pushExpr (.ref false x) else pure none
+    | some (x, path, fid), _ =>
+      if fid == 0 || known.lookup x != some 1 then pure none
+      else some <$> pushExpr (.refField fid false x path false)
+    | none, some (x, path, fid) => some <$> pushExpr (.refField fid false x path true)
+    | none, none => pure none
+  match base with
+  | some r => some <$> pushExpr (.deref (← pushExpr (.call id (← pushExpr (.name none "element_at")) #[r, i])))
+  | none => pure none
+
 mutual
 
 /-- `value.f(a)` where `f` takes a reference first and `value` is a variable,
@@ -332,6 +368,12 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
     let b ← get
     let plain := fun (_ : Unit) => pushExpr (.call id f args)
     match b.expr f, args.toList with
+    -- `a[i]` of a mutable variable, or of a field of a value or of what a
+    -- reference points to: the element read where it is, nothing copied.
+    | .name none "index", [a, i] =>
+      match ← elementRead b known id a i with
+      | some e => pure e
+      | none => plain ()
     | .name q name, recv :: rest =>
       match b.expr recv with
       | .call _ rm #[receiver] =>
@@ -361,6 +403,19 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
         -- where it is.)
         let rec element (uniq : Bool) (fuel : Nat) (e : ExprId) : Build (Option ExprId) := do
           match b.expr e with
+          -- (One `elementRead` made: the element's reference, for writing
+          -- through it where that is asked.)
+          | .deref inner =>
+            match b.expr inner with
+            | .call cid g #[r, i] =>
+              if (b.name? g).map (·.2) != some "element_at" then return none
+              if !uniq then return some inner
+              let r' ← match b.expr r with
+                | .ref _ x => pushExpr (.ref true x)
+                | .refField fid _ x path star => pushExpr (.refField fid true x path star)
+                | _ => return none
+              some <$> pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, r'])
+            | _ => pure none
           | .call cid g #[a, i] =>
             if (b.name? g).map (·.2) != some "index" then return none
             let base ← match fuel, place a 64, throughRef a 64 with
@@ -442,7 +497,13 @@ partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (Strin
       | _, .expr e => pure (← pushStmt (.expr (← receiverExpr taken known e)), known)
       | _, .defer e => pure (← pushStmt (.defer (← receiverExpr taken known e)), known)
       | _, .assign target value =>
-        let t ← receiverExpr taken known target
+        -- (`a[i] = v` is written where it is: what is below it is looked at.)
+        let t ← match b.expr target with
+          | .call id f #[a, i] =>
+            if (b.name? f).map (·.2) == some "index" then do
+              pushExpr (.call id f #[← receiverExpr taken known a, ← receiverExpr taken known i])
+            else receiverExpr taken known target
+          | _ => receiverExpr taken known target
         let v ← receiverExpr taken known value
         pure (← pushStmt (.assign t v), known)
       | fuel + 1, .located line col inner =>

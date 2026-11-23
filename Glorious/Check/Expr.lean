@@ -194,6 +194,7 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
     | .replace => throw "`replace` must be called"
     | .swap => throw "`swap` must be called"
     | .overwrite => throw "`overwrite` must be called"
+    | .readOut => throw "`read_out` must be called"
     | .transmute => throw "`transmute` must be called"
     | .const e =>
       let (cb, ce) := Flat.ofExpr e
@@ -1152,6 +1153,18 @@ partial def inferCallPlace (scope : Scope) (amb : Row) (args : Array Flat.ExprId
     checkArgs scope amb "`overwrite`" [.ref .uniq t cap, t] args call
     use scope (.through cap "the reference given to `overwrite`" true)
     pure .unit
+  | .readOut => do
+    -- What a reference points to read out of it and left there as it is:
+    -- the value is then in two places, which is why it is unsafe: whoever
+    -- writes it says the one left is not used again.
+    let s ← get
+    unless s.unsafeBlock || s.unsafeFns.contains s.owner do
+      throw "`read_out` is unsafe: what the reference points to is read out and also left where it is. It can be named only in `unsafe { .. }` or in an `unsafe fn`"
+    let t ← freshTy
+    let cap ← freshCap
+    checkArgs scope amb "`read_out`" [.ref .shared t cap] args call
+    use scope (.through cap "the reference given to `read_out`" false)
+    pure t
   | .transmute => do
     -- A value seen as of another type, which nothing is asked of: a
     -- reference's borrow, given, is not one the result is said to hold.

@@ -379,7 +379,12 @@ def hosts : List (String × Nat × Nat) :=
    ("host_fn_name", 9, 1),
    -- Unsafe: memory, by address. A new block of so many bytes at a multiple
    -- of an alignment; a block freed; bytes copied.
-   ("mem_alloc", 11, 2), ("mem_free", 12, 1), ("mem_copy", 13, 3)]
+   ("mem_alloc", 11, 2), ("mem_free", 12, 1), ("mem_copy", 13, 3),
+   -- How many bytes a value of what a pointer is to takes, and at what
+   -- alignment.
+   ("size_of_at", 15, 1), ("align_of_at", 16, 1),
+   -- What a raw pointer points to, as a reference.
+   ("ptr_ref_at", 17, 2), ("ptr_mut_ref_at", 18, 2)]
 
 /-- The host operations that are the machine's memory by address: what each
 is (`MemOp`). -/
@@ -389,6 +394,9 @@ def memOfHost : Nat → Option MemOp
   | 11 => some .alloc
   | 12 => some .free
   | 13 => some .copy
+  | 15 => some .sizeOf
+  | 16 => some .alignOf
+  | 17 | 18 => some .deref
   | _ => none
 
 /-- Is this the name of one of the machine's operations (declared

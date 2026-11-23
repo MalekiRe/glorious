@@ -23,6 +23,13 @@ namespace Glorious.Lower
 
 open Typing Core
 
+/-- Whether a type has in it what nothing decided (`anyName`). -/
+partial def undecided : Ty → Bool
+  | .data n args => n == anyName || args.any undecided
+  | .tuple fs => fs.any undecided
+  | .ref _ t => undecided t
+  | _ => false
+
 /-- Why a program is not lowered, or what it is lowered to. -/
 abbrev L := Except String
 
@@ -35,7 +42,11 @@ def need {α : Type} (o : Option α) (why : String) : L α :=
 /-- The memory operation `op` of an address, laid out as what the reference
 `args`' first is to; not if what it reaches into is not bytes. -/
 def laidOp (C : Cert) (Γ : TEnv) (op : MemOp) (args : List Atom) : L MemOp := do
+  -- (Those by address are as they are.)
+  if [.alloc, .free, .readBits, .writeBits, .copy, .sizeOf, .alignOf, .deref].contains op then return op
   let some (.ref _ σ) := args.head?.bind (atomTy Γ) | throw "a memory operation not of a reference"
+  -- (What nothing decided may be laid out otherwise where it is decided.)
+  if undecided σ then throw "a reference to what nothing decided the type of"
   let l := (layOf C [] σ).lay
   match op with
   | .load => pure (.loadL l)
@@ -162,7 +173,31 @@ partial def lowerTm (C : Cert) (T : Targets) (ε : Row) : TEnv → Tm → List H
   | Γ, .lend uniq r thunk pre post body, hs => do
     let some (.fn _ _ ρ ..) := atomTy Γ thunk | throw "a borrow's scope not callable"
     pure (.lend uniq r thunk pre post (← lowerTm C T ε (Γ ++ [ρ]) body hs))
-  | Γ, .mem op args body, hs => do
+  -- (What a type takes, a number now.)
+  | Γ, .mem op [a] body, hs =>
+    if op == .sizeOf || op == .alignOf then do
+      let some t := (match atomTy Γ a with
+        | some (.ref _ t) | some (.data _ (t :: _)) => some t
+        | _ => none) | throw "the size of what is not a pointer's or a reference's"
+      let l := layOf C [] t
+      pure (.let_ (.atom (.int (if op == .sizeOf then l.size else l.align)))
+        (← lowerTm C T ε (Γ ++ [.scalar (-64)]) body hs))
+    else lowerMem C T ε Γ op [a] body hs
+  -- (A raw pointer's target, its address.)
+  | Γ, .mem .deref [base, a, _] body, hs => do
+    let some (.data _ (t :: _)) := atomTy Γ base | throw "what a pointer of no type points to"
+    pure (.let_ (.atom a) (← lowerTm C T ε (Γ ++ [.ref (.cell 0) t]) body hs))
+  | Γ, .mem op args body, hs => lowerMem C T ε Γ op args body hs
+  | Γ, .host id args body, hs => do
+    match id, hs with
+    | 0, hs => pure (.host id args (← lowerTm C T ε (Γ ++ [.unit]) body hs))
+    | 1, hs => pure (.host id args (← lowerTm C T ε (Γ ++ [.tuple [.int, .int]]) body hs))
+    | _, .ty σ :: hs => pure (.host id args (← lowerTm C T ε (Γ ++ [σ]) body hs))
+    | _, _ => throw "a host operation without its type"
+where
+  /-- A memory operation lowered: of the layout of what its reference is to. -/
+  lowerMem (C : Cert) (T : Targets) (ε : Row) (Γ : TEnv) (op : MemOp) (args : List Atom) (body : Tm)
+      (hs : List Hint) : L Tm := do
     let σ ← match op, args.head?.bind (atomTy Γ) with
       | .load, some (.ref _ σ) | .swap, some (.ref _ σ) => pure σ
       | .store, _ | .free, _ | .writeBits, _ | .copy, _ => pure .unit
@@ -176,12 +211,6 @@ partial def lowerTm (C : Cert) (T : Targets) (ε : Row) : TEnv → Tm → List H
         | _ => throw "a field not known"
       | _, _ => throw "a memory operation not of a reference"
     pure (.mem (← laidOp C Γ op args) args (← lowerTm C T ε (Γ ++ [σ]) body hs))
-  | Γ, .host id args body, hs => do
-    match id, hs with
-    | 0, hs => pure (.host id args (← lowerTm C T ε (Γ ++ [.unit]) body hs))
-    | 1, hs => pure (.host id args (← lowerTm C T ε (Γ ++ [.tuple [.int, .int]]) body hs))
-    | _, .ty σ :: hs => pure (.host id args (← lowerTm C T ε (Γ ++ [σ]) body hs))
-    | _, _ => throw "a host operation without its type"
 
 /-- A function's clauses lowered at a signature, with their hints there. -/
 def lowerClauses (C : Cert) (T : Targets) (e : SigEntry) (cs : List Clause) : L (List Clause) :=

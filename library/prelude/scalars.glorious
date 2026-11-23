@@ -207,6 +207,16 @@ struct Ptr<T>(usize)
 struct PtrMut<T>(usize)
 
 fn ptr_at<T>(address: usize) -> *const T where T: Use<[1, 1]> { Ptr(address) }
+// How many bytes a value of what a pointer is to takes, and at what
+// alignment: as the type is laid out, which the program's types say.
+// (Of a `*mut T`: what its `T` is, the program's types say, where an
+// address made from it is a `*mut` of anything.)
+#[intrinsic] fn size_of_at<T>(p: *mut T) -> usize;
+#[intrinsic] fn align_of_at<T>(p: *mut T) -> usize;
+// A `T` at an address, as a reference for as long as the caller says, for a
+// pointer to `T`s (`base`, for its type): the caller's to get right.
+#[intrinsic] unsafe fn ptr_ref_at<'a, T>(base: *mut T, at: usize) -> &'a T;
+#[intrinsic] unsafe fn ptr_mut_ref_at<'a, T>(base: *mut T, at: usize) -> &'a mut T;
 fn ptr_mut_at<T>(address: usize) -> *mut T where T: Use<[1, 1]> { PtrMut(address) }
 fn ptr_address<T>(p: *const T) -> usize where T: Use<[1, 1]> { p.0 }
 fn ptr_mut_address<T>(p: *mut T) -> usize where T: Use<[1, 1]> { p.0 }

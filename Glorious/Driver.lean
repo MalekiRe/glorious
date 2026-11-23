@@ -1007,7 +1007,11 @@ def compileSource (src : String) (check : Bool := true)
     -- Found anew each time: with what the last compile kept, inference takes
     -- longer than without.)
     let types : Thunk (Option Typing.Cert) := if cert.isSome || !check then Thunk.pure cert
-      else Thunk.mk fun _ => (Trace.timed "types" fun _ => Infer.certify declared out.program false out.envSizes (anyUnknown := true)).toOption
+      else Thunk.mk fun _ =>
+        match Trace.timed "types" fun _ => Infer.certify declared out.program false out.envSizes (anyUnknown := true) with
+        | .ok types => some types
+        -- (`GLORIOUS_TRACE`: why there are none.)
+        | .error e => if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => none else none
     pure { compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made with types }
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
@@ -1444,10 +1448,10 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
           :: (← evalAtoms s.env post)))
     | some v => s!"`{showValue c.ctorNames v}` is lent, but it is not a reference"
     | none => unbound
-  | .mem _ args _ =>
+  | .mem op args _ =>
     match evalAtoms s.env args with
     | some (.ref _ _ _ :: _) => "a reference is used after the cell it points to was freed"
-    | some vs => s!"a memory operation is applied to ({shown vs}), which is not a reference"
+    | some vs => s!"a memory operation ({op.name}) is applied to ({shown vs}), which is not a reference"
     | none => unbound
   | .host id _ _ =>
     if id ≥ 6 then "a shared cell is used that is not there, or holds nothing"

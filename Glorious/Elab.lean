@@ -115,6 +115,7 @@ inductive Head where
   | replace
   | swap
   | overwrite
+  | readOut
   | transmute
   | const (e : Expr)
 
@@ -171,6 +172,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if x == "replace" then return .replace
   if x == "swap" then return .swap
   if x == "overwrite" then return .overwrite
+  if x == "read_out" then return .readOut
   if x == "transmute" then return .transmute
   if let some e := g.aliases[x]? then return .const e
   if let some (kind, n) := spreadOf x then return .fn (← spreadFn kind n)
@@ -251,6 +253,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
     | .replace => throw "`replace` must be called"
     | .swap => throw "`swap` must be called"
     | .overwrite => throw "`overwrite` must be called"
+    | .readOut => throw "`read_out` must be called"
     | .transmute => throw "`transmute` must be called"
     | .const e =>
       let (cb, ce) := Flat.ofExpr e
@@ -509,6 +512,10 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
       if id ≥ 2 then modify fun s => { s with foreign := true }
       -- (Memory by address is the machine's, not the host's.)
       match memOfHost id with
+      | some .deref =>
+        -- (With the pointer type's constructor, for the type it points to.)
+        let tag := ((← read).ctors["PtrMut"]?).map (·.tag) |>.getD 0
+        emit (.mem .deref (atoms ++ [.int tag]))
       | some op => emit (.mem op atoms)
       | none => emit (.host id atoms)
     | .cancel => do
@@ -551,6 +558,12 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
       match ← elabArgs scope args with
       | [target, value] => emit (.mem .store [target, value])
       | _ => throw "`overwrite` takes a reference and a value"
+    | .readOut => do
+      -- What a reference points to, read out and left there as it is.
+      if isTail then throw "`tail` applies to calls, not to `read_out`"
+      match ← elabArgs scope args with
+      | [target] => emit (.mem .load [target])
+      | _ => throw "`read_out` takes a reference"
     | .transmute => do
       -- The value as it is: only its type is another.
       if isTail then throw "`tail` applies to calls, not to `transmute`"

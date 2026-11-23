@@ -277,6 +277,8 @@ partial def ofTy (env : RgEnv) : Ty → M ITy
   | .int => pure .int
   | .scalar b => pure (.scalar b)
   | .tuple fs => do pure (.tuple (← fs.mapM (ofTy env)))
+  -- (What nothing decided, in the types for lowering: still to be decided.)
+  | .data n [] => if n == anyName then freshTy else pure (.data n [])
   | .data n args => do pure (.data n (← args.mapM (ofTy env)))
   | .fn n ps r eff once stated acc => do
     -- A callable type that binds a region has a region of its own.

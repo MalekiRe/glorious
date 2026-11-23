@@ -658,6 +658,18 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
       | .readBits, [a, w] => do addr a; int w; pure .int
       | .writeBits, [a, w, v] => do addr a; int w; int v; pure .unit
       | .copy, [a, b, n] => do addr a; addr b; addr n; pure .unit
+      | .sizeOf, [_] | .alignOf, [_] => pure (.scalar (-64))
+      | .deref, [p, a, _] =>
+        match args with
+        | [_, _, .int tag] => do
+          addr a
+          -- (The pointer is of its type; what it points to, of its argument.)
+          let (whole, _) ← instCtor tag.toNat
+          unify p whole
+          match ← find whole with
+          | .data _ (t :: _) => pure (.ref ρ t)
+          | _ => throw "a pointer of a type with no argument"
+        | _ => throw "a pointer without its type's constructor"
       | .load, [t] => do
         accRgn self ρ
         let σ ← freshTy

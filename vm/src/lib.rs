@@ -195,6 +195,10 @@ enum MemOp {
     ReadBits,
     WriteBits,
     Copy,
+    /// What the typed lowering makes a number: here, nothing.
+    SizeOf,
+    AlignOf,
+    Deref,
     /// Those of a reference that is an address, of a value laid out so.
     LoadL(Rc<Lay>),
     StoreL(Rc<Lay>),
@@ -532,6 +536,9 @@ impl Reader<'_> {
                     7 => MemOp::ReadBits,
                     8 => MemOp::WriteBits,
                     9 => MemOp::Copy,
+                    15 => MemOp::SizeOf,
+                    16 => MemOp::AlignOf,
+                    17 => MemOp::Deref,
                     10 => MemOp::LoadL(Rc::new(self.lay()?)),
                     11 => MemOp::StoreL(Rc::new(self.lay()?)),
                     12 => MemOp::SwapL(Rc::new(self.lay()?)),

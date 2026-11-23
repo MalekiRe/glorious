@@ -217,6 +217,14 @@ inductive MemOp where
   | writeBits
   /-- So many bytes copied, as if through a buffer of their own. -/
   | copy
+  /-- How many bytes, and at what alignment, a value of the type a pointer
+  or reference is to takes: what the typed lowering makes a number. -/
+  | sizeOf
+  | alignOf
+  /-- What a raw pointer points to, as a reference: given the pointer and the
+  tag of the pointer type's constructor, for its type. What the typed
+  lowering makes the address. -/
+  | deref
   /-- `load`, `store`, `swap`, `tag` and `focus` of a reference that is an
   address (a cell of memory, `Tm.cellL`), of a value laid out so (the
   typed lowering's). -/
@@ -286,6 +294,14 @@ def Lay.tagAt (m : Memory) (addr : Nat) : Lay → Option Nat
   | .fields tag _ => some tag
   | .tagged cs => do pure (← cs[← m.read addr 1]?).1
   | _ => none
+
+/-- A memory operation's name, for saying what went wrong. -/
+def MemOp.name : MemOp → String
+  | .load => "load" | .store => "store" | .swap => "swap" | .tag => "tag" | .focus => "focus"
+  | .alloc => "alloc" | .free => "free" | .readBits => "read" | .writeBits => "write"
+  | .copy => "copy" | .sizeOf => "size" | .alignOf => "align" | .deref => "deref"
+  | .loadL l => s!"load as {l.show}" | .storeL l => s!"store as {l.show}"
+  | .swapL l => s!"swap as {l.show}" | .tagL l => s!"tag as {l.show}" | .focusL l => s!"focus as {l.show}"
 
 /-- The value the machine holds at `addr` (`Lay.held`), with its id. -/
 def heldAt (m : Memory) (held : Held) (addr : Nat) : Option (Nat × Value) := do

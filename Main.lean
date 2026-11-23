@@ -500,9 +500,15 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if (← IO.getEnv "GLORIOUS_LOWER").isSome then
       match c.types.get with
       | none => IO.eprintln "not lowered: no types"
-      | some C => match Lower.lowered C c.checked with
+      | some C =>
+        match Lower.lowered C c.checked with
         | .ok _ => IO.eprintln "lowered"
         | .error e => IO.eprintln s!"not lowered: {e}"
+        -- (And the functions with no signature, left as they are.)
+        let C := C.withIndex
+        let unsigned := (List.range c.checked.fns.size).filter fun f => (C.sigsOf f).isEmpty
+        unless unsigned.isEmpty do
+          IO.eprintln s!"no signature: {unsigned.map fun f => c.fnNames[f]?.getD (toString f)}"
   pure result
 
 /-- The program at `path` built: what the last compile kept in the build
@@ -933,10 +939,16 @@ where
   -- found it: name, type parameters, parameters, result, effects, asks.)
   | ["signatures", path] => signatures path false
   | ["signatures", "--library", path] => signatures path true
+  -- (Why a program goes wrong, compiled without the checks: what the
+  -- `diagnose` cases of `tests/checks.cases` ask.)
+  | ["diagnose", path] => do
+    IO.println (diagnose (← IO.FS.readFile path))
+    pure 0
   | ["sigs", path] =>
     match ← compileFile path with
     | .ok c =>
-      match c.cert with
+      -- (The types where there is no certificate.)
+      match c.cert.orElse fun _ => c.types.get with
       | some cert =>
         IO.println s!"strict={cert.strict} regions={cert.regions} loans={cert.loans}"
         for e in cert.sigs do

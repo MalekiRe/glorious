@@ -800,7 +800,7 @@ partial def unify (a b : ITy) : M Unit := do
 
 partial def unifyList (as bs : List ITy) : M Unit := do
   unless as.length == bs.length do
-    throw s!"{as.length} types do not match {bs.length}"
+    throw s!"{as.length} types do not match {bs.length}: ({", ".intercalate (← as.mapM showTy)}) and ({", ".intercalate (← bs.mapM showTy)})"
   for (x, y) in as.zip bs do
     unify x y
 

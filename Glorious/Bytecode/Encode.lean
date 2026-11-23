@@ -124,6 +124,9 @@ def memOp : MemOp → Bytes
   | .readBits => [7]
   | .writeBits => [8]
   | .copy => [9]
+  | .sizeOf => [15]
+  | .alignOf => [16]
+  | .deref => [17]
   | .loadL l => 10 :: lay l
   | .storeL l => 11 :: lay l
   | .swapL l => 12 :: lay l
