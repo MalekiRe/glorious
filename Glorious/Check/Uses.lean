@@ -332,15 +332,6 @@ partial def ACtx.ctorOf (ctx : ACtx) (name : String) : Option String :=
     | some (.name _ y) => ctx.ctorOf y
     | _ => none
 
-partial def constPat : Expr → Option Pattern
-  | .int n => some (.int n)
-  | .name q x => some (if q.isSome then .ctor x q [] else .var x)
-  | .call _ (.name q x) args => do
-    some (.ctor x q (← args.mapM constPat))
-  | .tuple args => do
-    some (.tuple (← args.mapM constPat))
-  | _ => none
-
 /-- The names a pattern binds, leaving out constructors and constants. -/
 partial def binders (ctx : ACtx) : Pattern → List String
   | .wild => []
@@ -374,7 +365,7 @@ partial def fit (ctx : ACtx) : Pattern → AVal → Fit × List (String × AVal)
     | none =>
       match ctx.aliases[x]? with
       | some e =>
-        match constPat e with
+        match (exprToPat e).toOption with
         | some p => fit ctx p v
         | none => (.maybe, [])
       | none => (.yes, [(x, v)])
