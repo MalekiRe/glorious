@@ -631,13 +631,18 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
         annots := annots ++ [if whole then some q else none]
         wider := wider ++ [if declared || whole then some q else none]
         if declared && !whole then widened := true
+      -- (The callable read with these types written of its parameters.)
+      let plain := fun (annots : List (Option Ty)) => do
+        if arity == ps.length && annots.any (·.isSome) then
+          let t ← inferCallable scope annots knownRet none clauses "the clauses of this callable do" id
+          if let .fn _ _ _ _ cap := t then
+            modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
+          return ← fitAt scope amb what site p t
+        fitAt scope amb what site p (← inferExpr scope amb a)
       if arity == ps.length && widened then
         let saved ← get
         let tried ← tryCatchThe Elab.Said (do
-            let t ← inferCallable scope wider knownRet none clauses "the clauses of this callable do" id
-            if let .fn _ _ _ _ cap := t then
-              modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
-            pure (if (← fitAt scope amb what site p t).isNone then none else some ("" : Elab.Said))) fun e => pure (some e)
+            pure (if (← plain wider).isNone then none else some ("" : Elab.Said))) fun e => pure (some e)
         match tried with
         | none => return none
         | some found =>
@@ -653,19 +658,9 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
             let at_ := (← get).at_
             let said := if at_.1 == 0 then said else Syntax.positioned at_.1 at_.2 said
             modify fun s => { s with firstSaid := s.firstSaid <|> some { found with msg := said } }
-            try
-              if arity == ps.length && annots.any (·.isSome) then
-                let t ← inferCallable scope annots knownRet none clauses "the clauses of this callable do" id
-                if let .fn _ _ _ _ cap := t then
-                  modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
-                return ← fitAt scope amb what site p t
-              return ← fitAt scope amb what site p (← inferExpr scope amb a)
+            try return ← plain annots
             catch _ => throwThe Elab.Said { found with msg := said }
-      if arity == ps.length && annots.any (·.isSome) then
-        let t ← inferCallable scope annots knownRet none clauses "the clauses of this callable do" id
-        if let .fn _ _ _ _ cap := t then
-          modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
-        return ← fitAt scope amb what site p t
+      return ← plain annots
     fitAt scope amb what site p (← inferExpr scope amb a)
 
 /-- A dot call's own function of the receiver's type, if the resolver found
