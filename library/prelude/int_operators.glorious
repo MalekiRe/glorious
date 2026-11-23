@@ -1,0 +1,36 @@
+
+infixl 6 +
+infixl 6 -
+infixl 7 *
+infixl 7 /
+infixl 7 %
+fn +(a: Int, b: Int) -> Int { int_add(a, b) }
+fn -(a: Int, b: Int) -> Int { int_sub(a, b) }
+fn *(a: Int, b: Int) -> Int { int_mul(a, b) }
+fn /(a: Int, b: Int) -> Int { int_div(a, b) }
+fn %(a: Int, b: Int) -> Int { int_rem(a, b) }
+prefix 9 - = negate
+fn negate(a: Int) -> Int { int_sub(0, a) }
+fn bit_and(a: Int, b: Int) -> Int { int_and(a, b) }
+fn bit_or(a: Int, b: Int) -> Int { int_or(a, b) }
+fn bit_xor(a: Int, b: Int) -> Int { int_xor(a, b) }
+fn shl(a: Int, n: Int) -> Int { int_fit(int_shl(a, n), 64) }
+fn shr(a: Int, n: Int) -> Int { int_shr(a, n) }
+
+fn bool(n: Int) -> Bool {
+    match(n) { 0 => false, _ => true }
+}
+
+infix 4 <
+infix 4 >
+infix 4 <=
+infix 4 >=
+infix 4 ==
+infix 4 !=
+fn <(a: Int, b: Int) -> Bool { bool(int_lt(a, b)) }
+fn >(a: Int, b: Int) -> Bool { bool(int_lt(b, a)) }
+fn <=(a: Int, b: Int) -> Bool { not bool(int_lt(b, a)) }
+fn >=(a: Int, b: Int) -> Bool { not bool(int_lt(a, b)) }
+fn ==(a: Int, b: Int) -> Bool { bool(int_eq(a, b)) }
+fn !=(a: Int, b: Int) -> Bool { not bool(int_eq(a, b)) }
+

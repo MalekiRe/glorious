@@ -1,0 +1,69 @@
+
+// The outside world.
+fn print<T>(value: T) where T: Use<[1, 1]> { host_write(value) }
+
+fn read() -> Option<Int> {
+    match(host_read()) {
+        (1, value) => Some(value),
+        _ => None
+    }
+}
+
+// Loops: a handler for `break` and `continue` around a body run again by a tail call.
+effect LoopControl<B> {
+    break(B) -> !,
+    continue() -> !
+}
+
+fn loop<T, U, e: EffectRow>(body: fn() -> T / {LoopControl<U> | e}) -> U / {| e} where U: Use<[1, 1]> {
+    handle body() {
+        _ => tail loop(body),
+        break(value) => value,
+        continue() => tail loop(body)
+    }
+}
+
+// Leaving for a label with a value: out of a function, `return(v, @f)`, or
+// out of a scope, `break_at(v, @outer)`. A label is where to go; these are
+// functions like any other.
+fn return<T, L, e: EffectRow>(value: T, target: L) -> ! / {| e} where L: Label<T>, T: Use<[1, 1]> {
+    target(value)
+}
+
+fn break_at<T, L, e: EffectRow>(value: T, target: L) -> ! / {| e} where L: Label<T>, T: Use<[1, 1]> {
+    target(value)
+}
+
+// A loop that hands its state on: each turn gives the state for the next, or
+// what the loop gives.
+enum LoopStep<S, B> { Continue(S), Break(B) }
+
+fn loop_state<T, U, e: EffectRow>(initial: T, body: fn(T) -> LoopStep<T, U> / {| e}) -> U / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]> {
+    match(body(initial)) {
+        Continue(next) => tail loop_state(next, body),
+        Break(value) => value
+    }
+}
+
+// The body so many times.
+fn repeat_n<T, e: EffectRow>(count: Int, body: fn() -> T / {| e}) -> () / {| e} {
+    match(int_lt(0, count)) {
+        0 => (),
+        _ => body(); tail repeat_n(int_sub(count, 1), body)
+    }
+}
+
+// The body for as long as the condition holds, given what the condition
+// found; both may leave the loop (`LoopControl`), and perform what `while`
+// does.
+fn while<A, X, C, F, e: EffectRow>(condition: C, body: F) -> () / {| e}
+where C: Fn<(), Output = Result<A, X>, Effects = {LoopControl<()> | e}>,
+      F: Fn<(A,), Output = (), Effects = {LoopControl<()> | e}>, A: Use<[1, 1]>
+{
+    loop {
+        match(condition()) {
+            Ok(found) => body(found),
+            Err(_) => break(())
+        }
+    }
+}

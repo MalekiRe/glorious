@@ -1,0 +1,94 @@
+
+// Arithmetic and comparison are traits, so that every type of number has
+// them; `Int` and the scalar types do, below.
+infixl 6 +
+infixl 6 -
+infixl 7 *
+infixl 7 /
+infixl 7 %
+trait Add { fn +(Self, Self) -> Self }
+trait Sub { fn -(Self, Self) -> Self }
+trait Mul { fn *(Self, Self) -> Self }
+trait Div { fn /(Self, Self) -> Self }
+trait Rem { fn %(Self, Self) -> Self }
+// `-` before a value is `negate`; between two it is the `-` above.
+prefix 9 - = negate
+trait Neg { fn negate(Self) -> Self }
+// The bits of a whole number; `shl` and `shr` move them up and down.
+// What a callable given to a function that holds a value that has to be
+// used while it calls it says: that it comes back, and jumps to no label.
+trait Returns {}
+
+trait Bits {
+    fn bit_and(Self, Self) -> Self
+    fn bit_or(Self, Self) -> Self
+    fn bit_xor(Self, Self) -> Self
+    fn shl(Self, Int) -> Self
+    fn shr(Self, Int) -> Self
+}
+
+fn bool(n: Int) -> Bool {
+    match(n) { 0 => false, _ => true }
+}
+
+infix 4 <
+infix 4 >
+infix 4 <=
+infix 4 >=
+infix 4 ==
+infix 4 !=
+// A type says what `==` and `<` are; the rest follow, unless it says them too.
+trait Eq {
+    fn ==(Self, Self) -> Bool
+    fn !=(a: Self, b: Self) -> Bool { not (a == b) }
+}
+trait Ord: Eq {
+    fn <(Self, Self) -> Bool
+    fn >(a: Self, b: Self) -> Bool { b < a }
+    fn <=(a: Self, b: Self) -> Bool { not (b < a) }
+    fn >=(a: Self, b: Self) -> Bool { not (a < b) }
+}
+
+impl Add for Int { fn +(a: Int, b: Int) -> Int { int_add(a, b) } }
+impl Sub for Int { fn -(a: Int, b: Int) -> Int { int_sub(a, b) } }
+impl Mul for Int { fn *(a: Int, b: Int) -> Int { int_mul(a, b) } }
+impl Div for Int { fn /(a: Int, b: Int) -> Int { int_fit(int_div(a, b), 64) } }
+impl Rem for Int { fn %(a: Int, b: Int) -> Int { int_rem(a, b) } }
+impl Neg for Int { fn negate(a: Int) -> Int { int_sub(0, a) } }
+impl Bits for Int {
+    fn bit_and(a: Int, b: Int) -> Int { int_and(a, b) }
+    fn bit_or(a: Int, b: Int) -> Int { int_or(a, b) }
+    fn bit_xor(a: Int, b: Int) -> Int { int_xor(a, b) }
+    fn shl(a: Int, n: Int) -> Int { int_fit(int_shl(a, n), 64) }
+    fn shr(a: Int, n: Int) -> Int { int_shr(a, n) }
+}
+impl Eq for Int {
+    fn ==(a: Int, b: Int) -> Bool { bool(int_eq(a, b)) }
+    fn !=(a: Int, b: Int) -> Bool { not bool(int_eq(a, b)) }
+}
+impl Ord for Int {
+    fn <(a: Int, b: Int) -> Bool { bool(int_lt(a, b)) }
+    fn >(a: Int, b: Int) -> Bool { bool(int_lt(b, a)) }
+    fn <=(a: Int, b: Int) -> Bool { not bool(int_lt(b, a)) }
+    fn >=(a: Int, b: Int) -> Bool { not bool(int_lt(a, b)) }
+}
+
+// A tuple, by its length: the first of it and the rest, or none. What an
+// implementation for every length spreads of a list of values, `let (h,
+// ..r) = t` and `(h, ..r)`, is these functions: written out for the length
+// of what is spread where the implementations are known (`Elab.Specialize`),
+// that of `B` or, `.._as`, of `L`, the implementation's list (what `..`
+// written in it is: what it spreads is as long as that).
+trait Spread { fn spread_length() -> Int }
+impl Spread for () { fn spread_length() -> Int { 0 } }
+impl<H, ..R> Spread for (H, ..R) where R: Spread { fn spread_length() -> Int { 1 + <R as Spread>::spread_length() } }
+fn spread_split<A, B>(t: (A, ..B)) -> (A, B) where B: Spread { spread_split(t) }
+fn spread_cons<A, B>(first: A, rest: B) -> (A, ..B) where B: Spread { spread_cons(first, rest) }
+fn spread_snoc<B, X>(rest: B, last: X) -> (..B, X) where B: Spread { spread_snoc(rest, last) }
+fn spread_split_as<L, A, B>(t: (A, ..B)) -> (A, B) where L: Spread { spread_split_as<L>(t) }
+fn spread_cons_as<L, A, B>(first: A, rest: B) -> (A, ..B) where L: Spread { spread_cons_as<L>(first, rest) }
+fn spread_snoc_as<L, B, X>(rest: B, last: X) -> (..B, X) where L: Spread { spread_snoc_as<L>(rest, last) }
+// A callable called with a tuple's parts, `f(..t)`.
+fn spread_call<F, B, O, e: EffectRow>(f: F, args: B) -> O / {| e} where F: Fn<(..B), Output = O, Effects = {| e}>, B: Spread { spread_call(f, args) }
+fn spread_call_as<L, F, B, O, e: EffectRow>(f: F, args: B) -> O / {| e} where F: Fn<(..B), Output = O, Effects = {| e}>, L: Spread { spread_call_as<L>(f, args) }
+

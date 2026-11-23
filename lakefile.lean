@@ -23,8 +23,9 @@ package glorious where
   moreLeanArgs := #["-DwarningAsError=true", "-DautoImplicit=false"]
   moreLeancArgs := quickArgs
 
-/-- The library's texts (`Glorious.Std` reads each with `include_str`): an
-edit of one builds that module again, and what imports it. -/
+/-- The prelude's and the library's texts (`Glorious.Prelude` and
+`Glorious.Std` read each with `include_str`): an edit of one builds that
+module again, and what imports it. -/
 input_dir librarySources where
   path := "library"
   text := true
@@ -34,8 +35,8 @@ lean_lib Glorious
 
 -- (Declared after `Glorious`: of the libraries a module could be in, Lake
 -- takes the last.)
-lean_lib GloriousStd where
-  roots := #[`Glorious.Std]
+lean_lib GloriousLibrary where
+  roots := #[`Glorious.Std, `Glorious.Prelude]
   needs := #[librarySources]
 
 @[default_target]

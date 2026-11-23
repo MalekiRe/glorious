@@ -1,0 +1,89 @@
+
+enum Result<T, E> { Ok(T), Err(E) }
+
+// Truth is success. `Option<T>` is `Result<T, ()>` and `Bool` is `Option<()>`.
+type Option<T> = Result<T, ()>;
+type Bool = Result<(), ()>;
+let Some: fn(_) -> Result<_, ()> = Ok;
+let None = Err(());
+let true: Result<(), ()> = Ok(());
+let false: Result<(), ()> = Err(());
+
+// Matching is applying a pattern callable: its clauses are the arms.
+fn match<S, R, F, e: EffectRow>(subject: S, arms: F) -> R / {| e}
+where F: Fn<(S,), Output = R, Effects = {| e}>, F: Use<[1, 1]>, S: Use<[1, 1]>, R: Use<[1, 1]>
+{ tail arms(subject) }
+
+// `if` gives the result of its body on success, and gives the body what the
+// test found: nothing, for a comparison; for `value is Pattern`, what the
+// pattern's names stand for, which a block then has under those names. On
+// failure it gives the body back: it was not run, so whatever it captured is
+// still there to be used. The body runs in an environment of its own (`E`),
+// and performs what `if` does.
+fn if<'e, E, A, X, B, F, e: EffectRow>(condition: Result<A, X>, body: F) -> Result<B, F> / {| e}
+where E: Environment<'e>, F: RunsIn<E, (A,), Output = B, Effects = {| e}>, A: Use<[1, 1]>, B: Use<[1, 1]>
+{
+    match(condition) {
+        Ok(found) => Ok(body(found)),
+        Err(_) => Err(body)
+    }
+}
+
+// `else` unwraps success, and on failure gives what failed to its fallback.
+// The fallback runs in an environment and is given what failed: after an
+// `if`, that is the body that was not run, given to run in an environment
+// too, so the fallback runs in its place, over what it captured.
+infixr 1 else
+fn else<'e, E, B, X, G, e: EffectRow>(value: Result<B, X>, fallback: G) -> B / {| e}
+where E: Environment<'e>, G: RunsIn<E, (X,), Output = B, Effects = {| e}>, X: Use<[1, 1]>, B: Use<[1, 1]>
+{
+    match(value) {
+        Ok(result) => result,
+        Err(failure) => tail fallback(failure)
+    }
+}
+
+// Any failure can be forgotten: a `Result` is an `Option` wherever one is
+// expected, and what failed is dropped.
+coerce option
+fn option<T, U>(value: Result<T, U>) -> Option<T> where T: Use<[1, 1]> {
+    match(value) {
+        Ok(result) => Ok(result),
+        Err(_) => None
+    }
+}
+
+// The right operands of `and` and `or` are callables, run only when needed.
+// That of `and` is given what the left one found, as the body of an `if` is.
+infixl 3 and
+fn and<A, X, B, F, e: EffectRow>(left: Result<A, X>, right: F) -> Result<B, X> / {| e}
+where F: Fn<(A,), Output = Result<B, X>, Effects = {| e}>, F: Use<[0, 1]>, A: Use<[1, 1]>, X: Use<[1, 1]>, B: Use<[1, 1]>
+{
+    match(left) {
+        Ok(found) => tail right(found),
+        Err(error) => Err(error)
+    }
+}
+
+// `or` gives what failed to its right operand, as `else` does: after an `if`
+// that is the body that was not run, and a plain block runs in its place. So
+// `if(a) { .. } or { if(b) { .. } } else { .. }` is a chain of alternatives
+// over what the first body captured.
+infixl 2 or
+fn or<'e, E, A, X, Y, G, e: EffectRow>(left: Result<A, X>, right: G) -> Result<A, Y> / {| e}
+where E: Environment<'e>, G: RunsIn<E, (X,), Output = Result<A, Y>, Effects = {| e}>, X: Use<[1, 1]>, A: Use<[1, 1]>, Y: Use<[1, 1]>
+{
+    match(left) {
+        Ok(value) => Ok(value),
+        Err(failure) => tail right(failure)
+    }
+}
+
+prefix 8 not
+fn not<A, X>(value: Result<A, X>) -> Result<X, A> where A: Use<[1, 1]>, X: Use<[1, 1]> {
+    match(value) {
+        Ok(payload) => Err(payload),
+        Err(payload) => Ok(payload)
+    }
+}
+
