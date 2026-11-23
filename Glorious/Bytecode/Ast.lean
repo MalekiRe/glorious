@@ -46,6 +46,9 @@ inductive Instr where
   | cell (init : Atom) (thunk : Atom)
   /-- Push the scope of a fresh memory cell and enter `thunk`, reusing the current frame. -/
   | cellTail (init : Atom) (thunk : Atom)
+  /-- `cell` and `cellTail` of a cell of memory, laid out so (`Core.Tm.cellL`). -/
+  | cellL (lay : Laid) (init : Atom) (thunk : Atom)
+  | cellTailL (lay : Laid) (init : Atom) (thunk : Atom)
   /-- Push a return frame, then call `thunk` with `pre`, a reference to the cell
   `r` refers to that is a new borrow, and `post`. Core marks where the borrow
   ends with a frame of its own; nothing here reads it, so it is not kept. -/

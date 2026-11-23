@@ -988,7 +988,7 @@ def compileSource (src : String) (check : Bool := true)
       | some k => [(("%way", 0), k)]
       | none => []
     let types : Thunk (Option Typing.Cert) := if cert.isSome || !check then Thunk.pure cert
-      else Thunk.mk fun _ => (Trace.timed "types" fun _ => Infer.certify declared out.program false out.envSizes).toOption
+      else Thunk.mk fun _ => (Trace.timed "types" fun _ => Infer.certify declared out.program false out.envSizes (anyUnknown := true)).toOption
     pure { compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made with types }
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
@@ -1414,6 +1414,9 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
   | .raise op _ | .perform op _ _ => performed op
   | .cancel _ _ => "`cancel` is applied to something that is not a usable resumption"
   | .cell _ thunk _ | .cellTail _ thunk => applied thunk (some [.ref s.store.cells.size 0 []])
+  | .cellL l init _ _ | .cellTailL l init _ =>
+    let v := (init.eval s.env).map (showValue c.ctorNames) |>.getD "?"
+    s!"a cell of memory could not be made: `{v}` is not laid out as {l.lay.show}"
   | .lend _ r thunk pre post _ =>
     match r.eval s.env with
     | some (.ref a _ path) =>

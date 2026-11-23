@@ -279,6 +279,26 @@ def step (p : Program) (s : State) : Step State Value :=
     match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.size 0 []) with
     | some v, some c => apply p c (.cell s.store.cells.size :: s.stack) (s.store.alloc v)
     | _, _ => .stuck
+  | .cellL l init thunk body =>
+    match init.eval s.env with
+    | none => .stuck
+    | some v =>
+      match s.store.allocLaid l v with
+      | none => .stuck
+      | some (a, store) =>
+        match evalScope s.env thunk (.ref a 0 []) with
+        | some c => apply p c (.cell a :: .call s.env body :: s.stack) store
+        | none => .stuck
+  | .cellTailL l init thunk =>
+    match init.eval s.env with
+    | none => .stuck
+    | some v =>
+      match s.store.allocLaid l v with
+      | none => .stuck
+      | some (a, store) =>
+        match evalScope s.env thunk (.ref a 0 []) with
+        | some c => apply p c (.cell a :: s.stack) store
+        | none => .stuck
   | .lend uniq r thunk pre post body =>
     match evalLend s.env r thunk pre post (s.store.labels + 1) with
     | none => .stuck

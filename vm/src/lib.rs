@@ -164,7 +164,25 @@ enum Prim {
     Cast,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// How a value is laid out in memory (`Glorious.Lay`).
+#[derive(Debug, Clone)]
+pub enum Lay {
+    Int(usize, bool),
+    Fields(u64, Vec<(usize, Lay)>),
+    Tagged(Vec<(u64, Vec<(usize, Lay)>)>),
+    Addr,
+    Held,
+    Nothing,
+}
+
+#[derive(Debug, Clone)]
+pub struct Laid {
+    size: usize,
+    align: usize,
+    lay: Lay,
+}
+
+#[derive(Debug, Clone)]
 enum MemOp {
     Load,
     Store,
@@ -177,6 +195,12 @@ enum MemOp {
     ReadBits,
     WriteBits,
     Copy,
+    /// Those of a reference that is an address, of a value laid out so.
+    LoadL(Rc<Lay>),
+    StoreL(Rc<Lay>),
+    SwapL(Rc<Lay>),
+    TagL(Rc<Lay>),
+    FocusL(Rc<Lay>),
 }
 
 #[derive(Clone, Debug)]
@@ -205,7 +229,7 @@ enum Instr {
     TestCtor(Place, u64, usize, usize),
     TestInt(Place, i128, usize),
     Mem(MemOp, Vec<Atom>),
-    Cell { init: Atom, thunk: Atom, tail: bool },
+    Cell { init: Atom, thunk: Atom, tail: bool, lay: Option<Rc<Laid>> },
     Lend { r: Atom, thunk: Atom, pre: Vec<Atom>, post: Vec<Atom> },
     // No file has the three below: they are written when a program is
     // loaded (`opt.rs`).
@@ -414,10 +438,44 @@ impl Reader<'_> {
         Ok(Instr::Guard { cleanup, thunk, tail })
     }
 
-    fn cell(&mut self, tail: bool) -> Decoded<Instr> {
+    fn cell(&mut self, tail: bool, laid: bool) -> Decoded<Instr> {
+        let lay = if laid { Some(Rc::new(self.laid()?)) } else { None };
         let init = self.atom()?;
         let thunk = self.atom()?;
-        Ok(Instr::Cell { init, thunk, tail })
+        Ok(Instr::Cell { init, thunk, tail, lay })
+    }
+
+    fn fields(&mut self) -> Decoded<Vec<(usize, Lay)>> {
+        let n = self.nat()?;
+        (0..n).map(|_| Ok((self.nat()? as usize, self.lay()?))).collect()
+    }
+
+    fn lay(&mut self) -> Decoded<Lay> {
+        match self.byte()? {
+            0 => {
+                let n = self.nat()? as usize;
+                Ok(Lay::Int(n, self.byte()? == 1))
+            }
+            1 => {
+                let tag = self.nat()?;
+                Ok(Lay::Fields(tag, self.fields()?))
+            }
+            2 => {
+                let n = self.nat()?;
+                let cs = (0..n).map(|_| Ok((self.nat()?, self.fields()?))).collect::<Decoded<Vec<_>>>()?;
+                Ok(Lay::Tagged(cs))
+            }
+            3 => Ok(Lay::Addr),
+            4 => Ok(Lay::Held),
+            5 => Ok(Lay::Nothing),
+            t => Err(format!("unknown layout {t}")),
+        }
+    }
+
+    fn laid(&mut self) -> Decoded<Laid> {
+        let size = self.nat()? as usize;
+        let align = self.nat()? as usize;
+        Ok(Laid { size, align, lay: self.lay()? })
     }
 
     fn instr(&mut self) -> Decoded<Instr> {
@@ -474,12 +532,19 @@ impl Reader<'_> {
                     7 => MemOp::ReadBits,
                     8 => MemOp::WriteBits,
                     9 => MemOp::Copy,
+                    10 => MemOp::LoadL(Rc::new(self.lay()?)),
+                    11 => MemOp::StoreL(Rc::new(self.lay()?)),
+                    12 => MemOp::SwapL(Rc::new(self.lay()?)),
+                    13 => MemOp::TagL(Rc::new(self.lay()?)),
+                    14 => MemOp::FocusL(Rc::new(self.lay()?)),
                     t => return Err(format!("unknown memory operation {t}")),
                 };
                 Ok(Instr::Mem(op, self.atoms()?))
             }
-            17 => self.cell(false),
-            18 => self.cell(true),
+            17 => self.cell(false, false),
+            18 => self.cell(true, false),
+            20 => self.cell(false, true),
+            21 => self.cell(true, true),
             19 => {
                 // Whether the borrow is for writing too: the machine does not use it.
                 let uniq = self.byte()?;
@@ -904,11 +969,57 @@ fn sized(raw: u128, width: i128) -> i128 {
     }
 }
 
+/// Which constructor built the value a path of field numbers leads to in
+/// `at`; -1 where it leads nowhere.
+fn tag_at(mut at: &Value, path: &[Value]) -> Value {
+    for step in path {
+        let next = match (at, step) {
+            (Value::Data(d), Value::Int(i)) => usize::try_from(*i).ok().and_then(|i| d.fields.get(i)),
+            _ => None,
+        };
+        match next {
+            Some(v) => at = v,
+            None => return Value::Int(-1),
+        }
+    }
+    match at {
+        Value::Data(d) => Value::Int(i128::from(d.tag)),
+        _ => Value::Int(-1),
+    }
+}
+
+/// Where memory by address starts (`Glorious.memBase`): an address of a cell
+/// of memory is past any cell's number.
+const MEM_BASE: usize = 1 << 40;
+
+/// What marks a reference written in memory as one that is held (`Glorious.heldRefBit`).
+const HELD_REF: u64 = 1 << 63;
+
 /// The blocks of memory the program made and has not freed, each with the
 /// layout it was made with: every machine of the program shares them.
-fn blocks() -> std::sync::MutexGuard<'static, HashMap<usize, std::alloc::Layout>> {
-    static BLOCKS: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, std::alloc::Layout>>> = std::sync::OnceLock::new();
+fn blocks() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<usize, std::alloc::Layout>> {
+    static BLOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<usize, std::alloc::Layout>>> =
+        std::sync::OnceLock::new();
     BLOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The blocks the program freed, by where they start, with their sizes, until
+/// one made is where one was.
+fn freed() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<usize, usize>> {
+    static FREED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<usize, usize>>> =
+        std::sync::OnceLock::new();
+    FREED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether none of the `n` bytes from `at` is in a block the program freed:
+/// what its own reading, writing and copying by address are asked, as on the
+/// Lean machines. (Memory C made is not known here, and is let be.)
+fn live(at: usize, n: usize) -> Step<()> {
+    let freed = freed();
+    match freed.range(..at + n.max(1)).next_back() {
+        Some((start, size)) if at < start + size => wrong(),
+        _ => Ok(()),
+    }
 }
 
 fn read_at(at: usize, bytes: usize) -> u128 {
@@ -1178,6 +1289,9 @@ pub struct Vm {
     labels: u64,
     /// Memory: a cell is live with a value, or has been freed.
     cells: Vec<Option<Value>>,
+    /// The values in memory that are not bytes yet (`Lay::Held`), by id.
+    held: HashMap<u64, Value>,
+    held_next: u64,
     input: VecDeque<i64>,
     out: BufWriter<io::Stdout>,
     names: Vec<String>,
@@ -1366,9 +1480,106 @@ impl Vm {
 
     /// The scope of a cell has ended: the cell is released.
     fn release(&mut self, addr: usize) {
-        if let Some(cell) = self.cells.get_mut(addr) {
+        // (A cell of memory has an address: its block is freed.)
+        if addr >= MEM_BASE {
+            if let Some(layout) = blocks().remove(&addr) {
+                // SAFETY: the block was made with this layout and is freed once.
+                unsafe { std::alloc::dealloc(addr as *mut u8, layout) };
+            }
+        } else if let Some(cell) = self.cells.get_mut(addr) {
             *cell = None;
         }
+    }
+
+    /// A value written at an address, laid out so (`Glorious.Lay.write`).
+    fn lay_write(&mut self, at: usize, l: &Lay, v: Value) -> Step<()> {
+        match (l, v) {
+            (Lay::Int(n, _), Value::Int(x)) => write_at(at, *n, x as u128),
+            // (A reference seen as a whole number, `transmute`: its address.)
+            (Lay::Int(n, _), Value::Ref(a, p)) if steps(&p).is_empty() => write_at(at, *n, a as u128),
+            (Lay::Fields(_, fs), Value::Data(d)) => {
+                if fs.len() != d.fields.len() {
+                    return wrong();
+                }
+                for ((off, fl), fv) in fs.iter().zip(d.fields.iter()) {
+                    self.lay_write(at + off, fl, fv.clone())?;
+                }
+            }
+            (Lay::Tagged(cs), Value::Data(d)) => {
+                let i = cs.iter().position(|(t, _)| *t == d.tag).ok_or(Stop::Wrong)?;
+                write_at(at, 1, i as u128);
+                let fs = &cs[i].1;
+                if fs.len() != d.fields.len() {
+                    return wrong();
+                }
+                for ((off, fl), fv) in fs.iter().zip(d.fields.iter()) {
+                    self.lay_write(at + off, fl, fv.clone())?;
+                }
+            }
+            (Lay::Addr, Value::Ref(a, p)) if steps(&p).is_empty() => write_at(at, 8, a as u128),
+            // (A reference into a value the machine holds is held, its id
+            // written with the top bit set.)
+            (Lay::Addr, v) => {
+                let id = self.held_next;
+                self.held_next += 1;
+                self.held.insert(id, v);
+                write_at(at, 8, (HELD_REF | id) as u128);
+            }
+            (Lay::Held, v) => {
+                let id = self.held_next;
+                self.held_next += 1;
+                self.held.insert(id, v);
+                write_at(at, 8, id as u128);
+            }
+            (Lay::Nothing, _) => {}
+            _ => return wrong(),
+        }
+        Ok(())
+    }
+
+    /// The value at an address, laid out so (`Glorious.Lay.read`).
+    fn lay_read(&self, at: usize, l: &Lay) -> Step<Value> {
+        Ok(match l {
+            Lay::Int(n, signed) => {
+                let width = (8 * n) as i128;
+                Value::Int(sized(read_at(at, *n), if *signed { width } else { -width }))
+            }
+            Lay::Fields(tag, fs) => data(*tag, fs.iter().map(|(off, fl)| self.lay_read(at + off, fl)).collect::<Step<_>>()?),
+            Lay::Tagged(cs) => {
+                let (tag, fs) = cs.get(read_at(at, 1) as usize).ok_or(Stop::Wrong)?;
+                data(*tag, fs.iter().map(|(off, fl)| self.lay_read(at + off, fl)).collect::<Step<_>>()?)
+            }
+            Lay::Addr => {
+                let a = read_at(at, 8) as u64;
+                if a & HELD_REF != 0 {
+                    self.held.get(&(a & !HELD_REF)).cloned().ok_or(Stop::Wrong)?
+                } else {
+                    Value::Ref(a as usize, None)
+                }
+            }
+            Lay::Held => self.held.get(&(read_at(at, 8) as u64)).cloned().ok_or(Stop::Wrong)?,
+            Lay::Nothing => return wrong(),
+        })
+    }
+
+    /// The address and layout a path of field numbers leads to from `at`, and
+    /// at what the machine holds, the rest of the path.
+    fn lay_path<'a, 'p>(&self, mut at: usize, mut l: &'a Lay, path: &'p [Value]) -> Step<(usize, &'a Lay, &'p [Value])> {
+        for (k, step) in path.iter().enumerate() {
+            if let Lay::Held = l {
+                return Ok((at, l, &path[k..]));
+            }
+            let Value::Int(i) = step else { return wrong() };
+            let fs = match l {
+                Lay::Fields(_, fs) => fs,
+                Lay::Tagged(cs) => &cs.get(read_at(at, 1) as usize).ok_or(Stop::Wrong)?.1,
+                _ => return wrong(),
+            };
+            let (off, fl) = fs.get(usize::try_from(*i).map_err(|_| Stop::Wrong)?).ok_or(Stop::Wrong)?;
+            at += off;
+            l = fl;
+        }
+        Ok((at, l, &[]))
     }
 
     /// Apply a callee: enter a function, resume a continuation, or leave a label scope.
@@ -1422,7 +1633,85 @@ impl Vm {
     }
 
     fn mem(&mut self, op: MemOp, mut args: Vec<Value>) -> Step<Value> {
+        let storing = matches!(op, MemOp::StoreL(_));
+        // (An address seen as a whole number, `transmute`, is the reference.)
+        if let (MemOp::LoadL(_) | MemOp::StoreL(_) | MemOp::SwapL(_) | MemOp::TagL(_) | MemOp::FocusL(_), Some(Value::Int(a))) =
+            (&op, args.first())
+        {
+            let a = usize::try_from(*a).map_err(|_| Stop::Wrong)?;
+            args[0] = Value::Ref(a, None);
+        }
         match (op, args.as_mut_slice()) {
+            // A reference into a value the machine holds: the address of its
+            // id, and a path into it.
+            (MemOp::LoadL(_), [Value::Ref(a, p)]) if !steps(p).is_empty() => {
+                let v = self.held.get(&(read_at(*a, 8) as u64)).ok_or(Stop::Wrong)?;
+                Ok(part(v, steps(p))?.clone())
+            }
+            (MemOp::StoreL(_) | MemOp::SwapL(_), [Value::Ref(a, p), _]) if !steps(p).is_empty() => {
+                let (addr, p) = (*a, p.clone());
+                let new = args.pop().ok_or(Stop::Wrong)?;
+                let v = self.held.get_mut(&(read_at(addr, 8) as u64)).ok_or(Stop::Wrong)?;
+                let old = std::mem::replace(part_mut(v, steps(&p))?, new);
+                Ok(if storing { unit() } else { old })
+            }
+            (MemOp::TagL(_), [Value::Ref(a, p), path @ ..]) if !steps(p).is_empty() => {
+                let v = self.held.get(&(read_at(*a, 8) as u64)).ok_or(Stop::Wrong)?;
+                Ok(tag_at(part(v, steps(p))?, path))
+            }
+            (MemOp::FocusL(l), [Value::Ref(a, p), rest @ ..])
+                if !steps(p).is_empty() || matches!(&*l, Lay::Held) =>
+            {
+                let step = match rest {
+                    [Value::Int(i)] if *i >= 0 => (0, usize::try_from(*i).unwrap_or(usize::MAX)),
+                    [Value::Int(i), Value::Int(built)] if *i >= 0 && *built >= 0 => {
+                        (*built as u64 + 1, usize::try_from(*i).unwrap_or(usize::MAX))
+                    }
+                    _ => return wrong(),
+                };
+                let mut path = steps(p).to_vec();
+                path.push(step);
+                Ok(Value::Ref(*a, Some(path.into())))
+            }
+            (MemOp::LoadL(l), [Value::Ref(a, _)]) => self.lay_read(*a, &l),
+            (MemOp::StoreL(l), [Value::Ref(a, _), v]) => {
+                let (a, v) = (*a, v.clone());
+                self.lay_write(a, &l, v)?;
+                Ok(unit())
+            }
+            (MemOp::SwapL(l), [Value::Ref(a, _), v]) => {
+                let (a, v) = (*a, v.clone());
+                let old = self.lay_read(a, &l)?;
+                self.lay_write(a, &l, v)?;
+                Ok(old)
+            }
+            (MemOp::TagL(l), [Value::Ref(a, _), path @ ..]) => {
+                let (at, l2, rest) = self.lay_path(*a, &l, path)?;
+                if let Lay::Held = l2 {
+                    let v = self.held.get(&(read_at(at, 8) as u64)).ok_or(Stop::Wrong)?;
+                    return Ok(tag_at(v, rest));
+                }
+                Ok(Value::Int(match l2 {
+                    Lay::Fields(tag, _) => *tag as i128,
+                    Lay::Tagged(cs) => cs.get(read_at(at, 1) as usize).map(|c| c.0 as i128).unwrap_or(-1),
+                    _ => -1,
+                }))
+            }
+            (MemOp::FocusL(l), [Value::Ref(a, _), Value::Int(i)]) => match &*l {
+                Lay::Fields(_, fs) => {
+                    let (off, _) = fs.get(usize::try_from(*i).map_err(|_| Stop::Wrong)?).ok_or(Stop::Wrong)?;
+                    Ok(Value::Ref(*a + off, None))
+                }
+                _ => wrong(),
+            },
+            (MemOp::FocusL(l), [Value::Ref(a, _), Value::Int(i), Value::Int(built)]) => match &*l {
+                Lay::Tagged(cs) => {
+                    let fs = &cs.iter().find(|c| c.0 as i128 == *built).ok_or(Stop::Wrong)?.1;
+                    let (off, _) = fs.get(usize::try_from(*i).map_err(|_| Stop::Wrong)?).ok_or(Stop::Wrong)?;
+                    Ok(Value::Ref(*a + off, None))
+                }
+                _ => wrong(),
+            },
             // Memory by address: a block made, zeroed; one freed; bits read
             // and written; bytes copied.
             (MemOp::Alloc, [Value::Int(size), Value::Int(align)]) => {
@@ -1433,23 +1722,40 @@ impl Vm {
                 if at.is_null() {
                     return wrong();
                 }
-                blocks().insert(at as usize, layout);
-                Ok(Value::Int(at as usize as i128))
+                let start = at as usize;
+                let mut freed = freed();
+                let over: Vec<usize> = freed
+                    .range(..start + layout.size())
+                    .filter(|(s, n)| start < *s + *n)
+                    .map(|(s, _)| *s)
+                    .collect();
+                for s in over {
+                    freed.remove(&s);
+                }
+                blocks().insert(start, layout);
+                Ok(Value::Int(start as i128))
             }
             (MemOp::Free, [Value::Int(at)]) => {
                 let layout = blocks().remove(&(*at as usize)).ok_or(Stop::Wrong)?;
+                freed().insert(*at as usize, layout.size());
                 // SAFETY: the block was made with this layout and is freed once.
                 unsafe { std::alloc::dealloc(*at as usize as *mut u8, layout) };
                 Ok(unit())
             }
             (MemOp::ReadBits, [Value::Int(at), Value::Int(width)]) => {
-                Ok(Value::Int(sized(read_at(*at as usize, width.unsigned_abs() as usize / 8), *width)))
+                let n = width.unsigned_abs() as usize / 8;
+                live(*at as usize, n)?;
+                Ok(Value::Int(sized(read_at(*at as usize, n), *width)))
             }
             (MemOp::WriteBits, [Value::Int(at), Value::Int(width), Value::Int(v)]) => {
-                write_at(*at as usize, width.unsigned_abs() as usize / 8, *v as u128);
+                let n = width.unsigned_abs() as usize / 8;
+                live(*at as usize, n)?;
+                write_at(*at as usize, n, *v as u128);
                 Ok(unit())
             }
             (MemOp::Copy, [Value::Int(to), Value::Int(from), Value::Int(n)]) => {
+                live(*to as usize, *n as usize)?;
+                live(*from as usize, *n as usize)?;
                 // SAFETY: none. The program said both places hold so many bytes.
                 unsafe { std::ptr::copy(*from as usize as *const u8, *to as usize as *mut u8, *n as usize) };
                 Ok(unit())
@@ -1500,23 +1806,7 @@ impl Vm {
                 let (addr, p) = (*a, p.clone());
                 let path: Vec<Value> = args.drain(1..).collect();
                 let whole = self.cell(addr)?.as_ref().ok_or(Stop::Wrong)?;
-                let mut at = part(whole, steps(&p))?;
-                for step in &path {
-                    let next = match (at, step) {
-                        (Value::Data(d), Value::Int(i)) => {
-                            usize::try_from(*i).ok().and_then(|i| d.fields.get(i))
-                        }
-                        _ => None,
-                    };
-                    match next {
-                        Some(v) => at = v,
-                        None => return Ok(Value::Int(-1)),
-                    }
-                }
-                Ok(match at {
-                    Value::Data(d) => Value::Int(i128::from(d.tag)),
-                    _ => Value::Int(-1),
-                })
+                Ok(tag_at(part(whole, steps(&p))?, &path))
             }
             _ => wrong(),
         }
@@ -1647,15 +1937,34 @@ impl Vm {
                 self.frames.push(Frame::Guard { func: c.func, caps: c.caps.clone() });
                 self.apply(callee, Vec::new())
             }
-            Instr::Cell { init, thunk, tail } => {
+            Instr::Cell { init, thunk, tail, lay } => {
                 let value = self.atom(init)?;
                 // Any callable taking one value will do; `apply` rejects the rest.
                 let callee = self.atom(thunk)?;
                 if !tail {
                     self.push_ret();
                 }
-                let addr = self.cells.len();
-                self.cells.push(Some(value));
+                let addr = match lay {
+                    // A cell of memory: its value's bytes in a block of its own.
+                    Some(l) => {
+                        let layout = std::alloc::Layout::from_size_align(l.size.max(1), l.align.max(1))
+                            .map_err(|_| Stop::Wrong)?;
+                        // SAFETY: the layout's size is not zero.
+                        let at = unsafe { std::alloc::alloc_zeroed(layout) } as usize;
+                        if at == 0 {
+                            return wrong();
+                        }
+                        blocks().insert(at, layout);
+                        let l = l.clone();
+                        self.lay_write(at, &l.lay, value)?;
+                        at
+                    }
+                    None => {
+                        let addr = self.cells.len();
+                        self.cells.push(Some(value));
+                        addr
+                    }
+                };
                 self.frames.push(Frame::Cell(addr));
                 self.apply(callee, vec![Value::Ref(addr, None)])
             }
@@ -1784,7 +2093,7 @@ impl Vm {
             }
             Instr::Mem(op, args) => {
                 let args = self.atoms(args)?;
-                let result = self.mem(*op, args)?;
+                let result = self.mem(op.clone(), args)?;
                 self.locals.push(result);
                 self.pc += 1;
                 Ok(())
@@ -2123,6 +2432,8 @@ fn machine(program: Program, input: VecDeque<i64>) -> Vm {
         conts: Vec::new(),
         labels: 0,
         cells: Vec::new(),
+        held: HashMap::new(),
+        held_next: 0,
         input,
         out: BufWriter::new(io::stdout()),
         shared_names: Rc::new(program.fn_names),
@@ -2147,6 +2458,8 @@ fn sibling(vm: &Vm) -> Vm {
         conts: Vec::new(),
         labels: 0,
         cells: Vec::new(),
+        held: HashMap::new(),
+        held_next: 0,
         input: VecDeque::new(),
         out: BufWriter::new(io::stdout()),
         names: vm.names.clone(),

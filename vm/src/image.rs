@@ -18,6 +18,64 @@ fn nat(out: &mut Vec<u8>, mut n: u64) {
     }
 }
 
+fn fields(out: &mut Vec<u8>, fs: &[(usize, Lay)]) {
+    nat(out, fs.len() as u64);
+    for (off, l) in fs {
+        nat(out, *off as u64);
+        layout(out, l);
+    }
+}
+
+fn layout(out: &mut Vec<u8>, l: &Lay) {
+    match l {
+        Lay::Int(n, signed) => {
+            out.push(0);
+            nat(out, *n as u64);
+            out.push(*signed as u8);
+        }
+        Lay::Fields(tag, fs) => {
+            out.push(1);
+            nat(out, *tag);
+            fields(out, fs);
+        }
+        Lay::Tagged(cs) => {
+            out.push(2);
+            nat(out, cs.len() as u64);
+            for (tag, fs) in cs {
+                nat(out, *tag);
+                fields(out, fs);
+            }
+        }
+        Lay::Addr => out.push(3),
+        Lay::Held => out.push(4),
+        Lay::Nothing => out.push(5),
+    }
+}
+
+fn mem_op(out: &mut Vec<u8>, op: &MemOp) {
+    let (n, l) = match op {
+        MemOp::Load => (0, None),
+        MemOp::Store => (1, None),
+        MemOp::Swap => (2, None),
+        MemOp::Tag => (3, None),
+        MemOp::Focus => (4, None),
+        MemOp::Alloc => (5, None),
+        MemOp::Free => (6, None),
+        MemOp::ReadBits => (7, None),
+        MemOp::WriteBits => (8, None),
+        MemOp::Copy => (9, None),
+        MemOp::LoadL(l) => (10, Some(l)),
+        MemOp::StoreL(l) => (11, Some(l)),
+        MemOp::SwapL(l) => (12, Some(l)),
+        MemOp::TagL(l) => (13, Some(l)),
+        MemOp::FocusL(l) => (14, Some(l)),
+    };
+    out.push(n);
+    if let Some(l) = l {
+        layout(out, l);
+    }
+}
+
 fn wide(out: &mut Vec<u8>, mut n: u128) {
     loop {
         let b = (n & 0x7f) as u8;
@@ -167,11 +225,19 @@ fn instr(out: &mut Vec<u8>, i: &Instr) {
         }
         Instr::Mem(op, xs) => {
             out.push(16);
-            out.push(*op as u8);
+            mem_op(out, op);
             atoms(out, xs);
         }
-        Instr::Cell { init, thunk, tail } => {
-            out.push(if *tail { 18 } else { 17 });
+        Instr::Cell { init, thunk, tail, lay } => {
+            match lay {
+                Some(l) => {
+                    out.push(if *tail { 21 } else { 20 });
+                    nat(out, l.size as u64);
+                    nat(out, l.align as u64);
+                    layout(out, &l.lay);
+                }
+                None => out.push(if *tail { 18 } else { 17 }),
+            }
             atom(out, init);
             atom(out, thunk);
         }

@@ -28,7 +28,7 @@ inductive Pat where
   /-- Matches a `struct` or `enum` value with this constructor tag and one
   sub-pattern per field. -/
   | ctor (tag : Nat) (args : List Pat)
-  deriving Hashable
+  deriving Hashable, BEq
 
 /-- A Core computation. Each binding form appends its result to the environment. -/
 inductive Tm where
@@ -76,6 +76,10 @@ inductive Tm where
   | cell (init : Atom) (thunk : Atom) (body : Tm)
   /-- `cell` whose result is the result of the current activation. -/
   | cellTail (init : Atom) (thunk : Atom)
+  /-- `cell` and `cellTail` of a cell of memory, its value laid out so and its
+  reference an address (the typed lowering's). -/
+  | cellL (lay : Laid) (init : Atom) (thunk : Atom) (body : Tm)
+  | cellTailL (lay : Laid) (init : Atom) (thunk : Atom)
   /-- Lend a reference: call `thunk` with a reference to the same cell that is
   a borrow of its own, between the arguments `pre` and `post`, and bind the
   result. The borrow lasts as long as the call does; `uniq` says whether it is
@@ -87,14 +91,14 @@ inductive Tm where
   | mem (op : MemOp) (args : List Atom) (body : Tm)
   /-- Ask the host to perform operation `id` and bind its result. -/
   | host (id : Nat) (args : List Atom) (body : Tm)
-  deriving Hashable
+  deriving Hashable, BEq
 
 /-- One clause of a callable: one pattern per argument, and a body. The body
 runs in the environment `arguments ++ captures ++ pattern bindings`. -/
 structure Clause where
   pats : List Pat
   body : Tm
-  deriving Hashable
+  deriving Hashable, BEq
 
 /-- A callable: ordered clauses, the first matching one runs. -/
 structure Fn where

@@ -371,6 +371,30 @@ A callable whose captures are not known where it is stored (a `fn(..)`
 value that captured something) is held by the machine and named by an id
 in memory meanwhile: what replaces that waits on the decision above.
 
+As it is done (`Lower.Typed`, `Lower.Layout`, `Lay`):
+
+- Memory by address is the machines' store's (`Store.mem`), as memory
+  operations (`MemOp.alloc`, `free`, `readBits`, `writeBits`, `copy`), not
+  the host's: a cell of memory and what `mem_alloc` made are one memory.
+- `Tm.cellL` is a cell of memory: its value's bytes in a block of their own
+  from `memBase` on, freed when its scope ends; `loadL`, `storeL`, `swapL`,
+  `tagL` and `focusL` read, write and reach into it by the layout of the
+  type the reference is to. On both Lean machines and the Rust VM.
+- `Lower.lowered` walks each function at each of its signatures, finding
+  each local's type as the checker does, and lays out each cell and memory
+  operation. Until a function is copied for each signature whose layouts
+  differ, a program where they differ is not lowered.
+- What is not bytes yet is held: a callable, an array, a type that holds
+  itself (wherever it is, so that a reference to one means the same bytes
+  however it was reached), and what nothing decided the type of (a type
+  parameter a function is not given a value of where it is called, as what
+  is read from a shared cell: `anyName`, in the types for lowering only). A
+  reference into a held value is the address of its id and a path, and
+  what is done there is done to the value as it was to a cell's; written to
+  memory, such a reference is held too.
+- The suite runs each program it lowers on the Lean machines both ways and
+  asks for the same result, and the Rust VM runs the lowered one.
+
 Stage 2 so far: `Repr` (the prelude's) writes a value to memory and reads
 it back, `repr_store` and `repr_load`, both `unsafe fn` (a trait's
 `unsafe fn` is called only in `unsafe`). `Int`'s and each scalar's are its

@@ -14,6 +14,10 @@ call the same `Host.call`, and nothing else touches the world.
 
 namespace Glorious
 
+/-- Where memory by address starts: far past any cell's number, which a
+reference to a cell holds where one to memory holds an address. -/
+def memBase : Nat := 1099511627776
+
 /-- Memory: bytes by address, each byte of a live block there (a new block
 is zeroed); and each live block's size, by where it starts. A block's
 address is never given again: one freed is gone. -/
@@ -21,7 +25,7 @@ structure Memory where
   bytes : Std.HashMap Nat UInt8 := {}
   blocks : Std.HashMap Nat Nat := {}
   /-- Where the next block may start. -/
-  next : Nat := 4096
+  next : Nat := memBase
 
 namespace Memory
 

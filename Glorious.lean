@@ -30,6 +30,7 @@ public import Glorious.Typing.Checker
 public import Glorious.Typing.Covers
 public import Glorious.Typing.Certify
 public import Glorious.Lower.Layout
+import Glorious.Lower.Typed
 public import Glorious.Proof.Audit
 public import Glorious.Syntax.Ast
 public import Glorious.Syntax.Lexer

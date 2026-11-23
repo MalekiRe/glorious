@@ -158,6 +158,20 @@ def starts (s : State) : Nat :=
     match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.size 0 []) with
     | some v, some c => applyStarts c (.cell s.store.cells.size :: s.stack) (s.store.alloc v)
     | _, _ => 0
+  | .cellL l init thunk body =>
+    match (init.eval s.env).bind (s.store.allocLaid l) with
+    | some (a, store) =>
+      match evalScope s.env thunk (.ref a 0 []) with
+      | some c => applyStarts c (.cell a :: .call s.env body :: s.stack) store
+      | none => 0
+    | none => 0
+  | .cellTailL l init thunk =>
+    match (init.eval s.env).bind (s.store.allocLaid l) with
+    | some (a, store) =>
+      match evalScope s.env thunk (.ref a 0 []) with
+      | some c => applyStarts c (.cell a :: s.stack) store
+      | none => 0
+    | none => 0
   | .lend uniq r thunk pre post body =>
     match evalLend s.env r thunk pre post (s.store.labels + 1) with
     | none => 0

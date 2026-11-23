@@ -232,6 +232,20 @@ def step (p : Program) (s : State) : Step State Value :=
     match init.eval s.locals, evalScope s.locals thunk (.ref s.store.cells.size 0 []) with
     | some v, some c => apply p c (.cell s.store.cells.size :: s.frames) (s.store.alloc v)
     | _, _ => .stuck
+  | some (.cellL l init thunk) =>
+    match (init.eval s.locals).bind (s.store.allocLaid l) with
+    | some (a, store) =>
+      match evalScope s.locals thunk (.ref a 0 []) with
+      | some c => apply p c (.cell a :: .ret s.code (s.pc + 1) s.locals :: s.frames) store
+      | none => .stuck
+    | none => .stuck
+  | some (.cellTailL l init thunk) =>
+    match (init.eval s.locals).bind (s.store.allocLaid l) with
+    | some (a, store) =>
+      match evalScope s.locals thunk (.ref a 0 []) with
+      | some c => apply p c (.cell a :: s.frames) store
+      | none => .stuck
+    | none => .stuck
   | some (.lend _ r thunk pre post) =>
     match evalLend s.locals r thunk pre post (s.store.labels + 1) with
     | none => .stuck

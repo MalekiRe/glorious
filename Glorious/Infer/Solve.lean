@@ -644,6 +644,8 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
     lent Γ uniq r thunk pre post ρt εt
     needs εt [] amb
     inferTm self amb τ (Γ.push ρt) body
+  -- (Cells of memory are the typed lowering's, after inference.)
+  | .cellL .. | .cellTailL .. => throw "a cell of memory is not inferred"
   | .mem op args body => do
     let ts ← args.mapM (atomTy Γ)
     let ρ ← freshRg
@@ -720,6 +722,8 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
       -- (`transmute`: the value, of another type.)
       | 14, [_] => freshTy
       | _, _ => throw s!"host operation {id} does not exist with {args.length} arguments"
+    -- (What one outside Core's rules gives, for the typed lowering.)
+    if 2 ≤ id then hint (.ty σ)
     inferTm self amb τ (Γ.push σ) body
 where
   /-- A call: the callee's operations must be served where it is called, and

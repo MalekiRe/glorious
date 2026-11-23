@@ -293,6 +293,9 @@ structure Made where
 
 structure St where
   fns : Array Core.Fn
+  /-- Whether a type nothing determined is `anyName`'s (for the typed
+  lowering) rather than unit (for the checker). -/
+  anyUnknown : Bool := false
   /-- The types of numbers written out: a whole number's, or a scalar's, as
   what they are given to says; `Int` where nothing does. -/
   numeric : Std.HashSet Nat := {}

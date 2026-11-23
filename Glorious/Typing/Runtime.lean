@@ -331,6 +331,8 @@ def calleeAtom : Tm → Option Atom
   | .cell _ thunk _ => some thunk
   | .lend _ _ thunk _ _ _ => some thunk
   | .cellTail _ thunk => some thunk
+  | .cellL _ _ thunk _ => some thunk
+  | .cellTailL _ _ thunk => some thunk
   | .ret _ => none
   | .let_ _ _ => none
   | .handle _ _ _ _ _ => none

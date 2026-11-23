@@ -26,8 +26,8 @@ partial def tmRefs : Core.Tm → List Nat
   | .raise _ _ => []
   | .perform _ _ body | .label _ body => tmRefs body
   | .labelTail _ => []
-  | .cell _ _ body | .lend _ _ _ _ _ body => tmRefs body
-  | .cellTail _ _ => []
+  | .cell _ _ body | .cellL _ _ _ body | .lend _ _ _ _ _ body => tmRefs body
+  | .cellTail _ _ | .cellTailL _ _ _ => []
   | .guard _ _ body => tmRefs body
   | .guardTail _ _ => []
   | .cancel _ body | .mem _ _ body | .host _ _ body => tmRefs body
@@ -201,9 +201,9 @@ def captureCounts (p : Core.Program) : Array Nat := Id.run do
     | .perform _ _ body => visit out body
     | .label _ body => visit out body
     | .labelTail _ => out
-    | .cell _ _ body => visit out body
+    | .cell _ _ body | .cellL _ _ _ body => visit out body
     | .lend _ _ _ _ _ body => visit out body
-    | .cellTail _ _ => out
+    | .cellTail _ _ | .cellTailL _ _ _ => out
     | .guard _ _ body => visit out body
     | .guardTail _ _ => out
     | .cancel _ body => visit out body
@@ -326,19 +326,20 @@ kept of its inference (`memo`) and, if `remember`, giving what this one made,
 to be kept for the next. -/
 def certifyKept (items : List Item) (p : Core.Program) (strict : Bool)
     (envSizes : List (Nat × Nat × Nat) := []) (regions loans ranked widen : Bool := false)
-    (memo : Memo := {}) (remember : Bool := true) : Except String (Cert × Made) := do
+    (memo : Memo := {}) (remember : Bool := true) (anyUnknown : Bool := false) :
+    Except String (Cert × Made) := do
   let g ← Elab.collectDeclared items
   match (certifyM items g p envSizes).run
-    { fns := p.fns, strict, regions, loans, ranked, widen, memo := memo.inst
+    { fns := p.fns, strict, regions, loans, ranked, widen, anyUnknown, memo := memo.inst
       frozen := memo.schemes, keptFaces := memo.faces, remember } with
   | .ok cert st => pure (cert, ⟨st.made, st.frozenMade, st.facesMade⟩)
   | .error e _ => throw e
 
 /-- The certificate alone, with nothing kept. -/
 def certify (items : List Item) (p : Core.Program) (strict : Bool)
-    (envSizes : List (Nat × Nat × Nat) := []) (regions loans ranked widen : Bool := false) :
-    Except String Cert :=
-  (·.1) <$> certifyKept items p strict envSizes regions loans ranked widen (remember := false)
+    (envSizes : List (Nat × Nat × Nat) := []) (regions loans ranked widen : Bool := false)
+    (anyUnknown : Bool := false) : Except String Cert :=
+  (·.1) <$> certifyKept items p strict envSizes regions loans ranked widen (remember := false) (anyUnknown := anyUnknown)
 
 /-- What was made, as kept for the next compile. -/
 def toMemo (made : Made) : Memo :=

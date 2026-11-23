@@ -229,6 +229,8 @@ def fv : Tm → List Nat
   | .cancel k body => atomVars [k] ++ fv body
   | .cell init thunk body => atomVars [init, thunk] ++ fv body
   | .cellTail init thunk => atomVars [init, thunk]
+  | .cellL _ init thunk body => atomVars [init, thunk] ++ fv body
+  | .cellTailL _ init thunk => atomVars [init, thunk]
   | .lend _ r thunk pre post body => atomVars (r :: thunk :: pre ++ post) ++ fv body
   | .mem _ args body => atomVars args ++ fv body
   | .host _ args body => atomVars args ++ fv body

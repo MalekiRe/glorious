@@ -1312,6 +1312,8 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
       σ' == σ && ρ == τ && cellOk C ϕ n r σ ρ εt acc && rowLe εt ε
         && linearB C Γ (atomVars [init, thunk]) []
     | _, _ => false
+  -- (Cells of memory are the typed lowering's, after the certificate.)
+  | _, .cellL .., _, _, _ | _, .cellTailL .., _, _, _ => false
   | Γ, .lend uniq r thunk pre post body, hs, τ, ε =>
     match atomTy Γ r, atomTy Γ thunk with
     | some (.ref ρ σ), some (.fn n Ps ρt εt _ _ acc) =>

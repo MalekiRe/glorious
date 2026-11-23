@@ -268,7 +268,8 @@ fn main() -> Int {
 use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};
 use std::host::{IoError, run_host};
 use std::stream::{Stdout};
-fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {
+fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError>
+    / { | <R as Read>::Effects, <W as Write>::Effects } {
     match(read(reader, 4)) {
         Ok(got) =>
             if(len(got) == 0) { Ok(done) }
@@ -300,7 +301,8 @@ copied606
 use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};
 use std::host::{IoError, run_host};
 use std::stream::{Stdout};
-fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {
+fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError>
+    / { | <R as Read>::Effects, <W as Write>::Effects } {
     match(read(reader, 4)) {
         Ok(got) =>
             if(len(got) == 0) { Ok(done) }
@@ -308,7 +310,7 @@ fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<
         Err(e) => Err(e)
     }
 }
-fn twice<A: Read, B: Write>(a: &mut A, b: &mut B) -> Int { match(copy(a, b, 0)) { Ok(n) => n * 2, Err(_) => 0 } }
+fn twice<A: Read, B: Write>(a: &mut A, b: &mut B) -> Int / { | <A as Read>::Effects, <B as Write>::Effects } { match(copy(a, b, 0)) { Ok(n) => n * 2, Err(_) => 0 } }
 fn main() -> Int {
     let mut from = MemoryCursor::new([]);
     write_str(&mut from, "0123456789");

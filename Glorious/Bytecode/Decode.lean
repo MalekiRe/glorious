@@ -134,6 +134,44 @@ def pair (bs : Bytes) : Option ((Nat × Nat) × Bytes) := do
   let (b, bs) ← nat bs
   pure ((a, b), bs)
 
+mutual
+
+/-- A layout (`Encode.lay`). -/
+partial def lay : Bytes → Option (Lay × Bytes)
+  | 0 :: bs => do
+    let (n, bs) ← nat bs
+    match bs with
+    | s :: bs => pure (.int n (s = 1), bs)
+    | [] => none
+  | 1 :: bs => do
+    let (tag, bs) ← nat bs
+    let (fs, bs) ← laidFields bs
+    pure (.fields tag fs, bs)
+  | 2 :: bs => do
+    let (cs, bs) ← list (fun bs => do
+      let (tag, bs) ← nat bs
+      let (fs, bs) ← laidFields bs
+      pure ((tag, fs), bs)) bs
+    pure (.tagged cs, bs)
+  | 3 :: bs => some (.addr, bs)
+  | 4 :: bs => some (.held, bs)
+  | 5 :: bs => some (.nothing, bs)
+  | _ => none
+
+partial def laidFields (bs : Bytes) : Option (List (Nat × Lay) × Bytes) :=
+  list (fun bs => do
+    let (at_, bs) ← nat bs
+    let (l, bs) ← lay bs
+    pure ((at_, l), bs)) bs
+
+end
+
+def laid (bs : Bytes) : Option (Laid × Bytes) := do
+  let (size, bs) ← nat bs
+  let (align, bs) ← nat bs
+  let (l, bs) ← lay bs
+  pure ({ lay := l, size, align }, bs)
+
 def memOp : Bytes → Option (MemOp × Bytes)
   | 0 :: bs => some (.load, bs)
   | 1 :: bs => some (.store, bs)
@@ -145,6 +183,11 @@ def memOp : Bytes → Option (MemOp × Bytes)
   | 7 :: bs => some (.readBits, bs)
   | 8 :: bs => some (.writeBits, bs)
   | 9 :: bs => some (.copy, bs)
+  | 10 :: bs => (lay bs).map fun (l, bs) => (.loadL l, bs)
+  | 11 :: bs => (lay bs).map fun (l, bs) => (.storeL l, bs)
+  | 12 :: bs => (lay bs).map fun (l, bs) => (.swapL l, bs)
+  | 13 :: bs => (lay bs).map fun (l, bs) => (.tagL l, bs)
+  | 14 :: bs => (lay bs).map fun (l, bs) => (.focusL l, bs)
   | _ => none
 
 def instr : Bytes → Option (Instr × Bytes)
@@ -216,6 +259,16 @@ def instr : Bytes → Option (Instr × Bytes)
     let (init, bs) ← atom bs
     let (thunk, bs) ← atom bs
     pure (.cellTail init thunk, bs)
+  | 20 :: bs => do
+    let (l, bs) ← laid bs
+    let (init, bs) ← atom bs
+    let (thunk, bs) ← atom bs
+    pure (.cellL l init thunk, bs)
+  | 21 :: bs => do
+    let (l, bs) ← laid bs
+    let (init, bs) ← atom bs
+    let (thunk, bs) ← atom bs
+    pure (.cellTailL l init thunk, bs)
   | 19 :: u :: bs => do
     let (r, bs) ← atom bs
     let (thunk, bs) ← atom bs

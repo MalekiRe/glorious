@@ -27,6 +27,25 @@ namespace Glorious.Lower
 
 open Typing
 
+/-- The declared types a value of a type holds within its bytes, `seen` those
+already found. -/
+partial def heldWithin (C : Cert) (seen : List (Nat × List Ty)) : Ty → List (Nat × List Ty)
+  | .tuple fs => fs.foldl (heldWithin C) seen
+  | .data name args =>
+    if name == arrayName || seen.contains (name, args) then seen
+    else match findData C.datas name args with
+      | some ctors => ctors.foldl (fun s (_, fs) => fs.foldl (heldWithin C) s) ((name, args) :: seen)
+      | none => seen
+  | _ => seen
+
+/-- Whether a value of the declared type would hold one of itself in its bytes:
+held by the machine wherever it is, so that a reference to one is to the same
+bytes whatever it is reached through. -/
+def holdsItself (C : Cert) (name : Nat) (args : List Ty) : Bool :=
+  match findData C.datas name args with
+  | some ctors => (ctors.foldl (fun s (_, fs) => fs.foldl (heldWithin C) s) []).contains (name, args)
+  | none => false
+
 /-- The layout of a type, `seen` the declared types it is inside of. -/
 partial def layOf (C : Cert) (seen : List (Nat × List Ty)) : Ty → Laid
   | .int => ⟨.int 8 true, 8, 8⟩
@@ -38,7 +57,8 @@ partial def layOf (C : Cert) (seen : List (Nat × List Ty)) : Ty → Laid
     ⟨.fields 0 at_, alignUp size align, align⟩
   | .data name args =>
     if name == arrayName then ⟨.held, 24, 8⟩
-    else if seen.contains (name, args) then ⟨.held, 8, 8⟩
+    else if name == anyName then ⟨.held, 8, 8⟩
+    else if seen.contains (name, args) || holdsItself C name args then ⟨.held, 8, 8⟩
     else
       match findData C.datas name args with
       | some [(tag, fs)] =>

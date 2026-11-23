@@ -217,7 +217,15 @@ inductive MemOp where
   | writeBits
   /-- So many bytes copied, as if through a buffer of their own. -/
   | copy
-  deriving Hashable
+  /-- `load`, `store`, `swap`, `tag` and `focus` of a reference that is an
+  address (a cell of memory, `Tm.cellL`), of a value laid out so (the
+  typed lowering's). -/
+  | loadL (l : Lay)
+  | storeL (l : Lay)
+  | swapL (l : Lay)
+  | tagL (l : Lay)
+  | focusL (l : Lay)
+  deriving Hashable, BEq
 
 /-- The constructor of the value a path of field numbers leads to; `-1` if the
 path leads nowhere, or to something no constructor built. -/
@@ -254,6 +262,78 @@ def MemOp.evalBytes (m : Memory) : MemOp → List Value → Option (Value × Mem
   | .copy, [.int to, .int src, .int n] => do
     unless 0 ≤ to ∧ 0 ≤ src ∧ 0 ≤ n do none
     pure (.unit, ← m.write to.toNat n.toNat (← m.read src.toNat n.toNat))
+  | _, _ => none
+
+/-- The layout a path of field numbers leads to from `addr`, and its address:
+through a value of several constructors by the one its tag says. At what the
+machine holds, the rest of the path is in the value it holds. -/
+partial def Lay.path (m : Memory) (addr : Nat) : Lay → List Value → Option (Nat × Lay × List Value)
+  | .held, rest => some (addr, .held, rest)
+  | l, [] => some (addr, l, [])
+  | .fields _ fs, .int i :: rest => do
+    let (at_, l) ← fs[i.toNat]?
+    if i < 0 then none
+    Lay.path m (addr + at_) l rest
+  | .tagged cs, .int i :: rest => do
+    let (_, fs) ← cs[← m.read addr 1]?
+    let (at_, l) ← fs[i.toNat]?
+    if i < 0 then none
+    Lay.path m (addr + at_) l rest
+  | _, _ => none
+
+/-- Which constructor built what is laid out so at `addr`. -/
+def Lay.tagAt (m : Memory) (addr : Nat) : Lay → Option Nat
+  | .fields tag _ => some tag
+  | .tagged cs => do pure (← cs[← m.read addr 1]?).1
+  | _ => none
+
+/-- The value the machine holds at `addr` (`Lay.held`), with its id. -/
+def heldAt (m : Memory) (held : Held) (addr : Nat) : Option (Nat × Value) := do
+  let id ← m.read addr 8
+  pure (id, ← held.values[id]?)
+
+/-- Perform a memory operation of a reference that is an address (`loadL` and
+the rest), on memory and what is held for it. A reference into a value the
+machine holds is the address of its id and a path into it, and what is done
+there is done to that value as to a cell's. -/
+def MemOp.evalLaid (m : Memory) (held : Held) : MemOp → List Value → Option (Value × Memory × Held)
+  | .loadL _, [.ref a _ (s :: p)] => do pure (← (← heldAt m held a).2.part (s :: p), m, held)
+  | .storeL _, [.ref a _ (s :: p), w] => do
+    let (id, v) ← heldAt m held a
+    pure (.unit, m, { held with values := held.values.insert id (← v.putPart (s :: p) w) })
+  | .swapL _, [.ref a _ (s :: p), w] => do
+    let (id, v) ← heldAt m held a
+    pure (← v.part (s :: p), m, { held with values := held.values.insert id (← v.putPart (s :: p) w) })
+  | .tagL _, .ref a _ (s :: p) :: path => do
+    pure (.int (tagAt (← (← heldAt m held a).2.part (s :: p)) path), m, held)
+  | .loadL l, [.ref a _ []] => do pure (← l.read m held a, m, held)
+  | .storeL l, [.ref a _ [], w] => do
+    let (m, held) ← l.write m held a w
+    pure (.unit, m, held)
+  | .swapL l, [.ref a _ [], w] => do
+    let old ← l.read m held a
+    let (m, held) ← l.write m held a w
+    pure (old, m, held)
+  | .tagL l, .ref a _ [] :: path => do
+    match Lay.path m a l path with
+    | some (a', .held, rest) => do
+      pure (.int (tagAt (← heldAt m held a').2 rest), m, held)
+    | some (a', l', _) => pure (.int ((l'.tagAt m a').map Int.ofNat |>.getD (-1)), m, held)
+    | none => pure (.int (-1), m, held)
+  | .focusL (.fields _ fs), [.ref a b [], .int i] => do
+    let (at_, _) ← fs[i.toNat]?
+    if i < 0 then none
+    pure (.ref (a + at_) b [], m, held)
+  | .focusL (.tagged cs), [.ref a b [], .int i, .int built] => do
+    let fs ← cs.lookup built.toNat
+    let (at_, _) ← fs[i.toNat]?
+    if i < 0 then none
+    pure (.ref (a + at_) b [], m, held)
+  -- (Into a value the machine holds, or further into one.)
+  | .focusL _, [.ref a b p, .int i] =>
+    if 0 ≤ i then some (.ref a b (p ++ [⟨none, i.toNat⟩]), m, held) else none
+  | .focusL _, [.ref a b p, .int i, .int built] =>
+    if 0 ≤ i ∧ 0 ≤ built then some (.ref a b (p ++ [⟨some built.toNat, i.toNat⟩]), m, held) else none
   | _, _ => none
 
 /-- Perform a memory operation: its result and the memory afterwards. -/
@@ -296,9 +376,12 @@ structure Store (φ : Type) where
   mem : Memory := {}
   held : Held := {}
 
-/-- The store after the scope of cell `a` has ended: the cell is released. -/
+/-- The store after the scope of cell `a` has ended: the cell is released (a
+cell of memory, `Tm.cellL`, has an address from `memBase` on; its block is
+freed). -/
 def Store.release {φ : Type} (store : Store φ) (a : Nat) : Store φ :=
-  { store with cells := store.cells.setIfInBounds a none }
+  if memBase ≤ a then { store with mem := (store.mem.free a).getD store.mem }
+  else { store with cells := store.cells.setIfInBounds a none }
 
 /-- The store with a new cell holding `v`; its address is the old number of cells. -/
 def Store.alloc {φ : Type} (store : Store φ) (v : Value) : Store φ :=
@@ -308,6 +391,21 @@ def Store.alloc {φ : Type} (store : Store φ) (v : Value) : Store φ :=
 def Store.memOp {φ : Type} (store : Store φ) (op : MemOp) (vs : List Value) : Option (Value × Store φ) :=
   match op.eval store.cells vs with
   | some (r, cells) => some (r, { store with cells })
-  | none => (op.evalBytes store.mem vs).map fun (r, mem) => (r, { store with mem })
+  | none =>
+    match op.evalBytes store.mem vs with
+    | some (r, mem) => some (r, { store with mem })
+    | none =>
+      -- (An address seen as a whole number, `transmute`, is the reference.)
+      let vs := match vs with
+        | .int a :: rest => if 0 ≤ a then .ref a.toNat 0 [] :: rest else vs
+        | _ => vs
+      (op.evalLaid store.mem store.held vs).map fun (r, mem, held) => (r, { store with mem, held })
+
+/-- The store with a new cell of memory (`Tm.cellL`) holding `v`, laid out so;
+its address. -/
+def Store.allocLaid {φ : Type} (store : Store φ) (l : Laid) (v : Value) : Option (Nat × Store φ) := do
+  let (a, mem) := store.mem.alloc l.size l.align
+  let (mem, held) ← l.lay.write mem store.held a v
+  pure (a, { store with mem, held })
 
 end Glorious

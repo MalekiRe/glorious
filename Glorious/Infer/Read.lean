@@ -82,8 +82,9 @@ mutual
 partial def zonk (pr : Pr) (t : ITy) : M Ty := do
   match ← find t with
   | .var id => do
-    pure (if (← get).numeric.contains id then .int else .tuple [])
-  | .param _ => pure (.tuple [])
+    let s ← get
+    pure (if s.numeric.contains id then .int else if s.anyUnknown then .data anyName [] else .tuple [])
+  | .param _ => pure (if (← get).anyUnknown then .data anyName [] else .tuple [])
   | .int => pure .int
   | .scalar b => pure (.scalar b)
   | .tuple fs => do pure (.tuple (← fs.mapM (zonk pr)))

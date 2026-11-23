@@ -60,6 +60,12 @@ attribute [irreducible] arrayBase
 
 def arrayName : Nat := 4611686018427387904
 
+/-- The name of the type the types for the typed lowering give what nothing
+determined (a type parameter a function holds no value of where it is
+called, as one read from a shared cell): no type declares it, so it is held
+by the machine, whatever it is. -/
+def anyName : Nat := arrayName + 1
+
 /-- The locals of one activation, oldest first. -/
 abbrev Env := List Value
 
@@ -68,13 +74,13 @@ inductive Atom where
   /-- The local at position `i` of the current environment. -/
   | var (i : Nat)
   | int (n : Int)
-  deriving Hashable
+  deriving Hashable, BEq
 
 /-- A field path into a local: `var.path₀.path₁...`. -/
 structure Place where
   var : Nat
   path : List Nat
-  deriving Hashable
+  deriving Hashable, BEq
 
 /-- Machine intrinsics. Their meaning is shared by both machines. -/
 inductive Prim where
@@ -164,7 +170,7 @@ inductive Prim where
   /-- A whole number seen as a scalar of so many bits (`into`), or a scalar
   as the whole number it is held as: the value as it is, of another type. -/
   | cast (bits : Int) (into : Bool)
-  deriving Hashable
+  deriving Hashable, BEq
 
 /-- A computation that produces a value without transferring control. -/
 inductive Rhs where
@@ -177,7 +183,7 @@ inductive Rhs where
   /-- What a closure captured, under the code of another function: the closure
   `a` is given up and `fn` runs in its place. -/
   | rebind (a : Atom) (fn : Nat)
-  deriving Hashable
+  deriving Hashable, BEq
 
 namespace Value
 

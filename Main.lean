@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Driver
+public import Glorious.Lower.Typed
 public import Glorious.Target
 public import Glorious.Store
 public import Std.Async.TCP
@@ -122,6 +123,9 @@ structure Outcome where
   /-- What the typing of its Core shows. -/
   certified : Bool := false
   typed : Bool := false
+  /-- What the Lean machines give the program lowered by its types
+  (`Lower.program`), if it is. -/
+  lowered : Option String := none
   strict : Bool := false
   regions : Bool := false
   loans : Bool := false
@@ -143,10 +147,16 @@ def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few 
   | .error e => { lean := s!"error: {e}", error := some e }
   | .ok compiled =>
     let has := fun (f : Typing.Cert → Bool) => (compiled.cert.map f).getD false
+    let lowered := compiled.types.get.bind (Lower.program · compiled.core)
     -- (An example, a program as long as it needs, is given more steps on
     -- bytecode.)
     { lean := if run then evalCompiled compiled c.input (vmScale := if few then 200 else 20) else ""
-      bytes := some (bytecodeBytes compiled)
+      lowered := if run then lowered.map fun core =>
+        evalCompiled { compiled with core } c.input (vmScale := if few then 200 else 20) else none
+      -- (The Rust VM runs the program lowered, where it is.)
+      bytes := some (bytecodeBytes (match lowered with
+        | some core => { compiled with core }
+        | none => compiled))
       certified := compiled.cert.isSome, typed := compiled.types.get.isSome
       strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
       lent := compiled.lent, plain := compiled.plain.length
@@ -284,6 +294,8 @@ partial def showTm (n : Nat) : Core.Tm → String
   | .cancel k body => s!"let v{n} = cancel {showAtom k}\n" ++ showTm (n + 1) body
   | .cell init thunk body => s!"let v{n} = cell {showAtom init} in {showAtom thunk}\n" ++ showTm (n + 1) body
   | .cellTail init thunk => s!"cell {showAtom init} in {showAtom thunk}"
+  | .cellL l init thunk body => s!"let v{n} = cell[{l.size}] {showAtom init} in {showAtom thunk}\n" ++ showTm (n + 1) body
+  | .cellTailL l init thunk => s!"cell[{l.size}] {showAtom init} in {showAtom thunk}"
   | .lend u r thunk pre post body =>
     s!"let v{n} = lend{if u then " mut" else ""} {showAtom r} to {showAtom thunk}({showAtoms pre} | {showAtoms post})\n"
       ++ showTm (n + 1) body
@@ -490,6 +502,13 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)
       IO.eprintln s!"drops: {c.core.drops}"
+    -- (`GLORIOUS_LOWER`: whether the program is lowered by its types, or why not.)
+    if (← IO.getEnv "GLORIOUS_LOWER").isSome then
+      match c.types.get with
+      | none => IO.eprintln "not lowered: no types"
+      | some C => match Lower.lowered C c.core with
+        | .ok _ => IO.eprintln "lowered"
+        | .error e => IO.eprintln s!"not lowered: {e}"
   pure result
 
 /-- The program at `path` built: what the last compile kept in the build
@@ -654,6 +673,14 @@ how many compile, and how many are shown to follow each set of Core's rules. -/
 def selftest (vm : Option String) : IO UInt32 := do
   let tmp : System.FilePath := (← IO.getEnv "TMPDIR").getD "/tmp"
   let stamp ← IO.monoMsNow
+  -- What runs the programs on the Rust VM is started now, while this process
+  -- holds little: started once it holds the programs, the system may not
+  -- have the memory to copy it. It is told where they are when they are.
+  let runner : Option (IO.Process.Child ⟨.piped, .piped, .piped⟩) ← vm.mapM fun vm => do
+    IO.Process.spawn
+      { cmd := "sh", env := #[("VM", some (← IO.FS.realPath vm).toString)]
+        args := #["-c", s!"read dir && cd \"$dir\" && ls | grep '[.]sh$' | xargs -P {← vmJobs} -n 1 sh"]
+        stdin := .piped, stdout := .piped, stderr := .piped }
   let examples := (← exampleCases "examples") ++ (← exampleCases "covey")
   -- (The programs that take the Lean machines too long come last, and are
   -- run on the Rust VM alone.)
@@ -713,6 +740,9 @@ def selftest (vm : Option String) : IO UInt32 := do
         failures := failures.push (2 * i, s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n")
     else if let some e := found[i]?.bind (·.error) then
       failures := failures.push (2 * i, s!"does not compile: {e}\nfor\n{c.src}\n")
+    if let some low := found[i]?.bind (·.lowered) then
+      if low != got then
+        failures := failures.push (2 * i, s!"lowered: gives\n{low}\nnot\n{got}\nfor\n{c.src}\n")
   for (c, i) in foreignCases.zipIdx do
     match foreign[i]? with
     | some o =>
@@ -722,7 +752,7 @@ def selftest (vm : Option String) : IO UInt32 := do
         failures := failures.push (2 * (all.length + i),
           s!"foreign: a program that calls a foreign function has a certificate\nfor\n{c.src}\n")
     | none => pure ()
-  if let some vm := vm then
+  if let some runner := runner then
     -- Each program's bytecode, what it is given, what it should give, and
     -- whether going wrong counts as `went wrong` or shows as it is.
     let runs : Array (Nat × ByteArray × Case × Bool) :=
@@ -733,20 +763,19 @@ def selftest (vm : Option String) : IO UInt32 := do
     -- All are started by one process that holds little: one started from
     -- here for each program waits for this one's memory to be copied, a
     -- hundredth of a second each time and one at a time.
-    let jobs ← vmJobs
     let dir := tmp / s!"glorious-selftest-{stamp}"
     IO.FS.createDirAll dir
-    let vmPath ← IO.FS.realPath vm
     for ((_, bytes, c, _), k) in runs.toList.zipIdx do
       IO.FS.writeBinFile (dir / s!"{k}.gbc") bytes
       let given := " ".intercalate (c.input.map toString)
       IO.FS.writeFile (dir / s!"{k}.sh")
         s!"\"$VM\" {k}.gbc {given} > {k}.out 2> {k}.err\necho $? > {k}.rc\n"
-    let ran ← IO.Process.output
-      { cmd := "sh", env := #[("VM", some vmPath.toString)]
-        args := #["-c", s!"cd '{dir}' && ls | grep '[.]sh$' | xargs -P {jobs} -n 1 sh"] }
-    if ran.exitCode != 0 then
-      failures := failures.push (0, s!"rust vm: the programs could not be run: {ran.stderr}\n")
+    runner.stdin.putStrLn dir.toString
+    runner.stdin.flush
+    let (_, runner) ← runner.takeStdin
+    let stderr ← runner.stderr.readToEnd
+    if (← runner.wait) != 0 then
+      failures := failures.push (0, s!"rust vm: the programs could not be run: {stderr}\n")
     for ((at_, _, c, plain), k) in runs.toList.zipIdx do
       let out ← IO.FS.readFile (dir / s!"{k}.out")
       let code := (← IO.FS.readFile (dir / s!"{k}.rc")).trimAscii.toString
@@ -771,7 +800,7 @@ def selftest (vm : Option String) : IO UInt32 := do
   let count := fun (f : Outcome → Bool) => (found.filter f).size
   let scopes := found.foldl (fun n o => n + o.lent) 0
   let plain := found.foldl (fun n o => n + o.plain) 0
-  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.typed)} typed; {count (·.certified)} with a certificate; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
+  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.typed)} typed; {count (·.lowered.isSome)} lowered; {count (·.certified)} with a certificate; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
   IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {count (·.plain > 0)} programs"
   let installs := count fun o => match o.cleanups with
     | some (n, _, _) => decide (n > 0)
@@ -1048,6 +1077,15 @@ where
       | .error e =>
         IO.eprintln s!"{path}: {e}"
         return 1
+    -- (`GLORIOUS_LOWER`: the program lowered by its types is what is run.)
+    let c := if (← IO.getEnv "GLORIOUS_LOWER").isSome then
+        match c.types.get.bind (Lower.program · c.core) with
+        | some core => { c with core }
+        | none => c
+      else c
+    if (← IO.getEnv "GLORIOUS_LOWER").isSome && (← IO.getEnv "GLORIOUS_CORE").isSome then
+      IO.eprintln "lowered:"
+      IO.eprintln (showCore c.fnNames c.core)
     let bytecode := compile c.core
     if command == "check" then
       let (onCore, coreSteps) := runToEnd (Core.stepIO c.core) (Core.initIO c.core input)
@@ -1056,6 +1094,8 @@ where
       let b := showOutcome c.ctorNames onVm
       IO.println s!"core ({coreSteps} steps):\n{a}"
       IO.println s!"bytecode ({vmSteps} steps):\n{b}"
+      if a == "went wrong" then
+        IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
       if a == b then pure 0
       else
         IO.eprintln "the two machines disagree"

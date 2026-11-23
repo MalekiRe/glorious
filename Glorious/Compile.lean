@@ -35,6 +35,8 @@ def compileTm : Core.Tm → Code
   | .cell init thunk body => .cell init thunk :: compileTm body
   | .lend uniq r thunk pre post body => .lend uniq r thunk pre post :: compileTm body
   | .cellTail init thunk => [.cellTail init thunk]
+  | .cellL l init thunk body => .cellL l init thunk :: compileTm body
+  | .cellTailL l init thunk => [.cellTailL l init thunk]
   | .mem op args body => .mem op args :: compileTm body
   | .host id args body => .host id args :: compileTm body
 

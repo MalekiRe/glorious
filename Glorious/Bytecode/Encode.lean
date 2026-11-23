@@ -95,6 +95,24 @@ def rhs : Rhs → Bytes
 
 def pair (p : Nat × Nat) : Bytes := nat p.1 ++ nat p.2
 
+mutual
+
+/-- A layout (`Lay`). -/
+partial def lay : Lay → Bytes
+  | .int n signed => 0 :: nat n ++ [if signed then 1 else 0]
+  | .fields tag fs => 1 :: nat tag ++ laidFields fs
+  | .tagged cs => 2 :: nat cs.length ++ cs.flatMap fun (tag, fs) => nat tag ++ laidFields fs
+  | .addr => [3]
+  | .held => [4]
+  | .nothing => [5]
+
+partial def laidFields (fs : List (Nat × Lay)) : Bytes :=
+  nat fs.length ++ fs.flatMap fun (at_, l) => nat at_ ++ lay l
+
+end
+
+def laid (l : Laid) : Bytes := nat l.size ++ nat l.align ++ lay l.lay
+
 def memOp : MemOp → Bytes
   | .load => [0]
   | .store => [1]
@@ -106,6 +124,11 @@ def memOp : MemOp → Bytes
   | .readBits => [7]
   | .writeBits => [8]
   | .copy => [9]
+  | .loadL l => 10 :: lay l
+  | .storeL l => 11 :: lay l
+  | .swapL l => 12 :: lay l
+  | .tagL l => 13 :: lay l
+  | .focusL l => 14 :: lay l
 
 def instr : Instr → Bytes
   | .op r => 0 :: rhs r
@@ -129,6 +152,8 @@ def instr : Instr → Bytes
   | .mem op args => 16 :: memOp op ++ list atom args
   | .cell init thunk => 17 :: atom init ++ atom thunk
   | .cellTail init thunk => 18 :: atom init ++ atom thunk
+  | .cellL l init thunk => 20 :: laid l ++ atom init ++ atom thunk
+  | .cellTailL l init thunk => 21 :: laid l ++ atom init ++ atom thunk
   | .lend uniq r thunk pre post =>
     19 :: (if uniq then 1 else 0) :: atom r ++ atom thunk ++ list atom pre ++ list atom post
 
