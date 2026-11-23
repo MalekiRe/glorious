@@ -42,46 +42,10 @@ partial def normPat : Pattern → M NPat
         throw "an array pattern with `..` is a whole clause's pattern, `[first, ..rest] => ..`: it is not read inside another pattern, nor where a function's parameters are"
       throw s!"unknown constructor `{x}` in a pattern"
 
-/-- Do the rows of patterns cover every value of the column types? -/
-partial def exhaustive (tys : List Ty) (rows : List (List NPat)) : M Bool := do
-  match tys with
-  | [] => pure !rows.isEmpty
-  | t :: rest =>
-    let fallback : M Bool := exhaustive rest (rows.filterMap fun
-      | .any :: tl => some tl
-      | _ => none)
-    match ← find t with
-    | .tuple ts =>
-      exhaustive (ts ++ rest) (rows.filterMap fun
-        | .tuple ps :: tl => some (ps ++ tl)
-        | .any :: tl => some (List.replicate ts.length .any ++ tl)
-        | _ => none)
-    | .con name args =>
-      match (← get).types[name]? with
-      | some decl =>
-        -- Split by constructor only where some clause tests for one; a recursive
-        -- type would otherwise be unfolded for ever.
-        let tested := rows.any fun
-          | .ctor _ _ :: _ => true
-          | _ => false
-        if !tested then fallback
-        else decl.ctors.allM fun c => do
-          match (← get).ctors[c]? with
-          | none => pure false
-          | some sig =>
-            let fields := sig.fieldsAt args
-            exhaustive (fields ++ rest) (rows.filterMap fun
-              | .ctor c' ps :: tl => if c' == c then some (ps ++ tl) else none
-              | .any :: tl => some (List.replicate fields.length .any ++ tl)
-              | _ => none)
-      | none => fallback
-    -- What a reference points to is what clauses that reach through it ask
-    -- of: a clause that does not is one that takes any.
-    | .ref _ inner _ => exhaustive (inner :: rest) rows
-    | _ => fallback
-
-/-- A case the rows do not cover, as patterns written for the columns: what
-a refusal for `exhaustive` names. -/
+/-- A case the rows do not cover, as patterns written for the columns; none
+where they cover every value of the column types. A type is split by
+constructor only where some clause tests for one: a recursive type would
+otherwise be unfolded for ever. -/
 partial def uncovered (tys : List Ty) (rows : List (List NPat)) : M (Option (List String)) := do
   match tys with
   | [] => pure (if rows.isEmpty then some [] else none)
@@ -109,29 +73,29 @@ partial def uncovered (tys : List Ty) (rows : List (List NPat)) : M (Option (Lis
         if !tested then fallback
         else
           for c in decl.ctors do
-            if let some sig := (← get).ctors[c]? then
-              let fields := sig.fieldsAt args
-              let found ← uncovered (fields ++ rest) (rows.filterMap fun
-                | .ctor c' ps :: tl => if c' == c then some (ps ++ tl) else none
-                | .any :: tl => some (List.replicate fields.length .any ++ tl)
-                | _ => none)
-              if let some w := found then
-                let parts := w.take fields.length
-                -- (A `Result` whose error is `()` is an `Option`, and one
-                -- whose value is `()` too is a `Bool`: named so.)
-                let unitArg := fun (k : Nat) => (do
-                  match args[k]? with
-                  | some a => match ← find a with
-                    | .tuple [] => pure true
-                    | _ => pure false
-                  | none => pure false : M Bool)
-                let short := Syntax.lastSegment c
-                let isResult := Syntax.lastSegment name == "Result"
-                let shown ← if isResult && (← unitArg 1) then
-                    if ← unitArg 0 then pure (if short == "Ok" then "true" else "false")
-                    else pure (if short == "Ok" then s!"Some({", ".intercalate parts})" else "None")
-                  else pure (short ++ (if parts.isEmpty then "" else s!"({", ".intercalate parts})"))
-                return some (shown :: w.drop fields.length)
+            let some sig := (← get).ctors[c]? | return some ["_"]
+            let fields := sig.fieldsAt args
+            let found ← uncovered (fields ++ rest) (rows.filterMap fun
+              | .ctor c' ps :: tl => if c' == c then some (ps ++ tl) else none
+              | .any :: tl => some (List.replicate fields.length .any ++ tl)
+              | _ => none)
+            if let some w := found then
+              let parts := w.take fields.length
+              -- (A `Result` whose error is `()` is an `Option`, and one
+              -- whose value is `()` too is a `Bool`: named so.)
+              let unitArg := fun (k : Nat) => (do
+                match args[k]? with
+                | some a => match ← find a with
+                  | .tuple [] => pure true
+                  | _ => pure false
+                | none => pure false : M Bool)
+              let short := Syntax.lastSegment c
+              let isResult := Syntax.lastSegment name == "Result"
+              let shown ← if isResult && (← unitArg 1) then
+                  if ← unitArg 0 then pure (if short == "Ok" then "true" else "false")
+                  else pure (if short == "Ok" then s!"Some({", ".intercalate parts})" else "None")
+                else pure (short ++ (if parts.isEmpty then "" else s!"({", ".intercalate parts})"))
+              return some (shown :: w.drop fields.length)
           pure none
       | none => fallback
     | .ref _ inner _ => uncovered (inner :: rest) rows
@@ -641,14 +605,13 @@ def runPending : M Unit := do
   modify fun s => { s with pending := #[] }
   for p in pending do
     let rows ← p.rows.mapM (·.mapM normPat)
-    unless ← exhaustive p.tys rows do
+    if let some ws ← uncovered p.tys rows then
       -- (Not where it says nothing: any value, or an array's length.)
       let telling := fun (w : String) => (w.toList.any fun c => c.isAlpha) && (w.splitOn "Array(").length == 1
-      let case_ := match ← uncovered p.tys rows with
-        | some [w] => if telling w then s!": not `{w}`" else ""
-        | some ws => if ws.isEmpty || !ws.any telling || ws.any (fun w => (w.splitOn "Array(").length > 1) then ""
+      let case_ := match ws with
+        | [w] => if telling w then s!": not `{w}`" else ""
+        | ws => if ws.isEmpty || !ws.any telling || ws.any (fun w => (w.splitOn "Array(").length > 1) then ""
           else s!": not `{", ".intercalate ws}`"
-        | none => ""
       throw s!"{p.pos}{p.what} not cover every case{case_}"
     -- A clause that tests for something the clauses before it have already
     -- taken every case of is never reached (6.2). One that takes whatever
@@ -658,7 +621,7 @@ def runPending : M Unit := do
         | .any => false
         | _ => true
       if tests then
-        if ← exhaustive p.tys (rows.take i) then
+        if (← uncovered p.tys (rows.take i)).isNone then
           throw s!"{p.pos}clause {i + 1} is never reached: the clauses before it take every case"
 
 /-! ## Scopes that values cannot outlive
