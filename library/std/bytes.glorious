@@ -1,0 +1,412 @@
+// Bytes read and written a number at a time, as the library specification
+// has them (23). Places and lengths are `Int`.
+
+use std::slice::{Slice};
+use std::text::{from_utf8};
+
+pub enum DecodeErrorKind { Truncated, Overflow, NonCanonical, InvalidTag, InvalidUtf8, LimitExceeded }
+pub struct DecodeError { pub offset: Int, pub kind: DecodeErrorKind }
+pub use std::error::{MarkError, RangeError, ReserveError};
+pub enum ByteWriteError { Range(RangeError), Reserve(ReserveError), InvalidAlignment }
+
+// A place in some bytes, read from front to back. A read that fails leaves
+// the place where it was.
+pub struct ByteReader<'a> { bytes: Slice<'a, u8>, at: Int }
+
+// Where a reader was, to go back to.
+pub struct ReaderMark { at: Int, length: Int }
+
+fn fails<T>(at: Int, kind: DecodeErrorKind) -> Result<T, DecodeError> where T: Use<[1, 1]> { Err(DecodeError { offset: at, kind: kind }) }
+
+fn byte_at<'a>(bytes: &Slice<'a, u8>, i: Int) -> Int {
+    match(Slice::get(bytes, i)) { Some(b) => int(*b), None => 0 }
+}
+
+fn wide(n: Int) -> u128 { to(n) }
+
+// The number so many bytes from a place are, the first the least.
+fn le_from<'a>(bytes: &Slice<'a, u8>, at: Int, width: Int) -> u128 {
+    if(width <= 0) { 0u128 } else { wide(byte_at(bytes, at)) + 256u128 * le_from(bytes, at + 1, width - 1) }
+}
+
+// And the first the greatest.
+fn be_from<'a>(bytes: &Slice<'a, u8>, at: Int, width: Int, so_far: u128) -> u128 {
+    if(width <= 0) { so_far } else { tail be_from(bytes, at + 1, width - 1, so_far * 256u128 + wide(byte_at(bytes, at))) }
+}
+
+impl<'a> ByteReader<'a> {
+    pub fn new(bytes: Slice<'a, u8>) -> Self { Self { bytes: bytes, at: 0 } }
+    pub fn position(r: &Self) -> Int { r.at }
+    pub fn remaining_len(r: &Self) -> Int { Slice::len(&r.bytes) - r.at }
+    pub fn remaining(r: &Self) -> Slice<'a, u8> {
+        match(Slice::sub(&r.bytes, r.at, Slice::len(&r.bytes))) { Some(rest) => rest, None => r.bytes }
+    }
+    pub fn mark(r: &Self) -> ReaderMark { ReaderMark { at: r.at, length: Slice::len(&r.bytes) } }
+    pub fn restore(r: &mut Self, mark: ReaderMark) -> Result<(), MarkError> {
+        if(mark.length != Slice::len(&r.bytes)) { Err(MarkError::WrongOwner) } else {
+            if(mark.at > mark.length) { Err(MarkError::OutOfRange) } else { r.at = mark.at; Ok(()) }
+        }
+    }
+    // So many bytes on, if there are that many.
+    fn step(r: &mut Self, width: Int) -> Result<Int, DecodeError> {
+        let at = r.at;
+        if(width < 0) { fails(at, DecodeErrorKind::Overflow) } else {
+            if(at + width > Slice::len(&r.bytes)) { fails(at, DecodeErrorKind::Truncated) } else { r.at = at + width; Ok(at) }
+        }
+    }
+    pub fn read_u8(r: &mut Self) -> Result<u8, DecodeError> {
+        match(ByteReader::step(r, 1)) { Ok(at) => Ok(u8(byte_at(&r.bytes, at))), Err(e) => Err(e) }
+    }
+    pub fn read_u16_le(r: &mut Self) -> Result<u16, DecodeError> {
+        match(ByteReader::step(r, 2)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 2))), Err(e) => Err(e) }
+    }
+    pub fn read_u32_le(r: &mut Self) -> Result<u32, DecodeError> {
+        match(ByteReader::step(r, 4)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 4))), Err(e) => Err(e) }
+    }
+    pub fn read_u64_le(r: &mut Self) -> Result<u64, DecodeError> {
+        match(ByteReader::step(r, 8)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 8))), Err(e) => Err(e) }
+    }
+    pub fn read_u128_le(r: &mut Self) -> Result<u128, DecodeError> {
+        match(ByteReader::step(r, 16)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 16))), Err(e) => Err(e) }
+    }
+    pub fn read_u16_be(r: &mut Self) -> Result<u16, DecodeError> {
+        match(ByteReader::step(r, 2)) { Ok(at) => Ok(to(be_from(&r.bytes, at, 2, 0u128))), Err(e) => Err(e) }
+    }
+    pub fn read_u32_be(r: &mut Self) -> Result<u32, DecodeError> {
+        match(ByteReader::step(r, 4)) { Ok(at) => Ok(to(be_from(&r.bytes, at, 4, 0u128))), Err(e) => Err(e) }
+    }
+    pub fn read_u64_be(r: &mut Self) -> Result<u64, DecodeError> {
+        match(ByteReader::step(r, 8)) { Ok(at) => Ok(to(be_from(&r.bytes, at, 8, 0u128))), Err(e) => Err(e) }
+    }
+    pub fn read_i64_le(r: &mut Self) -> Result<i64, DecodeError> {
+        match(ByteReader::step(r, 8)) {
+            Ok(at) => // (Two's complement: the upper half of what eight bytes can
+                // say is the numbers below nothing.)
+                let n: i128 = to(le_from(&r.bytes, at, 8));
+                Ok(to(if(n >= 9223372036854775808i128) { n - 18446744073709551616i128 } else { n })),
+            Err(e) => Err(e)
+        }
+    }
+    // A number written seven bits to a byte, the least first, each byte but
+    // the last with its top bit set: the one shortest way of writing it, in
+    // ten bytes at most.
+    pub fn read_var_u64(r: &mut Self) -> Result<u64, DecodeError> {
+        let start = r.at;
+        match(var_from(&r.bytes, start, 0u128, 1u128, 0)) {
+            Ok((value, width)) => r.at = start + width; Ok(to(value)),
+            Err(kind) => fails(start, kind)
+        }
+    }
+    pub fn read_exact(r: &mut Self, length: Int) -> Result<Slice<'a, u8>, DecodeError> {
+        match(ByteReader::step(r, length)) {
+            Ok(at) => match(Slice::sub(&r.bytes, at, at + length)) { Some(found) => Ok(found), None => fails(at, DecodeErrorKind::Truncated) },
+            Err(e) => Err(e)
+        }
+    }
+    // So many bytes as the text they are in UTF-8.
+    pub fn read_str(r: &mut Self, length: Int) -> Result<Str, DecodeError> {
+        let start = r.at;
+        match(ByteReader::step(r, length)) {
+            Ok(at) => match(from_utf8(copied(&r.bytes, at, at + length, []))) {
+                Some(text) => Ok(text),
+                None => r.at = start; fails(start, DecodeErrorKind::InvalidUtf8)
+            },
+            Err(e) => Err(e)
+        }
+    }
+    pub fn skip(r: &mut Self, length: Int) -> Result<(), DecodeError> {
+        match(ByteReader::step(r, length)) { Ok(_) => Ok(()), Err(e) => Err(e) }
+    }
+    // A reader of the next so many bytes alone; this one goes on after them.
+    pub fn subreader(r: &mut Self, length: Int) -> Result<ByteReader<'a>, DecodeError> {
+        match(ByteReader::read_exact(r, length)) { Ok(part) => Ok(ByteReader { bytes: part, at: 0 }), Err(e) => Err(e) }
+    }
+    // Done, with nothing left unread.
+    pub fn finish(r: Self) -> Result<(), DecodeError> {
+        if(ByteReader::remaining_len(&r) == 0) { Ok(()) } else { fails(ByteReader::position(&r), DecodeErrorKind::LimitExceeded) }
+    }
+}
+
+fn copied<'a>(bytes: &Slice<'a, u8>, at: Int, end: Int, out: [u8]) -> [u8] {
+    if(at >= end) { out } else { tail copied(bytes, at + 1, end, push(out, u8(byte_at(bytes, at)))) }
+}
+
+fn var_from<'a>(bytes: &Slice<'a, u8>, at: Int, value: u128, scale: u128, width: Int) -> Result<(u128, Int), DecodeErrorKind> {
+    if(at >= Slice::len(bytes)) { Err(DecodeErrorKind::Truncated) } else {
+        if(width >= 10) { Err(DecodeErrorKind::Overflow) } else {
+            let b = byte_at(bytes, at);
+            let next = value + wide(b % 128) * scale;
+            if(b >= 128) { tail var_from(bytes, at + 1, next, scale * 128u128, width + 1) } else {
+                if(next >= 18446744073709551616u128) { Err(DecodeErrorKind::Overflow) } else {
+                    // A last byte of nothing, after others, says the same
+                    // number a byte shorter.
+                    if(b == 0 and { width > 0 }) { Err(DecodeErrorKind::NonCanonical) } else { Ok((next, width + 1)) }
+                }
+            }
+        }
+    }
+}
+
+// Bytes built from front to back.
+pub struct ByteBuf { bytes: [u8] }
+
+// How long a buffer was, to cut it back to.
+pub struct BufferMark { length: Int }
+
+fn low(value: u128, modulus: u128) -> u8 { to(value % modulus) }
+
+fn le_onto(out: [u8], value: u128, width: Int) -> [u8] {
+    if(width <= 0) { out } else { tail le_onto(push(out, low(value, 256u128)), value / 256u128, width - 1) }
+}
+
+fn be_onto(out: [u8], value: u128, width: Int) -> [u8] {
+    if(width <= 0) { out } else { push(be_onto(out, value / 256u128, width - 1), low(value, 256u128)) }
+}
+
+fn var_onto(out: [u8], value: u128) -> [u8] {
+    if(value < 128u128) { push(out, low(value, 128u128)) }
+    else { tail var_onto(push(out, u8(128 + int(low(value, 128u128)))), value / 128u128) }
+}
+
+fn zeros_onto(out: [u8], count: Int) -> [u8] {
+    if(count <= 0) { out } else { tail zeros_onto(push(out, 0u8), count - 1) }
+}
+
+fn slice_onto<'a>(out: [u8], bytes: &Slice<'a, u8>, at: Int) -> [u8] {
+    if(at >= Slice::len(bytes)) { out } else { tail slice_onto(push(out, u8(byte_at(bytes, at))), bytes, at + 1) }
+}
+
+// The bytes with those from a place on replaced by a number's, the least first.
+fn patched(bytes: [u8], at: Int, value: u128, width: Int) -> [u8] {
+    if(width <= 0) { bytes } else { tail patched(with_byte(bytes, at, low(value, 256u128)), at + 1, value / 256u128, width - 1) }
+}
+
+fn with_byte(bytes: [u8], at: Int, byte: u8) -> [u8] { let mut next = bytes; next[at] = byte; next }
+
+// The bytes from one place up to another.
+fn piece(bytes: &[u8], from: Int, upto: Int, out: [u8]) -> [u8] {
+    if(from >= upto) { out } else {
+        match(element(bytes, from)) {
+            Some(b) => tail piece(bytes, from + 1, upto, push(out, *b)),
+            None => out
+        }
+    }
+}
+
+fn is_power_of_two(n: Int) -> Bool { if(n <= 0) { false } else { if(n == 1) { true } else { if(n % 2 == 0) { is_power_of_two(n / 2) } else { false } } } }
+
+impl ByteBuf {
+    pub fn new() -> Self { Self { bytes: [] } }
+    pub fn with_capacity(capacity: Int) -> Result<Self, ReserveError> {
+        if(capacity < 0) { Err(ReserveError::CapacityOverflow) } else { Ok(Self { bytes: [] }) }
+    }
+    pub fn len(b: &Self) -> Int { len_at(&b.bytes) }
+    pub fn as_slice<'a>(b: &'a Self) -> Slice<'a, u8> { Slice::of(&b.bytes) }
+    pub fn reserve(b: &mut Self, additional: Int) -> Result<(), ReserveError> {
+        if(additional < 0) { Err(ReserveError::CapacityOverflow) } else { Ok(()) }
+    }
+    pub fn push(b: &mut Self, byte: u8) -> Result<(), ReserveError> { b.bytes = push(b.bytes, byte); Ok(()) }
+    pub fn extend<'a>(b: &mut Self, bytes: Slice<'a, u8>) -> Result<(), ReserveError> { b.bytes = slice_onto(b.bytes, &bytes, 0); Ok(()) }
+    pub fn write_u16_le(b: &mut Self, input: u16) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 2); Ok(()) }
+    pub fn write_u32_le(b: &mut Self, input: u32) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 4); Ok(()) }
+    pub fn write_u64_le(b: &mut Self, input: u64) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 8); Ok(()) }
+    pub fn write_u128_le(b: &mut Self, input: u128) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 16); Ok(()) }
+    pub fn write_u16_be(b: &mut Self, input: u16) -> Result<(), ReserveError> { b.bytes = be_onto(b.bytes, to(input), 2); Ok(()) }
+    pub fn write_u32_be(b: &mut Self, input: u32) -> Result<(), ReserveError> { b.bytes = be_onto(b.bytes, to(input), 4); Ok(()) }
+    pub fn write_u64_be(b: &mut Self, input: u64) -> Result<(), ReserveError> { b.bytes = be_onto(b.bytes, to(input), 8); Ok(()) }
+    pub fn write_var_u64(b: &mut Self, input: u64) -> Result<(), ReserveError> { b.bytes = var_onto(b.bytes, to(input)); Ok(()) }
+    // A number written over bytes already there; all of them, or none.
+    fn patch(b: &mut Self, offset: Int, value: u128, width: Int) -> Result<(), RangeError> {
+        if(offset < 0 or { offset + width > len_at(&b.bytes) }) { Err(RangeError { offset: offset, length: width }) }
+        else { b.bytes = patched(b.bytes, offset, value, width); Ok(()) }
+    }
+    pub fn patch_u16_le(b: &mut Self, offset: Int, input: u16) -> Result<(), RangeError> { ByteBuf::patch(b, offset, to(input), 2) }
+    pub fn patch_u32_le(b: &mut Self, offset: Int, input: u32) -> Result<(), RangeError> { ByteBuf::patch(b, offset, to(input), 4) }
+    pub fn patch_u64_le(b: &mut Self, offset: Int, input: u64) -> Result<(), RangeError> { ByteBuf::patch(b, offset, to(input), 8) }
+    // Zeros up to the next multiple of a power of two.
+    pub fn align_zeroed(b: &mut Self, alignment: Int) -> Result<(), ByteWriteError> {
+        if(is_power_of_two(alignment)) {
+            let over = len_at(&b.bytes) % alignment;
+            b.bytes = zeros_onto(b.bytes, (alignment - over) % alignment);
+            Ok(())
+        } else { Err(ByteWriteError::InvalidAlignment) }
+    }
+    // Made so long: with zeros added, or cut short.
+    pub fn resize_zeroed(b: &mut Self, length: Int) -> Result<(), ReserveError> {
+        if(length < 0) { Err(ReserveError::CapacityOverflow) } else {
+            let n = len_at(&b.bytes);
+            b.bytes = if(length >= n) { zeros_onto(b.bytes, length - n) } else { piece(&b.bytes, 0, length, []) };
+            Ok(())
+        }
+    }
+    pub fn mark(b: &Self) -> BufferMark { BufferMark { length: len_at(&b.bytes) } }
+    pub fn truncate_to(b: &mut Self, mark: BufferMark) -> Result<(), MarkError> {
+        if(mark.length > len_at(&b.bytes)) { Err(MarkError::Stale) } else { b.bytes = piece(&b.bytes, 0, mark.length, []); Ok(()) }
+    }
+    pub fn finish(b: Self) -> [u8] { b.bytes }
+}
+
+pub enum HexErrorKind { InvalidDigit, OddLength, IncorrectLength }
+pub struct HexError { pub offset: Int, pub kind: HexErrorKind }
+
+fn hex_digit(n: Int) -> char { match(char(if(n < 10) { 48 + n } else { 87 + n })) { Some(c) => c, None => '0' } }
+
+// (From the last byte back: a text is built from its end.)
+fn hex_onto<'a>(bytes: &Slice<'a, u8>, at: Int, out: Str) -> Str {
+    if(at <= 0) { out } else {
+        let b = byte_at(bytes, at - 1);
+        tail hex_onto(bytes, at - 1, StrChar(hex_digit(b / 16), StrChar(hex_digit(b % 16), out)))
+    }
+}
+
+// Bytes as text, two digits each, the letters small.
+pub fn hex_encode<'a>(bytes: Slice<'a, u8>) -> Str { hex_onto(&bytes, Slice::len(&bytes), "") }
+
+fn hex_value(c: char) -> Option<Int> {
+    let n = int(c);
+    if(48 <= n and { n <= 57 }) { Some(n - 48) } else {
+        if(97 <= n and { n <= 102 }) { Some(n - 87) } else {
+            if(65 <= n and { n <= 70 }) { Some(n - 55) } else { None }
+        }
+    }
+}
+
+fn hex_from(text: Str, at: Int, out: [u8]) -> Result<[u8], HexError> {
+    match(text) {
+        StrEnd => Ok(out),
+        StrChar(a, rest) => match(rest) {
+            StrEnd => Err(HexError { offset: at, kind: HexErrorKind::OddLength }),
+            StrChar(b, more) => match(hex_value(a)) {
+                None => Err(HexError { offset: at, kind: HexErrorKind::InvalidDigit }),
+                Some(high) => match(hex_value(b)) {
+                    None => Err(HexError { offset: at + 1, kind: HexErrorKind::InvalidDigit }),
+                    Some(low) => tail hex_from(more, at + 2, push(out, u8(high * 16 + low)))
+                }
+            }
+        }
+    }
+}
+
+// The bytes a text of hexadecimal digits says, or where it stops being one.
+pub fn hex_decode(text: Str) -> Result<[u8], HexError> { hex_from(text, 0, []) }
+
+// Bytes as text six bits to a character.
+pub enum Base64Alphabet { Standard, UrlSafe }
+pub enum Padding { Required, Optional, Forbidden }
+pub struct Base64Options { pub alphabet: Base64Alphabet, pub padding: Padding }
+pub enum Base64ErrorKind { InvalidDigit, InvalidPadding, NonCanonicalTail, IncorrectLength }
+pub struct Base64Error { pub offset: Int, pub kind: Base64ErrorKind }
+
+fn is_url(options: &Base64Options) -> Bool { match(options.alphabet) { Base64Alphabet::UrlSafe => true, Base64Alphabet::Standard => false } }
+
+fn letter(n: Int) -> char { match(char(n)) { Some(c) => c, None => '?' } }
+
+fn digit64(n: Int, url: Bool) -> char {
+    if(n < 26) { letter(65 + n) } else {
+        if(n < 52) { letter(71 + n) } else {
+            if(n < 62) { letter(n - 4) } else {
+                if(n == 62) { if(url) { '-' } else { '+' } } else { if(url) { '_' } else { '/' } }
+            }
+        }
+    }
+}
+
+fn value64(c: char, url: Bool) -> Option<Int> {
+    let n = int(c);
+    if(65 <= n and { n <= 90 }) { Some(n - 65) } else {
+        if(97 <= n and { n <= 122 }) { Some(n - 71) } else {
+            if(48 <= n and { n <= 57 }) { Some(n + 4) } else {
+                if(c == (if(url) { '-' } else { '+' })) { Some(62) } else {
+                    if(c == (if(url) { '_' } else { '/' })) { Some(63) } else { None }
+                }
+            }
+        }
+    }
+}
+
+// The digits of the bytes from a place on, three bytes to four digits; the
+// last one or two bytes to two or three.
+fn digits64<'a>(bytes: &Slice<'a, u8>, at: Int, out: [Int]) -> [Int] {
+    let left = Slice::len(bytes) - at;
+    if(left <= 0) { out } else {
+        let a = byte_at(bytes, at);
+        if(left == 1) { push(push(out, a / 4), (a % 4) * 16) } else {
+            let b = byte_at(bytes, at + 1);
+            if(left == 2) { push(push(push(out, a / 4), (a % 4) * 16 + b / 16), (b % 16) * 4) } else {
+                let c = byte_at(bytes, at + 2);
+                tail digits64(bytes, at + 3, push(push(push(push(out, a / 4), (a % 4) * 16 + b / 16), (b % 16) * 4 + c / 64), c % 64))
+            }
+        }
+    }
+}
+
+fn padded(n: Int, out: Str) -> Str { if(n % 4 == 0) { out } else { tail padded(n + 1, StrChar('=', out)) } }
+
+fn text64(digits: &[Int], i: Int, url: Bool, out: Str) -> Str {
+    if(i <= 0) { out } else {
+        tail text64(digits, i - 1, url, StrChar(digit64(match(element(digits, i - 1)) { Some(d) => *d, None => 0 }, url), out))
+    }
+}
+
+pub fn base64_encode<'a>(bytes: Slice<'a, u8>, options: Base64Options) -> Str {
+    let digits = digits64(&bytes, 0, []);
+    let n = len(digits);
+    let end = match(options.padding) { Padding::Required => padded(n, ""), Padding::Optional => padded(n, ""), Padding::Forbidden => "" };
+    text64(&digits, n, is_url(&options), end)
+}
+
+// The digits a text has before its padding, and how many `=` follow them:
+// or the place of a character that is neither.
+fn read64(text: Str, at: Int, url: Bool, digits: [Int], pads: Int) -> Result<([Int], Int), Base64Error> {
+    match(text) {
+        StrEnd => Ok((digits, pads)),
+        StrChar(c, rest) =>
+            if(c == '=') { tail read64(rest, at + 1, url, digits, pads + 1) } else {
+                // A digit after padding is not where one can be.
+                if(pads > 0) { Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidPadding }) } else {
+                    match(value64(c, url)) {
+                        Some(v) => tail read64(rest, at + 1, url, push(digits, v), 0),
+                        None => Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidDigit })
+                    }
+                }
+            }
+    }
+}
+
+fn bytes64(digits: &[Int], at: Int, out: [u8]) -> Result<[u8], Base64Error> {
+    let left = len_at(digits) - at;
+    let d = fn(i: Int) -> Int { match(element(digits, at + i)) { Some(v) => *v, None => 0 } };
+    if(left <= 0) { Ok(out) } else {
+        if(left == 1) { Err(Base64Error { offset: at, kind: Base64ErrorKind::IncorrectLength }) } else {
+            let first = u8(d(0) * 4 + d(1) / 16);
+            if(left == 2) {
+                // (Bits left over have to be nothing: the one way to write it.)
+                if(d(1) % 16 != 0) { Err(Base64Error { offset: at + 1, kind: Base64ErrorKind::NonCanonicalTail }) } else { Ok(push(out, first)) }
+            } else {
+                let second = u8((d(1) % 16) * 16 + d(2) / 4);
+                if(left == 3) {
+                    if(d(2) % 4 != 0) { Err(Base64Error { offset: at + 2, kind: Base64ErrorKind::NonCanonicalTail }) } else { Ok(push(push(out, first), second)) }
+                } else {
+                    bytes64(digits, at + 4, push(push(push(out, first), second), u8((d(2) % 4) * 64 + d(3))))
+                }
+            }
+        }
+    }
+}
+
+// The bytes a text says, or where it stops being one: nothing is skipped,
+// and padding is taken as the options say.
+pub fn base64_decode(text: Str, options: Base64Options) -> Result<[u8], Base64Error> {
+    match(read64(text, 0, is_url(&options), [], 0)) {
+        Err(e) => Err(e),
+        Ok((digits, pads)) =>
+            let n = len(digits);
+            let wanted = (4 - n % 4) % 4;
+            let fits = match(options.padding) {
+                Padding::Required => pads == wanted,
+                Padding::Optional => pads == 0 or { pads == wanted },
+                Padding::Forbidden => pads == 0
+            };
+            if(fits) { bytes64(&digits, 0, []) } else { Err(Base64Error { offset: n, kind: Base64ErrorKind::InvalidPadding }) }
+    }
+}

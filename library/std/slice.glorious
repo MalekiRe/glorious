@@ -1,0 +1,53 @@
+// A stretch of an array, borrowed: the array is not copied, and an element is
+// looked at where it is. The shape the library specification gives a slice
+// (14); places and lengths are `Int`.
+
+use std::iterator::{Iterator};
+
+pub struct Slice<'a, T> { items: &'a [T], from: Int, to: Int }
+
+impl<'a, T> Slice<'a, T> {
+    // The whole of an array.
+    pub fn of(items: &'a [T]) -> Self where T: Use<[1, 1]> { Self { items: items, from: 0, to: len_at(items) } }
+    pub fn len(s: &Self) -> Int { s.to - s.from }
+    pub fn is_empty(s: &Self) -> Bool { s.to == s.from }
+    pub fn get(s: &Self, i: Int) -> Option<&'a T> where T: Use<[1, 1]> {
+        if(i < 0) { None } else {
+            if(s.from + i < s.to) { element(s.items, s.from + i) } else { None }
+        }
+    }
+    pub fn first(s: &Self) -> Option<&'a T> where T: Use<[1, 1]> { Slice::get(s, 0) }
+    pub fn last(s: &Self) -> Option<&'a T> where T: Use<[1, 1]> { Slice::get(s, s.to - s.from - 1) }
+    // The stretch from one place of this one up to, not including, another.
+    pub fn sub(s: &Self, from: Int, to: Int) -> Option<Slice<'a, T>> where T: Use<[1, 1]> {
+        if(from < 0) { None } else {
+            if(to < from) { None } else {
+                if(s.from + to > s.to) { None } else {
+                    Some(Slice { items: s.items, from: s.from + from, to: s.from + to })
+                }
+            }
+        }
+    }
+    // What is before a place, and what is from it on.
+    pub fn split_at(s: &Self, mid: Int) -> Option<(Slice<'a, T>, Slice<'a, T>)> where T: Use<[1, 1]> {
+        match(Slice::sub(s, 0, mid)) {
+            Some(before) => match(Slice::sub(s, mid, s.to - s.from)) {
+                Some(after) => Some((before, after)),
+                None => None
+            },
+            None => None
+        }
+    }
+    pub fn iter(s: &Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { SliceIter { items: s.items, at: s.from, end: s.to } }
+}
+
+// The elements of a slice by reference, first to last.
+pub struct SliceIter<'a, T> { items: &'a [T], at: Int, end: Int }
+
+
+impl<'a, T> Iterator for SliceIter<'a, T> {
+    type Item = &'a T;
+    fn next(it: &mut SliceIter<'a, T>) -> Option<&'a T> {
+        if(it.at < it.end) { let i = it.at; it.at = i + 1; element(it.items, i) } else { None }
+    }
+}

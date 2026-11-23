@@ -1,0 +1,369 @@
+// Arrays: `[T]`. Nothing here changes an array it is given; each gives a new one.
+
+pub fn is_empty<T>(a: T) -> Bool where T: Len, T: Use<[1, 1]> { len(a) == 0 }
+
+pub fn first<T>(a: [T]) -> Option<T> { get(a, 0) }
+pub fn last<T>(a: [T]) -> Option<T> where T: Use<[0, *]> { get(a, len(a) - 1) }
+
+// The numbers from `from` up to, not including, `to`.
+pub fn range(from: Int, to: Int) -> [Int] { range_onto(from, to, []) }
+fn range_onto(i: Int, to: Int, out: [Int]) -> [Int] {
+    if(i < to) { tail range_onto(i + 1, to, push(out, i)) } else { out }
+}
+
+// `n` elements, the one at each place what `f` gives for the place.
+pub fn from_fn<T, e: EffectRow>(n: Int, f: fn(Int) -> T / {| e}) -> [T] / {| e} { from_fn_onto(n, f, 0, []) }
+fn from_fn_onto<T, e: EffectRow>(n: Int, f: fn(Int) -> T / {| e}, i: Int, out: [T]) -> [T] / {| e} {
+    if(i < n) { tail from_fn_onto(n, f, i + 1, push(out, f(i))) } else { out }
+}
+
+pub fn map<T, U, e: EffectRow>(a: [T], f: fn(T) -> U / {| e}) -> [U] / {| e} where T: Use<[0, *]> { fold(a, [], fn(out, x) { push(out, f(x)) }) }
+
+// The elements `keep` says yes to.
+pub fn filter<T, U, V, e: EffectRow>(a: [T], keep: fn(T) -> Result<U, V> / {| e}) -> [T] / {| e} where T: Use<[0, *]> { fold(a, [], fn(out, x) { if(keep(x)) { push(out, x) } else { out } }) }
+
+// Each element with its place.
+pub fn enumerate<T, U>(a: T) -> [(Int, U)] where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { from_fn(len(a), { i => (i, a[i]) }) }
+
+pub fn reverse<T, U>(a: T) -> [U] where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { from_fn(len(a), { i => a[len(a) - 1 - i] }) }
+
+// One array after another.
+pub fn append<T>(a: [T], b: [T]) -> [T] where T: Use<[0, *]> { fold(b, a, fn(out, x) { push(out, x) }) }
+
+// The arrays of an array, one after another.
+pub fn concat<T>(parts: [[T]]) -> [T] where T: Use<[0, *]> { fold(parts, [], fn(out, part) { append(out, part) }) }
+
+// The first `n` elements, and the rest.
+pub fn take<T, U>(a: T, n: Int) -> [U] where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { slice(a, 0, if(n < len(a)) { n } else { len(a) }) }
+pub fn drop<T, U>(a: T, n: Int) -> [U] where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { slice(a, if(n < len(a)) { n } else { len(a) }, len(a)) }
+
+// Pairs of the elements at the same places, as many as the shorter has.
+pub fn zip<T, U, V, W>(a: T, b: U) -> [(V, W)] where T: Len, U: Len, T: Index, U: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]>, W: Use<[0, *]> { from_fn(if(len(a) < len(b)) { len(a) } else { len(b) }, { i => (a[i], b[i]) }) }
+
+// The place of the first element `wanted` says yes to.
+pub fn position<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<Int> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { position_from(a, wanted, 0) }
+fn position_from<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}, i: Int) -> Option<Int> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> {
+    if(i < len(a)) {
+        if(wanted(a[i])) { Some(i) } else { tail position_from(a, wanted, i + 1) }
+    } else { None }
+}
+
+// The first element `wanted` says yes to.
+pub fn find<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<U> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { match(position(a, wanted)) { Some(i) => Some(a[i]), None => None } }
+
+pub fn any<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { match(position(a, wanted)) { Some(_) => true, None => false } }
+pub fn all<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { not any(a, { x => not wanted(x) }) }
+pub fn contains<T, U>(a: T, x: U) -> Bool where U: Eq, T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { any(a, { y => y == x }) }
+
+// How many elements `wanted` says yes to.
+pub fn count<T, U, V, e: EffectRow>(a: [T], wanted: fn(T) -> Result<U, V> / {| e}) -> Int / {| e} where T: Use<[0, *]> { fold(a, 0, fn(n, x) { if(wanted(x)) { n + 1 } else { n } }) }
+
+pub fn sum(a: [Int]) -> Int { fold(a, 0, fn(total, x) { total + x }) }
+pub fn product(a: [Int]) -> Int { fold(a, 1, fn(total, x) { total * x }) }
+
+// The least and the greatest, if there is any element.
+pub fn minimum<T>(a: [T]) -> Option<T> where T: Ord, T: Use<[0, *]> {
+    if(len(a) == 0) { None } else { Some(fold(a, a[0], fn(m, x) { if(x < m) { x } else { m } })) }
+}
+pub fn maximum<T>(a: [T]) -> Option<T> where T: Ord, T: Use<[0, *]> {
+    if(len(a) == 0) { None } else { Some(fold(a, a[0], fn(m, x) { if(m < x) { x } else { m } })) }
+}
+
+// The array with the elements at two places changed over.
+pub fn swap<T>(a: T, i: Int, j: Int) -> T where T: Index, T: Use<[0, *]> {
+    let x = a[i];
+    let y = a[j];
+    index_set(index_set(a, i, y), j, x)
+}
+
+// The elements in order, by `<`. Elements that are equal stay as they were
+// to each other.
+pub fn sort<T>(a: [T]) -> [T] where T: Ord, T: Use<[0, *]> { sort_by(a, fn(x, y) { x < y }) }
+
+// The elements in the order `before` gives: `before(x, y)` says `x` comes
+// before `y`.
+pub fn sort_by<T, U, V, e: EffectRow>(a: [T], before: fn(T, T) -> Result<U, V> / {| e}) -> [T] / {| e} where T: Use<[0, *]>, U: Use<[1, 1]>, V: Use<[1, 1]> {
+    if(len(a) < 2) { a } else {
+        let half = len(a) / 2;
+        merge(sort_by(slice(a, 0, half), before), sort_by(slice(a, half, len(a)), before), before)
+    }
+}
+
+// Two arrays in order as one in order.
+fn merge<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]>, W: Use<[1, 1]>, X: Use<[1, 1]> { merge_from(a, b, before, 0, 0, []) }
+fn merge_from<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}, i: Int, j: Int, out: [V]) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]> {
+    if(i < len(a)) {
+        if(j < len(b)) {
+            if(before(b[j], a[i])) { tail merge_from(a, b, before, i, j + 1, push(out, b[j])) }
+            else { tail merge_from(a, b, before, i + 1, j, push(out, a[i])) }
+        } else { tail merge_from(a, b, before, i + 1, j, push(out, a[i])) }
+    } else {
+        if(j < len(b)) { tail merge_from(a, b, before, i, j + 1, push(out, b[j])) } else { out }
+    }
+}
+
+// Where `x` is in an array in order, or where it would go.
+pub fn binary_search<T, U>(a: T, x: U) -> Result<Int, Int> where T: Len, T: Index, U: Ord, T: Use<[0, *]>, U: Use<[0, *]> { search_in(a, x, 0, len(a)) }
+fn search_in<T, U>(a: T, x: U, low: Int, high: Int) -> Result<Int, Int> where T: Index, U: Ord, T: Use<[0, *]>, U: Use<[0, *]> {
+    if(low < high) {
+        let mid = low + (high - low) / 2;
+        if(a[mid] < x) { tail search_in(a, x, mid + 1, high) }
+        else { if(x < a[mid]) { tail search_in(a, x, low, mid) } else { Ok(mid) } }
+    } else { Err(low) }
+}
+
+// The array without an element that is equal to the one before it.
+pub fn dedup<T>(a: [T]) -> [T] where T: Eq, T: Use<[0, *]> {
+    fold(a, [], fn(out, x) {
+        if(len(out) == 0) { push(out, x) } else {
+            if(out[len(out) - 1] == x) { out } else { push(out, x) }
+        }
+    })
+}
+
+// `f(f(init, a0, b0), a1, b1)` and so on, of an array of pairs.
+pub fn fold_pairs<T, U, V, e: EffectRow>(pairs: [(T, U)], init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
+
+// How long an array is (the prelude's `len`, of arrays alone).
+pub fn len_of<T>(a: [T]) -> Int where T: Use<[1, 1]> { len(a) }
+
+// A growable array changed where it is, in the shape the library
+// specification gives it (15): functions of the type, `&mut Self` to change
+// one, `Option<&T>` to look at an element. Sizes and places are `Int`.
+use std::slice::{Slice, SliceIter};
+
+pub struct Vec<T> { items: [T] }
+
+// The last `n` elements of an array taken off, last first, and what is left.
+fn taken_off<T>(a: [T], n: Int, off: [T]) -> ([T], [T]) where T: Use<[1, 1]> {
+    if(n <= 0) { (a, off) } else {
+        match(pop(a)) {
+            Some((rest, last)) => tail taken_off(rest, n - 1, push(off, last)),
+            None => ([], off)
+        }
+    }
+}
+
+// The elements of one array onto another, last first.
+fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
+    match(pop(from)) {
+        Some((rest, last)) => tail turned(rest, push(onto, last)),
+        None => onto
+    }
+}
+
+// What was taken off, put back in the order it had.
+fn put_back<T>(a: [T], off: [T]) -> [T] where T: Use<[1, 1]> {
+    match(pop(off)) {
+        Some((rest, next)) => tail put_back(push(a, next), rest),
+        None => a
+    }
+}
+
+// `v[i]`, and `v[i] = x`, as of the array it holds: a place that is not
+// there stops the program.
+impl<T> Index for Vec<T> {
+    type Elem = T;
+    fn index(v: Vec<T>, i: Int) -> T { arr_get(v.items, i) }
+    fn index_set(v: Vec<T>, i: Int, x: T) -> Vec<T> { Vec { items: arr_set(v.items, i, x) } }
+}
+impl<T> Indexed for Vec<T> {
+    type Element = T;
+    fn element_at(v: &Vec<T>, i: Int) -> &T { element_at(&v.items, i) }
+    fn size_at(v: &Vec<T>) -> Int { len_at(&v.items) }
+}
+impl<T> IndexedMut for Vec<T> { fn place_at(i: Int, v: &mut Vec<T>) -> &mut <Vec<T> as Indexed>::Element { place_at(i, &mut v.items) } }
+impl<T> Clone for Vec<T> where T: Clone { fn clone(v: &Vec<T>) -> Vec<T> { Vec { items: clone(&v.items) } } }
+
+impl<T> Vec<T> {
+    pub fn new() -> Self { Self { items: [] } }
+    pub fn with_capacity(capacity: Int) -> Self { Self { items: [] } }
+    pub fn from_array(items: [T]) -> Self where T: Use<[1, 1]> { Self { items: items } }
+    pub fn into_array(value: Self) -> [T] where T: Use<[1, 1]> { match(value) { Vec { items } => items } }
+    pub fn len(value: &Self) -> Int { len_at(&value.items) }
+    pub fn is_empty(value: &Self) -> Bool { len_at(&value.items) == 0 }
+    pub fn get<'a>(value: &'a Self, index: Int) -> Option<&'a T> where T: Use<[1, 1]> { element(&value.items, index) }
+    pub fn get_mut<'a>(value: &'a mut Self, index: Int) -> Option<&'a mut T> where T: Use<[1, 1]> {
+        element_mut(&mut value.items, index)
+    }
+    pub fn first<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { element(&value.items, 0) }
+    pub fn last<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> {
+        element(&value.items, len_at(&value.items) - 1)
+    }
+    pub fn push(value: &mut Self, item: T) where T: Use<[1, 1]> {
+        push_at(&mut value.items, item);
+    }
+    pub fn pop(value: &mut Self) -> Option<T> where T: Use<[1, 1]> {
+        pop_at(&mut value.items)
+    }
+    // The item put at a place, what was there and after it moving up; the
+    // item given back if there is no such place.
+    pub fn insert(value: &mut Self, index: Int, item: T) -> Result<(), T> where T: Use<[1, 1]> {
+        let items = &mut value.items;
+        let n = len_at(&*items);
+        if(index < 0) { Err(item) } else {
+            if(index > n) { Err(item) } else {
+                match(taken_off(replace(items, []), n - index, [])) {
+                    (before, off) => unsafe { restore_at(items, put_back(push(before, item), off)) }; Ok(())
+                }
+            }
+        }
+    }
+    // The element at a place taken out, what was after it moving down.
+    pub fn remove(value: &mut Self, index: Int) -> Option<T> {
+        let items = &mut value.items;
+        let n = len_at(&*items);
+        if(index < 0) { None } else {
+            if(index >= n) { None } else {
+                match(taken_off(replace(items, []), n - index - 1, [])) {
+                    (upto, off) => match(pop(upto)) {
+                        Some((before, taken)) => unsafe { restore_at(items, put_back(before, off)) }; Some(taken),
+                        None => None
+                    }
+                }
+            }
+        }
+    }
+    // Everything of another put after what is here.
+    pub fn append(value: &mut Self, source: Self) {
+        let items = &mut value.items;
+        match(source) { Vec { items: more } => let all = put_back(replace(items, []), turned(more, [])); unsafe { restore_at(items, all) } }
+    }
+    pub fn reverse(value: &mut Self) {
+        let items = &mut value.items;
+        let all = turned(replace(items, []), []);
+        unsafe { restore_at(items, all) };
+    }
+    // In order, by `<`, equal ones as they were to each other; or in the
+    // order `before` gives.
+    pub fn sort(value: &mut Self) where T: Ord, T: Use<[0, *]> {
+        let items = &mut value.items;
+        let all = sort(replace(items, []));
+        unsafe { restore_at(items, all) };
+    }
+    pub fn sort_by<e: EffectRow>(value: &mut Self, before: fn(T, T) -> Bool / {| e}) / {| e} where T: Use<[0, *]> {
+        let items = &mut value.items;
+        let all = sort_by(replace(items, []), before);
+        unsafe { restore_at(items, all) };
+    }
+    // How many it holds room for without growing: as many as it holds, here.
+    pub fn capacity(value: &Self) -> Int { len_at(&value.items) }
+    pub fn reserve(value: &mut Self, additional: Int) { () }
+    pub fn shrink_to_fit(value: &mut Self) { () }
+    // The element at a place, which must be there.
+    pub fn index<'a>(value: &'a Self, index: Int) -> &'a T where T: Use<[1, 1]> { element_at(&value.items, index) }
+    pub fn index_mut<'a>(value: &'a mut Self, index: Int) -> &'a mut T where T: Use<[1, 1]> { place_at(index, &mut value.items) }
+    pub fn first_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> where T: Use<[1, 1]> { element_mut(&mut value.items, 0) }
+    pub fn last_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> where T: Use<[1, 1]> {
+        let n = len_at(&value.items);
+        element_mut(&mut value.items, n - 1)
+    }
+    // The element at a place, the last put in its place.
+    pub fn swap_remove(value: &mut Self, index: Int) -> Option<T> where T: Use<[1, 1]> {
+        let n = len_at(&value.items);
+        if(index < 0 or { index >= n }) { None } else {
+            match(pop_at(&mut value.items)) {
+                Some(last) => if(index == n - 1) { Some(last) } else { Some(replace(&mut value.items[index], last)) },
+                None => None
+            }
+        }
+    }
+    // What is at a place, with another put there; or the other given back.
+    pub fn replace(value: &mut Self, index: Int, item: T) -> Result<T, T> where T: Use<[1, 1]> {
+        if(index < 0 or { index >= len_at(&value.items) }) { Err(item) } else { Ok(replace(&mut value.items[index], item)) }
+    }
+    // The elements at two places changed over.
+    pub fn swap(value: &mut Self, left: Int, right: Int) -> Result<(), ()> {
+        let n = len_at(&value.items);
+        if(left < 0 or { right < 0 } or { left >= n } or { right >= n }) { Err(()) } else {
+            if(left != right) {
+                let first = Vec::remove(value, left);
+                let a = match(first) { Some(x) => x, None => unreachable("a place that is there") };
+                let at = if(right > left) { right - 1 } else { right };
+                let b = Vec::replace(value, at, a);
+                match(b) {
+                    Ok(y) => match(Vec::insert(value, left, y)) { Ok(_) => (), Err(z) => std::value::discard(z) },
+                    Err(z) => std::value::discard(z)
+                }
+            } else { () };
+            Ok(())
+        }
+    }
+    // The elements turned: the first `count` taken from the front to the back.
+    pub fn rotate_left(value: &mut Self, count: Int) -> Result<(), ()> {
+        let n = len_at(&value.items);
+        if(count < 0 or { count > n }) { Err(()) } else {
+            let rest = Vec::split_off_at(value, count);
+            let front = replace(&mut value.items, []);
+            value.items = rest;
+            Vec::append(value, Vec { items: front });
+            Ok(())
+        }
+    }
+    pub fn rotate_right(value: &mut Self, count: Int) -> Result<(), ()> {
+        let n = len_at(&value.items);
+        if(count < 0 or { count > n }) { Err(()) } else { Vec::rotate_left(value, n - count) }
+    }
+    // The elements from a place on, taken off into a new one.
+    pub fn split_off(value: &mut Self, index: Int) -> Result<Self, ()> {
+        if(index < 0 or { index > len_at(&value.items) }) { Err(()) } else { Ok(Vec { items: Vec::split_off_at(value, index) }) }
+    }
+    fn split_off_at(value: &mut Self, index: Int) -> [T] {
+        let items = &mut value.items;
+        let n = len_at(&*items);
+        let (kept, off) = taken_off(replace(items, []), n - index, []);
+        *items = kept;
+        turned(off, [])
+    }
+    // So many elements: those after the length let go, or copies of the
+    // fill put on.
+    pub fn resize(value: &mut Self, length: Int, fill: T) {
+        let n = len_at(&value.items);
+        if(length < n) { Vec::truncate(value, length) }
+        else { let mut i = n; while({ i < length }) { push_at(&mut value.items, fill); i = i + 1 } }
+    }
+    // Those for which the test holds, kept in order; the rest let go.
+    pub fn retain<e: EffectRow>(value: &mut Self, keep: for<'a> fn(&'a T) -> Bool / {| e}) / {| e} {
+        let mut all = turned(replace(&mut value.items, []), []);
+        let mut kept = [];
+        loop({
+            match(pop_at(&mut all)) {
+                Some(x) => if(keep(&x)) { push_at(&mut kept, x) } else { std::value::discard(x) },
+                None => break(())
+            }
+        });
+        value.items = kept
+    }
+    pub fn into_iter(value: Self) -> std::iterator::IntoIter<T> where T: Use<[1, 1]> { std::iterator::into_iter(Vec::into_array(value)) }
+    pub fn finish_empty(value: Self) -> Result<(), Self> {
+        if(len_at(&value.items) == 0) { match(value) { Vec { items } => std::value::discard(items) }; Ok(()) } else { Err(value) }
+    }
+    // Is a value equal to one of the elements?
+    pub fn contains(value: &Self, item: &T) -> Bool where T: Eq, T: Use<[0, *]> {
+        let mut i = 0;
+        let n = len_at(&value.items);
+        let mut found = false;
+        while({ i < n and { not found } }) { if(value.items[i] == *item) { found = true } else { () }; i = i + 1 };
+        found
+    }
+    pub fn extend(value: &mut Self, more: [T]) {
+        let mut rest = turned(more, []);
+        loop({ match(pop_at(&mut rest)) { Some(x) => push_at(&mut value.items, x), None => break(()) } })
+    }
+    // Only so many kept: the rest are let go.
+    pub fn truncate(value: &mut Self, length: Int) {
+        let items = &mut value.items;
+        let n = len_at(&*items);
+        // (What is taken off is destroyed: a pattern's `_` does that.)
+        let (kept, _) = taken_off(replace(items, []), n - length, []);
+        *items = kept;
+    }
+    pub fn clear(value: &mut Self) {
+        let items = &mut value.items;
+        *items = [];
+    }
+    // The elements as a slice: looked at where they are.
+    pub fn as_slice<'a>(value: &'a Self) -> Slice<'a, T> where T: Use<[1, 1]> { Slice::of(&value.items) }
+    // The elements one after another, by reference.
+    pub fn iter<'a>(value: &'a Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { Slice::iter(&Slice::of(&value.items)) }
+}

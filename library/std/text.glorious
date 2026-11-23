@@ -1,0 +1,193 @@
+// Texts: `Str`.
+
+use std::vec;
+
+pub fn is_empty(text: Str) -> Bool { match(text) { StrEnd => true, _ => false } }
+
+pub fn reverse(text: Str) -> Str { reverse_onto(text, "") }
+fn reverse_onto(text: Str, out: Str) -> Str {
+    match(text) { StrEnd => out, StrChar(c, rest) => tail reverse_onto(rest, StrChar(c, out)) }
+}
+
+// Does a text begin, end, or have somewhere in it, another?
+pub fn starts_with(text: Str, start: Str) -> Bool {
+    match((text, start)) {
+        (_, StrEnd) => true,
+        (StrChar(c, rest), StrChar(d, more)) => if(c == d) { starts_with(rest, more) } else { false },
+        _ => false
+    }
+}
+pub fn ends_with(text: Str, end: Str) -> Bool { starts_with(reverse(text), reverse(end)) }
+pub fn contains(text: Str, part: Str) -> Bool { match(find(text, part)) { Some(_) => true, None => false } }
+
+// Where a part of a text first begins.
+pub fn find(text: Str, part: Str) -> Option<Int> { find_from(text, part, 0) }
+fn find_from(text: Str, part: Str, at: Int) -> Option<Int> {
+    if(starts_with(text, part)) { Some(at) } else {
+        match(text) { StrEnd => None, StrChar(_, rest) => tail find_from(rest, part, at + 1) }
+    }
+}
+
+// The first `n` characters, and the rest.
+pub fn take(text: Str, n: Int) -> Str {
+    if(n <= 0) { "" } else { match(text) { StrEnd => "", StrChar(c, rest) => StrChar(c, take(rest, n - 1)) } }
+}
+pub fn drop(text: Str, n: Int) -> Str {
+    if(n <= 0) { text } else { match(text) { StrEnd => "", StrChar(_, rest) => tail drop(rest, n - 1) } }
+}
+
+pub fn char_at(text: Str, i: Int) -> Option<char> {
+    match(text) { StrEnd => None, StrChar(c, rest) => if(i == 0) { Some(c) } else { tail char_at(rest, i - 1) } }
+}
+
+pub fn map<e: EffectRow>(text: Str, f: fn(char) -> char / {| e}) -> Str / {| e} {
+    match(text) { StrEnd => "", StrChar(c, rest) => StrChar(f(c), map(rest, f)) }
+}
+pub fn to_upper(text: Str) -> Str { map(text, std::char::to_upper) }
+pub fn to_lower(text: Str) -> Str { map(text, std::char::to_lower) }
+
+// The text without the spaces at its ends.
+pub fn trim(text: Str) -> Str { reverse(trim_start(reverse(trim_start(text)))) }
+pub fn trim_start(text: Str) -> Str {
+    match(text) {
+        StrEnd => "",
+        StrChar(c, rest) => if(std::char::is_space(c)) { tail trim_start(rest) } else { text }
+    }
+}
+
+// The parts of a text between each two of a character.
+pub fn split(text: Str, at: char) -> [Str] { split_onto(text, at, "", []) }
+fn split_onto(text: Str, at: char, part: Str, out: [Str]) -> [Str] {
+    match(text) {
+        StrEnd => push(out, reverse(part)),
+        StrChar(c, rest) =>
+            if(c == at) { tail split_onto(rest, at, "", push(out, reverse(part))) }
+            else { tail split_onto(rest, at, StrChar(c, part), out) }
+    }
+}
+pub fn lines(text: Str) -> [Str] { split(text, '\n') }
+
+// The words of a text: what is between its spaces.
+pub fn words(text: Str) -> [Str] { vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
+
+// Texts one after another, with another between each two.
+pub fn join(parts: [Str], between: Str) -> Str {
+    fold(parts, "", fn(out, part) { if(is_empty(out)) { part } else { out ++ between ++ part } })
+}
+pub fn concat(parts: [Str]) -> Str { fold(parts, "", fn(out, part) { out ++ part }) }
+
+pub fn repeat(text: Str, n: Int) -> Str { if(n <= 0) { "" } else { text ++ repeat(text, n - 1) } }
+
+// The whole number a text writes, if it writes one: digits, perhaps after `-`.
+pub fn parse_int(text: Str) -> Option<Int> {
+    match(text) {
+        StrChar('-', rest) => match(digits_value(rest, 0, 0)) { Some(n) => Some(0 - n), None => None },
+        _ => digits_value(text, 0, 0)
+    }
+}
+fn digits_value(text: Str, seen: Int, value: Int) -> Option<Int> {
+    match(text) {
+        StrEnd => if(seen > 0) { Some(value) } else { None },
+        StrChar(c, rest) => match(std::char::digit(c)) {
+            Some(d) => tail digits_value(rest, seen + 1, value * 10 + d),
+            None => None
+        }
+    }
+}
+
+// A text put to a width with a character before it, or after it.
+pub fn pad_start(text: Str, width: Int, with: char) -> Str {
+    if(length(text) < width) { tail pad_start(StrChar(with, text), width, with) } else { text }
+}
+pub fn pad_end(text: Str, width: Int, with: char) -> Str {
+    reverse(pad_start(reverse(text), width, with))
+}
+
+// A text as bytes: each character as UTF-8 has it.
+pub fn utf8(text: Str) -> [u8] { utf8_onto(text, []) }
+fn utf8_onto(text: Str, out: [u8]) -> [u8] {
+    match(text) {
+        StrEnd => out,
+        StrChar(c, rest) => tail utf8_onto(rest, encode(int(c), out))
+    }
+}
+fn byte(n: Int) -> u8 { u8(n) }
+fn encode(code: Int, out: [u8]) -> [u8] {
+    if(code < 128) { push(out, byte(code)) } else {
+        if(code < 2048) { push(push(out, byte(192 + code / 64)), byte(128 + code % 64)) } else {
+            if(code < 65536) {
+                push(push(push(out, byte(224 + code / 4096)), byte(128 + code / 64 % 64)), byte(128 + code % 64))
+            } else {
+                push(push(push(push(out, byte(240 + code / 262144)), byte(128 + code / 4096 % 64)),
+                    byte(128 + code / 64 % 64)), byte(128 + code % 64))
+            }
+        }
+    }
+}
+
+// The text some bytes are, if they are UTF-8.
+pub fn from_utf8(bytes: [u8]) -> Option<Str> { decode(bytes, len(bytes), "") }
+// Read from the end, so that the text is built from its last character back.
+fn decode(bytes: [u8], end: Int, out: Str) -> Option<Str> {
+    if(end == 0) { Some(out) } else {
+        let last = int(bytes[end - 1]);
+        if(last < 128) { tail decode_one(bytes, end - 1, last, out) } else {
+            if(end < 2) { None } else {
+                let b1 = int(bytes[end - 2]);
+                if(b1 >= 192) { tail decode_one(bytes, end - 2, (b1 - 192) * 64 + (last - 128), out) } else {
+                    if(end < 3) { None } else {
+                        let b2 = int(bytes[end - 3]);
+                        if(b2 >= 224) {
+                            tail decode_one(bytes, end - 3, ((b2 - 224) * 64 + (b1 - 128)) * 64 + (last - 128), out)
+                        } else {
+                            if(end < 4) { None } else {
+                                let b3 = int(bytes[end - 4]);
+                                tail decode_one(bytes, end - 4,
+                                    (((b3 - 240) * 64 + (b2 - 128)) * 64 + (b1 - 128)) * 64 + (last - 128), out)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+fn decode_one(bytes: [u8], end: Int, code: Int, out: Str) -> Option<Str> {
+    match(char(code)) { Some(c) => tail decode(bytes, end, StrChar(c, out)), None => None }
+}
+
+// An owned text that grows where it is, in the shape the library
+// specification gives it (13): its bytes, which are UTF-8.
+pub struct String { bytes: [u8] }
+
+fn bytes_onto(a: [u8], b: [u8], i: Int) -> [u8] {
+    if(i >= len(b)) { a } else { tail bytes_onto(push(a, b[i]), b, i + 1) }
+}
+
+impl String {
+    pub fn new() -> Self { Self { bytes: [] } }
+    pub fn from_str(text: Str) -> Self { Self { bytes: utf8(text) } }
+    pub fn from_utf8(bytes: [u8]) -> Result<Self, [u8]> {
+        match(from_utf8(bytes)) { Some(_) => Ok(Self { bytes: bytes }), None => Err(bytes) }
+    }
+    pub fn into_bytes(value: Self) -> [u8] { match(value) { String { bytes } => bytes } }
+    // The text as a value of its own.
+    pub fn to_str(value: &Self) -> Str {
+        match(from_utf8(value.bytes)) { Some(text) => text, None => "" }
+    }
+    // How many bytes.
+    pub fn len(value: &Self) -> Int { len_at(&value.bytes) }
+    pub fn is_empty(value: &Self) -> Bool { len_at(&value.bytes) == 0 }
+    pub fn push_str(value: &mut Self, text: Str) {
+        let bytes = &mut value.bytes;
+        *bytes = bytes_onto(replace(bytes, []), utf8(text), 0);
+    }
+    pub fn push(value: &mut Self, c: char) { String::push_str(value, show(c)) }
+    pub fn clear(value: &mut Self) {
+        let bytes = &mut value.bytes;
+        *bytes = [];
+    }
+    // The text as a value of its own, as Rust names it.
+    pub fn as_str(value: &Self) -> Str { String::to_str(value) }
+}
+impl Show for String { fn show(s: String) -> Str { String::to_str(&s) } }

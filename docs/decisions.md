@@ -1609,8 +1609,12 @@ block inside is trusted, as it is everywhere.
 ## The standard library is written in the language
 
 **Decision: `std` is a module the compiler has the texts of, and a program
-that names it has it.** The texts are in `Glorious/Std.lean`, one for each
-module; a program that has the word `std` in it, and no module `std` of its
+that names it has it.** The texts are the files of `library/`, one for
+each module (`library/std/vec.glorious` is `std::vec`), read into
+`Glorious/Std.lean` when the compiler is built (`include_str`; the lakefile
+has the directory an input of that module alone, so an edit of one builds
+it again and nothing else); what is written out for each length or scalar
+is written there; a program that has the word `std` in it, and no module `std` of its
 own, is compiled with them as files beside it, `pub mod std;` in its first
 module. Nothing else is special about them: they are resolved, checked and
 elaborated as the program's own modules are, and name each other and the
@@ -7341,6 +7345,10 @@ source in Lean strings 6,021, and the test table 3,928.
     `liveCells` over one run; `fieldOfDeref` as `fieldOfName`.
   - `conditionUses`, the same as `equalUses`, gone: each use was asked
     twice.
+- **The library's texts are files** (`library/`, 5,013 lines of `Std.lean`
+  that were Glorious in Lean strings): not a cut, the same text counted as
+  covey's is. `Std.lean` keeps the table of modules and what it writes out
+  for each length and scalar.
 
 Against Zig 0.14 on the same chain of 2,000 functions (`gen.zig`, Debug,
 Zig's global cache warm as the library's kept check is; an edit of the

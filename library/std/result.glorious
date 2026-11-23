@@ -1,0 +1,30 @@
+// `Result<T, E>`: `Ok(value)` or `Err(error)`.
+
+pub fn is_ok<T, U>(r: Result<T, U>) -> Bool { match(r) { Ok(_) => true, Err(_) => false } }
+pub fn is_err<T, U>(r: Result<T, U>) -> Bool { match(r) { Ok(_) => false, Err(_) => true } }
+
+pub fn unwrap_or<T, U>(r: Result<T, U>, other: T) -> T { match(r) { Ok(x) => x, Err(_) => other } }
+pub fn unwrap_or_else<T, U, e: EffectRow>(r: Result<T, U>, other: fn(U) -> T / {| e}) -> T / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]> { match(r) { Ok(x) => x, Err(e) => other(e) } }
+
+pub fn map<T, U, V, e: EffectRow>(r: Result<T, U>, f: fn(T) -> V / {| e}) -> Result<V, U> / {| e} where T: Use<[1, 1]>, V: Use<[1, 1]>, U: Use<[1, 1]> { match(r) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
+pub fn map_err<T, U, V, e: EffectRow>(r: Result<T, U>, f: fn(U) -> V / {| e}) -> Result<T, V> / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]> { match(r) { Ok(x) => Ok(x), Err(e) => Err(f(e)) } }
+
+// `f` of what succeeded, which may itself fail.
+pub fn and_then<T, U, V, e: EffectRow>(r: Result<T, U>, f: fn(T) -> Result<V, U> / {| e}) -> Result<V, U> / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]> { match(r) { Ok(x) => f(x), Err(e) => Err(e) } }
+
+// What succeeded, or what `f` makes of the failure.
+pub fn or_else<T, U, V, e: EffectRow>(r: Result<T, U>, f: fn(U) -> Result<T, V> / {| e}) -> Result<T, V> / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]> { match(r) { Ok(x) => Ok(x), Err(e) => f(e) } }
+
+// The value, forgetting why there is none.
+pub fn ok<T, U>(r: Result<T, U>) -> Option<T> where T: Use<[1, 1]> { match(r) { Ok(x) => Some(x), Err(_) => None } }
+
+// The failure, if it failed.
+pub fn err<T, U>(r: Result<T, U>) -> Option<U> where U: Use<[1, 1]> { match(r) { Ok(_) => None, Err(e) => Some(e) } }
+
+// What succeeded or failed, where it is.
+pub fn as_ref<'a, T, E>(r: &'a Result<T, E>) -> Result<&'a T, &'a E> where T: Use<[1, 1]>, E: Use<[1, 1]> {
+    match(r) { &Ok(x) => Ok(x), &Err(e) => Err(e) }
+}
+pub fn as_mut<'a, T, E>(r: &'a mut Result<T, E>) -> Result<&'a mut T, &'a mut E> where T: Use<[1, 1]>, E: Use<[1, 1]> {
+    match(r) { &mut Ok(x) => Ok(x), &mut Err(e) => Err(e) }
+}

@@ -1,0 +1,74 @@
+// A place in a row of things, and parsers tried from it, as the library
+// specification has them (26.1). Places are `Int`.
+
+use std::slice::{Slice};
+use std::budget::{BudgetExceeded, BudgetKind};
+pub use std::error::{MarkError};
+
+// A row of things read from front to back.
+pub struct Cursor<'a, T> { input: Slice<'a, T>, at: Int }
+pub struct CursorMark { at: Int, length: Int }
+
+// What a parser found: something, nothing here (and it may be tried
+// elsewhere), or something wrong.
+pub enum ParseStep<T, E> { Matched(T), NoMatch, Failed(E) }
+pub enum ParseError<E> { User(E), NoProgress, Limit(BudgetExceeded) }
+
+impl<'a, T> Cursor<'a, T> {
+    pub fn new(input: Slice<'a, T>) -> Self where T: Use<[1, 1]> { Self { input: input, at: 0 } }
+    pub fn position(c: &Self) -> Int { c.at }
+    pub fn is_done(c: &Self) -> Bool { c.at >= Slice::len(&c.input) }
+    pub fn remaining(c: &Self) -> Slice<'a, T> where T: Use<[1, 1]> {
+        match(Slice::sub(&c.input, c.at, Slice::len(&c.input))) { Some(rest) => rest, None => c.input }
+    }
+    pub fn peek(c: &Self) -> Option<&'a T> where T: Use<[1, 1]> { Slice::get(&c.input, c.at) }
+    pub fn next(c: &mut Self) -> Option<&'a T> where T: Use<[1, 1]> {
+        match(Slice::get(&c.input, c.at)) { Some(item) => c.at = c.at + 1; Some(item), None => None }
+    }
+    pub fn mark(c: &Self) -> CursorMark { CursorMark { at: c.at, length: Slice::len(&c.input) } }
+    pub fn restore(c: &mut Self, mark: CursorMark) -> Result<(), MarkError> {
+        if(mark.length != Slice::len(&c.input)) { Err(MarkError::WrongOwner) } else {
+            if(mark.at > mark.length) { Err(MarkError::OutOfRange) } else { c.at = mark.at; Ok(()) }
+        }
+    }
+}
+
+// A parser tried. Where it finds nothing the cursor is put back where it
+// was; what else the parser did is not undone.
+pub fn attempt<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, parse: fn(&mut Cursor<'a, T>) -> ParseStep<U, E> / e)
+    -> ParseStep<U, E> / { | e } where T: Use<[1, 1]>, U: Use<[1, 1]>, E: Use<[1, 1]> {
+    let at = cursor.at;
+    match(parse(cursor)) {
+        ParseStep::NoMatch => cursor.at = at; ParseStep::NoMatch,
+        found => found
+    }
+}
+
+fn many_onto<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, limit: Int,
+    parse: fn(&mut Cursor<'a, T>) -> ParseStep<U, E> / e, out: [U], count: Int)
+    -> Result<[U], ([U], ParseError<E>)> / { | e } where E: Use<[1, 1]>, T: Use<[1, 1]> {
+    if(Cursor::is_done(cursor)) { Ok(out) } else {
+        if(count >= limit) {
+            Err((out, ParseError::Limit(BudgetExceeded { kind: BudgetKind::Items, requested: count + 1, remaining: 0 })))
+        } else {
+            let before = cursor.at;
+            match(attempt(cursor, parse)) {
+                ParseStep::Matched(item) =>
+                    // One that found something without moving on would
+                    // find it again for ever.
+                    if(cursor.at == before) { Err((push(out, item), ParseError::NoProgress)) }
+                    else { many_onto(cursor, limit, parse, push(out, item), count + 1) },
+                ParseStep::NoMatch => Ok(out),
+                ParseStep::Failed(e) => Err((out, ParseError::User(e)))
+            }
+        }
+    }
+}
+
+// A parser as many times as it finds something, up to so many: what it
+// found each time. What was found is given back with what went wrong, too.
+pub fn many<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, limit: Int,
+    parse: fn(&mut Cursor<'a, T>) -> ParseStep<U, E> / e)
+    -> Result<[U], ([U], ParseError<E>)> / { | e } where E: Use<[1, 1]>, T: Use<[1, 1]> {
+    many_onto(cursor, limit, parse, [], 0)
+}

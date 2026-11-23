@@ -1,0 +1,98 @@
+// Time as amounts and moments, as the library specification has them (29.3).
+// The machine's clock is `Clock`, the host's effect: nanoseconds as numbers.
+// What is here does nothing to the machine: a test answers `Clock` itself
+// and builds moments with `Instant::at`.
+
+pub use std::host::Clock;
+use std::cmp::{Ordering};
+
+pub enum TimeError { Overflow, BeforeOrigin, DifferentClock, Unsupported }
+
+// So many seconds and, less than a second, so many nanoseconds.
+pub struct Duration { seconds: u64, nanos: u32 }
+
+fn wide(n: u64) -> u128 { to(n) }
+
+impl Duration {
+    pub fn zero() -> Self { Self { seconds: 0u64, nanos: 0u32 } }
+    // A second or more of nanoseconds is refused: it is not carried over.
+    pub fn from_parts(seconds: u64, nanos: u32) -> Result<Self, TimeError> {
+        if(nanos < 1000000000u32) { Ok(Self { seconds: seconds, nanos: nanos }) } else { Err(TimeError::Overflow) }
+    }
+    pub fn from_nanos(nanos: Int) -> Result<Self, TimeError> {
+        if(nanos < 0) { Err(TimeError::BeforeOrigin) }
+        else { Ok(Self { seconds: to(nanos / 1000000000), nanos: to(nanos % 1000000000) }) }
+    }
+    pub fn seconds(value: Self) -> u64 { value.seconds }
+    pub fn subsec_nanos(value: Self) -> u32 { value.nanos }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let nanos = int(left.nanos) + int(right.nanos);
+        let carry = if(nanos >= 1000000000) { 1 } else { 0 };
+        let more: u128 = to(carry);
+        let seconds = wide(left.seconds) + wide(right.seconds) + more;
+        if(seconds > 18446744073709551615u128) { None }
+        else { Some(Self { seconds: to(seconds), nanos: to(nanos - carry * 1000000000) }) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let borrow = if(int(left.nanos) < int(right.nanos)) { 1 } else { 0 };
+        let nanos = int(left.nanos) + borrow * 1000000000 - int(right.nanos);
+        let less: u128 = to(borrow);
+        let need = wide(right.seconds) + less;
+        if(wide(left.seconds) < need) { None }
+        else { Some(Self { seconds: to(wide(left.seconds) - need), nanos: to(nanos) }) }
+    }
+    pub fn compare(left: Self, right: Self) -> Ordering {
+        if(left.seconds < right.seconds) { Ordering::Less } else {
+            if(right.seconds < left.seconds) { Ordering::Greater } else {
+                if(left.nanos < right.nanos) { Ordering::Less } else {
+                    if(right.nanos < left.nanos) { Ordering::Greater } else { Ordering::Equal }
+                }
+            }
+        }
+    }
+}
+
+// A moment on one clock: so long after that clock began. Moments on
+// different clocks are not compared or taken from one another.
+pub struct Instant { clock: u32, since: Duration }
+
+impl Instant {
+    // For whoever answers `Clock`: the moment so long after clock `clock` began.
+    pub fn at(clock: u32, since: Duration) -> Self { Self { clock: clock, since: since } }
+    pub fn checked_add(value: Self, duration: Duration) -> Result<Self, TimeError> {
+        match(Duration::checked_add(value.since, duration)) {
+            Some(since) => Ok(Self { clock: value.clock, since: since }),
+            None => Err(TimeError::Overflow)
+        }
+    }
+    pub fn duration_since(value: Self, earlier: Self) -> Result<Duration, TimeError> {
+        if(value.clock != earlier.clock) { Err(TimeError::DifferentClock) } else {
+            match(Duration::checked_sub(value.since, earlier.since)) {
+                Some(between) => Ok(between),
+                None => Err(TimeError::BeforeOrigin)
+            }
+        }
+    }
+    pub fn compare(left: Self, right: Self) -> Result<Ordering, TimeError> {
+        if(left.clock != right.clock) { Err(TimeError::DifferentClock) }
+        else { Ok(Duration::compare(left.since, right.since)) }
+    }
+}
+
+// A moment by the calendar's clock, which can be set back: so long after
+// its origin.
+pub struct SystemTime { since: Duration }
+
+impl SystemTime {
+    pub fn from_origin(since: Duration) -> Self { Self { since: since } }
+    pub fn since_origin(value: Self) -> Duration { value.since }
+}
+
+// Now, by the machine's clock that only goes forward (clock 0) and by its
+// calendar clock.
+pub fn monotonic_now() -> Result<Instant, TimeError> / {Clock} {
+    match(Duration::from_nanos(monotonic())) { Ok(since) => Ok(Instant::at(0u32, since)), Err(e) => Err(e) }
+}
+pub fn system_now() -> Result<SystemTime, TimeError> / {Clock} {
+    match(Duration::from_nanos(now())) { Ok(since) => Ok(SystemTime::from_origin(since)), Err(e) => Err(e) }
+}

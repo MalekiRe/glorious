@@ -1,0 +1,50 @@
+// An `Option<T>` is a `Result<T, ()>`: `Some(x)` or `None`.
+
+pub fn is_some<T>(o: Option<T>) -> Bool { match(o) { Some(_) => true, None => false } }
+pub fn is_none<T>(o: Option<T>) -> Bool { match(o) { Some(_) => false, None => true } }
+
+// What is there, or a value to use instead.
+pub fn unwrap_or<T>(o: Option<T>, other: T) -> T { match(o) { Some(x) => x, None => other } }
+
+// What is there, or what a callable gives.
+pub fn unwrap_or_else<T, e: EffectRow>(o: Option<T>, other: fn() -> T / {| e}) -> T / {| e} where T: Use<[1, 1]> { match(o) { Some(x) => x, None => other() } }
+
+pub fn map<T, U, e: EffectRow>(o: Option<T>, f: fn(T) -> U / {| e}) -> Option<U> / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]> { match(o) { Some(x) => Some(f(x)), None => None } }
+
+// `f` of what is there, which may itself be nothing.
+pub fn and_then<T, U, e: EffectRow>(o: Option<T>, f: fn(T) -> Option<U> / {| e}) -> Option<U> / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]> { match(o) { Some(x) => f(x), None => None } }
+
+// What is there if `keep` says so.
+pub fn filter<T, U, V, e: EffectRow>(o: Option<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Option<T> / {| e} where T: Use<[0, *]> {
+    match(o) {
+        Some(x) => if(keep(x)) { Some(x) } else { None },
+        None => None
+    }
+}
+
+// The first that is there.
+pub fn or_else<T, e: EffectRow>(o: Option<T>, other: fn() -> Option<T> / {| e}) -> Option<T> / {| e} where T: Use<[1, 1]> { match(o) { Some(x) => Some(x), None => other() } }
+
+// Both, if both are there.
+pub fn zip<T, U>(a: Option<T>, b: Option<U>) -> Option<(T, U)> {
+    match(a) {
+        Some(x) => match(b) { Some(y) => Some((x, y)), None => None },
+        None => None
+    }
+}
+
+// A `Result` that fails with `error` where there was nothing.
+pub fn ok_or<T, U>(o: Option<T>, error: U) -> Result<T, U> where T: Use<[1, 1]> { match(o) { Some(x) => Ok(x), None => Err(error) } }
+
+pub fn fold<T, U, e: EffectRow>(o: Option<T>, init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]> { match(o) { Some(x) => f(init, x), None => init } }
+
+// What is there, where it is: looked at or changed without being taken.
+pub fn as_ref<'a, T>(o: &'a Option<T>) -> Option<&'a T> where T: Use<[0, *]> {
+    match(o) { &Some(x) => Some(x), &None => None }
+}
+pub fn as_mut<'a, T>(o: &'a mut Option<T>) -> Option<&'a mut T> where T: Use<[0, *]> {
+    match(o) { &mut Some(x) => Some(x), &mut None => None }
+}
+
+// What is there, taken; nothing is left.
+pub fn take<T>(o: &mut Option<T>) -> Option<T> where T: Use<[1, 1]> { replace(o, None) }

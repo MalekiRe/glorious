@@ -1,0 +1,167 @@
+// Going over a graph from what each node leads to, as the library
+// specification has it (26.2). The order found is the order the nodes and
+// what they lead to are given in, never a table's.
+
+use std::hash::{Hash, HashMap};
+use std::slice::{Slice};
+use std::budget::{StepBudget, BudgetExceeded};
+
+// Something with nodes, each leading to others.
+pub trait Graph {
+    type Node;
+    fn successors(&Self, Self::Node) -> [Self::Node]
+}
+
+// Nodes that lead round to the first of them.
+pub struct Cycle<N> { pub nodes: [N] }
+pub enum GraphError<N> { Cycle(Cycle<N>), Limit(BudgetExceeded) }
+
+// More onto a stack so that the first of them comes off first.
+fn stacked<N>(stack: [N], more: [N], i: Int) -> [N] where N: Use<[0, *]> {
+    if(i <= 0) { stack } else { tail stacked(push(stack, more[i - 1]), more, i - 1) }
+}
+
+fn reach<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, stack: [N], seen: HashMap<N, ()>, out: [N], budget: &mut StepBudget)
+    -> Result<[N], BudgetExceeded> where N: Use<[0, *]> {
+    match(pop(stack)) {
+        None => Ok(out),
+        Some((rest, node)) => match(StepBudget::charge(budget, 1)) {
+            Err(e) => Err(e),
+            Ok(_) =>
+                if(std::hash::contains_key(seen, node)) { tail reach(graph, rest, seen, out, budget) } else {
+                    let next = successors(graph, node);
+                    tail reach(graph, stacked(rest, next, len(next)), std::hash::insert(seen, node, ()), push(out, node), budget)
+                }
+        }
+    }
+}
+
+// Every node that can be got to from one, itself first, each once. A step
+// is charged for each node looked at.
+pub fn reachable<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, start: N, budget: &mut StepBudget)
+    -> Result<[N], BudgetExceeded> where N: Use<[0, *]> {
+    reach(graph, [start], std::hash::new(), [], budget)
+}
+
+// The nodes on the way from one of them to the end of the way.
+fn way_from<N: Eq>(way: [N], node: N, i: Int, found: Bool, out: [N]) -> [N] where N: Use<[0, *]> {
+    if(i >= len(way)) { out } else {
+        let here = found or { way[i] == node };
+        tail way_from(way, node, i + 1, here, if(here) { push(out, way[i]) } else { out })
+    }
+}
+
+// Each of some nodes looked at in turn, and from it what it leads to: the
+// nodes done with, each after all it leads to. (A node is being looked at,
+// `1`, or done with, `2`; one met again while being looked at is on a way
+// that comes back to itself.)
+fn visit_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: [N], i: Int, state: HashMap<N, Int>, done: [N], way: [N], budget: &mut StepBudget)
+    -> Result<(HashMap<N, Int>, [N]), GraphError<N>> where N: Use<[0, *]> {
+    if(i >= len(nodes)) { Ok((state, done)) } else {
+        let node = nodes[i];
+        match(StepBudget::charge(budget, 1)) {
+            Err(e) => Err(GraphError::Limit(e)),
+            Ok(_) => match(std::hash::get(state, node)) {
+                Some(2) => visit_each(graph, nodes, i + 1, state, done, way, budget),
+                Some(_) => Err(GraphError::Cycle(Cycle { nodes: way_from(way, node, 0, false, []) })),
+                None => match(visit_each(graph, successors(graph, node), 0, std::hash::insert(state, node, 1), done, push(way, node), budget)) {
+                    Ok((after, found)) => visit_each(graph, nodes, i + 1, std::hash::insert(after, node, 2), push(found, node), way, budget),
+                    Err(e) => Err(e)
+                }
+            }
+        }
+    }
+}
+
+fn back_to_front<N>(items: [N], i: Int, out: [N]) -> [N] where N: Use<[0, *]> {
+    if(i <= 0) { out } else { tail back_to_front(items, i - 1, push(out, items[i - 1])) }
+}
+
+fn copied<'a, N>(nodes: &Slice<'a, N>, i: Int, out: [N]) -> [N] where N: Use<[0, *]> {
+    match(Slice::get(nodes, i)) { Some(node) => tail copied(nodes, i + 1, push(out, *node)), None => out }
+}
+
+// The nodes that can be got to from those given, each before every node it
+// leads to; or nodes that lead round in a circle, where there are some.
+pub fn topological_order<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: Slice<'a, N>, budget: &mut StepBudget)
+    -> Result<[N], GraphError<N>> where N: Use<[0, *]> {
+    match(visit_each(graph, copied(&nodes, 0, []), 0, std::hash::new(), [], [], budget)) {
+        Ok((_, done)) => Ok(back_to_front(done, len(done), [])),
+        Err(e) => Err(e)
+    }
+}
+
+// What is known while the groups are looked for: when each node was first
+// seen, the earliest it can get back to, the nodes not yet in a group.
+struct Search<N> { seen: HashMap<N, Int>, low: HashMap<N, Int>, open: HashMap<N, Bool>, stack: [N], next: Int, groups: [[N]] }
+
+fn number<N: Eq + Hash>(m: HashMap<N, Int>, node: N) -> Int where N: Use<[0, *]> { match(std::hash::get(m, node)) { Some(n) => n, None => 0 - 1 } }
+
+fn lower<N: Eq + Hash>(s: Search<N>, node: N, to: Int) -> Search<N> where N: Use<[0, *]> {
+    let mut next = s;
+    if(to < number(next.low, node)) { next.low = std::hash::insert(next.low, node, to); } else { };
+    next
+}
+
+// The nodes at the top of the stack down to one of them, as a group.
+fn closed<N: Eq + Hash>(s: Search<N>, root: N, group: [N]) -> Search<N> where N: Use<[0, *]> {
+    let mut next = s;
+    match(pop(next.stack)) {
+        None => next.groups = push(next.groups, group); next,
+        Some((rest, node)) =>
+            next.stack = rest;
+            next.open = std::hash::insert(next.open, node, false);
+            if(node == root) { next.groups = push(next.groups, push(group, node)); next }
+            else { closed(next, root, push(group, node)) }
+    }
+}
+
+// A node seen for the first time: numbered, and not yet in a group.
+fn entered<N: Eq + Hash>(s: Search<N>, node: N) -> Search<N> where N: Use<[0, *]> {
+    let mut next = s;
+    let at = next.next;
+    next.seen = std::hash::insert(next.seen, node, at);
+    next.low = std::hash::insert(next.low, node, at);
+    next.open = std::hash::insert(next.open, node, true);
+    next.stack = push(next.stack, node);
+    next.next = at + 1;
+    next
+}
+
+fn lowered<N: Eq + Hash>(s: Search<N>, from: Option<N>, to: Int) -> Search<N> where N: Use<[0, *]> {
+    match(from) { Some(node) => lower(s, node, to), None => s }
+}
+
+// Each of the nodes one leads to, in turn. One not seen before is gone into,
+// and is the root of a group if nothing under it gets back above it.
+fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nodes: [N], i: Int, s: Search<N>, budget: &mut StepBudget)
+    -> Result<Search<N>, BudgetExceeded> where N: Use<[0, *]> {
+    if(i >= len(nodes)) { Ok(s) } else {
+        let to = nodes[i];
+        let first = number(s.seen, to);
+        if(first < 0) {
+            match(StepBudget::charge(budget, 1)) {
+                Err(e) => Err(e),
+                Ok(_) => match(search_each(graph, Some(to), successors(graph, to), 0, entered(s, to), budget)) {
+                    Err(e) => Err(e),
+                    Ok(after) =>
+                        let reached = number(after.low, to);
+                        let settled = if(reached == number(after.seen, to)) { closed(after, to, []) } else { after };
+                        search_each(graph, from, nodes, i + 1, lowered(settled, from, reached), budget)
+                }
+            }
+        } else {
+            let still = match(std::hash::get(s.open, to)) { Some(open) => open, None => false };
+            search_each(graph, from, nodes, i + 1, if(still) { lowered(s, from, first) } else { s }, budget)
+        }
+    }
+}
+
+// The nodes that can be got to from those given, in groups: two nodes are
+// in one group when each can be got to from the other. A group comes before
+// any group that leads to it.
+pub fn strongly_connected_components<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: Slice<'a, N>, budget: &mut StepBudget)
+    -> Result<[[N]], BudgetExceeded> where N: Use<[0, *]> {
+    let start = Search { seen: std::hash::new(), low: std::hash::new(), open: std::hash::new(), stack: [], next: 0, groups: [] };
+    match(search_each(graph, None, copied(&nodes, 0, []), 0, start, budget)) { Ok(s) => Ok(s.groups), Err(e) => Err(e) }
+}

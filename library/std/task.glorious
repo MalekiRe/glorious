@@ -1,0 +1,86 @@
+// Work started and waited for, as the library specification has it (30.4),
+// and tasks that take turns. Nothing here runs two things at once.
+
+use std::generator::{Yield, yield, Coroutine, Generator, GeneratorStep, resume};
+
+// Work that was started: its result is had by waiting for it. A handle has
+// to be given to `join` or `cancel_task`: there is no letting it go.
+pub struct Task<T> { result: T }
+impl Use<[1, 1]> for Task {}
+
+pub enum TaskError { Cancelled, Failed, ProviderClosed }
+pub enum CancelOutcome<T> { Cancelled, Completed(T) }
+
+// Starting work that makes a `T`: whoever handles this says when it runs.
+// Whoever asks is always answered, with the handle.
+// (The work performs nothing, which is what lets a provider run it and be
+// sure to answer.)
+pub effect Spawn<T> { [1, 1] spawn(work: fn() -> T / {}) -> Task<T> }
+
+// Waiting for work, and asking it to stop: what it made is never lost, and
+// whoever asks is always answered.
+pub effect TaskControl<T> {
+    [1, 1] join(task: Task<T>) -> Result<T, TaskError>,
+    [1, 1] cancel_task(task: Task<T>) -> CancelOutcome<T>
+}
+
+// The simplest provider: work runs where it is spawned, to its end, so
+// waiting for it finds it done and asking it to stop finds it finished.
+pub fn run_inline<T, R>(body: fn() -> R / {Spawn<T>, TaskControl<T>}) -> R where T: Use<[1, 1]>, R: Use<[1, 1]> {
+    handle body() {
+        spawn(work, k) => k(Task { result: work() }),
+        join(task, k) => match(task) { Task { result } => k(Ok(result)) },
+        cancel_task(task, k) => match(task) { Task { result } => k(CancelOutcome::Completed(result)) }
+    }
+}
+
+// Giving way to the other tasks.
+pub fn yield_now() / {Yield<(), ()>} { yield(()) }
+
+fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
+    match(pop(from)) { Some((rest, last)) => tail turned(rest, push(onto, last)), None => onto }
+}
+
+// A result put among those done, kept in the order of the tasks' numbers.
+fn placed<T>(done: [(Int, T)], at: Int, result: T) -> [(Int, T)] where T: Use<[1, 1]> {
+    match(pop(done)) {
+        None => [(at, result)],
+        Some((rest, (i, r))) =>
+            if(i > at) { push(placed(rest, at, result), (i, r)) } else { push(push(rest, (i, r)), (at, result)) }
+    }
+}
+
+// (They are kept by how late each task was given, so the last of them is
+// the first given.)
+fn results<T>(done: [(Int, T)], out: [T]) -> [T] where T: Use<[1, 1]> {
+    match(pop(done)) { Some((rest, (_, r))) => tail results(rest, push(out, r)), None => out }
+}
+
+// One step of each task still going, the first given first; then again
+// with those that gave way, until none is left.
+fn turns<T>(waiting: [(Int, Coroutine<(), (), T>)], next: [(Int, Coroutine<(), (), T>)], done: [(Int, T)]) -> [(Int, T)] where T: Use<[1, 1]> {
+    match(pop(waiting)) {
+        Some((rest, (i, task))) => match(resume(task, ())) {
+            GeneratorStep::Yielded { value: _, rest: more } => turns(rest, push(next, (i, more)), done),
+            GeneratorStep::Complete(result) => turns(rest, next, placed(done, i, result))
+        },
+        None => match(pop(next)) {
+            None => done,
+            Some((others, last)) => turns(turned(push(others, last), []), [], done)
+        }
+    }
+}
+
+// Each task with a number: the last given has nothing, the one before it
+// one. (Taken from the end, so the first given is the last put, and is then
+// the first taken off.)
+fn numbered<T>(tasks: [Coroutine<(), (), T>], out: [(Int, Coroutine<(), (), T>)], late: Int) -> [(Int, Coroutine<(), (), T>)] where T: Use<[1, 1]> {
+    match(pop(tasks)) { Some((rest, task)) => tail numbered(rest, push(out, (late, task)), late + 1), None => out }
+}
+
+// Tasks that take turns: each runs until it gives way with `yield_now` or
+// ends, then the next, round and round. What each made, in the order the
+// tasks were given.
+pub fn round_robin<T>(tasks: [Coroutine<(), (), T>]) -> [T] where T: Use<[1, 1]> {
+    results(turns(numbered(tasks, [], 0), [], []), [])
+}

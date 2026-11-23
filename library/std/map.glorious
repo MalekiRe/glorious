@@ -1,0 +1,162 @@
+// A map from keys to values, the keys kept in order: a tree that stays
+// balanced, so finding, adding and taking away go through as many keys as the
+// number of keys has bits. A key is a type with `<`.
+
+enum Node<K, V> { Leaf, Branch(Node<K, V>, K, V, Node<K, V>, Int) }
+
+pub struct Map<K, V>(Node<K, V>)
+
+pub fn new<T, U>() -> Map<T, U> where T: Use<[1, 1]>, U: Use<[1, 1]> { Map(Leaf) }
+
+fn height<T, U>(n: Node<T, U>) -> Int { match(n) { Leaf => 0, Branch(_, _, _, _, h) => h } }
+
+fn branch<T, U>(l: Node<T, U>, k: T, v: U, r: Node<T, U>) -> Node<T, U> where T: Use<[0, *]>, U: Use<[0, *]> {
+    let hl = height(l);
+    let hr = height(r);
+    Branch(l, k, v, r, 1 + (if(hl < hr) { hr } else { hl }))
+}
+
+// A tree with these parts, turned if one side is two deeper than the other.
+fn balance<T, U>(l: Node<T, U>, k: T, v: U, r: Node<T, U>) -> Node<T, U> where T: Use<[0, *]>, U: Use<[0, *]> {
+    let hl = height(l);
+    let hr = height(r);
+    if(hl > hr + 1) {
+        match(l) {
+            Branch(ll, lk, lv, lr, _) =>
+                if(height(ll) >= height(lr)) { branch(ll, lk, lv, branch(lr, k, v, r)) }
+                else {
+                    match(lr) {
+                        Branch(lrl, lrk, lrv, lrr, _) =>
+                            branch(branch(ll, lk, lv, lrl), lrk, lrv, branch(lrr, k, v, r)),
+                        Leaf => branch(l, k, v, r)
+                    }
+                },
+            Leaf => branch(l, k, v, r)
+        }
+    } else {
+        if(hr > hl + 1) {
+            match(r) {
+                Branch(rl, rk, rv, rr, _) =>
+                    if(height(rr) >= height(rl)) { branch(branch(l, k, v, rl), rk, rv, rr) }
+                    else {
+                        match(rl) {
+                            Branch(rll, rlk, rlv, rlr, _) =>
+                                branch(branch(l, k, v, rll), rlk, rlv, branch(rlr, rk, rv, rr)),
+                            Leaf => branch(l, k, v, r)
+                        }
+                    },
+                Leaf => branch(l, k, v, r)
+            }
+        } else { branch(l, k, v, r) }
+    }
+}
+
+fn put<T, U>(n: Node<T, U>, key: T, value: U) -> Node<T, U> where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> {
+    match(n) {
+        Leaf => Branch(Leaf, key, value, Leaf, 1),
+        Branch(l, k, v, r, h) =>
+            if(key < k) { balance(put(l, key, value), k, v, r) }
+            else { if(k < key) { balance(l, k, v, put(r, key, value)) } else { Branch(l, key, value, r, h) } }
+    }
+}
+
+// The map with `key` standing for `value`, whatever it stood for.
+pub fn insert<T, U>(m: Map<T, U>, key: T, value: U) -> Map<T, U> where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> { match(m) { Map(n) => Map(put(n, key, value)) } }
+
+fn look<T, U>(n: Node<T, U>, key: T) -> Option<U> where T: Ord, T: Use<[0, *]> {
+    match(n) {
+        Leaf => None,
+        Branch(l, k, v, r, _) =>
+            if(key < k) { tail look(l, key) } else { if(k < key) { tail look(r, key) } else { Some(v) } }
+    }
+}
+
+// What `key` stands for.
+pub fn get<T, U>(m: Map<T, U>, key: T) -> Option<U> where T: Ord, T: Use<[0, *]> { match(m) { Map(n) => look(n, key) } }
+
+// What a key stands for, where it is in the tree.
+fn look_ref<'a, K, V>(n: &'a Node<K, V>, key: K) -> Option<&'a V> where K: Ord, K: Use<[0, *]>, V: Use<[1, 1]> {
+    match(n) {
+        &Leaf => None,
+        &Branch(l, k, v, r, _) =>
+            if(key < *k) { tail look_ref(l, key) }
+            else { if(*k < key) { tail look_ref(r, key) } else { Some(v) } }
+    }
+}
+
+fn look_mut<'a, K, V>(n: &'a mut Node<K, V>, key: K) -> Option<&'a mut V> where K: Ord, K: Use<[0, *]>, V: Use<[1, 1]> {
+    match(n) {
+        &mut Leaf => None,
+        &mut Branch(l, k, v, r, _) =>
+            if(key < *k) { tail look_mut(l, key) }
+            else { if(*k < key) { tail look_mut(r, key) } else { Some(v) } }
+    }
+}
+
+// The same map looked into and changed where it is, in the shape the library
+// specification gives its maps (17).
+impl<K, V> Map<K, V> {
+    pub fn get_ref<'a>(m: &'a Self, key: K) -> Option<&'a V> where K: Ord, K: Use<[0, *]>, V: Use<[1, 1]> { look_ref(&m.0, key) }
+    pub fn get_mut<'a>(m: &'a mut Self, key: K) -> Option<&'a mut V> where K: Ord, K: Use<[0, *]>, V: Use<[1, 1]> {
+        look_mut(&mut m.0, key)
+    }
+}
+
+pub fn contains_key<T, U>(m: Map<T, U>, key: T) -> Bool where T: Ord, T: Use<[0, *]> { match(get(m, key)) { Some(_) => true, None => false } }
+
+// The least key of a tree that is not empty, what it stands for, and the rest.
+fn take_least<T, U>(l: Node<T, U>, k: T, v: U, r: Node<T, U>) -> (T, U, Node<T, U>) where T: Use<[0, *]>, U: Use<[0, *]> {
+    match(l) {
+        Leaf => (k, v, r),
+        Branch(ll, lk, lv, lr, _) =>
+            match(take_least(ll, lk, lv, lr)) { (mk, mv, rest) => (mk, mv, balance(rest, k, v, r)) }
+    }
+}
+
+fn cut<T, U>(n: Node<T, U>, key: T) -> Node<T, U> where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> {
+    match(n) {
+        Leaf => Leaf,
+        Branch(l, k, v, r, _) =>
+            if(key < k) { balance(cut(l, key), k, v, r) }
+            else {
+                if(k < key) { balance(l, k, v, cut(r, key)) }
+                else {
+                    match(r) {
+                        Leaf => l,
+                        Branch(rl, rk, rv, rr, _) =>
+                            match(take_least(rl, rk, rv, rr)) { (mk, mv, rest) => balance(l, mk, mv, rest) }
+                    }
+                }
+            }
+    }
+}
+
+// The map without `key`.
+pub fn remove<T, U>(m: Map<T, U>, key: T) -> Map<T, U> where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> { match(m) { Map(n) => Map(cut(n, key)) } }
+
+fn walk<T, U, V, e: EffectRow>(n: Node<T, U>, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where V: Use<[1, 1]> {
+    match(n) {
+        Leaf => init,
+        Branch(l, k, v, r, _) => walk(r, f(walk(l, init, f), k, v), f)
+    }
+}
+
+// `f(f(init, k0, v0), k1, v1)` and so on, the keys in order.
+pub fn fold<T, U, V, e: EffectRow>(m: Map<T, U>, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where V: Use<[1, 1]> { match(m) { Map(n) => walk(n, init, f) } }
+
+pub fn len<T, U>(m: Map<T, U>) -> Int { fold(m, 0, fn(n, k, v) { n + 1 }) }
+pub fn is_empty<T, U>(m: Map<T, U>) -> Bool { match(m) { Map(Leaf) => true, _ => false } }
+
+pub fn keys<T, U>(m: Map<T, U>) -> [T] { fold(m, [], fn(out, k, v) { push(out, k) }) }
+pub fn values<T, U>(m: Map<T, U>) -> [U] { fold(m, [], fn(out, k, v) { push(out, v) }) }
+pub fn entries<T, U>(m: Map<T, U>) -> [(T, U)] { fold(m, [], fn(out, k, v) { push(out, (k, v)) }) }
+
+// The map of an array of keys with what each stands for; a later one wins.
+pub fn from<T, U>(pairs: [(T, U)]) -> Map<T, U> where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> { std::vec::fold_pairs(pairs, new(), fn(m, k, v) { insert(m, k, v) }) }
+
+// The map with `key` standing for what `f` makes of what it stood for.
+pub fn update<T, U, e: EffectRow>(m: Map<T, U>, key: T, f: fn(Option<U>) -> U / {| e}) -> Map<T, U> / {| e} where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> { insert(m, key, f(get(m, key))) }
+
+// The least and the greatest key, each with what it stands for.
+pub fn least<T, U>(m: Map<T, U>) -> Option<(T, U)> { match(entries(m)) { es => std::vec::first(es) } }
+pub fn greatest<T, U>(m: Map<T, U>) -> Option<(T, U)> where T: Use<[0, *]>, U: Use<[0, *]> { match(entries(m)) { es => std::vec::last(es) } }

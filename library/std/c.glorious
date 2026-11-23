@@ -1,0 +1,247 @@
+// What C has: its memory, and texts as it writes them. Everything here is
+// unsafe: an address is whatever a program says it is.
+
+use std::slice::{Slice};
+use std::value::{Rejected};
+
+// C's names for its types, as they are on x86-64 Linux.
+pub type c_char = i8;
+pub type c_schar = i8;
+pub type c_uchar = u8;
+pub type c_short = i16;
+pub type c_ushort = u16;
+pub type c_int = i32;
+pub type c_uint = u32;
+pub type c_long = i64;
+pub type c_ulong = u64;
+pub type c_longlong = i64;
+pub type c_ulonglong = u64;
+pub type c_size_t = usize;
+pub type c_ssize_t = isize;
+pub type c_float = f32;
+pub type c_double = f64;
+
+pub extern "C" {
+    fn malloc(n: usize) -> usize;
+    fn free(p: usize);
+    fn strlen(s: usize) -> usize;
+}
+
+// One byte at an address, read and written.
+pub unsafe fn read_byte(at: usize) -> u8 { u8(ptr_read(at, -8)) }
+pub unsafe fn write_byte(at: usize, b: u8) { ptr_write(at, 8, int(b)) }
+
+// The bytes of an array at an address, one after another.
+pub unsafe fn write_bytes(at: usize, bytes: [u8]) { write_from(at, bytes, 0) }
+unsafe fn write_from(at: usize, bytes: [u8], i: Int) {
+    if(i < len(bytes)) { write_byte(at, bytes[i]); tail write_from(at + 1usize, bytes, i + 1) } else { () }
+}
+
+// So many bytes from an address.
+pub unsafe fn read_bytes(at: usize, n: Int) -> [u8] { read_onto(at, n, []) }
+unsafe fn read_onto(at: usize, n: Int, out: [u8]) -> [u8] {
+    if(n <= 0) { out } else { tail read_onto(at + 1usize, n - 1, push(out, read_byte(at))) }
+}
+
+// A text as C has it: its bytes and a zero after them, in memory that is the
+// caller's to `free`.
+pub unsafe fn c_string(text: Str) -> usize {
+    let bytes = std::text::utf8(text);
+    let at = malloc(usize(len(bytes) + 1));
+    write_bytes(at, push(bytes, 0u8));
+    at
+}
+
+// The text C has at an address: the bytes up to a zero, if they are UTF-8.
+pub unsafe fn text_at(at: usize) -> Option<Str> { std::text::from_utf8(read_bytes(at, int(strlen(at)))) }
+
+// How much memory, and how it has to be placed: the library specification's
+// `Layout` (22.1). Sizes are whole numbers here.
+pub struct Layout { size: Int, align: Int }
+pub enum LayoutError { ZeroAlignment, NonPowerOfTwoAlignment, SizeOverflow }
+pub enum AllocError { Exhausted, UnsupportedAlignment, LimitExceeded }
+
+fn power_of_two(n: Int) -> Bool {
+    if(n == 1) { true } else { if(n % 2 == 0) { power_of_two(n / 2) } else { false } }
+}
+
+// The next multiple of `align` at or after `n`.
+fn rounded(n: Int, align: Int) -> Int { ((n + align - 1) / align) * align }
+
+impl Layout {
+    pub fn from_size_align(size: Int, align: Int) -> Result<Self, LayoutError> {
+        if(align <= 0) { Err(ZeroAlignment) } else {
+            if(power_of_two(align)) {
+                if(size < 0) { Err(SizeOverflow) } else { Ok(Self { size: size, align: align }) }
+            } else { Err(NonPowerOfTwoAlignment) }
+        }
+    }
+    pub fn size(value: &Self) -> Int { value.size }
+    pub fn align(value: &Self) -> Int { value.align }
+    // This and another after it: the layout of both, and where the other
+    // starts.
+    pub fn extend(value: Self, other: Self) -> Result<(Self, Int), LayoutError> {
+        let at = rounded(value.size, other.align);
+        let align = if(value.align > other.align) { value.align } else { other.align };
+        Ok((Self { size: at + other.size, align: align }, at))
+    }
+    // Rounded up to a multiple of its alignment.
+    pub fn padded(value: Self) -> Result<Self, LayoutError> {
+        Ok(Self { size: rounded(value.size, value.align), align: value.align })
+    }
+}
+
+extern "C" {
+    fn aligned_alloc(align: usize, size: usize) -> usize;
+}
+
+// Memory that is this value's to give back. It has to be: an `Allocation`
+// cannot be let go, only given to `release` or to whatever takes it over.
+pub struct Allocation { at: usize, layout: Layout }
+impl Use<[1, 1]> for Allocation {}
+
+pub fn allocate(layout: Layout) -> Result<Allocation, AllocError> {
+    if(layout.align > 4096) { Err(UnsupportedAlignment) } else {
+        // (C wants a size that is a multiple of the alignment, and not none.)
+        let asked = rounded(if(layout.size == 0) { 1 } else { layout.size }, layout.align);
+        let at = unsafe { aligned_alloc(usize(layout.align), usize(asked)) };
+        if(at == 0usize) { Err(Exhausted) } else { Ok(Allocation { at: at, layout: layout }) }
+    }
+}
+
+impl Allocation {
+    pub fn layout(value: &Self) -> Layout { Layout { size: value.layout.size, align: value.layout.align } }
+    // Where the memory is.
+    pub fn as_ptr(value: &Self) -> usize { value.at }
+    // The memory given back.
+    pub fn release(value: Self) { match(value) { Allocation { at, layout } => unsafe { free(at) } } }
+}
+
+// C's own truth value: a byte that is nothing or one. Not `Bool`.
+pub struct c_bool(u8);
+pub fn c_bool_from_bool(value: Bool) -> c_bool { c_bool(if(value) { 1u8 } else { 0u8 }) }
+pub fn bool_from_c_bool(value: c_bool) -> Bool { value.0 != 0u8 }
+
+// Addresses: the one that is nowhere, and one so many bytes on from another.
+pub fn null() -> usize { 0usize }
+pub fn ptr_is_null(at: usize) -> Bool { at == 0usize }
+pub fn ptr_add(at: usize, count: Int) -> usize { at + usize(count) }
+
+extern "C" {
+    fn memset(at: usize, byte: i32, count: usize) -> usize;
+    fn memmove(to: usize, from: usize, count: usize) -> usize;
+    fn memcpy(to: usize, from: usize, count: usize) -> usize;
+}
+
+// So many bytes at an address made one byte.
+pub unsafe fn ptr_write_bytes(at: usize, byte: u8, count: Int) { memset(at, to(byte), usize(count)); }
+// So many bytes copied from one address to another; the two stretches may
+// share bytes.
+pub unsafe fn ptr_copy(from: usize, to_: usize, count: Int) { memmove(to_, from, usize(count)); }
+// The same where they share none.
+pub unsafe fn ptr_copy_nonoverlapping(from: usize, to_: usize, count: Int) { memcpy(to_, from, usize(count)); }
+
+// Where a zero byte was found that should not be there.
+pub struct NulError { pub position: Int }
+pub enum CStrError { MissingTerminator, InteriorNul(NulError) }
+
+// The first zero among some bytes from a place on.
+fn first_zero<'a>(bytes: &Slice<'a, u8>, i: Int) -> Option<Int> {
+    match(Slice::get(bytes, i)) {
+        Some(b) => if(*b == 0u8) { Some(i) } else { tail first_zero(bytes, i + 1) },
+        None => None
+    }
+}
+
+fn zero_in(bytes: &[u8], i: Int) -> Option<Int> {
+    match(element(bytes, i)) {
+        Some(b) => if(*b == 0u8) { Some(i) } else { tail zero_in(bytes, i + 1) },
+        None => None
+    }
+}
+
+fn slice_bytes<'a>(bytes: &Slice<'a, u8>, i: Int, out: [u8]) -> [u8] {
+    match(Slice::get(bytes, i)) { Some(b) => tail slice_bytes(bytes, i + 1, push(out, *b)), None => out }
+}
+
+// Bytes that end in a zero and have no other: a text as C reads one, looked
+// at where it is.
+pub struct CStr<'a> { bytes: Slice<'a, u8> }
+
+impl<'a> CStr<'a> {
+    pub fn from_bytes_with_nul(value: Slice<'a, u8>) -> Result<Self, CStrError> {
+        match(first_zero(&value, 0)) {
+            None => Err(CStrError::MissingTerminator),
+            Some(at) =>
+                if(at + 1 == Slice::len(&value)) { Ok(Self { bytes: value }) }
+                else { Err(CStrError::InteriorNul(NulError { position: at })) }
+        }
+    }
+    // The bytes without the zero, and with it.
+    pub fn bytes(value: Self) -> Slice<'a, u8> {
+        let all = value.bytes;
+        match(Slice::sub(&all, 0, Slice::len(&all) - 1)) { Some(found) => found, None => all }
+    }
+    pub fn bytes_with_nul(value: Self) -> Slice<'a, u8> { value.bytes }
+    pub fn len(value: &Self) -> Int { Slice::len(&value.bytes) - 1 }
+    // The text, if the bytes are UTF-8.
+    pub fn to_str(value: Self) -> Option<Str> {
+        let found = CStr::bytes(value);
+        std::text::from_utf8(slice_bytes(&found, 0, []))
+    }
+}
+
+// The bytes C has at an address, up to its zero: copied out, the zero
+// with them. Unsafe: the address has to be one where that many bytes can
+// be read.
+pub unsafe fn bytes_at(at: usize, maximum_length: Int) -> Result<[u8], CStrError> { until_zero(at, maximum_length, []) }
+unsafe fn until_zero(at: usize, left: Int, out: [u8]) -> Result<[u8], CStrError> {
+    if(left <= 0) { Err(CStrError::MissingTerminator) } else {
+        let b = read_byte(at);
+        if(b == 0u8) { Ok(push(out, b)) } else { tail until_zero(at + 1usize, left - 1, push(out, b)) }
+    }
+}
+
+// A text for C in memory of its own: its bytes and a zero after them. It
+// has to be given back, with `release` or by taking its bytes out.
+pub struct CString { memory: Allocation, length: Int }
+
+impl CString {
+    // From bytes with no zero among them; with one, the bytes come back.
+    pub fn from_vec(bytes: [u8]) -> Result<Self, Rejected<[u8], NulError>> {
+        match(zero_in(&bytes, 0)) {
+            Some(at) => Err(Rejected { value: bytes, error: NulError { position: at } }),
+            None =>
+                let n = len(bytes);
+                match(Layout::from_size_align(n + 1, 1)) {
+                    Err(_) => Err(Rejected { value: bytes, error: NulError { position: n } }),
+                    Ok(layout) => match(allocate(layout)) {
+                        Err(_) => Err(Rejected { value: bytes, error: NulError { position: n } }),
+                        Ok(memory) =>
+                            unsafe { write_bytes(Allocation::as_ptr(&memory), push(bytes, 0u8)) };
+                            Ok(Self { memory: memory, length: n })
+                    }
+                }
+        }
+    }
+    pub fn from_str(text: Str) -> Result<Self, NulError> {
+        match(CString::from_vec(std::text::utf8(text))) { Ok(found) => Ok(found), Err(rejected) => Err(rejected.error) }
+    }
+    // Where C can read it, for as long as this is kept.
+    pub fn as_ptr(value: &Self) -> usize { Allocation::as_ptr(&value.memory) }
+    pub fn len(value: &Self) -> Int { value.length }
+    pub fn release(value: Self) { match(value) { CString { memory, length: _ } => Allocation::release(memory) } }
+    // Its bytes, without the zero and with it; the memory is given back.
+    pub fn into_bytes(value: Self) -> [u8] {
+        match(value) { CString { memory, length } =>
+            let bytes = unsafe { read_bytes(Allocation::as_ptr(&memory), length) };
+            Allocation::release(memory);
+            bytes }
+    }
+    pub fn into_bytes_with_nul(value: Self) -> [u8] {
+        match(value) { CString { memory, length } =>
+            let bytes = unsafe { read_bytes(Allocation::as_ptr(&memory), length + 1) };
+            Allocation::release(memory);
+            bytes }
+    }
+}

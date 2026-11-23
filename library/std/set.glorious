@@ -1,0 +1,28 @@
+// A set of values kept in order: a map from each to nothing.
+
+use std::map;
+use std::map::Map;
+
+pub struct Set<T>(Map<T, ()>)
+
+pub fn new<T>() -> Set<T> where T: Use<[1, 1]> { Set(map::new()) }
+
+pub fn insert<T>(s: Set<T>, x: T) -> Set<T> where T: Ord, T: Use<[0, *]> { match(s) { Set(m) => Set(map::insert(m, x, ())) } }
+pub fn remove<T>(s: Set<T>, x: T) -> Set<T> where T: Ord, T: Use<[0, *]> { match(s) { Set(m) => Set(map::remove(m, x)) } }
+pub fn contains<T>(s: Set<T>, x: T) -> Bool where T: Ord, T: Use<[0, *]> { match(s) { Set(m) => map::contains_key(m, x) } }
+pub fn len<T>(s: Set<T>) -> Int { match(s) { Set(m) => map::len(m) } }
+pub fn is_empty<T>(s: Set<T>) -> Bool { match(s) { Set(m) => map::is_empty(m) } }
+
+// The values, in order.
+pub fn to_array<T>(s: Set<T>) -> [T] { match(s) { Set(m) => map::keys(m) } }
+
+// The set of the values of an array.
+pub fn from<T>(a: [T]) -> Set<T> where T: Ord, T: Use<[0, *]> { fold(a, new(), fn(s, x) { insert(s, x) }) }
+
+pub fn fold_set<T, U, e: EffectRow>(s: Set<T>, init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where U: Use<[1, 1]> { match(s) { Set(m) => map::fold(m, init, fn(acc, k, v) { f(acc, k) }) } }
+
+// What is in either, in both, and in the first but not the second.
+pub fn union<T>(a: Set<T>, b: Set<T>) -> Set<T> where T: Ord, T: Use<[0, *]> { fold_set(b, a, fn(s, x) { insert(s, x) }) }
+pub fn intersection<T>(a: Set<T>, b: Set<T>) -> Set<T> where T: Ord, T: Use<[0, *]> { fold_set(a, new(), fn(s, x) { if(contains(b, x)) { insert(s, x) } else { s } }) }
+pub fn difference<T>(a: Set<T>, b: Set<T>) -> Set<T> where T: Ord, T: Use<[0, *]> { fold_set(b, a, fn(s, x) { remove(s, x) }) }
+pub fn is_subset<T>(a: Set<T>, b: Set<T>) -> Bool where T: Ord, T: Use<[0, *]> { fold_set(a, true, fn(ok, x) { ok and { contains(b, x) } }) }

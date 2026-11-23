@@ -1,0 +1,38 @@
+// The small things the rest is built from, as the library specification
+// lists them (3).
+
+// One of two.
+pub enum Either<A, B> { Left(A), Right(B) }
+
+// What was refused, given back with why.
+pub struct Rejected<T, E> { pub value: T, pub error: E }
+
+pub fn identity<T>(value: T) -> T where T: Use<[1, 1]> { value }
+
+// A value let go: its `drop` runs, if it has one.
+pub fn discard<T>(value: T) { () }
+
+// A type with a value to start from.
+pub trait Default {
+    fn default() -> Self;
+}
+
+impl Default for Int { fn default() -> Int { 0 } }
+impl Default for Str { fn default() -> Str { "" } }
+// (`Bool` is an `Option<()>`: its start is `false`.)
+impl<A> Default for Option<A> { fn default() -> Option<A> { None } }
+
+// What a reference points to, taken; the type's start is left in its place.
+pub fn take<T: Default>(target: &mut T) -> T { replace(target, default()) }
+
+// A step that cannot go on, with why; and one that says something and goes
+// on (the library specification's §6.1). `catch_fail` runs a body and gives
+// `Ok` of what it gives, or `Err` of what it failed with.
+pub effect Fail<E> { fail(E) -> ! }
+pub effect Report<D> { report(D) }
+pub fn catch_fail<T, U, e: EffectRow>(body: fn() -> T / {Fail<U> | e}) -> Result<T, U> / {| e} {
+    handle body() {
+        r => Ok(r),
+        fail(e) => Err(e)
+    }
+}

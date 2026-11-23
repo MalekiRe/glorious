@@ -1,0 +1,281 @@
+// One value at a time, asked for through a `&mut` reference: the shape the
+// library specification gives iteration (18). What is iterated says what its
+// values are (`Item`); what uses them is a function over anything iterated.
+
+pub trait Iterator {
+    type Item;
+    fn next(&mut Self) -> Option<Self::Item>;
+}
+
+// From one value up to, not including, another (the library
+// specification's §3); of whole numbers, what is iterated.
+pub struct Range<T> { pub start: T, pub end: T }
+pub fn range(from: Int, to: Int) -> Range<Int> { Range { start: from, end: to } }
+impl Iterator for Range<Int> {
+    type Item = Int;
+    fn next(r: &mut Range<Int>) -> Option<Int> { if(r.start < r.end) { let v = r.start; r.start = v + 1; Some(v) } else { None } }
+}
+
+fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
+    match(pop(from)) {
+        Some((rest, last)) => tail turned(rest, push(onto, last)),
+        None => onto
+    }
+}
+
+// The elements of an array, each given away, first to last.
+pub struct IntoIter<T> { rest: [T] }
+pub fn into_iter<T>(items: [T]) -> IntoIter<T> where T: Use<[1, 1]> { IntoIter { rest: turned(items, []) } }
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+    fn next(it: &mut IntoIter<T>) -> Option<T> {
+        pop_at(&mut it.rest)
+    }
+}
+
+// Every value, folded into one.
+pub fn fold<I: Iterator, A, e: EffectRow>(it: &mut I, acc: A, f: fn(A, I::Item) -> A / {| e}) -> A / {| e} where I: Use<[1, 1]>, A: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => tail fold(it, f(acc, x), f),
+        None => acc
+    }
+}
+
+// Something done with every value.
+pub fn for_each<I: Iterator, e: EffectRow>(it: &mut I, f: fn(I::Item) -> () / {| e}) / {| e} where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => f(x); tail for_each(it, f),
+        None => ()
+    }
+}
+
+// How many values are left; they are let go.
+pub fn count<I: Iterator>(it: &mut I) -> Int where I: Use<[1, 1]> { count_from(it, 0) }
+fn count_from<I: Iterator>(it: &mut I, n: Int) -> Int where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(_) => tail count_from(it, n + 1),
+        None => n
+    }
+}
+
+// The values left, as an array.
+pub fn collect<I: Iterator>(it: &mut I) -> [I::Item] where I: Use<[1, 1]> { collect_onto(it, []) }
+fn collect_onto<I: Iterator>(it: &mut I, out: [I::Item]) -> [I::Item] where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => tail collect_onto(it, push(out, x)),
+        None => out
+    }
+}
+
+// What a function makes of each value, as an array.
+pub fn map_collect<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> B / {| e}) -> [B] / {| e} where I: Use<[1, 1]> { map_onto(it, f, []) }
+fn map_onto<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> B / {| e}, out: [B]) -> [B] / {| e} where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => tail map_onto(it, f, push(out, f(x))),
+        None => out
+    }
+}
+
+// Iterators made from iterators. Each is a type of its own that holds the
+// one it reads from, and gives a value only when asked: nothing is done
+// until something is asked for. `A` is what the inner iterator gives; the
+// implementation says so in its conditions.
+
+// Each value, changed by a function.
+pub struct Map<I, A, B> { inner: I, f: fn(A) -> B }
+impl<I, A, B> Iterator for Map<I, A, B> where I: Iterator<Item = A> {
+    type Item = B;
+    fn next(it: &mut Map<I, A, B>) -> Option<B> {
+        match(next(&mut it.inner)) {
+            Some(x) => Some((it.f)(x)),
+            None => None
+        }
+    }
+}
+pub fn map<I: Iterator, B>(it: I, f: fn(I::Item) -> B) -> Map<I, I::Item, B> where I: Use<[1, 1]>, B: Use<[1, 1]> {
+    Map { inner: it, f: f }
+}
+
+// The values a test passes.
+pub struct Filter<I, A> { inner: I, keep: for<'a> fn(&'a A) -> Bool }
+impl<I, A> Iterator for Filter<I, A> where I: Iterator<Item = A> {
+    type Item = A;
+    fn next(it: &mut Filter<I, A>) -> Option<A> {
+        match(next(&mut it.inner)) {
+            Some(x) => if((it.keep)(&x)) { Some(x) } else { next(it) },
+            None => None
+        }
+    }
+}
+pub fn filter<I: Iterator>(it: I, keep: for<'a> fn(&'a I::Item) -> Bool) -> Filter<I, I::Item> where I: Use<[1, 1]> {
+    Filter { inner: it, keep: keep }
+}
+
+// The first so many values.
+pub struct Take<I, A> { inner: I, left: Int }
+impl<I, A> Iterator for Take<I, A> where I: Iterator<Item = A> {
+    type Item = A;
+    fn next(it: &mut Take<I, A>) -> Option<A> {
+        if(it.left <= 0) { None } else {
+            it.left = it.left - 1;
+            next(&mut it.inner)
+        }
+    }
+}
+pub fn take<I: Iterator>(it: I, n: Int) -> Take<I, I::Item> where I: Use<[1, 1]> {
+    Take { inner: it, left: n }
+}
+
+// All but the first so many values.
+pub struct Skip<I, A> { inner: I, left: Int }
+impl<I, A> Iterator for Skip<I, A> where I: Iterator<Item = A> {
+    type Item = A;
+    fn next(it: &mut Skip<I, A>) -> Option<A> {
+        if(it.left <= 0) { next(&mut it.inner) } else {
+            it.left = it.left - 1;
+            match(next(&mut it.inner)) {
+                Some(_) => next(it),
+                None => None
+            }
+        }
+    }
+}
+pub fn skip<I: Iterator>(it: I, n: Int) -> Skip<I, I::Item> where I: Use<[1, 1]> {
+    Skip { inner: it, left: n }
+}
+
+// Each value with its place, counted from zero.
+pub struct Enumerate<I, A> { inner: I, at: Int }
+impl<I, A> Iterator for Enumerate<I, A> where I: Iterator<Item = A> {
+    type Item = (Int, A);
+    fn next(it: &mut Enumerate<I, A>) -> Option<(Int, A)> {
+        match(next(&mut it.inner)) {
+            Some(x) =>
+                let i = it.at;
+                it.at = i + 1;
+                Some((i, x)),
+            None => None
+        }
+    }
+}
+pub fn enumerate<I: Iterator>(it: I) -> Enumerate<I, I::Item> where I: Use<[1, 1]> {
+    Enumerate { inner: it, at: 0 }
+}
+
+// The values of two iterators in pairs, for as long as both have one.
+pub struct Zip<I, J, A, B> { left: I, right: J }
+impl<I, J, A, B> Iterator for Zip<I, J, A, B> where I: Iterator<Item = A>, J: Iterator<Item = B> {
+    type Item = (A, B);
+    fn next(it: &mut Zip<I, J, A, B>) -> Option<(A, B)> {
+        match(next(&mut it.left)) {
+            Some(a) => match(next(&mut it.right)) {
+                Some(b) => Some((a, b)),
+                None => None
+            },
+            None => None
+        }
+    }
+}
+pub fn zip<I: Iterator, J: Iterator>(a: I, b: J) -> Zip<I, J, I::Item, J::Item> where I: Use<[1, 1]>, J: Use<[1, 1]> {
+    Zip { left: a, right: b }
+}
+
+// The values of one iterator, then those of another.
+pub struct Chain<I, J, A> { first: I, second: J }
+impl<I, J, A> Iterator for Chain<I, J, A> where I: Iterator<Item = A>, J: Iterator<Item = A> {
+    type Item = A;
+    fn next(it: &mut Chain<I, J, A>) -> Option<A> {
+        match(next(&mut it.first)) {
+            Some(x) => Some(x),
+            None => next(&mut it.second)
+        }
+    }
+}
+pub fn chain<I: Iterator, J: Iterator<Item = I::Item>>(a: I, b: J) -> Chain<I, J, I::Item> {
+    Chain { first: a, second: b }
+}
+
+// The first value a test passes, if one does; those before it are let go.
+pub fn find<I: Iterator, e: EffectRow>(it: &mut I, wanted: for<'a> fn(&'a I::Item) -> Bool / {| e}) -> Option<I::Item> / {| e} where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => if(wanted(&x)) { Some(x) } else { tail find(it, wanted) },
+        None => None
+    }
+}
+
+// The first thing a function makes of a value, where it makes anything; the
+// values before that are let go.
+pub fn find_map<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> Option<B> / {| e}) -> Option<B> / {| e} where I: Use<[1, 1]>, B: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => match(f(x)) {
+            Some(found) => Some(found),
+            None => tail find_map(it, f)
+        },
+        None => None
+    }
+}
+
+// The value so many further on.
+pub fn nth<I: Iterator>(it: &mut I, n: Int) -> Option<I::Item> where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => if(n <= 0) { Some(x) } else { tail nth(it, n - 1) },
+        None => None
+    }
+}
+
+// The whole numbers left, added up, and multiplied.
+pub fn sum<I: Iterator<Item = Int>>(it: &mut I) -> Int { fold(it, 0, { (a, x) => a + x }) }
+pub fn product<I: Iterator<Item = Int>>(it: &mut I) -> Int { fold(it, 1, { (a, x) => a * x }) }
+
+// Whether some value left passes a test, and whether every one does: each
+// stops at the first that settles it.
+pub fn any<I: Iterator, e: EffectRow>(it: &mut I, test: fn(I::Item) -> Bool / {| e}) -> Bool / {| e} where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => if(test(x)) { true } else { tail any(it, test) },
+        None => false
+    }
+}
+pub fn all<I: Iterator, e: EffectRow>(it: &mut I, test: fn(I::Item) -> Bool / {| e}) -> Bool / {| e} where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => if(test(x)) { tail all(it, test) } else { false },
+        None => true
+    }
+}
+
+// Where the first value left that passes a test is, counting from here.
+pub fn position<I: Iterator, e: EffectRow>(it: &mut I, test: fn(I::Item) -> Bool / {| e}) -> Option<Int> / {| e} where I: Use<[1, 1]> { position_from(it, test, 0) }
+fn position_from<I: Iterator, e: EffectRow>(it: &mut I, test: fn(I::Item) -> Bool / {| e}, at: Int) -> Option<Int> / {| e} where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => if(test(x)) { Some(at) } else { tail position_from(it, test, at + 1) },
+        None => None
+    }
+}
+
+// The last value left.
+pub fn last<I: Iterator>(it: &mut I) -> Option<I::Item> where I: Use<[1, 1]> { last_after(it, None) }
+fn last_after<I: Iterator>(it: &mut I, seen: Option<I::Item>) -> Option<I::Item> where I: Use<[1, 1]> {
+    match(next(it)) {
+        Some(x) => tail last_after(it, Some(x)),
+        None => seen
+    }
+}
+
+// The least and the greatest value left, by `<`.
+pub fn min<T: Ord, I: Iterator<Item = T>>(it: &mut I) -> Option<T> where T: Use<[0, *]> {
+    match(next(it)) { Some(x) => Some(least_after(it, x)), None => None }
+}
+fn least_after<T: Ord, I: Iterator<Item = T>>(it: &mut I, best: T) -> T where T: Use<[0, *]> {
+    match(next(it)) {
+        Some(x) => if(x < best) { tail least_after(it, x) } else { tail least_after(it, best) },
+        None => best
+    }
+}
+pub fn max<T: Ord, I: Iterator<Item = T>>(it: &mut I) -> Option<T> where T: Use<[0, *]> {
+    match(next(it)) { Some(x) => Some(greatest_after(it, x)), None => None }
+}
+fn greatest_after<T: Ord, I: Iterator<Item = T>>(it: &mut I, best: T) -> T where T: Use<[0, *]> {
+    match(next(it)) {
+        Some(x) => if(best < x) { tail greatest_after(it, x) } else { tail greatest_after(it, best) },
+        None => best
+    }
+}

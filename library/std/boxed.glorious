@@ -1,0 +1,17 @@
+// One value kept as its owner's alone, as the library specification has it
+// (22.3). Every value here is kept somewhere of its own already, so a `Box`
+// is the value under another name: it is for programs written to be read
+// where that is not so.
+
+use std::value::{Rejected};
+use std::c::{AllocError};
+
+pub struct Box<T> { held: T }
+
+impl<T> Box<T> {
+    pub fn new(value: T) -> Self where T: Use<[1, 1]> { Self { held: value } }
+    pub fn try_new(value: T) -> Result<Self, Rejected<T, AllocError>> where T: Use<[1, 1]> { Ok(Self { held: value }) }
+    pub fn as_ref<'a>(value: &'a Self) -> &'a T where T: Use<[1, 1]> { &value.held }
+    pub fn as_mut<'a>(value: &'a mut Self) -> &'a mut T where T: Use<[1, 1]> { &mut value.held }
+    pub fn into_inner(value: Self) -> T where T: Use<[1, 1]> { match(value) { Box { held } => held } }
+}

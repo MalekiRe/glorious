@@ -1,0 +1,41 @@
+// Whole numbers.
+
+pub fn abs(n: Int) -> Int { if(n < 0) { 0 - n } else { n } }
+
+// -1, 0 or 1: the sign of a number.
+pub fn signum(n: Int) -> Int { if(n < 0) { 0 - 1 } else { if(n == 0) { 0 } else { 1 } } }
+
+pub fn is_even(n: Int) -> Bool { n % 2 == 0 }
+pub fn is_odd(n: Int) -> Bool { n % 2 != 0 }
+
+// `base` multiplied by itself `exponent` times; `exponent` is not negative.
+pub fn pow(base: Int, exponent: Int) -> Int { pow_onto(base, exponent, 1) }
+fn pow_onto(base: Int, exponent: Int, acc: Int) -> Int {
+    if(exponent <= 0) { acc } else {
+        if(exponent % 2 == 0) { tail pow_onto(base * base, exponent / 2, acc) }
+        else { tail pow_onto(base, exponent - 1, acc * base) }
+    }
+}
+
+// The greatest number that divides both; never negative.
+pub fn gcd(a: Int, b: Int) -> Int { if(b == 0) { abs(a) } else { tail gcd(b, a % b) } }
+
+// The least number both divide; never negative.
+pub fn lcm(a: Int, b: Int) -> Int { if(a == 0 or { b == 0 }) { 0 } else { abs(a / gcd(a, b) * b) } }
+
+// The quotient rounded down, and what is left, which has the sign of `b`.
+pub fn div_floor(a: Int, b: Int) -> Int {
+    let q = a / b;
+    if(a % b != 0 and { (a < 0) != (b < 0) }) { q - 1 } else { q }
+}
+pub fn mod_floor(a: Int, b: Int) -> Int { a - div_floor(a, b) * b }
+
+// The digits of a number that is not negative, the first first.
+pub fn digits(n: Int) -> [Int] { if(n < 10) { [n] } else { push(digits(n / 10), n % 10) } }
+
+// The whole root: the greatest `r` with `r * r <= n`, for `n` not negative.
+pub fn sqrt(n: Int) -> Int { if(n < 2) { n } else { sqrt_from(n, n) } }
+fn sqrt_from(n: Int, guess: Int) -> Int {
+    let next = (guess + n / guess) / 2;
+    if(next >= guess) { guess } else { tail sqrt_from(n, next) }
+}

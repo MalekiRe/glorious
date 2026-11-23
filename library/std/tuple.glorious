@@ -1,0 +1,70 @@
+// Tuples and functions of any length, through one form: the tuple
+// `(A, B, C)` as the pairs `(A, (B, (C, ())))`. What is written for `()` and
+// for a pair `(First, Rest)` is then written for every length:
+//
+//     trait Total { fn total(Self) -> Int }
+//     impl Total for () { fn total(nothing) { 0 } }
+//     impl<Rest> Total for (Int, Rest) where Rest: Total { fn total(p) { p.0 + total(p.1) } }
+//     total(nest((1, 2, 3)))
+//
+// Up to sixteen.
+
+// A tuple, and the pairs it is.
+pub trait Tuple {
+    type Nested;
+    fn nest(Self) -> Nested
+    fn flat(Nested) -> Self
+}
+
+// A tuple with one more part last (`(..T, X)`), or first (`(X, ..T)`).
+pub trait Push<X> {
+    type Out;
+    fn push(Self, X) -> Out
+}
+pub trait Prepend<X> {
+    type Out;
+    fn prepend(X, Self) -> Out
+}
+// A tuple of one or more as its first and the tuple of the rest.
+pub trait SplitFirst {
+    type First;
+    type Rest;
+    fn split_first(Self) -> (First, Rest)
+}
+
+// A function called with a tuple's parts, `f(..t)`: one that performs
+// nothing, and one that may wait (`std::thread::Threads`).
+pub trait Apply<F, O> { fn apply_parts(&F, Self) -> O }
+pub trait ApplyWaiting<F, O> { fn apply_parts_waiting(&F, Self) -> O / {std::thread::Threads} }
+
+// A function, by what it takes, as pairs, and what it gives.
+pub trait Callable {
+    type Args;
+    type Output;
+    fn call_with(&Self, Args) -> Output
+}
+
+// A function called with a tuple of what it takes: `apply(add, (3, 4))`.
+pub fn apply<F, T, L, R>(f: F, args: T) -> R where T: Tuple<Nested = L>, F: Callable<Args = L, Output = R> {
+    call_with(&f, nest(args))
+}
+
+// Two lists of pairs as one, the second after the first.
+pub trait Concat<Other> {
+    type Joined;
+    fn concat(Self, Other) -> Joined
+}
+impl<Other> Concat<Other> for () {
+    type Joined = Other;
+    fn concat(nothing: (), other: Other) -> Other { other }
+}
+impl<First, Rest, Other, J> Concat<Other> for (First, Rest) where Rest: Concat<Other, Joined = J> {
+    type Joined = (First, J);
+    fn concat(pair: (First, Rest), other: Other) -> (First, J) { (pair.0, concat(pair.1, other)) }
+}
+
+// How many a list of pairs has.
+pub trait Count { const COUNT: Int; }
+impl Count for () { const COUNT: Int = 0; }
+impl<First, Rest> Count for (First, Rest) where Rest: Count { const COUNT: Int = 1 + Rest::COUNT; }
+

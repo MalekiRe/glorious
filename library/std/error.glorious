@@ -1,0 +1,11 @@
+// Failures several modules share, as the library specification lists them
+// (32).
+
+// A mark used on what it was not taken from, or after that was cut back.
+pub enum MarkError { WrongOwner, Stale, OutOfRange, NotTop }
+// A stretch that is not within what it is a stretch of.
+pub struct RangeError { pub offset: Int, pub length: Int }
+// Room that could not be made.
+pub enum ReserveError { CapacityOverflow }
+// More things than a place can number.
+pub struct IndexOverflow;

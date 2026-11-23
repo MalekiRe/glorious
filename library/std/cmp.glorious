@@ -1,0 +1,24 @@
+// Putting values in order.
+
+pub enum Ordering { Less, Equal, Greater }
+
+// How `a` stands to `b`.
+pub fn compare<T>(a: T, b: T) -> Ordering where T: Ord, T: Eq, T: Use<[0, *]> {
+    if(a < b) { Less } else { if(a == b) { Equal } else { Greater } }
+}
+
+pub fn min<T>(a: T, b: T) -> T where T: Ord, T: Use<[0, *]> { if(b < a) { b } else { a } }
+pub fn max<T>(a: T, b: T) -> T where T: Ord, T: Use<[0, *]> { if(b < a) { a } else { b } }
+
+// `x`, kept between `low` and `high`.
+pub fn clamp<T>(x: T, low: T, high: T) -> T where T: Ord, T: Use<[0, *]> { if(x < low) { low } else { if(high < x) { high } else { x } } }
+
+// The order the other way round.
+pub fn reverse(o: Ordering) -> Ordering { match(o) { Less => Greater, Equal => Equal, Greater => Less } }
+
+// This order, or where it says equal, another.
+pub fn then(o: Ordering, other: Ordering) -> Ordering { match(o) { Equal => other, _ => o } }
+
+pub fn is_less(o: Ordering) -> Bool { match(o) { Less => true, _ => false } }
+pub fn is_equal(o: Ordering) -> Bool { match(o) { Equal => true, _ => false } }
+pub fn is_greater(o: Ordering) -> Bool { match(o) { Greater => true, _ => false } }

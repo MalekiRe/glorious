@@ -1,0 +1,21 @@
+// Characters. What is said of letters and digits here is said of ASCII.
+
+pub fn code(c: char) -> Int { int(c) }
+
+pub fn is_digit(c: char) -> Bool { '0' <= c and { c <= '9' } }
+pub fn is_lower(c: char) -> Bool { 'a' <= c and { c <= 'z' } }
+pub fn is_upper(c: char) -> Bool { 'A' <= c and { c <= 'Z' } }
+pub fn is_alpha(c: char) -> Bool { is_lower(c) or { is_upper(c) } }
+pub fn is_alphanumeric(c: char) -> Bool { is_alpha(c) or { is_digit(c) } }
+pub fn is_space(c: char) -> Bool {
+    c == ' ' or { c == '\n' } or { c == '\t' } or { c == '\r' }
+}
+
+// The number a digit stands for.
+pub fn digit(c: char) -> Option<Int> { if(is_digit(c)) { Some(int(c) - int('0')) } else { None } }
+
+// The digit that stands for a number from 0 to 9.
+pub fn of_digit(n: Int) -> Option<char> { if(0 <= n and { n <= 9 }) { char(int('0') + n) } else { None } }
+
+pub fn to_upper(c: char) -> char { if(is_lower(c)) { char(int(c) - 32) else { c } } else { c } }
+pub fn to_lower(c: char) -> char { if(is_upper(c)) { char(int(c) + 32) else { c } } else { c } }

@@ -1,0 +1,34 @@
+// Computations that may not be done yet, as the library specification has
+// them (30.3): polling one uses it up, and gives its result or the future
+// that goes on. Who polls, and when, is whoever handles `await`.
+
+pub enum FutureStep<T, F> { Ready(T), Pending(F) }
+
+pub trait Future {
+    type Output;
+    fn poll(Self) -> FutureStep<Self::Output, Self>
+}
+
+// Waiting for a future's result. Whoever asks is always answered, with what
+// the future made: a handler drives the future, or hands it on, and resumes
+// once.
+pub effect Await<F: Future> { [1, 1] await(F) -> F::Output }
+
+// A future that is done already.
+pub struct Ready<T> { value: T }
+pub fn ready<T>(value: T) -> Ready<T> where T: Use<[1, 1]> { Ready { value: value } }
+impl<T> Future for Ready<T> {
+    type Output = T;
+    fn poll(r: Ready<T>) -> FutureStep<T, Ready<T>> { match(r) { Ready { value } => FutureStep::Ready(value) } }
+}
+
+// A future polled until it is done.
+pub fn drive<T, F: Future<Output = T>>(future: F) -> T {
+    match(poll(future)) { FutureStep::Ready(value) => value, FutureStep::Pending(rest) => drive(rest) }
+}
+
+// The simplest provider: a future awaited is driven to its end where it is
+// awaited.
+pub fn block_on<F: Future, R>(body: fn() -> R / {Await<F>}) -> R where R: Use<[1, 1]> {
+    handle body() { await(future, k) => k(drive(future)) }
+}

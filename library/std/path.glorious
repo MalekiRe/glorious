@@ -1,0 +1,97 @@
+// Paths taken apart and put together as text, as the library specification
+// has them (29.1), for paths written with `/`. Nothing here looks at a file
+// system: a link is not followed, and a path is not shown to stay inside
+// another.
+
+use std::text::{split, join, starts_with, is_empty};
+
+// A path, kept as it is written.
+pub struct PathBuf { text: Str }
+
+pub enum PathComponent { Root, Current, Parent, Normal(Str) }
+pub enum PathError { InvalidEncoding, InvalidComponent, UnsupportedPrefix }
+
+// The names between the `/`s, those that are nothing left out.
+fn names(text: Str) -> [Str] { kept(split(text, '/'), 0, []) }
+fn kept(parts: [Str], i: Int, out: [Str]) -> [Str] {
+    if(i >= len(parts)) { out } else { tail kept(parts, i + 1, if(is_empty(parts[i])) { out } else { push(out, parts[i]) }) }
+}
+
+fn component(name: Str) -> PathComponent {
+    if(name == ".") { PathComponent::Current } else { if(name == "..") { PathComponent::Parent } else { PathComponent::Normal(name) } }
+}
+
+fn components_of(parts: [Str], i: Int, out: [PathComponent]) -> [PathComponent] {
+    if(i >= len(parts)) { out } else { tail components_of(parts, i + 1, push(out, component(parts[i]))) }
+}
+
+fn upto(parts: [Str], n: Int, i: Int, out: [Str]) -> [Str] {
+    if(i >= n) { out } else { tail upto(parts, n, i + 1, push(out, parts[i])) }
+}
+
+// The place of the last `.` in a name, if it has one after its first
+// character: a name that only begins with one has no extension.
+fn last_dot(name: Str, i: Int, found: Int) -> Int {
+    match(name) {
+        StrEnd => found,
+        StrChar(c, rest) => tail last_dot(rest, i + 1, if(c == '.' and { i > 0 }) { i } else { found })
+    }
+}
+
+impl PathBuf {
+    pub fn new() -> Self { Self { text: "" } }
+    pub fn from_str(text: Str) -> Self { Self { text: text } }
+    pub fn as_str(p: &Self) -> Str { p.text }
+    pub fn is_absolute(p: &Self) -> Bool { starts_with(p.text, "/") }
+    // What it is made of, in order: the root if it starts at it, then each
+    // name, with `.` and `..` told from the others.
+    pub fn components(p: &Self) -> [PathComponent] {
+        components_of(names(p.text), 0, if(starts_with(p.text, "/")) { [PathComponent::Root] } else { [] })
+    }
+    // The last name, if the path ends in one.
+    pub fn file_name(p: &Self) -> Option<Str> {
+        let parts = names(p.text);
+        let n = len(parts);
+        if(n == 0) { None } else {
+            let last = parts[n - 1];
+            if(last == "." or { last == ".." }) { None } else { Some(last) }
+        }
+    }
+    // What follows the last `.` of the last name.
+    pub fn extension(p: &Self) -> Option<Str> {
+        match(PathBuf::file_name(p)) {
+            None => None,
+            Some(name) =>
+                let at = last_dot(name, 0, 0 - 1);
+                if(at < 0) { None } else { Some(std::text::drop(name, at + 1)) }
+        }
+    }
+    // The path without its last name: none for the root and for a path of
+    // no names.
+    pub fn parent(p: &Self) -> Option<PathBuf> {
+        let parts = names(p.text);
+        let n = len(parts);
+        if(n == 0) { None } else {
+            let before = join(upto(parts, n - 1, 0, []), "/");
+            Some(PathBuf { text: if(starts_with(p.text, "/")) { "/" ++ before } else { before } })
+        }
+    }
+    // Another path after this one; one that starts at the root takes its
+    // place.
+    pub fn join(p: &Self, other: &Self) -> PathBuf {
+        if(starts_with(other.text, "/") or { is_empty(p.text) }) { PathBuf { text: other.text } } else {
+            if(is_empty(other.text)) { PathBuf { text: p.text } } else {
+                PathBuf { text: if(std::text::ends_with(p.text, "/")) { p.text ++ other.text } else { p.text ++ "/" ++ other.text } }
+            }
+        }
+    }
+    pub fn push(p: &mut Self, other: &Self) -> Result<(), PathError> {
+        let joined = PathBuf::join(&*p, other);
+        p.text = joined.text;
+        Ok(())
+    }
+    // The last name taken off: whether there was one.
+    pub fn pop(p: &mut Self) -> Bool {
+        match(PathBuf::parent(&*p)) { Some(up) => p.text = up.text; true, None => false }
+    }
+}

@@ -1,0 +1,264 @@
+// Streams of bytes, in the shape the library specification gives them (28): a
+// trait for what can be read from and one for what can be written to. Each
+// leaves to its implementation the row of effects its functions perform, so
+// a stream held in memory performs nothing and one of the host's performs
+// the host's effect, under the same functions.
+
+use std::host::{IoError, Console, write_stdout, write_stderr, read_stdin};
+use std::text::{utf8};
+
+pub trait Read {
+    type Effects: EffectRow;
+    // Up to so many bytes. None, asked for some, is the end of the stream.
+    fn read(&mut Self, Int) -> Result<[u8], IoError> / { | Self::Effects };
+}
+
+pub trait Write {
+    type Effects: EffectRow;
+    // How many of the bytes were taken, from the first of them.
+    fn write(&mut Self, [u8]) -> Result<Int, IoError> / { | Self::Effects };
+    fn flush(&mut Self) -> Result<(), IoError> / { | Self::Effects };
+}
+
+// The bytes of an array from one place up to another.
+fn piece(bytes: &[u8], from: Int, upto: Int, out: [u8]) -> [u8] {
+    if(from >= upto) { out } else {
+        match(element(bytes, from)) {
+            Some(b) => tail piece(bytes, from + 1, upto, push(out, *b)),
+            None => out
+        }
+    }
+}
+
+// One array's bytes after another's.
+fn joined(onto: [u8], more: &[u8], i: Int) -> [u8] {
+    match(element(more, i)) {
+        Some(b) => tail joined(push(onto, *b), more, i + 1),
+        None => onto
+    }
+}
+
+// Bytes held in memory: read from where the last read stopped, written at
+// the end.
+pub struct MemoryCursor { bytes: [u8], at: Int }
+
+impl MemoryCursor {
+    pub fn new(bytes: [u8]) -> Self { Self { bytes: bytes, at: 0 } }
+    pub fn position(value: &Self) -> Int { value.at }
+    pub fn into_inner(value: Self) -> [u8] { match(value) { MemoryCursor { bytes, at } => bytes } }
+}
+
+impl Read for MemoryCursor {
+    type Effects = {};
+    fn read(cursor: &mut MemoryCursor, most: Int) -> Result<[u8], IoError> {
+        let from = cursor.at;
+        let n = len_at(&cursor.bytes);
+        let upto = if(from + most > n) { n } else { from + most };
+        cursor.at = upto;
+        Ok(piece(&cursor.bytes, from, upto, []))
+    }
+}
+
+impl Write for MemoryCursor {
+    type Effects = {};
+    fn write(cursor: &mut MemoryCursor, bytes: [u8]) -> Result<Int, IoError> {
+        let held = &mut cursor.bytes;
+        *held = joined(replace(held, []), &bytes, 0);
+        Ok(len(bytes))
+    }
+    fn flush(cursor: &mut MemoryCursor) -> Result<(), IoError> { Ok(()) }
+}
+
+// The host's standard streams.
+pub struct Stdout
+pub struct Stderr
+pub struct Stdin
+
+impl Write for Stdout {
+    type Effects = {Console};
+    fn write(out: &mut Stdout, bytes: [u8]) -> Result<Int, IoError> / {Console} { write_stdout(bytes) }
+    fn flush(out: &mut Stdout) -> Result<(), IoError> / {Console} { Ok(()) }
+}
+
+impl Write for Stderr {
+    type Effects = {Console};
+    fn write(out: &mut Stderr, bytes: [u8]) -> Result<Int, IoError> / {Console} { write_stderr(bytes) }
+    fn flush(out: &mut Stderr) -> Result<(), IoError> / {Console} { Ok(()) }
+}
+
+impl Read for Stdin {
+    type Effects = {Console};
+    fn read(from: &mut Stdin, most: Int) -> Result<[u8], IoError> / {Console} { read_stdin(most) }
+}
+
+// How far `write_all` got before it failed.
+pub struct WriteAllError { pub written: Int, pub error: IoError }
+
+fn write_from<W: Write>(writer: &mut W, bytes: [u8], done: Int)
+    -> Result<(), WriteAllError> / { | <W as Write>::Effects } where W: Use<[1, 1]> {
+    let n = len(bytes);
+    if(done >= n) { Ok(()) } else {
+        match(write(writer, piece(&bytes, done, n, []))) {
+            // A writer that takes nothing has failed: going round again
+            // would never end.
+            Ok(took) =>
+                if(took <= 0) { Err(WriteAllError { written: done, error: IoError { code: 0 } }) }
+                else { tail write_from(writer, bytes, done + took) },
+            Err(e) => Err(WriteAllError { written: done, error: e })
+        }
+    }
+}
+
+// Every byte written, or how many were when it failed.
+pub fn write_all<W: Write>(writer: &mut W, bytes: [u8])
+    -> Result<(), WriteAllError> / { | <W as Write>::Effects } where W: Use<[1, 1]> {
+    write_from(writer, bytes, 0)
+}
+
+// A text written as its UTF-8 bytes.
+pub fn write_str<W: Write>(writer: &mut W, text: Str)
+    -> Result<(), WriteAllError> / { | <W as Write>::Effects } where W: Use<[1, 1]> {
+    write_from(writer, utf8(text), 0)
+}
+
+fn read_more<R: Read>(reader: &mut R, out: [u8], limit: Int)
+    -> Result<[u8], IoError> / { | <R as Read>::Effects } where R: Use<[1, 1]> {
+    let left = limit - len(out);
+    if(left <= 0) { Ok(out) } else {
+        match(read(reader, if(left > 4096) { 4096 } else { left })) {
+            Ok(got) =>
+                if(len(got) == 0) { Ok(out) }
+                else { tail read_more(reader, joined(out, &got, 0), limit) },
+            Err(e) => Err(e)
+        }
+    }
+}
+
+// Everything a stream still has, up to so many bytes.
+pub fn read_to_end<R: Read>(reader: &mut R, limit: Int)
+    -> Result<[u8], IoError> / { | <R as Read>::Effects } where R: Use<[1, 1]> {
+    read_more(reader, [], limit)
+}
+
+// Where copying stopped: more may have been read than was written.
+pub struct CopyError { pub read: Int, pub written: Int, pub error: IoError }
+
+fn copy_more<R: Read, W: Write>(reader: &mut R, writer: &mut W, limit: Int, done: Int)
+    -> Result<Int, CopyError> / { | <R as Read>::Effects, <W as Write>::Effects } where R: Use<[1, 1]>, W: Use<[1, 1]> {
+    let left = limit - done;
+    if(left <= 0) { Ok(done) } else {
+        match(read(reader, if(left > 4096) { 4096 } else { left })) {
+            Ok(got) =>
+                let n = len(got);
+                if(n == 0) { Ok(done) } else {
+                    match(write_from(writer, got, 0)) {
+                        Ok(_) => tail copy_more(reader, writer, limit, done + n),
+                        Err(e) => Err(CopyError { read: done + n, written: done + e.written, error: e.error })
+                    }
+                },
+            Err(e) => Err(CopyError { read: done, written: done, error: e })
+        }
+    }
+}
+
+// One stream into another until the first ends, up to so many bytes: how
+// many went across. It performs what reading the one and writing the other
+// do.
+pub fn copy_stream<R: Read, W: Write>(reader: &mut R, writer: &mut W, limit: Int)
+    -> Result<Int, CopyError> / { | <R as Read>::Effects, <W as Write>::Effects } where R: Use<[1, 1]>, W: Use<[1, 1]> {
+    copy_more(reader, writer, limit, 0)
+}
+
+// What was left when a buffered writer could not finish: the writer, the
+// bytes not written, and why.
+pub struct FinishWriteFailure<W> { pub writer: W, pub pending: [u8], pub error: IoError }
+
+// Bytes kept until there are enough to be worth writing. Letting one go
+// writes nothing: `finish` asks for what is kept to be written, and
+// `into_parts` gives it back.
+pub struct BufferWriter<W> { inner: W, held: [u8], capacity: Int }
+
+impl<W> BufferWriter<W> {
+    pub fn new(writer: W, capacity: Int) -> Self where W: Use<[1, 1]> {
+        Self { inner: writer, held: [], capacity: if(capacity < 1) { 1 } else { capacity } }
+    }
+    pub fn get_ref<'a>(value: &'a Self) -> &'a W where W: Use<[1, 1]> { &value.inner }
+    // How many bytes are kept.
+    pub fn buffered(value: &Self) -> Int { len_at(&value.held) }
+    pub fn pending(value: &Self) -> [u8] { value.held }
+    pub fn into_parts(value: Self) -> (W, [u8]) where W: Use<[1, 1]> { match(value) { BufferWriter { inner, held, capacity: _ } => (inner, held) } }
+    // What is kept written, and the writer given back; or all three of what
+    // there was, where it could not be.
+    pub fn finish(value: Self) -> Result<W, FinishWriteFailure<W>> / { | <W as Write>::Effects } where W: Write, W: Use<[0, *]> {
+        match(value) {
+            BufferWriter { inner, held, capacity: _ } =>
+                let mut writer = inner;
+                match(write_from(&mut writer, held, 0)) {
+                    Ok(_) => match(flush(&mut writer)) {
+                        Ok(_) => Ok(writer),
+                        Err(e) => Err(FinishWriteFailure { writer: writer, pending: [], error: e })
+                    },
+                    Err(e) => Err(FinishWriteFailure { writer: writer, pending: piece(&held, e.written, len(held), []), error: e.error })
+                }
+        }
+    }
+}
+
+impl<W> Write for BufferWriter<W> where W: Write {
+    type Effects = { | <W as Write>::Effects };
+    fn write(b: &mut BufferWriter<W>, bytes: [u8]) -> Result<Int, IoError> / {| <W as Write>::Effects} {
+        b.held = joined(b.held, &bytes, 0);
+        if(len_at(&b.held) >= b.capacity) {
+            match(write_from(&mut b.inner, b.held, 0)) {
+                Ok(_) => b.held = []; Ok(len(bytes)),
+                // (What the writer took is no longer kept.)
+                Err(e) => b.held = piece(&b.held, e.written, len_at(&b.held), []); Err(e.error)
+            }
+        } else { Ok(len(bytes)) }
+    }
+    fn flush(b: &mut BufferWriter<W>) -> Result<(), IoError> / {| <W as Write>::Effects} {
+        match(write_from(&mut b.inner, b.held, 0)) {
+            Ok(_) => b.held = []; flush(&mut b.inner),
+            Err(e) => b.held = piece(&b.held, e.written, len_at(&b.held), []); Err(e.error)
+        }
+    }
+}
+
+// Bytes read ahead, so that a little is not asked of the reader each time.
+pub struct BufferReader<R> { inner: R, held: [u8], at: Int, capacity: Int }
+
+impl<R> BufferReader<R> {
+    pub fn new(reader: R, capacity: Int) -> Self where R: Use<[1, 1]> {
+        Self { inner: reader, held: [], at: 0, capacity: if(capacity < 1) { 1 } else { capacity } }
+    }
+    pub fn get_ref<'a>(value: &'a Self) -> &'a R where R: Use<[1, 1]> { &value.inner }
+    // The reader, and the bytes read from it that nothing has asked for yet.
+    pub fn into_parts(value: Self) -> (R, [u8]) where R: Use<[1, 1]> {
+        match(value) { BufferReader { inner, held, at, capacity: _ } => (inner, piece(&held, at, len(held), [])) }
+    }
+}
+
+impl<R> Read for BufferReader<R> where R: Read {
+    type Effects = { | <R as Read>::Effects };
+    fn read(b: &mut BufferReader<R>, most: Int) -> Result<[u8], IoError> / {| <R as Read>::Effects} {
+        if(b.at < len_at(&b.held)) {
+            let from = b.at;
+            let n = len_at(&b.held);
+            let upto = if(from + most > n) { n } else { from + most };
+            b.at = upto;
+            Ok(piece(&b.held, from, upto, []))
+        } else {
+            // Nothing kept: more is read, as much as is kept at a time or
+            // as much as is asked for, whichever is more.
+            match(read(&mut b.inner, if(most > b.capacity) { most } else { b.capacity })) {
+                Err(e) => Err(e),
+                Ok(got) =>
+                    let n = len(got);
+                    let upto = if(most > n) { n } else { most };
+                    b.held = got;
+                    b.at = upto;
+                    Ok(piece(&b.held, 0, upto, []))
+            }
+        }
+    }
+}

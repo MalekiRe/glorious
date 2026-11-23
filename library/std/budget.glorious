@@ -1,0 +1,117 @@
+// What a piece of work may use, counted: steps, memory, depth; and a log of
+// what to undo, as the library specification has them (25.2, 25.3). Amounts
+// are `Int`.
+
+use std::value::{Rejected};
+pub use std::error::{MarkError};
+
+pub enum BudgetKind { Steps, Depth, Memory, Diagnostics, Items }
+pub struct BudgetExceeded { pub kind: BudgetKind, pub requested: Int, pub remaining: Int }
+
+// Steps that may still be taken.
+pub struct StepBudget { left: Int }
+
+impl StepBudget {
+    pub fn new(limit: Int) -> Self { Self { left: if(limit < 0) { 0 } else { limit } } }
+    pub fn remaining(b: &Self) -> Int { b.left }
+    // So many taken, or none of them if that is more than are left.
+    pub fn charge(b: &mut Self, steps: Int) -> Result<(), BudgetExceeded> {
+        if(steps < 0 or { steps > b.left }) { Err(BudgetExceeded { kind: BudgetKind::Steps, requested: steps, remaining: b.left }) }
+        else { b.left = b.left - steps; Ok(()) }
+    }
+}
+
+// Memory that may still be asked for. What is asked for is held as a
+// charge, which has to be given back to the budget it came from.
+pub struct MemoryBudget { left: Int, out: Int, id: Int }
+pub struct MemoryCharge { bytes: Int, of: Int }
+impl Use<[1, 1]> for MemoryCharge {}
+
+impl MemoryBudget {
+    // (`id` tells this budget's charges from another's: a release checks it.)
+    pub fn new(limit: Int) -> Self { Self { left: if(limit < 0) { 0 } else { limit }, out: 0, id: 0 } }
+    pub fn named(limit: Int, id: Int) -> Self { Self { left: if(limit < 0) { 0 } else { limit }, out: 0, id: id } }
+    pub fn remaining(b: &Self) -> Int { b.left }
+    pub fn charge(b: &mut Self, bytes: Int) -> Result<MemoryCharge, BudgetExceeded> {
+        if(bytes < 0 or { bytes > b.left }) { Err(BudgetExceeded { kind: BudgetKind::Memory, requested: bytes, remaining: b.left }) }
+        else { b.left = b.left - bytes; b.out = b.out + bytes; Ok(MemoryCharge { bytes: bytes, of: b.id }) }
+    }
+    // A charge given back; one that is another budget's comes back as it was.
+    pub fn release(b: &mut Self, charge: MemoryCharge) -> Result<(), Rejected<MemoryCharge, MarkError>> {
+        match(charge) {
+            MemoryCharge { bytes, of } =>
+                if(of != b.id or { bytes > b.out }) { Err(Rejected { value: MemoryCharge { bytes: bytes, of: of }, error: MarkError::WrongOwner }) }
+                else { b.left = b.left + bytes; b.out = b.out - bytes; Ok(()) }
+        }
+    }
+}
+
+// How deep work may still go. Going in gives a permit, which has to be
+// given back on the way out, the last given first.
+pub struct DepthBudget { limit: Int, depth: Int, id: Int }
+pub struct DepthPermit { level: Int, of: Int }
+impl Use<[1, 1]> for DepthPermit {}
+
+impl DepthBudget {
+    pub fn new(limit: Int) -> Self { Self { limit: if(limit < 0) { 0 } else { limit }, depth: 0, id: 0 } }
+    pub fn named(limit: Int, id: Int) -> Self { Self { limit: if(limit < 0) { 0 } else { limit }, depth: 0, id: id } }
+    pub fn depth(b: &Self) -> Int { b.depth }
+    pub fn enter(b: &mut Self) -> Result<DepthPermit, BudgetExceeded> {
+        if(b.depth >= b.limit) { Err(BudgetExceeded { kind: BudgetKind::Depth, requested: 1, remaining: 0 }) }
+        else { b.depth = b.depth + 1; Ok(DepthPermit { level: b.depth, of: b.id }) }
+    }
+    pub fn leave(b: &mut Self, permit: DepthPermit) -> Result<(), Rejected<DepthPermit, MarkError>> {
+        match(permit) {
+            DepthPermit { level, of } =>
+                if(of != b.id) { Err(Rejected { value: DepthPermit { level: level, of: of }, error: MarkError::WrongOwner }) } else {
+                    if(level != b.depth) { Err(Rejected { value: DepthPermit { level: level, of: of }, error: MarkError::NotTop }) }
+                    else { b.depth = b.depth - 1; Ok(()) }
+                }
+        }
+    }
+}
+
+// Whether to go on.
+pub enum ControlSignal { Proceed, CancelRequested }
+pub effect RequestControl { poll() -> ControlSignal }
+
+// Records of what was done, to undo back to a mark. It does not know what
+// undoing one is: it gives the records back, the last made first.
+pub struct UndoLog<T> { records: [T] }
+pub struct UndoMark { length: Int }
+
+fn last_onto<T>(items: [T], count: Int, taken: [T]) -> ([T], [T]) where T: Use<[1, 1]> {
+    if(count <= 0) { (items, taken) } else {
+        match(pop(items)) {
+            Some((rest, last)) => tail last_onto(rest, count - 1, push(taken, last)),
+            None => ([], taken)
+        }
+    }
+}
+
+fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
+    match(pop(from)) { Some((rest, last)) => tail turned(rest, push(onto, last)), None => onto }
+}
+
+impl<T> UndoLog<T> {
+    pub fn new() -> Self { Self { records: [] } }
+    pub fn len(log: &Self) -> Int { len_at(&log.records) }
+    pub fn mark(log: &Self) -> UndoMark { UndoMark { length: len_at(&log.records) } }
+    pub fn push(log: &mut Self, item: T) where T: Use<[1, 1]> { push_at(&mut log.records, item); }
+    // The records since a mark, the last made first, for undoing.
+    pub fn rollback_take(log: &mut Self, mark: UndoMark) -> Result<[T], MarkError> where T: Use<[1, 1]> {
+        if(mark.length > len_at(&log.records)) { Err(MarkError::Stale) } else {
+            let count = len_at(&log.records) - mark.length;
+            let records = &mut log.records;
+            let none = [];
+            match(last_onto(replace(records, []), count, none)) {
+                (kept, taken) => unsafe { restore_at(records, kept) }; Ok(taken)
+            }
+        }
+    }
+    // The same records in the order they were made: no longer needed.
+    pub fn commit(log: &mut Self, mark: UndoMark) -> Result<[T], MarkError> where T: Use<[1, 1]> {
+        match(UndoLog::rollback_take(log, mark)) { Ok(taken) => Ok(turned(taken, [])), Err(e) => Err(e) }
+    }
+    pub fn clear(log: &mut Self) where T: Use<[0, 1]> { log.records = []; }
+}
