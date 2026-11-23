@@ -25,6 +25,33 @@ public section
 
 namespace Glorious.Syntax.Flat
 
+/-- A node with each node directly in it made by `fe`, a callable's clauses by
+`fc` and a block's statements by `fb`; the rest as it is. -/
+@[specialize] def FExpr.mapIds {m : Type → Type} [Monad m] (fe : ExprId → m ExprId)
+    (fc : ClauseId → m ClauseId) (fb : Array StmtId → m (Array StmtId)) : FExpr → m FExpr
+  | .call id f args => do pure (.call id (← fe f) (← args.mapM fe))
+  | .tailCall id f args => do pure (.tailCall id (← fe f) (← args.mapM fe))
+  | .tuple args => do pure (.tuple (← args.mapM fe))
+  | .proj x i => do pure (.proj (← fe x) i)
+  | .closure id cs => do pure (.closure id (← cs.mapM fc))
+  | .handle s cs => do pure (.handle (← fe s) (← cs.mapM fc))
+  | .labelScope l body => do pure (.labelScope l (← fb body))
+  | .deref x => do pure (.deref (← fe x))
+  | .reborrow u x => do pure (.reborrow u (← fe x))
+  | .fieldOf id x n => do pure (.fieldOf id (← fe x) n)
+  | n => pure n
+
+/-- A statement with its expressions made by `fe`, the statement it places by
+`fs` and a `let`'s pattern by `fp`. -/
+@[specialize] def FStmt.mapIds {m : Type → Type} [Monad m] (fe : ExprId → m ExprId)
+    (fs : StmtId → m StmtId) (fp : Pattern → Pattern := id) : FStmt → m FStmt
+  | .let_ p v => do pure (.let_ (fp p) (← fe v))
+  | .expr v => do pure (.expr (← fe v))
+  | .defer v => do pure (.defer (← fe v))
+  | .letMut x v => do pure (.letMut x (← fe v))
+  | .assign t v => do pure (.assign (← fe t) (← fe v))
+  | .located l c inner => do pure (.located l c (← fs inner))
+
 namespace Body
 
 @[inline] def expr (b : Body) (e : ExprId) : FExpr := b.exprs[e]!
@@ -67,27 +94,22 @@ def direct (b : Body) (e : ExprId) : Array ExprId :=
   | .name none x => some x
   | _ => none
 
-mutual
+/-- The expressions one level down, blocks' too. -/
+def children (b : Body) (e : ExprId) : List ExprId :=
+  (b.direct e).toList ++ match b.expr e with
+    | .closure _ cs | .handle _ cs => cs.toList.flatMap fun c => (b.clause c).body.toList.flatMap fun s => (b.stmtExprs s).toList
+    | .labelScope _ body => body.toList.flatMap fun s => (b.stmtExprs s).toList
+    | _ => []
 
 /-- Is `p` true of an expression or of one inside it, blocks' too? -/
 partial def anyExpr (b : Body) (p : FExpr → Bool) (e : ExprId) : Bool :=
-  let n := b.expr e
-  p n || match n with
-    | .call _ f args | .tailCall _ f args => b.anyExpr p f || args.any (b.anyExpr p)
-    | .tuple args => args.any (b.anyExpr p)
-    | .proj e _ | .deref e | .reborrow _ e | .fieldOf _ e _ => b.anyExpr p e
-    | .closure _ cs => cs.any (b.anyClause p)
-    | .handle s cs => b.anyExpr p s || cs.any (b.anyClause p)
-    | .labelScope _ body => body.any (b.anyStmt p)
-    | _ => false
+  p (b.expr e) || (b.children e).any (b.anyExpr p)
 
-partial def anyClause (b : Body) (p : FExpr → Bool) (c : ClauseId) : Bool :=
-  (b.clause c).body.any (b.anyStmt p)
-
-partial def anyStmt (b : Body) (p : FExpr → Bool) (s : StmtId) : Bool :=
+def anyStmt (b : Body) (p : FExpr → Bool) (s : StmtId) : Bool :=
   (b.stmtExprs s).any (b.anyExpr p)
 
-end
+def anyClause (b : Body) (p : FExpr → Bool) (c : ClauseId) : Bool :=
+  (b.clause c).body.any (b.anyStmt p)
 
 end Body
 
@@ -215,35 +237,10 @@ into a body of its own. -/
 mutual
 
 partial def compactExpr (src : Body) (e : ExprId) : Build ExprId := do
-  match src.expr e with
-  | .call id f args => do
-    let f ← compactExpr src f
-    pushExpr (.call id f (← args.mapM (compactExpr src)))
-  | .tailCall id f args => do
-    let f ← compactExpr src f
-    pushExpr (.tailCall id f (← args.mapM (compactExpr src)))
-  | .tuple args => do pushExpr (.tuple (← args.mapM (compactExpr src)))
-  | .proj x i => do pushExpr (.proj (← compactExpr src x) i)
-  | .closure id cs => do pushExpr (.closure id (← cs.mapM (compactClause src)))
-  | .handle s cs => do
-    let s ← compactExpr src s
-    pushExpr (.handle s (← cs.mapM (compactClause src)))
-  | .labelScope l body => do pushExpr (.labelScope l (← body.mapM (compactStmt src)))
-  | .deref x => do pushExpr (.deref (← compactExpr src x))
-  | .reborrow u x => do pushExpr (.reborrow u (← compactExpr src x))
-  | .fieldOf id x n => do pushExpr (.fieldOf id (← compactExpr src x) n)
-  | n => pushExpr n
+  pushExpr (← (src.expr e).mapIds (compactExpr src) (compactClause src) (·.mapM (compactStmt src)))
 
 partial def compactStmt (src : Body) (s : StmtId) : Build StmtId := do
-  match src.stmt s with
-  | .let_ p v => do pushStmt (.let_ p (← compactExpr src v))
-  | .expr v => do pushStmt (.expr (← compactExpr src v))
-  | .defer v => do pushStmt (.defer (← compactExpr src v))
-  | .letMut x v => do pushStmt (.letMut x (← compactExpr src v))
-  | .assign t v => do
-    let t ← compactExpr src t
-    pushStmt (.assign t (← compactExpr src v))
-  | .located l c inner => do pushStmt (.located l c (← compactStmt src inner))
+  pushStmt (← (src.stmt s).mapIds (compactExpr src) (compactStmt src))
 
 partial def compactClause (src : Body) (c : ClauseId) : Build ClauseId := do
   let ⟨pats, body⟩ := src.clause c

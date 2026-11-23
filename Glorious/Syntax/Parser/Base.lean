@@ -391,10 +391,7 @@ partial def hasThrough (b : Flat.Body) (e : ExprId) : Bool :=
     (match b.expr f with
       | .name none g => g == throughMark
       | _ => hasThrough b f) || args.any (hasThrough b)
-  | .tailCall _ f args => hasThrough b f || args.any (hasThrough b)
-  | .tuple es => es.any (hasThrough b)
-  | .proj e _ | .fieldOf _ e _ | .deref e | .reborrow _ e | .handle e _ => hasThrough b e
-  | _ => false
+  | _ => (b.direct e).any (hasThrough b)
 
 /-- Each borrow through an expression made, in place, a borrow through a
 name, the expressions to be given those names noted in the order they are

@@ -574,14 +574,9 @@ partial def etaExprF (x : String) (arity : Nat) (base : Nat) (e : ExprId) : Buil
     pushExpr (.tailCall i f' (← args.mapM (etaExprF x arity (base + 2 * (i % 1000000)))))
   | .tuple args => do
     pushExpr (.tuple (← (args.toList.zipIdx.mapM fun (a, k) => etaExprF x arity (base + 2 * k + 1000000000) a)).toArray)
-  | .proj a n => do pushExpr (.proj (← etaExprF x arity base a) n)
-  | .closure i cs => do pushExpr (.closure i (← cs.mapM (etaClauseF x arity base)))
-  | .handle s cs => do pushExpr (.handle (← etaExprF x arity base s) (← cs.mapM (etaClauseF x arity base)))
-  | .labelScope l body => do pushExpr (.labelScope l (← body.mapM (etaStmtF x arity base)))
-  | .deref a => do pushExpr (.deref (← etaExprF x arity base a))
-  | .reborrow u a => do pushExpr (.reborrow u (← etaExprF x arity base a))
-  | .fieldOf i a n => do pushExpr (.fieldOf i (← etaExprF x arity base a) n)
-  | _ => pure e
+  | n => do
+    let n' ← n.mapIds (etaExprF x arity base) (etaClauseF x arity base) (·.mapM (etaStmtF x arity base))
+    if n' == n then pure e else pushExpr n'
 
 partial def etaClauseF (x : String) (arity : Nat) (base : Nat) (c : ClauseId) : Build ClauseId := do
   let ⟨pats, body⟩ := (← get).clause c
@@ -589,14 +584,8 @@ partial def etaClauseF (x : String) (arity : Nat) (base : Nat) (c : ClauseId) : 
 
 partial def etaStmtF (x : String) (arity : Nat) (base : Nat) (s : StmtId) : Build StmtId := do
   match (← get).stmt s with
-  | .let_ pat v => do pushStmt (.let_ pat (← etaExprF x arity base v))
-  | .expr v => do pushStmt (.expr (← etaExprF x arity base v))
-  | .defer v => do pushStmt (.defer (← etaExprF x arity base v))
-  | .letMut y v => do pushStmt (.letMut y (← etaExprF x arity base v))
-  | .assign t v => do
-    let t ← etaExprF x arity base t
-    pushStmt (.assign t (← etaExprF x arity base v))
   | .located l c inner => do pushStmt (.located l c (← etaStmtF x arity (base + 4000000 * l + 2000 * c) inner))
+  | n => do pushStmt (← n.mapIds (etaExprF x arity base) pure)
 
 end
 

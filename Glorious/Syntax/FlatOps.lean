@@ -36,11 +36,7 @@ partial def fvExprAcc (b : Body) (bound : List String) (e : ExprId) (acc : List 
   | .ref _ x | .refField _ _ x _ _ => if bound.contains x then acc else x :: acc
   | .closure _ cs => cs.foldr (fun c acc => b.fvClauseAcc bound c acc) acc
   | .handle s cs => b.fvExprAcc bound s (cs.foldr (fun c acc => b.fvClauseAcc bound c acc) acc)
-  | .call _ f args | .tailCall _ f args =>
-    b.fvExprAcc bound f (args.foldr (fun a acc => b.fvExprAcc bound a acc) acc)
-  | .tuple args => args.foldr (fun a acc => b.fvExprAcc bound a acc) acc
-  | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ => b.fvExprAcc bound x acc
-  | .int _ => acc
+  | _ => (b.direct e).foldr (fun a acc => b.fvExprAcc bound a acc) acc
 
 partial def fvClauseAcc (b : Body) (bound : List String) (c : ClauseId) (acc : List String) : List String :=
   let ⟨pats, body⟩ := b.clause c
@@ -66,13 +62,6 @@ end
 
 /-- The names free in clauses. -/
 def fvClauses (b : Body) (cs : Array ClauseId) : List String := cs.toList.flatMap (b.fvClause [])
-
-/-- The expressions one level down, blocks' too. -/
-def children (b : Body) (e : ExprId) : List ExprId :=
-  (b.direct e).toList ++ match b.expr e with
-    | .closure _ cs | .handle _ cs => cs.toList.flatMap fun c => (b.clause c).body.toList.flatMap fun s => (b.stmtExprs s).toList
-    | .labelScope _ body => body.toList.flatMap fun s => (b.stmtExprs s).toList
-    | _ => []
 
 /-- The names an expression hands on with `move name`, wherever in it
 . -/
@@ -188,18 +177,14 @@ partial def nameUseExpr (b : Body) (noDefers : Bool) (x : String) (e : ExprId) :
   | .name none y => if y == x then { valued := true } else {}
   | .ref uniq y => if y != x then {} else if uniq then { changed := true } else { shared := true }
   | .refField _ uniq y _ _ => if y == x then { fielded := true, changed := uniq } else {}
-  | .call _ f args | .tailCall _ f args =>
-    args.foldl (fun u e => u.or (b.nameUseExpr noDefers x e)) (b.nameUseExpr noDefers x f)
-  | .tuple args => args.foldl (fun u e => u.or (b.nameUseExpr noDefers x e)) {}
   | .proj e _ | .fieldOf _ e _ => if b.placeRoot e == some x then { looked := true } else b.nameUseExpr noDefers x e
-  | .deref e | .reborrow _ e => b.nameUseExpr noDefers x e
   | .closure _ cs =>
     NameUse.inside (cs.foldl (fun u c => u.or (b.nameUseClause noDefers x c)) ({} : NameUse))
   | .handle subject arms =>
     (NameUse.inside (arms.foldl (fun u c => u.or (b.nameUseClause noDefers x c)) ({} : NameUse))).or
       (b.nameUseExpr noDefers x subject)
   | .labelScope _ body => b.nameUseStmts noDefers x body.toList
-  | _ => {}
+  | _ => (b.direct e).foldl (fun u e => u.or (b.nameUseExpr noDefers x e)) {}
 
 partial def nameUseClause (b : Body) (noDefers : Bool) (x : String) (c : ClauseId) : NameUse :=
   let ⟨pats, body⟩ := b.clause c
@@ -247,10 +232,7 @@ partial def borrowAfterValue (b : Body) (x : String) (seen : Bool) (e : ExprId) 
   match b.expr e with
   | .name none y => (seen || y == x, false)
   | .ref _ y | .refField _ _ y _ _ => (seen, seen && y == x)
-  | .call _ f args | .tailCall _ f args => b.borrowAfterValues x seen (#[f] ++ args).toList
-  | .tuple args => b.borrowAfterValues x seen args.toList
   | .proj e _ | .fieldOf _ e _ => if b.placeRoot e == some x then (seen, seen) else b.borrowAfterValue x seen e
-  | .deref e | .reborrow _ e => b.borrowAfterValue x seen e
   | .closure _ _ =>
     let u := b.nameUseExpr false x e
     (seen || u.valuedInside,
@@ -263,7 +245,7 @@ partial def borrowAfterValue (b : Body) (x : String) (seen : Bool) (e : ExprId) 
     body.foldl (fun (seen, bad) s =>
       let (seen', bad') := b.borrowAfterValueStmt x seen s
       (seen', bad || bad')) (seen, false)
-  | _ => (seen, false)
+  | _ => b.borrowAfterValues x seen (b.direct e).toList
 
 partial def borrowAfterValues (b : Body) (x : String) (seen : Bool) (es : List ExprId) : Bool × Bool :=
   es.foldl (fun (seen, bad) e =>
@@ -400,41 +382,9 @@ mutual
 partial def FRewriteM.ex (r : FRewriteM m) (e : ExprId) : StateT Body m ExprId := do
   let b ← get
   if let some made := r.onExpr r.go b e then return ← made
-  match b.expr e with
-  | .call id f args => do
-    let f' ← r.ex f
-    let args' ← args.mapM r.ex
-    if f' == f && args' == args then pure e else pushE (.call id f' args')
-  | .tailCall id f args => do
-    let f' ← r.ex f
-    let args' ← args.mapM r.ex
-    if f' == f && args' == args then pure e else pushE (.tailCall id f' args')
-  | .tuple args => do
-    let args' ← args.mapM r.ex
-    if args' == args then pure e else pushE (.tuple args')
-  | .proj x i => do
-    let x' ← r.ex x
-    if x' == x then pure e else pushE (.proj x' i)
-  | .closure id cs => do
-    let cs' ← cs.mapM r.clause
-    if cs' == cs then pure e else pushE (.closure id cs')
-  | .handle s cs => do
-    let s' ← r.ex s
-    let cs' ← cs.mapM r.clause
-    if s' == s && cs' == cs then pure e else pushE (.handle s' cs')
-  | .labelScope l body => do
-    let body' := (← r.stmtList body.toList).toArray
-    if body' == body then pure e else pushE (.labelScope l body')
-  | .deref x => do
-    let x' ← r.ex x
-    if x' == x then pure e else pushE (.deref x')
-  | .reborrow u x => do
-    let x' ← r.ex x
-    if x' == x then pure e else pushE (.reborrow u x')
-  | .fieldOf id x n => do
-    let x' ← r.ex x
-    if x' == x then pure e else pushE (.fieldOf id x' n)
-  | _ => pure e
+  let n := b.expr e
+  let n' ← n.mapIds r.ex r.clause fun body => do pure (← r.stmtList body.toList).toArray
+  if n' == n then pure e else pushE n'
 
 partial def FRewriteM.clause (r : FRewriteM m) (c : ClauseId) : StateT Body m ClauseId := do
   if let some made := r.onClause r.go (← get) c then return ← made
@@ -455,27 +405,9 @@ partial def FRewriteM.go (r : FRewriteM m) : FGoM m := ⟨r.ex, r.st, r.stmtList
 partial def FRewriteM.st (r : FRewriteM m) (s : StmtId) : StateT Body m StmtId := do
   let b ← get
   if let some made := r.onStmt r.go b s then return ← made
-  match b.stmt s with
-  | .let_ p v => do
-    let p' := r.onPat p
-    let v' ← r.ex v
-    if v' == v && p' == p then pure s else pushS (.let_ p' v')
-  | .expr v => do
-    let v' ← r.ex v
-    if v' == v then pure s else pushS (.expr v')
-  | .defer v => do
-    let v' ← r.ex v
-    if v' == v then pure s else pushS (.defer v')
-  | .letMut x v => do
-    let v' ← r.ex v
-    if v' == v then pure s else pushS (.letMut x v')
-  | .assign t v => do
-    let t' ← r.ex t
-    let v' ← r.ex v
-    if t' == t && v' == v then pure s else pushS (.assign t' v')
-  | .located l c inner => do
-    let inner' ← r.st inner
-    if inner' == inner then pure s else pushS (.located l c inner')
+  let n := b.stmt s
+  let n' ← n.mapIds r.ex r.st r.onPat
+  if n' == n then pure s else pushS n'
 
 end
 
@@ -558,39 +490,22 @@ def Body.anyAscription (b : Body) : Bool :=
       | none => false
     | _ => false
 
-mutual
-
 /-- The ascriptions an expression has, `let x: Type = ..`: the places of the
 types written, added in front of `acc`. -/
 partial def Body.ascriptionsExpr (b : Body) (e : ExprId) (acc : List ExprId) : List ExprId :=
+  let rest := fun (_ : Unit) => (b.children e).foldr (fun x acc => b.ascriptionsExpr x acc) acc
   match b.expr e with
-  | .call _ f args =>
-    match args, b.bare? f with
-    | #[v, ty], some mark =>
-      -- (The type itself is not looked in.)
-      if mark == ascribeMark || mark == instMark then ty :: b.ascriptionsExpr v acc
-      else b.ascriptionsExpr f (args.foldr (fun a acc => b.ascriptionsExpr a acc) acc)
-    | _, _ => b.ascriptionsExpr f (args.foldr (fun a acc => b.ascriptionsExpr a acc) acc)
-  | .tailCall _ f args => b.ascriptionsExpr f (args.foldr (fun a acc => b.ascriptionsExpr a acc) acc)
-  | .tuple args => args.foldr (fun a acc => b.ascriptionsExpr a acc) acc
-  | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ => b.ascriptionsExpr x acc
-  | .closure _ cs => cs.foldr (fun c acc => b.ascriptionsClause c acc) acc
-  | .handle s cs => b.ascriptionsExpr s (cs.foldr (fun c acc => b.ascriptionsClause c acc) acc)
-  | .labelScope _ body => body.foldr (fun s acc => b.ascriptionsStmt s acc) acc
-  | _ => acc
-
-partial def Body.ascriptionsClause (b : Body) (c : ClauseId) (acc : List ExprId) : List ExprId :=
-  (b.clause c).body.foldr (fun s acc => b.ascriptionsStmt s acc) acc
-
-partial def Body.ascriptionsStmt (b : Body) (s : StmtId) (acc : List ExprId) : List ExprId :=
-  (b.stmtExprs s).foldr (fun e acc => b.ascriptionsExpr e acc) acc
-
-end
+  | .call _ f #[v, ty] =>
+    match b.bare? f with
+    -- (The type itself is not looked in.)
+    | some mark => if mark == ascribeMark || mark == instMark then ty :: b.ascriptionsExpr v acc else rest ()
+    | none => rest ()
+  | _ => rest ()
 
 /-- The ascriptions of a body, `let x: Type = ..`: each with the place of the
 type written. Only those reached from the body's own clauses. -/
 def Body.ascriptions (b : Body) : List ExprId :=
-  if !b.anyAscription then [] else b.roots.foldr (fun c acc => b.ascriptionsClause c acc) []
+  if !b.anyAscription then [] else b.roots.toList.flatMap fun c => (b.clause c).body.toList.flatMap fun s => (b.stmtExprs s).toList.flatMap (b.ascriptionsExpr · [])
 
 /-- A body with each type written in it, `let x: Type = ..`, changed: the
 types are worked out first, which may fail, and then written in. -/

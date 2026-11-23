@@ -357,19 +357,10 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
         pushExpr (.call id (← pushExpr (.name q name)) (#[given] ++ rest.toArray))
       | _ => plain ()
     | _, _ => plain ()
-  | .tailCall id f args => do
-    pushExpr (.tailCall id (← receiverExpr taken known f) (← args.mapM (receiverExpr taken known)))
-  | .tuple args => do pushExpr (.tuple (← args.mapM (receiverExpr taken known)))
-  | .proj x n => do pushExpr (.proj (← receiverExpr taken known x) n)
-  | .deref x => do pushExpr (.deref (← receiverExpr taken known x))
-  | .reborrow u x => do pushExpr (.reborrow u (← receiverExpr taken known x))
-  | .fieldOf i x n => do pushExpr (.fieldOf i (← receiverExpr taken known x) n)
-  | .closure i cs => do pushExpr (.closure i (← cs.mapM (receiverClause taken known [])))
-  | .handle s cs => do
-    pushExpr (.handle (← receiverExpr taken known s) (← cs.mapM (receiverClause taken known [])))
-  | .labelScope l body => do
-    pushExpr (.labelScope l (← receiverStmts taken known body.toList).toArray)
-  | _ => pure e
+  | n => do
+    let n' ← n.mapIds (receiverExpr taken known) (receiverClause taken known [])
+      fun body => do pure (← receiverStmts taken known body.toList).toArray
+    if n' == n then pure e else pushExpr n'
 
 /-- (`values`: the parameters written with types that are no reference's.) -/
 partial def receiverClause (taken : Std.HashMap String Bool) (known : List (String × Nat))
