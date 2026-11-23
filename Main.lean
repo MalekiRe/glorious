@@ -923,6 +923,15 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
     IO.sleep 100
   pure 0
 
+/-- Where the VM and its library are: `GLORIOUS_VM_DIR`, or where the
+repository builds them. -/
+def vmDir : IO System.FilePath := do
+  match ← IO.getEnv "GLORIOUS_VM_DIR" with
+  | some d => pure (System.FilePath.mk d)
+  | none =>
+    let root := ((((← IO.appPath).parent.bind (·.parent)).bind (·.parent)).bind (·.parent)).getD "."
+    pure (root / "vm" / "target" / "release")
+
 def main (args : List String) : IO UInt32 := do
   let code ← Trace.timedIO "glorious" (command args)
   -- (What a compile keeps is written while the program it made runs.)
@@ -973,16 +982,10 @@ where
       pure 1
   | ["native", path, out] =>
     -- A program of its own: the bytecode, a body for every function made by
-    -- LLVM, and the runtime, linked. The VM and its library are looked for
-    -- in `GLORIOUS_VM_DIR`, or where the repository builds them.
+    -- LLVM, and the runtime, linked (`vmDir`).
     match ← compileFile path (search := false) with
     | .ok c => do
-      let dir ← match ← IO.getEnv "GLORIOUS_VM_DIR" with
-        | some d => pure (System.FilePath.mk d)
-        | none => do
-          let exe ← IO.appPath
-          let root := (((exe.parent.bind (·.parent)).bind (·.parent)).bind (·.parent)).getD "."
-          pure (root / "vm" / "target" / "release")
+      let dir ← vmDir
       let gbc := out ++ ".gbc"
       writeBytecode c gbc
       let ir ← IO.Process.output
@@ -1014,12 +1017,7 @@ where
     -- the program at its end, loaded and compiled to machine code by it.
     match ← compileFile path (search := false) with
     | .ok c => do
-      let dir ← match ← IO.getEnv "GLORIOUS_VM_DIR" with
-        | some d => pure (System.FilePath.mk d)
-        | none => do
-          let exe ← IO.appPath
-          let root := (((exe.parent.bind (·.parent)).bind (·.parent)).bind (·.parent)).getD "."
-          pure (root / "vm" / "target" / "release")
+      let dir ← vmDir
       let gbc := out ++ ".gbc"
       writeBytecode c gbc
       let made ← IO.Process.output
