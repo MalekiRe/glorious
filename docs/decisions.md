@@ -7366,6 +7366,20 @@ source in Lean strings 6,021, and the test table 3,928.
   and the tree-bodied `Item` with `FItem`, `ofItems`, the tree `Rewrite` and
   its passes are gone (see "A flat representation of each declaration's
   body").
+- **Not done: a typed Core**, the checker's types carried onto Core so
+  that certificate inference would only find regions. Read against the code,
+  it does not make the compiler smaller. Infer's types carry regions, effect
+  rows, classes and accesses in one term (`ITy`), so its unification,
+  schemes, copies and freezing stay for those; what given types would
+  delete is what waits for a type to be known (`places`, `calls`,
+  `coerces`, `nevers`, `cancels`, `closureRanks` in `settleAll` and
+  `tryCall`), some 150 to 250 lines. Against that, the checker's types are
+  the source's, before traits are taken away, implementations specialized
+  and fields split: the elaborator would have to give a type to each of the
+  some 80 places it builds Core a binder that no source expression has (a
+  closure's environment, a handler's arms, a label's thunk, a cell, a loan,
+  a dictionary), and carry the rest through each rewrite, which is
+  certificate inference's work done again earlier.
 - **The test programs are files** (`tests/cases.cases`, `foreign.cases`,
   `long.cases`: 3,928 lines of `Cases.lean`), each case after `#### case`
   with what it is for, its program, `#### input` and `#### expect`;
