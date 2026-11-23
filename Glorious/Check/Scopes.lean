@@ -413,19 +413,6 @@ def hasGenericImpl (trait : String) (self : Ty) : M Bool := do
     pure ((← implsOfHead trait h).any (·.generic))
   | _ => pure false
 
-/-- What an implementation's conditions say of types left to other traits'
-implementations, for one use of it (`at_`): asked, to be found when they
-can be, so that a type parameter only they decide is decided. -/
-def conditionUses (im : ImplDecl) (at_ : List (Nat × Ty)) (hargs : List Ty) (owner pos : String) :
-    M Unit := do
-  for (j, asked, name, said) in im.equal do
-    if let some subject := hargs[j]? then
-      let use := (asked, subject, name, subst at_ [] [] said, owner, pos)
-      modify fun s => { s with assocUses := s.assocUses.push use }
-  for (whole, asked, name, said) in im.extraEqual do
-    let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, owner, pos)
-    modify fun s => { s with assocUses := s.assocUses.push use }
-
 /-- What an implementation's conditions say of the types other traits leave
 to implementations (`H: Parameter<Asks = HA>`), asked: its own type
 parameters that only those decide are answered as each is
@@ -455,7 +442,6 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   let some said := im.assocs.lookup name | return none
   let some at_ ← fitHead im hargs args | return none
   equalUses im at_ hargs (← get).owner (← get).pos
-  conditionUses im at_ hargs (← get).owner (← get).pos
   pure (some (← unproject (gatAt at_ ((im.gatParams.lookup name).getD []) asked said)))
 
 /-- Settle what can be settled of the types traits leave to implementations:
@@ -529,7 +515,6 @@ def settleAssocs : M Unit := do
             | some at_ => pure at_
             | none => implAt im hargs
           equalUses im at_ hargs owner pos
-          conditionUses im at_ hargs owner pos
           try unifyAt s!"`{name}` of `{key}` for `{bareName head}`" (← unproject (subst at_ [] [] said)) a
           catch e => throw (pos ++ e)
           if let some k := memoKey then
