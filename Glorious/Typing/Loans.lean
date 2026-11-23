@@ -42,6 +42,7 @@ def writes : MemOp → Bool
   | .swap => true
   | .tag => false
   | .focus => false
+  | _ => true
 
 /-- Whether the reference to cell `a` that is borrow `b`, or the cell's own
 reference if `b` is `0`, may be used on this stack: to write if `write`, and

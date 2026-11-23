@@ -140,6 +140,11 @@ def memOp : Bytes → Option (MemOp × Bytes)
   | 2 :: bs => some (.swap, bs)
   | 3 :: bs => some (.tag, bs)
   | 4 :: bs => some (.focus, bs)
+  | 5 :: bs => some (.alloc, bs)
+  | 6 :: bs => some (.free, bs)
+  | 7 :: bs => some (.readBits, bs)
+  | 8 :: bs => some (.writeBits, bs)
+  | 9 :: bs => some (.copy, bs)
   | _ => none
 
 def instr : Bytes → Option (Instr × Bytes)

@@ -64,15 +64,14 @@ def ofBits (raw : Nat) (width : Int) : Int :=
   if 0 < width ∧ n > 0 ∧ raw ≥ 2 ^ (n - 1) then (raw : Int) - 2 ^ n else raw
 
 /-- The world outside the program: input not yet read, and output written so
-far; cells that more than one holder reaches, by number (`heap`): what the
-library's shared values and threads are kept in; and memory, by address. -/
+far; and cells that more than one holder reaches, by number (`heap`): what
+the library's shared values and threads are kept in. -/
 structure World where
   input : List Int
   output : List Value
   heap : List (Option Value) := []
   /-- The program's functions' names, by index (`call` 9). -/
   names : Array String := #[]
-  mem : Memory := {}
 
 /-- What a finished program leaves behind. -/
 structure Result where
@@ -95,12 +94,9 @@ Perform host operation `id`.
 * `9`, a value: the pair of the name of the function it is a callable of,
   as an array of its characters' codes (none, of any other value), and the
   value itself, given back.
-* `3`, an address and a width: the whole number in the `|width| / 8` bytes
-  there (with a sign if the width is positive); none if a byte is in no
-  live block. `4`, an address, a width and a whole number: written there.
-* `11`, a size and an alignment: a new block of memory, zeroed; its address.
-  `12`, an address: the block that starts there freed. `13`, where to, where
-  from and how many: the bytes copied, as if through a buffer of their own.
+* `14`, a value: the value as it is (`transmute`: of another type).
+
+Memory by address is the machine's (`MemOp.alloc` and the rest), not the host's.
 -/
 def call (w : World) (id : Nat) (args : List Value) : Option (Value × World) :=
   if id = 0 then
@@ -129,40 +125,6 @@ def call (w : World) (id : Nat) (args : List Value) : Option (Value × World) :=
     match args with
     | [.int n, v] =>
       if 0 ≤ n ∧ n.toNat < w.heap.length then some (.data 0 [], { w with heap := w.heap.set n.toNat (some v) }) else none
-    | _ => none
-  else if id = 3 then
-    match args with
-    | [.int addr, .int width] => do
-      let raw ← w.mem.read addr.toNat (width.natAbs / 8)
-      if 0 ≤ addr then some (.int (ofBits raw width), w) else none
-    | _ => none
-  else if id = 4 then
-    match args with
-    | [.int addr, .int width, .int v] => do
-      let mem ← w.mem.write addr.toNat (width.natAbs / 8) (bitsOf v (width.natAbs / 8))
-      if 0 ≤ addr then some (.data 0 [], { w with mem }) else none
-    | _ => none
-  else if id = 11 then
-    match args with
-    | [.int size, .int align] =>
-      if 0 ≤ size ∧ 0 < align then
-        let (addr, mem) := w.mem.alloc size.toNat align.toNat
-        some (.int addr, { w with mem })
-      else none
-    | _ => none
-  else if id = 12 then
-    match args with
-    | [.int addr] => do
-      let mem ← w.mem.free addr.toNat
-      if 0 ≤ addr then some (.data 0 [], { w with mem }) else none
-    | _ => none
-  else if id = 13 then
-    match args with
-    | [.int to, .int src, .int n] => do
-      unless 0 ≤ to ∧ 0 ≤ src ∧ 0 ≤ n do none
-      let raw ← w.mem.read src.toNat n.toNat
-      let mem ← w.mem.write to.toNat n.toNat raw
-      some (.data 0 [], { w with mem })
     | _ => none
   else if id = 14 then
     -- (`transmute`: the value as it is.)

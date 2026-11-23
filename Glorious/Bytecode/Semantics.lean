@@ -117,7 +117,7 @@ def apply (p : Program) (c : Callee) (frames : List Frame) (store : Store Frame)
   | .cont id v =>
     match takeCont store.conts id with
     | some (segment, conts) =>
-      deliver p v (segment ++ frames) ⟨conts, store.labels, store.cells⟩
+      deliver p v (segment ++ frames) { store with conts }
     | none => .stuck
   | .label id v =>
     match findLabel Frame.asLabel id frames with
@@ -147,7 +147,7 @@ def step (p : Program) (s : State) : Step State Value :=
     match evalAtoms s.locals captures, evalCall s.locals thunk [] with
     | some caps, some c =>
       apply p c (.handler s.store.labels ⟨ret, ops, caps⟩ :: .ret s.code (s.pc + 1) s.locals :: s.frames)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
     | _, _ => .stuck
   | some (.raise op args) =>
     match evalAtoms s.locals args with
@@ -169,13 +169,13 @@ def step (p : Program) (s : State) : Step State Value :=
         callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
           ⟨s.store.conts
               ++ [some (.ret s.code (s.pc + 1) s.locals :: d.above ++ [.handler d.id d.handler])],
-            s.store.labels, s.store.cells⟩
+            s.store.labels, s.store.cells, s.store.mem, s.store.held⟩
   | some (.label thunk) =>
     match evalScope s.locals thunk (.label s.store.labels) with
     | none => .stuck
     | some c =>
       apply p c (.label s.store.labels :: .ret s.code (s.pc + 1) s.locals :: s.frames)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
   | some (.testCtor pl tag arity fail) =>
     match pl.eval s.locals with
     | none => .stuck
@@ -190,14 +190,14 @@ def step (p : Program) (s : State) : Step State Value :=
     match evalAtoms s.locals captures, evalCall s.locals thunk [] with
     | some caps, some c =>
       apply p c (.handler s.store.labels ⟨ret, ops, caps⟩ :: s.frames)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
     | _, _ => .stuck
   | some (.labelTail thunk) =>
     match evalScope s.locals thunk (.label s.store.labels) with
     | none => .stuck
     | some c =>
       apply p c (.label s.store.labels :: s.frames)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
   | some (.guard cleanup thunk) =>
     match evalClosure s.locals cleanup, evalCall s.locals thunk [] with
     | some (fn, captures), some c =>
@@ -220,7 +220,7 @@ def step (p : Program) (s : State) : Step State Value :=
         leave p (.label s.store.labels) (.yield .unit)
           (segment ++ .yield .unit :: .label s.store.labels
             :: .ret s.code (s.pc + 1) s.locals :: s.frames)
-          ⟨conts, s.store.labels + 1, s.store.cells⟩
+          { s.store with conts, labels := s.store.labels + 1 }
       | none => .stuck
   | some (.cell init thunk) =>
     match init.eval s.locals, evalScope s.locals thunk (.ref s.store.cells.size 0 []) with
@@ -239,20 +239,18 @@ def step (p : Program) (s : State) : Step State Value :=
       -- The scope of the borrow is nothing here: this is the call, and a
       -- counter that gives the borrow its identity.
       apply p c (.ret s.code (s.pc + 1) s.locals :: s.frames)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
   | some (.mem op args) =>
     match evalAtoms s.locals args with
     | none => .stuck
     | some vs =>
-      match op.eval s.store.cells vs with
+      match s.store.memOp op vs with
       | none => .stuck
-      | some (r, cells) =>
-        .next ⟨s.code, s.pc + 1, s.locals ++ [r], s.frames,
-          ⟨s.store.conts, s.store.labels, cells⟩⟩
+      | some (r, store) => .next ⟨s.code, s.pc + 1, s.locals ++ [r], s.frames, store⟩
   -- A host operation is a step of the program in its world; see `stepIO`.
   | some (.host _ _) => .stuck
 
-def init (p : Program) : State := ⟨p.main, 0, [], [], ⟨[], 0, #[]⟩⟩
+def init (p : Program) : State := ⟨p.main, 0, [], [], { conts := [], labels := 0, cells := #[] }⟩
 
 /-- A machine state together with the world outside the program. -/
 structure Config where

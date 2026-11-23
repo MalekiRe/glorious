@@ -168,7 +168,7 @@ def apply (p : Program) (c : Callee) (stack : List Frame) (store : Store Frame) 
   | .cont id v =>
     match takeCont store.conts id with
     | some (segment, conts) =>
-      deliver p v (segment ++ stack) ⟨conts, store.labels, store.cells⟩
+      deliver p v (segment ++ stack) { store with conts }
     | none => .stuck
   | .label id v =>
     match findLabel Frame.asLabel id stack with
@@ -197,7 +197,7 @@ def step (p : Program) (s : State) : Step State Value :=
     match evalAtoms s.env captures, evalCall s.env thunk [] with
     | some caps, some c =>
       apply p c (.handler s.store.labels ⟨ret, ops, caps⟩ :: .call s.env body :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
     | _, _ => .stuck
   | .raise op args =>
     match evalAtoms s.env args with
@@ -221,25 +221,25 @@ def step (p : Program) (s : State) : Step State Value :=
         callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
           ⟨s.store.conts
               ++ [some (.call s.env body :: d.above ++ [.handler d.id d.handler])],
-            s.store.labels, s.store.cells⟩
+            s.store.labels, s.store.cells, s.store.mem, s.store.held⟩
   | .label thunk body =>
     match evalScope s.env thunk (.label s.store.labels) with
     | none => .stuck
     | some c =>
       apply p c (.label s.store.labels :: .call s.env body :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
   | .handleTail ret ops captures thunk =>
     match evalAtoms s.env captures, evalCall s.env thunk [] with
     | some caps, some c =>
       apply p c (.handler s.store.labels ⟨ret, ops, caps⟩ :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
     | _, _ => .stuck
   | .labelTail thunk =>
     match evalScope s.env thunk (.label s.store.labels) with
     | none => .stuck
     | some c =>
       apply p c (.label s.store.labels :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
   | .guard cleanup thunk body =>
     match evalClosure s.env cleanup, evalCall s.env thunk [] with
     | some (fn, captures), some c =>
@@ -268,7 +268,7 @@ def step (p : Program) (s : State) : Step State Value :=
         -- `cancel` is unit.
         leave p (.label s.store.labels) (.yield .unit)
           (segment ++ .yield .unit :: .label s.store.labels :: .call s.env body :: s.stack)
-          ⟨conts, s.store.labels + 1, s.store.cells⟩
+          { s.store with conts, labels := s.store.labels + 1 }
       | none => .stuck
   | .cell init thunk body =>
     match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.size 0 []) with
@@ -285,19 +285,18 @@ def step (p : Program) (s : State) : Step State Value :=
     | some (a, c) =>
       -- The borrow's identity is new, as a label's is, and not zero.
       apply p c (.lend uniq a (s.store.labels + 1) :: .call s.env body :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
   | .mem op args body =>
     match evalAtoms s.env args with
     | none => .stuck
     | some vs =>
-      match op.eval s.store.cells vs with
+      match s.store.memOp op vs with
       | none => .stuck
-      | some (r, cells) =>
-        .next ⟨body, s.env ++ [r], s.stack, ⟨s.store.conts, s.store.labels, cells⟩⟩
+      | some (r, store) => .next ⟨body, s.env ++ [r], s.stack, store⟩
   -- A host operation is a step of the program in its world; see `stepIO`.
   | .host _ _ _ => .stuck
 
-def init (p : Program) : State := ⟨p.main, [], [], ⟨[], 0, #[]⟩⟩
+def init (p : Program) : State := ⟨p.main, [], [], { conts := [], labels := 0, cells := #[] }⟩
 
 /-- A machine state together with the world outside the program. -/
 structure Config where

@@ -101,6 +101,11 @@ def memOp : MemOp → Bytes
   | .swap => [2]
   | .tag => [3]
   | .focus => [4]
+  | .alloc => [5]
+  | .free => [6]
+  | .readBits => [7]
+  | .writeBits => [8]
+  | .copy => [9]
 
 def instr : Instr → Bytes
   | .op r => 0 :: rhs r

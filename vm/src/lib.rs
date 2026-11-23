@@ -171,6 +171,12 @@ enum MemOp {
     Swap,
     Tag,
     Focus,
+    /// Memory by address.
+    Alloc,
+    Free,
+    ReadBits,
+    WriteBits,
+    Copy,
 }
 
 #[derive(Clone, Debug)]
@@ -463,6 +469,11 @@ impl Reader<'_> {
                     2 => MemOp::Swap,
                     3 => MemOp::Tag,
                     4 => MemOp::Focus,
+                    5 => MemOp::Alloc,
+                    6 => MemOp::Free,
+                    7 => MemOp::ReadBits,
+                    8 => MemOp::WriteBits,
+                    9 => MemOp::Copy,
                     t => return Err(format!("unknown memory operation {t}")),
                 };
                 Ok(Instr::Mem(op, self.atoms()?))
@@ -1412,6 +1423,37 @@ impl Vm {
 
     fn mem(&mut self, op: MemOp, mut args: Vec<Value>) -> Step<Value> {
         match (op, args.as_mut_slice()) {
+            // Memory by address: a block made, zeroed; one freed; bits read
+            // and written; bytes copied.
+            (MemOp::Alloc, [Value::Int(size), Value::Int(align)]) => {
+                let layout = std::alloc::Layout::from_size_align((*size as usize).max(1), *align as usize)
+                    .map_err(|_| Stop::Wrong)?;
+                // SAFETY: the layout's size is not zero.
+                let at = unsafe { std::alloc::alloc_zeroed(layout) };
+                if at.is_null() {
+                    return wrong();
+                }
+                blocks().insert(at as usize, layout);
+                Ok(Value::Int(at as usize as i128))
+            }
+            (MemOp::Free, [Value::Int(at)]) => {
+                let layout = blocks().remove(&(*at as usize)).ok_or(Stop::Wrong)?;
+                // SAFETY: the block was made with this layout and is freed once.
+                unsafe { std::alloc::dealloc(*at as usize as *mut u8, layout) };
+                Ok(unit())
+            }
+            (MemOp::ReadBits, [Value::Int(at), Value::Int(width)]) => {
+                Ok(Value::Int(sized(read_at(*at as usize, width.unsigned_abs() as usize / 8), *width)))
+            }
+            (MemOp::WriteBits, [Value::Int(at), Value::Int(width), Value::Int(v)]) => {
+                write_at(*at as usize, width.unsigned_abs() as usize / 8, *v as u128);
+                Ok(unit())
+            }
+            (MemOp::Copy, [Value::Int(to), Value::Int(from), Value::Int(n)]) => {
+                // SAFETY: none. The program said both places hold so many bytes.
+                unsafe { std::ptr::copy(*from as usize as *const u8, *to as usize as *mut u8, *n as usize) };
+                Ok(unit())
+            }
             (MemOp::Load, [Value::Ref(a, p)]) => {
                 let (addr, p) = (*a, p.clone());
                 let whole = self.cell(addr)?.as_ref().ok_or(Stop::Wrong)?;
@@ -1684,13 +1726,6 @@ impl Vm {
                         self.out.flush().expect("cannot write to standard output");
                         foreign_call(vs).ok_or(Stop::Wrong)?
                     }
-                    (3, [Value::Int(at), Value::Int(width)]) => {
-                        Value::Int(sized(read_at(*at as usize, width.unsigned_abs() as usize / 8), *width))
-                    }
-                    (4, [Value::Int(at), Value::Int(width), Value::Int(v)]) => {
-                        write_at(*at as usize, width.unsigned_abs() as usize / 8, *v as u128);
-                        unit()
-                    }
                     // An address C can call, which runs a callable of so
                     // many whole numbers that gives one.
                     (5, [callee, Value::Int(arity)]) if (0..=5).contains(arity) => {
@@ -1714,30 +1749,6 @@ impl Vm {
                     // waiting for what it will fill waits for it.
                     (10, []) => {
                         self.heap.started();
-                        unit()
-                    }
-                    // Memory, by address: a block made, zeroed; one freed;
-                    // bytes copied.
-                    (11, [Value::Int(size), Value::Int(align)]) => {
-                        let layout = std::alloc::Layout::from_size_align((*size as usize).max(1), *align as usize)
-                            .map_err(|_| Stop::Wrong)?;
-                        // SAFETY: the layout's size is not zero.
-                        let at = unsafe { std::alloc::alloc_zeroed(layout) };
-                        if at.is_null() {
-                            return wrong();
-                        }
-                        blocks().insert(at as usize, layout);
-                        Value::Int(at as usize as i128)
-                    }
-                    (12, [Value::Int(at)]) => {
-                        let layout = blocks().remove(&(*at as usize)).ok_or(Stop::Wrong)?;
-                        // SAFETY: the block was made with this layout and is freed once.
-                        unsafe { std::alloc::dealloc(*at as usize as *mut u8, layout) };
-                        unit()
-                    }
-                    (13, [Value::Int(to), Value::Int(from), Value::Int(n)]) => {
-                        // SAFETY: none. The program said both places hold so many bytes.
-                        unsafe { std::ptr::copy(*from as usize as *const u8, *to as usize as *mut u8, *n as usize) };
                         unit()
                     }
                     // `transmute`: the value as it is.

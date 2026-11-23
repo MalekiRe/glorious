@@ -103,7 +103,7 @@ def starts (s : State) : Nat :=
     match evalAtoms s.env captures, evalCall s.env thunk [] with
     | some caps, some c =>
       applyStarts c (.handler s.store.labels ⟨ret, ops, caps⟩ :: .call s.env body :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
     | _, _ => 0
   | .raise op args =>
     match evalAtoms s.env args with
@@ -118,19 +118,19 @@ def starts (s : State) : Nat :=
     | none => 0
     | some c =>
       applyStarts c (.label s.store.labels :: .call s.env body :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
   | .handleTail ret ops captures thunk =>
     match evalAtoms s.env captures, evalCall s.env thunk [] with
     | some caps, some c =>
       applyStarts c (.handler s.store.labels ⟨ret, ops, caps⟩ :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
     | _, _ => 0
   | .labelTail thunk =>
     match evalScope s.env thunk (.label s.store.labels) with
     | none => 0
     | some c =>
       applyStarts c (.label s.store.labels :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
   | .guard cleanup thunk body =>
     match evalClosure s.env cleanup, evalCall s.env thunk [] with
     | some (fn, captures), some c =>
@@ -163,7 +163,7 @@ def starts (s : State) : Nat :=
     | none => 0
     | some (a, c) =>
       applyStarts c (.lend uniq a (s.store.labels + 1) :: .call s.env body :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
+        { s.store with labels := s.store.labels + 1 }
   | .mem _ _ _ | .host _ _ _ => 0
 
 /-- How many guards a step installs: one, if it is a guard that is stepping. -/

@@ -507,7 +507,10 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
       let atoms ← elabArgs scope args
       -- What is unsafe is outside what Core's rules are about.
       if id ≥ 2 then modify fun s => { s with foreign := true }
-      emit (.host id atoms)
+      -- (Memory by address is the machine's, not the host's.)
+      match memOfHost id with
+      | some op => emit (.mem op atoms)
+      | none => emit (.host id atoms)
     | .cancel => do
       if isTail then throw "`tail` applies to calls, not to `cancel`"
       match args.toList with

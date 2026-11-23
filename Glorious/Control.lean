@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Value
+public import Glorious.Lay
 
 /-!
 # Control structures shared by both machines
@@ -204,6 +205,18 @@ inductive MemOp where
   zero. Given a constructor as well, the field is that constructor's: the
   reference then leads somewhere only while the value is built by it. -/
   | focus
+  /-- Memory by address (`Memory`): a new block of so many bytes at a
+  multiple of an alignment, zeroed; its address. -/
+  | alloc
+  /-- The block that starts at an address, freed. -/
+  | free
+  /-- The whole number in so many bits at an address (with a sign if the
+  width is positive). -/
+  | readBits
+  /-- A whole number written in so many bits at an address. -/
+  | writeBits
+  /-- So many bytes copied, as if through a buffer of their own. -/
+  | copy
   deriving Hashable
 
 /-- The constructor of the value a path of field numbers leads to; `-1` if the
@@ -220,6 +233,28 @@ def tagAt : Value → List Value → Int
 
 /-- Memory: a cell is live with a value, or has been freed. Addresses are never reused. -/
 abbrev Cells := Array (Option Value)
+
+/-- Perform an operation on memory by address: its result and the memory
+afterwards. -/
+def MemOp.evalBytes (m : Memory) : MemOp → List Value → Option (Value × Memory)
+  | .alloc, [.int size, .int align] =>
+    if 0 ≤ size ∧ 0 < align then
+      let (addr, m) := m.alloc size.toNat align.toNat
+      some (.int addr, m)
+    else none
+  | .free, [.int addr] => do
+    if addr < 0 then none
+    pure (.unit, ← m.free addr.toNat)
+  | .readBits, [.int addr, .int width] => do
+    if addr < 0 then none
+    pure (.int (ofBits (← m.read addr.toNat (width.natAbs / 8)) width), m)
+  | .writeBits, [.int addr, .int width, .int v] => do
+    if addr < 0 then none
+    pure (.unit, ← m.write addr.toNat (width.natAbs / 8) (bitsOf v (width.natAbs / 8)))
+  | .copy, [.int to, .int src, .int n] => do
+    unless 0 ≤ to ∧ 0 ≤ src ∧ 0 ≤ n do none
+    pure (.unit, ← m.write to.toNat n.toNat (← m.read src.toNat n.toNat))
+  | _, _ => none
 
 /-- Perform a memory operation: its result and the memory afterwards. -/
 def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells)
@@ -256,13 +291,23 @@ structure Store (φ : Type) where
   of the next one. -/
   labels : Nat
   cells : Cells
+  /-- Memory by address: what `alloc` makes, and the values held for what
+  is not bytes yet (`Lay.held`). -/
+  mem : Memory := {}
+  held : Held := {}
 
 /-- The store after the scope of cell `a` has ended: the cell is released. -/
 def Store.release {φ : Type} (store : Store φ) (a : Nat) : Store φ :=
-  ⟨store.conts, store.labels, store.cells.setIfInBounds a none⟩
+  { store with cells := store.cells.setIfInBounds a none }
 
 /-- The store with a new cell holding `v`; its address is the old number of cells. -/
 def Store.alloc {φ : Type} (store : Store φ) (v : Value) : Store φ :=
-  ⟨store.conts, store.labels, store.cells.push (some v)⟩
+  { store with cells := store.cells.push (some v) }
+
+/-- Perform a memory operation on the store. -/
+def Store.memOp {φ : Type} (store : Store φ) (op : MemOp) (vs : List Value) : Option (Value × Store φ) :=
+  match op.eval store.cells vs with
+  | some (r, cells) => some (r, { store with cells })
+  | none => (op.evalBytes store.mem vs).map fun (r, mem) => (r, { store with mem })
 
 end Glorious

@@ -229,8 +229,8 @@ theorem findLabel_sim {id : Nat} {stack : List Core.Frame} {frames : List Byteco
 and the same memory. -/
 inductive MatchStore : Store Core.Frame → Store Bytecode.Frame → Prop where
   | mk {conts : Conts Core.Frame} {conts' : Conts Bytecode.Frame} {labels : Nat}
-      {cells : Cells} :
-      MatchConts conts conts' → MatchStore ⟨conts, labels, cells⟩ ⟨conts', labels, cells⟩
+      {cells : Cells} {mem : Memory} {held : Held} :
+      MatchConts conts conts' → MatchStore ⟨conts, labels, cells, mem, held⟩ ⟨conts', labels, cells, mem, held⟩
 
 /-%proof (commented out while the machines become bytes)
 theorem MatchStore.release {store : Store Core.Frame} {store' : Store Bytecode.Frame}

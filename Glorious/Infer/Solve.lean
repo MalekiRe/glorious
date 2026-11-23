@@ -647,7 +647,15 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
   | .mem op args body => do
     let ts ← args.mapM (atomTy Γ)
     let ρ ← freshRg
+    let int := fun (t : ITy) => unify t .int
+    -- (An address is a `usize`.)
+    let addr := fun (t : ITy) => unify t (.scalar (-64))
     let σ ← match op, ts with
+      | .alloc, [s, a] => do addr s; addr a; pure (.scalar (-64))
+      | .free, [a] => do addr a; pure .unit
+      | .readBits, [a, w] => do addr a; int w; pure .int
+      | .writeBits, [a, w, v] => do addr a; int w; int v; pure .unit
+      | .copy, [a, b, n] => do addr a; addr b; addr n; pure .unit
       | .load, [t] => do
         accRgn self ρ
         let σ ← freshTy
@@ -699,23 +707,16 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
     -- (Those past the first two are outside what Core's rules are about: a
     -- program with one has types, and no certificate the checker accepts.)
     let int := fun (t : ITy) => unify t .int
-    -- (An address is a `usize`.)
-    let addr := fun (t : ITy) => unify t (.scalar (-64))
     let σ ← match id, ts with
       | 0, [_] => pure ITy.unit
       | 1, [] => pure (ITy.tuple [.int, .int])
       | 2, _ => do ts.forM int; pure .int
-      | 3, [a, w] => do addr a; int w; pure .int
-      | 4, [a, w, v] => do addr a; int w; int v; pure .unit
       | 5, [_, n] => do int n; pure (.scalar (-64))
       | 6, [_] => pure .int
       | 7, [c] => do int c; freshTy
       | 8, [c, _] => do int c; pure .unit
       | 9, [v] => pure (ITy.tuple [.data arrayName [.int], v])
       | 10, [] => pure (ITy.tuple [.int, .int])
-      | 11, [s, a] => do addr s; addr a; pure (.scalar (-64))
-      | 12, [a] => do addr a; pure .unit
-      | 13, [a, b, n] => do addr a; addr b; addr n; pure .unit
       -- (`transmute`: the value, of another type.)
       | 14, [_] => freshTy
       | _, _ => throw s!"host operation {id} does not exist with {args.length} arguments"
