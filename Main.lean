@@ -339,6 +339,12 @@ def loadShards {α : Type} (dir : System.FilePath) (name key : String) : IO (Lis
       all := part ++ all
   pure all
 
+/-- What `file` keeps, if this compiler wrote it from `key` and `fresh`
+(`GLORIOUS_FRESH`) is not set; `none_` otherwise. -/
+def keptIn {α : Type} [Nonempty α] (fresh : Bool) (file : System.FilePath) (key : String) (none_ : α) :
+    IO α := do
+  if fresh then pure none_ else pure ((← Store.load file key).getD none_)
+
 /-- Compile the program at `path`, with the modules it has in other files.
 What the last compile of it found for each place where a borrow can be a scope
 of its own is where this one starts; and what this one finds is kept for the
@@ -348,23 +354,22 @@ neither is read). -/
 def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool := true) :
     IO (Except String Compiled) := do
   let file ← placesFile path
-  let known ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else readPlaces file
+  let fresh := (← IO.getEnv "GLORIOUS_FRESH").isSome
+  let dir ← Target.dirOf path
+  let library ← Target.libraryDir
+  let known ← if fresh then pure [] else readPlaces file
   -- (Which way of finding a certificate passed last time, kept by any
   -- compile, where the places say none.)
-  let known ← if (← IO.getEnv "GLORIOUS_FRESH").isSome || (List.lookup ("%way", 0) known).isSome then pure known
-    else match ← Store.load (α := Nat) ((← Target.dirOf path) / "way") "way" with
+  let known ← if (List.lookup ("%way", 0) known).isSome then pure known
+    else match ← (if fresh then pure none else Store.load (α := Nat) (dir / "way") "way") with
       | some k => pure ((("%way", 0), k) :: known)
       | none => pure known
-  let dir ← Target.dirOf path
-  let kept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
-    pure ((← Target.readCert dir).toList)
+  let kept ← if fresh then pure [] else pure ((← Target.readCert dir).toList)
   -- (And what any program kept of the library's modules, checked first.)
-  let library ← Target.libraryDir
-  let libraryKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure []
-    else pure ((← Store.load (α := Check.Kept) (library / "units") "units").getD [])
+  let libraryKept ← keptIn fresh (library / "units") "units" ([] : Check.Kept)
   let checkKept := checkKept ++ libraryKept
   -- (What certificate inference made the last time, by function and signature.)
-  let memo ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else do
+  let memo ← if fresh then pure {} else do
     let mut m : Infer.Memo := {}
     for i in [0:inferShards] do
       if let some part ← Store.load (α := Infer.Memo) (dir / s!"infer.{i}") "infer" then
@@ -374,42 +379,31 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     pure m
   -- (The prelude and library as checked, by an earlier process of this
   -- compiler, for any program.)
-  let firsts ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
-    [(true, false), (true, true), (false, false), (false, true)].filterMapM fun (std, drop) => do
-      pure (((← Store.load (α := List (Nat × Check.St)) (library / s!"first-{std}-{drop}") "first").bind
-        (·.head?)).map ((std, drop), ·))
+  let firsts ← [(true, false), (true, true), (false, false), (false, true)].filterMapM fun (std, drop) => do
+    pure (((← keptIn fresh (library / s!"first-{std}-{drop}") "first" ([] : List (Nat × Check.St))).head?).map
+      ((std, drop), ·))
   -- (The prelude as any earlier process of this compiler parsed it.)
-  let preludeKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure none else
+  let preludeKept ← if fresh then pure none else
     Store.load (α := List Syntax.Item × Syntax.Fixities) (library / "prelude") "prelude"
-  -- (Modules' items as an earlier compile parsed them.)
-  let parsedKept : Parsed ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
-    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Item)) (dir / "parsed") "parsed").getD []))
-  let texts : Texts ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
-    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × TextRead)) (dir / "texts") "texts").getD []))
+  -- (Modules' items as an earlier compile parsed them, and their texts.)
+  let parsedKept : Parsed := .ofList (← keptIn fresh (dir / "parsed") "parsed" [])
+  let texts : Texts := .ofList (← keptIn fresh (dir / "texts") "texts" [])
   -- (What each of the program's own groups added, as the last compile of it
-  -- checked them.)
-  -- (Each in a file of its own: a compile writes only those it made anew.)
-  -- (All in one kept file, read as one region: each group is a place in
-  -- it, not a file of its own to open.)
-  let groupsKeptList : List (UInt64 × Check.KeptGroup) ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
+  -- checked them: all in one kept file, read as one region, each group a
+  -- place in it.)
+  let groupsKeptList : List (UInt64 × Check.KeptGroup) ← if fresh then pure [] else
     loadShards dir "groups.kept" "groups"
   let groupsKept : Check.Deltas := groupsKeptList.foldl (fun m (k, d) => m.insertIfNew k (Thunk.pure (some d))) {}
   -- (And each module's items as resolution made them.)
-  let unitsKept : Syntax.Modules.UnitsKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
-    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Item × Syntax.Modules.UnitMade))
-      (dir / "resolved") "resolved").getD []))
+  let unitsKept : Syntax.Modules.UnitsKept := .ofList (← keptIn fresh (dir / "resolved") "resolved" [])
   -- (And what the front end's passes made of each item.)
-  let frontKept : Std.HashMap UInt64 (List Syntax.Item) ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
+  let frontKept : Std.HashMap UInt64 (List Syntax.Item) ← if fresh then pure {} else
     pure (Std.HashMap.ofList (← loadShards (α := List Syntax.Item) dir "front" "front"))
-  -- (And each function as lowered.)
-  let lowerKept : Elab.LowerMemo ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
-    pure ((← Store.load (α := Elab.LowerMemo) (dir / "lower") "lower").getD {})
-  -- (And each function as elaborated.)
-  let elabKept : Elab.ElabMemo ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
-    pure ((← Store.load (α := Elab.ElabMemo) (dir / "elab") "elab").getD {})
-  -- (And each group of the program's own text's items, as parsed.)
-  let itemsKept : Syntax.ItemsKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
-    pure ((← Store.load (α := Syntax.ItemsKept) (dir / "items") "items").getD {})
+  -- (And each function as lowered, and as elaborated; and each group of the
+  -- program's own text's items, as parsed.)
+  let lowerKept : Elab.LowerMemo ← keptIn fresh (dir / "lower") "lower" {}
+  let elabKept : Elab.ElabMemo ← keptIn fresh (dir / "elab") "elab" {}
+  let itemsKept : Syntax.ItemsKept ← keptIn fresh (dir / "items") "items" {}
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
