@@ -474,12 +474,7 @@ implement the trait but has a function of the name of its own: that one,
 decided where it is found (`Elab.Decision.receiver`). -/
 def dotOwnInstead (call : Nat) (ty : Ty) (said : String) : M Unit := do
   if let some alts := dotAltsOf (← get).modules call then
-    let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
-      match fuel, ← find t with
-      | fuel + 1, .ref _ inner _ => head fuel inner
-      | _, .con n _ => pure (some n)
-      | _, _ => pure none
-    if let some h ← head 8 ty then
+    if let some h ← headName 8 ty then
       if let some alt := alts.find? (·.startsWith (h ++ "::")) then
         throwThe Elab.Said { msg := said, decision := some (← receiverDecision call alt) }
 

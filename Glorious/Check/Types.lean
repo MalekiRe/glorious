@@ -1142,6 +1142,18 @@ partial def find (t : Ty) : M Ty := do
     else pure t
   | _ => pure t
 
+/-- The name of a type's head, through references. -/
+def headName : Nat → Ty → M (Option String)
+  | fuel + 1, t => do
+    match ← find t with
+    | .ref _ inner _ => headName fuel inner
+    | .con n _ => pure (some n)
+    | _ => pure none
+  | 0, t => do
+    match ← find t with
+    | .con n _ => pure (some n)
+    | _ => pure none
+
 /-- Expand a row's tail as far as it is known. -/
 partial def flattenRow (r : Row) : M Row := do
   match r.tail with

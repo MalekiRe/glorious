@@ -679,14 +679,9 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Flat.ExprId)
       | _ => pure a
     let found ← tryCatchThe Elab.Said (some <$> inferExpr scope amb a) fun e =>
       if e.passOn then throwThe Elab.Said e else pure none
-    let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
-      match fuel, ← find t with
-      | fuel + 1, .ref _ inner _ => head fuel inner
-      | _, .con n _ => pure (some n)
-      | _, _ => pure none
     -- (Its head read before what was found on the way is let go.)
     let h ← match found with
-      | some ty => head 8 ty
+      | some ty => headName 8 ty
       | none => pure none
     set saved
     pure (h.bind fun h => alts.find? (·.startsWith (h ++ "::")))
