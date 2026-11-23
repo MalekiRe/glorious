@@ -496,6 +496,358 @@ def rekey (b : Bound) : M Bound := do
     pure { b with trait := ← implKey (Syntax.traitBase b.trait) b.ty b.args }
   else pure b
 
+/-- One function of a group given its type, once the group's bounds are
+met (`settleBounds`): with the traits at arguments its bounds name, the
+conditions on types made from its implementation's parameters, and what
+it is given, each with this function's added. -/
+def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
+    (instSites : Array (String × Nat × String × String × List Ty)) (leafs : Array (String × Nat × Ty))
+    (heldIncl : List (Ty × Ty)) (d : FnDecl) (keyed : List (String × String × List Ty))
+    (compound : List (String × String × String × Ty)) (givensOf : List (String × List (String × Nat))) :
+    M (List (String × String × List Ty) × List (String × String × String × Ty)
+      × List (String × List (String × Nat))) := do
+  let mut keyed := keyed
+  let mut compound := compound
+  let mut givensOf := givensOf
+  let t0 ← zonk ((defs.lookup d.name).getD .unit)
+  let (t1, seen) ← openParams [] t0
+  -- A type parameter the function's type does not mention is one of its
+  -- parameters all the same: a call says it (`f<Read>()`), and what is
+  -- written of it holds (`A: Access`).
+  let mut unmentioned : List Nat := []
+  let mut seen := seen
+  if d.impl.isNone then
+    -- (Not one said to be a callable or a label: that is its type, and
+    -- the parameter's name is not in the function's type for that reason.)
+    let intrinsic := d.bounds.filterMap fun b =>
+      if ["Fn", "RunsIn", "Environment", "Use", "Label", "Returns"].contains b.trait then some b.subject else none
+    for p in d.params do
+      let key := s!"'{p}@{rigidOwner decls d}"
+      if !p.startsWith "'" && !intrinsic.contains p && (seen.lookup key).isNone then
+        let fresh ← freshTy
+        if let .var id := fresh then unmentioned := unmentioned ++ [id]
+        seen := seen ++ [(key, fresh)]
+  -- What the body needs of a type parameter it wrote, to be let go or to
+  -- be used more than once, it needs of the type the parameter is at each
+  -- use: said of the parameter as the function's type has it.
+  let before ← get
+  let mut opened : Array (Array (Ty × String)) := #[]
+  for needs in [before.dups, before.drops, before.stays] do
+    let mut out : Array (Ty × String) := #[]
+    for (need, why) in needs do
+      let (need, seen') ← openParams seen (← zonk need)
+      seen := seen'
+      out := out.push (need, why)
+    opened := opened.push out
+  modify fun s =>
+    { s with dups := opened.getD 0 #[], drops := opened.getD 1 #[], stays := opened.getD 2 #[] }
+  -- What a function needs of what its caller gives is what its signature
+  -- says, not what its body is found to do: `T: Use<[fewest, most]>` of a
+  -- type parameter, and where nothing is said, one that it may let go but
+  -- not use twice, as Rust's `T` is. A callable it is given, it may call
+  -- any number of times and let go, as Rust's `Fn`: a callable type
+  -- parameter said `Use<[.., 1]>` is called at most once. The body's needs
+  -- are held to that; the function's type says that and no more.
+  let mut said : Array (Ty × Bool × Bool) := #[]
+  let quantityOf := fun (p : String) =>
+    (d.bounds.find? fun b => b.trait == "Use" && b.subject == p).bind (·.quantity)
+  let rowOrLife := fun (p : String) => p.startsWith "'" || (Syntax.rowParam p).isSome
+  -- (An implementation's function: of the implementation's type
+  -- parameters, what the implementation says, `impl<T> .. where T:
+  -- Use<[0, *]>`, as of its own.)
+  for p in genericParams d.params do
+    if rowOrLife p then continue
+    if let some param := seen.lookup s!"'{p}@{rigidOwner decls d}" then
+      let written := quantityOf p
+      let (lower, upper) := written.getD (0, some 1)
+      -- (What is needed of a reference to a `T` is not needed of a `T`.)
+      let mentions := fun (need : Ty) => show M Bool from match param with
+        | .var id => tyHoldsVar [] id need
+        | _ => pure false
+      -- (A type parameter of none of what it is given: nothing of one is the
+      -- function's to let go or to use twice, `fn empty<T>() -> [T]`.)
+      let given ← match ← find t1 with
+        | .fn ps _ _ _ _ => match param with
+          | .var id => ps.anyM fun q => tyHoldsVar [] id q
+          | _ => pure true
+        | _ => pure true
+      if written.isNone && !given then continue
+      let nothing := s!"`{p}` says nothing of how often it is used, so"
+      if lower ≥ 1 then
+        if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => mentions need then
+          if written.isNone then
+            throw (inFunction d.name s!"{nothing} a `{p}` has to be used, but {why}: write `{p}: Use<[0, 1]>` for one that can go unused")
+          throw (inFunction d.name s!"`{p}: Use<[{lower}, ..]>` says a `{p}` has to be used, but {why}")
+      if upper.isSome then
+        let said_ := if written.isSome then s!"`{p}: Use<[.., 1]>` says" else nothing
+        if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => mentions need then
+          let whereTo := match d.impl with
+            | some (_, sig) => if sig.mparams.any (·.1 == p) then " in the trait's function" else ""
+            | none => ""
+          let hint := if written.isNone then s!": write `{p}: Use<[0, *]>`{whereTo} for one that can be used any number of times" else ""
+          throw (inFunction d.name s!"{said_} a `{p}` is used at most once, but {why}{hint}")
+      said := said.push (param, lower == 0, upper.isNone)
+  -- (A callable it is given: as many times as it likes, or none, unless
+  -- its type parameter says how often, `F: Use<[1, 1]>` for once.)
+  let mut envNeeds : List ((Ty × String) × Bool) := []
+  let mut saidStays : Array (Ty × String) := #[]
+  let mut saidStatics : Array (Ty × String) := #[]
+  let mut envStays : List (Ty × String) := []
+  if let .fn ps _ _ _ _ ← find t1 then
+      for ((q, annot), place) in (ps.zip d.annots).zipIdx do
+        if let .fn _ _ _ _ cap ← find q then
+          let named := match annot with
+            | some (.name f []) => some f
+            | _ => none
+          -- (`F: 'static`: what it is given borrows nothing.)
+          if named.any fun f => d.bounds.any fun b => b.subject == f && b.trait == "'static" then
+            saidStatics := saidStatics.push (q, s!"`{named.getD "F"}: 'static` says it borrows nothing, as a thread's does, which runs after the block a borrow would be of may have ended: give it what it uses (`let m = mine;` in its block)")
+          let written := named.bind quantityOf
+          let (lower, upper) := written.getD (0, none)
+          let root ← findCap cap
+          let isIt := fun (need : Ty) => show M Bool from do
+            match ← find need with
+            | .fn _ _ _ _ c => pure ((← findCap c) == root)
+            | _ => pure false
+          let f := named.getD "the callable"
+          -- (One that runs in an environment the function is given: which
+          -- of those runs, and how, the environment's rules say, from what
+          -- the body does.)
+          if named.any fun f => d.bounds.any fun b => b.trait == "RunsIn" && b.subject == f then
+            envNeeds := envNeeds ++ ((← (opened.getD 0 #[]).filterM fun (need, _) => isIt need).toList.map (·, true))
+              ++ ((← (opened.getD 1 #[]).filterM fun (need, _) => isIt need).toList.map (·, false))
+            envStays := envStays ++ (← (opened.getD 2 #[]).filterM fun (need, _) => isIt need).toList
+            continue
+          if lower ≥ 1 then
+            if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => isIt need then
+              throw (inFunction d.name s!"`{f}: Use<[{lower}, ..]>` says it has to be called, but {why}")
+          if upper.isSome then
+            if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => isIt need then
+              throw (inFunction d.name s!"`{f}: Use<[.., 1]>` says it is called at most once, but {why}")
+          said := said.push (q, lower == 0, upper.isNone)
+          -- (One the function calls while it holds a value that has to be
+          -- used has to come back: `F: Returns`. Any other may jump to a
+          -- label it was made under.)
+          let returns := named.any fun f => d.bounds.any fun b => b.trait == "Returns" && b.subject == f
+          if returns then saidStays := saidStays.push (q, "it is said to come back when called")
+          else if let some (_, why) ← (opened.getD 2 #[]).findM? fun (need, _) => isIt need then
+            let hint := match named with
+              | some f => s!"write `{f}: Returns`"
+              | none => s!"say so of a type parameter for parameter {place + 1}, `F: Fn<..>, F: Returns`"
+            throw (inFunction d.name s!"{why}, and what it is given may jump to a label and not come back: {hint}")
+  let saidDrops := said.filterMap fun (param, drops, _) =>
+    if drops then some (param, "its type parameter is said to be one that can go unused") else none
+  let saidDups := said.filterMap fun (param, _, dups) =>
+    if dups then some (param, "its type parameter is said to be one that can be used more than once") else none
+  let envDups := (envNeeds.filter (·.2)).map (·.1)
+  let envDrops := (envNeeds.filter (!·.2)).map (·.1)
+  modify fun s =>
+    { s with drops := saidDrops ++ envDrops.toArray, dups := saidDups ++ envDups.toArray
+             stays := saidStays ++ envStays.toArray, statics := saidStatics }
+  let scheme ← generalize t1 [] false
+  modify fun s => { s with dups := before.dups, drops := before.drops, stays := before.stays, statics := before.statics }
+  -- What a lifetime is said to hold of a type parameter, it holds of the
+  -- type the parameter is at each use.
+  let mut edges : Array (Nat × Captured) := #[]
+  for (cap, what) in scheme.edges do
+    match what with
+    | .ty target => edges := edges.push (cap, .ty (← openParams seen target).1)
+    | other => edges := edges.push (cap, other)
+  let mut ranked : List (Nat × List (Nat × String)) := []
+  for (cap, lifetimes) in (← get).ranked do
+    let root ← findCap cap
+    if scheme.cvars.contains root && !ranked.any (·.1 == root) then
+      ranked := (root, ← lifetimes.mapM fun (q, name) => do pure (← findCap q, name)) :: ranked
+  -- Which instance of an effect each operation of the function is about,
+  -- as the function's type has its type parameters.
+  let mut vector : Array Ty := #[]
+  let mut table : Array (Nat × String × String × Nat × Nat) := #[]
+  for (owner, id, kind, name, tys) in instSites do
+    if owner == d.name then
+      let mut whose : List Ty := []
+      for ty in tys do
+        let (ty, seen') ← openParams seen (← zonk ty)
+        seen := seen'
+        whose := whose ++ [ty]
+      table := table.push (id, kind, name, vector.size, whose.length)
+      vector := vector ++ whose.toArray
+  unless table.isEmpty do
+    modify fun s =>
+      { s with siteTable := (d.name, table.toList) :: s.siteTable
+               siteTypes := (d.name, vector.toList.map Ty.written) :: s.siteTypes }
+  let scheme := { scheme with edges := edges.toList, ranked, sites := vector.toList
+                              tvars := scheme.tvars ++ unmentioned }
+  -- The type parameters as written, for a call that writes types for them.
+  let written := (d.params.filter fun p => !p.startsWith "'").map fun p =>
+    match seen.lookup s!"'{p}@{rigidOwner decls d}" with
+    | some (.var id) => if scheme.tvars.contains id then some id else none
+    | _ => none
+  modify fun s => { s with typeParams := (d.name, written) :: s.typeParams }
+  -- A type parameter may be in the function's type only as what a trait's
+  -- type is said to be, `X: Graph<Node = N>`: it is one of the function's
+  -- all the same, and what is written of it holds.
+  for (_, subject, _, a, owner, _) in (← get).assocUses do
+    if owner == d.name then
+      let (_, seen') ← openParams seen (← zonk subject)
+      let (_, seen'') ← openParams seen' (← zonk a)
+      seen := seen''
+  let mine : List (String × Nat × Ty) ← match d.impl with
+    | some (im, _) =>
+      -- (As it is now: another of its functions may have found more that
+      -- it assumes.)
+      let im := ((← implsOfHead (Syntax.traitBase im.trait) im.head).find? (·.dictFn == im.dictFn)).getD im
+      -- An implementation says what it assumes.
+      let plain ← im.context.mapM fun (tr, j) => do
+        let t := Ty.con s!"'{(im.params[j]?).getD ""}@{d.name}" []
+        pure (tr, ((← keyOf t).getD 0), t)
+      -- Those kept apart: the trait at its arguments, of a type
+      -- parameter, as this function names the implementation's.
+      let own := im.pvars.map fun (p, id) => (id, Ty.con s!"'{p}@{d.name}" [])
+      let apart ← im.extra.mapM fun (tr, cargs, subject) => do
+        let t := subst own [] [] subject
+        let key ← if cargs.isEmpty then pure tr else traitKey tr (cargs.map (subst own [] []))
+        match ← keyOf t with
+        | some k => pure (key, k, t)
+        | none =>
+          -- Of a type made from them, `(A, B): Apart`: whoever uses the
+          -- implementation has to meet it. In here it is known by a
+          -- number of its own, which a need of the trait of that very
+          -- type is met by.
+          let own ← conditionKey d.name key t
+          pure (key, own.getD 0, t)
+      for (key, _, t) in apart do
+        if (← keyOf t).isNone then
+          compound := (d.name, key, ← spellTy t, Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" []) :: compound
+      pure (plain ++ apart)
+    | none =>
+      let inferred := leafs.toList.filter fun (_, _, k) =>
+        match k with
+        | .var id => scheme.tvars.contains id
+        | .con n [] => (seen.lookup n).isSome
+        | _ => false
+      -- How each type parameter it is given values of is destroyed: by
+      -- its signature, whether or not its body lets one go, so that what
+      -- the function asks of its callers is what its signature says.
+      let mut inferred := inferred
+      -- (A coercion is given nothing: what it lets go of a type it is
+      -- generic in, or what what it calls does, is not destroyed.)
+      if (← get).coercing.contains d.name then
+        inferred := inferred.filter (·.1 != Syntax.destroyTrait)
+      else if (← get).dropMode then
+        -- (Last, in the order of the type parameters, whatever order the
+        -- body asked them in: as the signature alone gives them.)
+        let byBody := inferred.filter (·.1 == Syntax.destroyTrait)
+        inferred := inferred.filter (·.1 != Syntax.destroyTrait)
+        -- (Each one its type has, as Rust gives every type parameter how
+        -- its values are dropped: what the body does with one is not
+        -- asked.)
+        for p in (genericParams d.params).filter (!isLifetime ·) do
+          let t := Ty.con s!"'{p}@{rigidOwner decls d}" []
+          if (seen.lookup s!"'{p}@{rigidOwner decls d}").isSome then
+            let k := (← keyOf t).getD 0
+            inferred := inferred ++ [(Syntax.destroyTrait, k, t)]
+        -- (And of each type its signature says a trait leaves to an
+        -- implementation, `<I as Iterator>::Item`: what the function is
+        -- given values of as much as its type parameters.)
+        for (_, _, _, a, owner, _) in (← get).assocUses do
+          if owner == d.name then
+            let t ← find a
+            if let .var id := t then
+              if scheme.tvars.contains id then
+                let k := (← keyOf t).getD 0
+                unless inferred.any (fun (tr, k', _) => tr == Syntax.destroyTrait && k' == k) do
+                  inferred := inferred ++ [(Syntax.destroyTrait, k, t)]
+        for b in byBody do
+          unless inferred.any (fun (tr, k', _) => tr == Syntax.destroyTrait && k' == b.2.1) do
+            inferred := inferred ++ [b]
+      -- Where traits are written of the function's type parameters, they
+      -- are all a type parameter has: what the body needs of one must be
+      -- among them, or among the traits those need.
+      let ordinary := d.bounds.filter fun b =>
+        !["Fn", "RunsIn", "Environment", "Use", "Returns"].contains b.trait && !b.trait.startsWith "'"
+      if ordinary.isEmpty then pure inferred
+      else
+        let mut written : List (String × Nat × Ty) := []
+        for (b, at_) in ordinary.zipIdx do
+          let t := Ty.con s!"'{b.subject}@{rigidOwner decls d}" []
+          if (seen.lookup s!"'{b.subject}@{rigidOwner decls d}").isSome then
+            let k := (← keyOf t).getD 0
+            -- The trait at the arguments written, if it takes some: this
+            -- bound's, where the trait is asked of the type more than
+            -- once (`F: Family<Int>, F: Family<Str>`).
+            let nth := ((ordinary.take at_).filter fun o => o.subject == b.subject && o.trait == b.trait).length
+            let theirs := (← get).writtenArgs.filterMap fun (f, subject, tr, args) =>
+              if f == d.name && subject == b.subject && tr == b.trait then some args else none
+            let args := (theirs[nth]?).getD (theirs.headD [])
+            let key ← traitKey b.trait args
+            unless args.isEmpty || keyed.any (·.1 == key) do keyed := (key, b.trait, args) :: keyed
+            for tr in key :: (← supersAll b.trait) do
+              unless written.any (fun w => w.1 == tr && w.2.1 == k) do
+                written := written ++ [(tr, k, t)]
+        let blankets := (← get).blanketTraits
+        for (tr, k, t) in inferred do
+          if let .con n [] := t then
+            -- (How a type parameter is destroyed is never written.)
+            unless tr == Syntax.destroyTrait || written.any (fun w => w.1 == tr && w.2.1 == k) do
+              -- (A trait every type has that has what is written of this
+              -- one is had by it too: met where the function is used.)
+              let had := fun (c : String) => written.any fun w => Syntax.traitBase w.1 == c && w.2.1 == k
+              if blankets.any (fun (b, asked) => b == Syntax.traitBase tr && asked.all had) then
+                written := written ++ [(tr, k, t)]
+              else
+              -- A need of the trait at arguments nothing has decided yet is
+              -- the written one's, where they fit (`T: Unlinks<?>` with
+              -- `T: Unlinks<T>` written): as Rust takes a `where` bound.
+              let mut fitted := false
+              if let some (_, _, args) := keyed.find? (·.1 == tr) then
+                for w in written do
+                  if !fitted && Syntax.traitBase w.1 == Syntax.traitBase tr && w.2.1 == k then
+                    if let some (_, _, wargs) := keyed.find? (·.1 == w.1) then
+                      if wargs.length == args.length then
+                        let saved ← get
+                        try
+                          for (a, b) in args.zip wargs do unify a b
+                          fitted := true
+                        catch _ => set saved
+              if fitted then written := written ++ [(tr, k, t)]
+              else
+                throw (inFunction d.name s!"`{bareName n}` is not said to have `{tr}`: write `{bareName n}: {tr}`")
+        pure (written ++ inferred.filter fun (tr, k, _) =>
+          !written.any (fun w => w.1 == tr && w.2.1 == k))
+  -- As the function's type has them: a trait with arguments is asked of
+  -- the type together with them, so that each use says them anew.
+  let mut bounds : List (String × Ty) := []
+  for (tr, _, k) in mine do
+    let self := match k with
+      | .con n [] => (seen.lookup n).getD k
+      | k => k
+    match keyed.find? (·.1 == tr) with
+    | some (_, base, args) =>
+      let args ← args.mapM fun a => do pure (← openParams seen (← zonk a)).1
+      bounds := bounds ++ [(base, Ty.tuple (self :: args))]
+    | none => bounds := bounds ++ [(tr, self)]
+  -- The types left to implementations that the function's type mentions.
+  let mut assocs : List (String × Ty × String × Ty) := []
+  for (tr, subject, name, a, owner, _) in (← get).assocUses do
+    if owner == d.name then
+      assocs := assocs ++ [(tr, (← openParams seen (← zonk subject)).1, name,
+        (← openParams seen (← zonk a)).1)]
+  -- A type left to an implementation that the function's type does not
+  -- mention is still found anew at each use.
+  let mut incls : List (Ty × Ty) := []
+  for (callee, amb) in heldIncl do
+    incls := incls ++ [((← openParams seen (← zonk callee)).1, (← openParams seen (← zonk amb)).1)]
+  let carried := assocs.map (·.2.2.2) ++ incls.flatMap fun (c, a) => [c, a]
+  let found := ((assocs.flatMap fun (_, subject, _, _) => freeTys subject) ++ carried.flatMap freeTys).eraseDups
+  let scheme := { scheme with assocs, incls, tvars := (scheme.tvars ++ found).eraseDups,
+                              rvars := (scheme.rvars ++ carried.flatMap freeRows).eraseDups }
+  givensOf := (d.name, mine.map fun (tr, k, _) => (tr, k)) :: givensOf
+  modify fun s =>
+    { s with
+      fns := s.fns.insert d.name { scheme with bounds := bounds }
+      fnBounds := (d.name, mine.length) :: s.fnBounds }
+  pure (keyed, compound, givensOf)
+
 /-- Meet the bounds of the group just inferred, and give each of its functions
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
@@ -811,343 +1163,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- type as written, and the number it is known by in the function.
   let mut compound : List (String × String × String × Ty) := []
   for d in decls do
-    let t0 ← zonk ((defs.lookup d.name).getD .unit)
-    let (t1, seen) ← openParams [] t0
-    -- A type parameter the function's type does not mention is one of its
-    -- parameters all the same: a call says it (`f<Read>()`), and what is
-    -- written of it holds (`A: Access`).
-    let mut unmentioned : List Nat := []
-    let mut seen := seen
-    if d.impl.isNone then
-      -- (Not one said to be a callable or a label: that is its type, and
-      -- the parameter's name is not in the function's type for that reason.)
-      let intrinsic := d.bounds.filterMap fun b =>
-        if ["Fn", "RunsIn", "Environment", "Use", "Label", "Returns"].contains b.trait then some b.subject else none
-      for p in d.params do
-        let key := s!"'{p}@{rigidOwner decls d}"
-        if !p.startsWith "'" && !intrinsic.contains p && (seen.lookup key).isNone then
-          let fresh ← freshTy
-          if let .var id := fresh then unmentioned := unmentioned ++ [id]
-          seen := seen ++ [(key, fresh)]
-    -- What the body needs of a type parameter it wrote, to be let go or to
-    -- be used more than once, it needs of the type the parameter is at each
-    -- use: said of the parameter as the function's type has it.
-    let before ← get
-    let mut opened : Array (Array (Ty × String)) := #[]
-    for needs in [before.dups, before.drops, before.stays] do
-      let mut out : Array (Ty × String) := #[]
-      for (need, why) in needs do
-        let (need, seen') ← openParams seen (← zonk need)
-        seen := seen'
-        out := out.push (need, why)
-      opened := opened.push out
-    modify fun s =>
-      { s with dups := opened.getD 0 #[], drops := opened.getD 1 #[], stays := opened.getD 2 #[] }
-    -- What a function needs of what its caller gives is what its signature
-    -- says, not what its body is found to do: `T: Use<[fewest, most]>` of a
-    -- type parameter, and where nothing is said, one that it may let go but
-    -- not use twice, as Rust's `T` is. A callable it is given, it may call
-    -- any number of times and let go, as Rust's `Fn`: a callable type
-    -- parameter said `Use<[.., 1]>` is called at most once. The body's needs
-    -- are held to that; the function's type says that and no more.
-    let mut said : Array (Ty × Bool × Bool) := #[]
-    let quantityOf := fun (p : String) =>
-      (d.bounds.find? fun b => b.trait == "Use" && b.subject == p).bind (·.quantity)
-    let rowOrLife := fun (p : String) => p.startsWith "'" || (Syntax.rowParam p).isSome
-    -- (An implementation's function: of the implementation's type
-    -- parameters, what the implementation says, `impl<T> .. where T:
-    -- Use<[0, *]>`, as of its own.)
-    for p in genericParams d.params do
-      if rowOrLife p then continue
-      if let some param := seen.lookup s!"'{p}@{rigidOwner decls d}" then
-        let written := quantityOf p
-        let (lower, upper) := written.getD (0, some 1)
-        -- (What is needed of a reference to a `T` is not needed of a `T`.)
-        let mentions := fun (need : Ty) => show M Bool from match param with
-          | .var id => tyHoldsVar [] id need
-          | _ => pure false
-        -- (A type parameter of none of what it is given: nothing of one is the
-        -- function's to let go or to use twice, `fn empty<T>() -> [T]`.)
-        let given ← match ← find t1 with
-          | .fn ps _ _ _ _ => match param with
-            | .var id => ps.anyM fun q => tyHoldsVar [] id q
-            | _ => pure true
-          | _ => pure true
-        if written.isNone && !given then continue
-        let nothing := s!"`{p}` says nothing of how often it is used, so"
-        if lower ≥ 1 then
-          if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => mentions need then
-            if written.isNone then
-              throw (inFunction d.name s!"{nothing} a `{p}` has to be used, but {why}: write `{p}: Use<[0, 1]>` for one that can go unused")
-            throw (inFunction d.name s!"`{p}: Use<[{lower}, ..]>` says a `{p}` has to be used, but {why}")
-        if upper.isSome then
-          let said_ := if written.isSome then s!"`{p}: Use<[.., 1]>` says" else nothing
-          if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => mentions need then
-            let whereTo := match d.impl with
-              | some (_, sig) => if sig.mparams.any (·.1 == p) then " in the trait's function" else ""
-              | none => ""
-            let hint := if written.isNone then s!": write `{p}: Use<[0, *]>`{whereTo} for one that can be used any number of times" else ""
-            throw (inFunction d.name s!"{said_} a `{p}` is used at most once, but {why}{hint}")
-        said := said.push (param, lower == 0, upper.isNone)
-    -- (A callable it is given: as many times as it likes, or none, unless
-    -- its type parameter says how often, `F: Use<[1, 1]>` for once.)
-    let mut envNeeds : List ((Ty × String) × Bool) := []
-    let mut saidStays : Array (Ty × String) := #[]
-    let mut saidStatics : Array (Ty × String) := #[]
-    let mut envStays : List (Ty × String) := []
-    if let .fn ps _ _ _ _ ← find t1 then
-        for ((q, annot), place) in (ps.zip d.annots).zipIdx do
-          if let .fn _ _ _ _ cap ← find q then
-            let named := match annot with
-              | some (.name f []) => some f
-              | _ => none
-            -- (`F: 'static`: what it is given borrows nothing.)
-            if named.any fun f => d.bounds.any fun b => b.subject == f && b.trait == "'static" then
-              saidStatics := saidStatics.push (q, s!"`{named.getD "F"}: 'static` says it borrows nothing, as a thread's does, which runs after the block a borrow would be of may have ended: give it what it uses (`let m = mine;` in its block)")
-            let written := named.bind quantityOf
-            let (lower, upper) := written.getD (0, none)
-            let root ← findCap cap
-            let isIt := fun (need : Ty) => show M Bool from do
-              match ← find need with
-              | .fn _ _ _ _ c => pure ((← findCap c) == root)
-              | _ => pure false
-            let f := named.getD "the callable"
-            -- (One that runs in an environment the function is given: which
-            -- of those runs, and how, the environment's rules say, from what
-            -- the body does.)
-            if named.any fun f => d.bounds.any fun b => b.trait == "RunsIn" && b.subject == f then
-              envNeeds := envNeeds ++ ((← (opened.getD 0 #[]).filterM fun (need, _) => isIt need).toList.map (·, true))
-                ++ ((← (opened.getD 1 #[]).filterM fun (need, _) => isIt need).toList.map (·, false))
-              envStays := envStays ++ (← (opened.getD 2 #[]).filterM fun (need, _) => isIt need).toList
-              continue
-            if lower ≥ 1 then
-              if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => isIt need then
-                throw (inFunction d.name s!"`{f}: Use<[{lower}, ..]>` says it has to be called, but {why}")
-            if upper.isSome then
-              if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => isIt need then
-                throw (inFunction d.name s!"`{f}: Use<[.., 1]>` says it is called at most once, but {why}")
-            said := said.push (q, lower == 0, upper.isNone)
-            -- (One the function calls while it holds a value that has to be
-            -- used has to come back: `F: Returns`. Any other may jump to a
-            -- label it was made under.)
-            let returns := named.any fun f => d.bounds.any fun b => b.trait == "Returns" && b.subject == f
-            if returns then saidStays := saidStays.push (q, "it is said to come back when called")
-            else if let some (_, why) ← (opened.getD 2 #[]).findM? fun (need, _) => isIt need then
-              let hint := match named with
-                | some f => s!"write `{f}: Returns`"
-                | none => s!"say so of a type parameter for parameter {place + 1}, `F: Fn<..>, F: Returns`"
-              throw (inFunction d.name s!"{why}, and what it is given may jump to a label and not come back: {hint}")
-    let saidDrops := said.filterMap fun (param, drops, _) =>
-      if drops then some (param, "its type parameter is said to be one that can go unused") else none
-    let saidDups := said.filterMap fun (param, _, dups) =>
-      if dups then some (param, "its type parameter is said to be one that can be used more than once") else none
-    let envDups := (envNeeds.filter (·.2)).map (·.1)
-    let envDrops := (envNeeds.filter (!·.2)).map (·.1)
-    modify fun s =>
-      { s with drops := saidDrops ++ envDrops.toArray, dups := saidDups ++ envDups.toArray
-               stays := saidStays ++ envStays.toArray, statics := saidStatics }
-    let scheme ← generalize t1 [] false
-    modify fun s => { s with dups := before.dups, drops := before.drops, stays := before.stays, statics := before.statics }
-    -- What a lifetime is said to hold of a type parameter, it holds of the
-    -- type the parameter is at each use.
-    let mut edges : Array (Nat × Captured) := #[]
-    for (cap, what) in scheme.edges do
-      match what with
-      | .ty target => edges := edges.push (cap, .ty (← openParams seen target).1)
-      | other => edges := edges.push (cap, other)
-    let mut ranked : List (Nat × List (Nat × String)) := []
-    for (cap, lifetimes) in (← get).ranked do
-      let root ← findCap cap
-      if scheme.cvars.contains root && !ranked.any (·.1 == root) then
-        ranked := (root, ← lifetimes.mapM fun (q, name) => do pure (← findCap q, name)) :: ranked
-    -- Which instance of an effect each operation of the function is about,
-    -- as the function's type has its type parameters.
-    let mut vector : Array Ty := #[]
-    let mut table : Array (Nat × String × String × Nat × Nat) := #[]
-    for (owner, id, kind, name, tys) in instSites do
-      if owner == d.name then
-        let mut whose : List Ty := []
-        for ty in tys do
-          let (ty, seen') ← openParams seen (← zonk ty)
-          seen := seen'
-          whose := whose ++ [ty]
-        table := table.push (id, kind, name, vector.size, whose.length)
-        vector := vector ++ whose.toArray
-    unless table.isEmpty do
-      modify fun s =>
-        { s with siteTable := (d.name, table.toList) :: s.siteTable
-                 siteTypes := (d.name, vector.toList.map Ty.written) :: s.siteTypes }
-    let scheme := { scheme with edges := edges.toList, ranked, sites := vector.toList
-                                tvars := scheme.tvars ++ unmentioned }
-    -- The type parameters as written, for a call that writes types for them.
-    let written := (d.params.filter fun p => !p.startsWith "'").map fun p =>
-      match seen.lookup s!"'{p}@{rigidOwner decls d}" with
-      | some (.var id) => if scheme.tvars.contains id then some id else none
-      | _ => none
-    modify fun s => { s with typeParams := (d.name, written) :: s.typeParams }
-    -- A type parameter may be in the function's type only as what a trait's
-    -- type is said to be, `X: Graph<Node = N>`: it is one of the function's
-    -- all the same, and what is written of it holds.
-    for (_, subject, _, a, owner, _) in (← get).assocUses do
-      if owner == d.name then
-        let (_, seen') ← openParams seen (← zonk subject)
-        let (_, seen'') ← openParams seen' (← zonk a)
-        seen := seen''
-    let mine : List (String × Nat × Ty) ← match d.impl with
-      | some (im, _) =>
-        -- (As it is now: another of its functions may have found more that
-        -- it assumes.)
-        let im := ((← implsOfHead (Syntax.traitBase im.trait) im.head).find? (·.dictFn == im.dictFn)).getD im
-        -- An implementation says what it assumes.
-        let plain ← im.context.mapM fun (tr, j) => do
-          let t := Ty.con s!"'{(im.params[j]?).getD ""}@{d.name}" []
-          pure (tr, ((← keyOf t).getD 0), t)
-        -- Those kept apart: the trait at its arguments, of a type
-        -- parameter, as this function names the implementation's.
-        let own := im.pvars.map fun (p, id) => (id, Ty.con s!"'{p}@{d.name}" [])
-        let apart ← im.extra.mapM fun (tr, cargs, subject) => do
-          let t := subst own [] [] subject
-          let key ← if cargs.isEmpty then pure tr else traitKey tr (cargs.map (subst own [] []))
-          match ← keyOf t with
-          | some k => pure (key, k, t)
-          | none =>
-            -- Of a type made from them, `(A, B): Apart`: whoever uses the
-            -- implementation has to meet it. In here it is known by a
-            -- number of its own, which a need of the trait of that very
-            -- type is met by.
-            let own ← conditionKey d.name key t
-            pure (key, own.getD 0, t)
-        for (key, _, t) in apart do
-          if (← keyOf t).isNone then
-            compound := (d.name, key, ← spellTy t, Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" []) :: compound
-        pure (plain ++ apart)
-      | none =>
-        let inferred := leafs.toList.filter fun (_, _, k) =>
-          match k with
-          | .var id => scheme.tvars.contains id
-          | .con n [] => (seen.lookup n).isSome
-          | _ => false
-        -- How each type parameter it is given values of is destroyed: by
-        -- its signature, whether or not its body lets one go, so that what
-        -- the function asks of its callers is what its signature says.
-        let mut inferred := inferred
-        -- (A coercion is given nothing: what it lets go of a type it is
-        -- generic in, or what what it calls does, is not destroyed.)
-        if (← get).coercing.contains d.name then
-          inferred := inferred.filter (·.1 != Syntax.destroyTrait)
-        else if (← get).dropMode then
-          -- (Last, in the order of the type parameters, whatever order the
-          -- body asked them in: as the signature alone gives them.)
-          let byBody := inferred.filter (·.1 == Syntax.destroyTrait)
-          inferred := inferred.filter (·.1 != Syntax.destroyTrait)
-          -- (Each one its type has, as Rust gives every type parameter how
-          -- its values are dropped: what the body does with one is not
-          -- asked.)
-          for p in (genericParams d.params).filter (!isLifetime ·) do
-            let t := Ty.con s!"'{p}@{rigidOwner decls d}" []
-            if (seen.lookup s!"'{p}@{rigidOwner decls d}").isSome then
-              let k := (← keyOf t).getD 0
-              inferred := inferred ++ [(Syntax.destroyTrait, k, t)]
-          -- (And of each type its signature says a trait leaves to an
-          -- implementation, `<I as Iterator>::Item`: what the function is
-          -- given values of as much as its type parameters.)
-          for (_, _, _, a, owner, _) in (← get).assocUses do
-            if owner == d.name then
-              let t ← find a
-              if let .var id := t then
-                if scheme.tvars.contains id then
-                  let k := (← keyOf t).getD 0
-                  unless inferred.any (fun (tr, k', _) => tr == Syntax.destroyTrait && k' == k) do
-                    inferred := inferred ++ [(Syntax.destroyTrait, k, t)]
-          for b in byBody do
-            unless inferred.any (fun (tr, k', _) => tr == Syntax.destroyTrait && k' == b.2.1) do
-              inferred := inferred ++ [b]
-        -- Where traits are written of the function's type parameters, they
-        -- are all a type parameter has: what the body needs of one must be
-        -- among them, or among the traits those need.
-        let ordinary := d.bounds.filter fun b =>
-          !["Fn", "RunsIn", "Environment", "Use", "Returns"].contains b.trait && !b.trait.startsWith "'"
-        if ordinary.isEmpty then pure inferred
-        else
-          let mut written : List (String × Nat × Ty) := []
-          for (b, at_) in ordinary.zipIdx do
-            let t := Ty.con s!"'{b.subject}@{rigidOwner decls d}" []
-            if (seen.lookup s!"'{b.subject}@{rigidOwner decls d}").isSome then
-              let k := (← keyOf t).getD 0
-              -- The trait at the arguments written, if it takes some: this
-              -- bound's, where the trait is asked of the type more than
-              -- once (`F: Family<Int>, F: Family<Str>`).
-              let nth := ((ordinary.take at_).filter fun o => o.subject == b.subject && o.trait == b.trait).length
-              let theirs := (← get).writtenArgs.filterMap fun (f, subject, tr, args) =>
-                if f == d.name && subject == b.subject && tr == b.trait then some args else none
-              let args := (theirs[nth]?).getD (theirs.headD [])
-              let key ← traitKey b.trait args
-              unless args.isEmpty || keyed.any (·.1 == key) do keyed := (key, b.trait, args) :: keyed
-              for tr in key :: (← supersAll b.trait) do
-                unless written.any (fun w => w.1 == tr && w.2.1 == k) do
-                  written := written ++ [(tr, k, t)]
-          let blankets := (← get).blanketTraits
-          for (tr, k, t) in inferred do
-            if let .con n [] := t then
-              -- (How a type parameter is destroyed is never written.)
-              unless tr == Syntax.destroyTrait || written.any (fun w => w.1 == tr && w.2.1 == k) do
-                -- (A trait every type has that has what is written of this
-                -- one is had by it too: met where the function is used.)
-                let had := fun (c : String) => written.any fun w => Syntax.traitBase w.1 == c && w.2.1 == k
-                if blankets.any (fun (b, asked) => b == Syntax.traitBase tr && asked.all had) then
-                  written := written ++ [(tr, k, t)]
-                else
-                -- A need of the trait at arguments nothing has decided yet is
-                -- the written one's, where they fit (`T: Unlinks<?>` with
-                -- `T: Unlinks<T>` written): as Rust takes a `where` bound.
-                let mut fitted := false
-                if let some (_, _, args) := keyed.find? (·.1 == tr) then
-                  for w in written do
-                    if !fitted && Syntax.traitBase w.1 == Syntax.traitBase tr && w.2.1 == k then
-                      if let some (_, _, wargs) := keyed.find? (·.1 == w.1) then
-                        if wargs.length == args.length then
-                          let saved ← get
-                          try
-                            for (a, b) in args.zip wargs do unify a b
-                            fitted := true
-                          catch _ => set saved
-                if fitted then written := written ++ [(tr, k, t)]
-                else
-                  throw (inFunction d.name s!"`{bareName n}` is not said to have `{tr}`: write `{bareName n}: {tr}`")
-          pure (written ++ inferred.filter fun (tr, k, _) =>
-            !written.any (fun w => w.1 == tr && w.2.1 == k))
-    -- As the function's type has them: a trait with arguments is asked of
-    -- the type together with them, so that each use says them anew.
-    let mut bounds : List (String × Ty) := []
-    for (tr, _, k) in mine do
-      let self := match k with
-        | .con n [] => (seen.lookup n).getD k
-        | k => k
-      match keyed.find? (·.1 == tr) with
-      | some (_, base, args) =>
-        let args ← args.mapM fun a => do pure (← openParams seen (← zonk a)).1
-        bounds := bounds ++ [(base, Ty.tuple (self :: args))]
-      | none => bounds := bounds ++ [(tr, self)]
-    -- The types left to implementations that the function's type mentions.
-    let mut assocs : List (String × Ty × String × Ty) := []
-    for (tr, subject, name, a, owner, _) in (← get).assocUses do
-      if owner == d.name then
-        assocs := assocs ++ [(tr, (← openParams seen (← zonk subject)).1, name,
-          (← openParams seen (← zonk a)).1)]
-    -- A type left to an implementation that the function's type does not
-    -- mention is still found anew at each use.
-    let mut incls : List (Ty × Ty) := []
-    for (callee, amb) in heldIncl do
-      incls := incls ++ [((← openParams seen (← zonk callee)).1, (← openParams seen (← zonk amb)).1)]
-    let carried := assocs.map (·.2.2.2) ++ incls.flatMap fun (c, a) => [c, a]
-    let found := ((assocs.flatMap fun (_, subject, _, _) => freeTys subject) ++ carried.flatMap freeTys).eraseDups
-    let scheme := { scheme with assocs, incls, tvars := (scheme.tvars ++ found).eraseDups,
-                                rvars := (scheme.rvars ++ carried.flatMap freeRows).eraseDups }
-    givensOf := (d.name, mine.map fun (tr, k, _) => (tr, k)) :: givensOf
-    modify fun s =>
-      { s with
-        fns := s.fns.insert d.name { scheme with bounds := bounds }
-        fnBounds := (d.name, mine.length) :: s.fnBounds }
+    let (k, c, g) ← settleScheme decls defs instSites leafs heldIncl d keyed compound givensOf
+    keyed := k
+    compound := c
+    givensOf := g
   let impls := (← get).impls
   let kimpls := (← get).kimpls
   let methodless : Std.HashSet String := (← get).traits.foldl (init := {}) fun m (t, fns) =>

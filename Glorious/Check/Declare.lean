@@ -406,6 +406,444 @@ partial def writesRef : TypeExpr → Bool
   | .performs r _ => writesRef r
   | _ => false
 
+/-- An effect's declaration read: its operations, each with what it is
+given and gives (`declare`). -/
+def declareEffect (items : List Item) (name : String) (params : List String) (ops : List OpDecl) : M Unit := do
+  -- A lifetime of an effect is given where the effect is handled: what
+  -- an operation gives or takes may borrow for that long.
+  let (pmap, _, _) ← freshParams params
+  let mut ids : List Nat := []
+  let mut lifetimes : List (Option Nat) := []
+  for (_, t) in pmap do
+    match t with
+    | .var id =>
+      ids := ids ++ [id]
+      lifetimes := lifetimes ++ [none]
+    | .ref _ _ cap =>
+      ids := ids ++ [match ← freshTy with
+        | .var id => id
+        | _ => 0]
+      lifetimes := lifetimes ++ [some cap]
+    | _ => pure ()
+  for op in ops do
+    -- (Its own lifetimes, and those it does not write: not the
+    -- declaration's, but each use's.)
+    let before := (← get).monoCaps
+    let mut own : List (String × Ty) := []
+    for l in op.lifetimes do
+      own := own ++ [(l, Ty.life (← freshCap))]
+    let opMap := own ++ pmap
+    -- (`S::Out` of a type parameter of the effect: kept as written, and
+    -- answered at each use, at the type the use gives.)
+    let projecting := (← get).projecting
+    let written := items.findSome? fun
+      | .bounds n bs => if n == name then some bs else none
+      | .module _ (some inner) => inner.findSome? fun
+        | .bounds n bs => if n == name then some bs else none
+        | _ => none
+      | _ => none
+    modify fun s => { s with projecting := ids
+                             paramTraits := ((written.getD []).map fun b => (b.subject, b.trait, b.args)) }
+    let payload ← op.payload.mapM (resolveType opMap true)
+    let result ← if op.terminal then pure none
+      else match op.result with
+        | some t => some <$> resolveType opMap true t
+        | none => some <$> resolveType opMap true .hole
+    modify fun s => { s with projecting := projecting, paramTraits := [] }
+    -- (Of references only: a callable it is given or gives is held to
+    -- what the declaration says, as before.)
+    let rec refCaps : Ty → List Nat
+      | .ref _ t c => c :: refCaps t
+      | .con _ args => args.flatMap refCaps
+      | .tuple args => args.flatMap refCaps
+      | _ => []
+    let atRefs := (payload ++ result.toList).flatMap refCaps
+    let made := (← get).monoCaps.filter fun c => !before.contains c && atRefs.contains c
+    modify fun s => { s with monoCaps := s.monoCaps.filter (!made.contains ·) }
+    let caps := made ++ own.filterMap fun (_, t) => match t with
+      | .ref _ _ c => some c
+      | _ => none
+    -- A resumption is resumed at most once, so the most uses is one; the
+    -- fewest says whether it may simply be let go.
+    let must ← match op.quantity with
+      | none => pure false
+      | some (lower, upper) =>
+        if op.terminal then
+          throw s!"operation `{op.name}` does not return, so it has no resumption to say this of"
+        unless upper == some 1 do
+          throw s!"operation `{op.name}`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`"
+        pure (lower == 1)
+    if must then modify fun s => { s with anyMust := true }
+    modify fun s =>
+      { s with ops := (op.name, ⟨name, ids, payload, result, must, lifetimes, caps⟩) :: s.ops,
+               runOps := s.runOps.insert op.name result.isSome,
+               runExact := if must && result.isSome then s.runExact.insert op.name
+                 else s.runExact.erase op.name }
+  modify fun s =>
+    { s with effects := (name, ⟨ids, ops.map (·.name), lifetimes.map (·.isSome)⟩) :: s.effects }
+
+/-- A trait's declaration read: its functions' signatures (`declareTraits`). -/
+def declareTrait (items : List Item) (name : String) (methods : List (String × List TypeExpr × Option TypeExpr)) : M Unit := do
+  if ((← get).traits.lookup name).isSome then throw s!"trait `{name}` is declared twice"
+  let self ← match ← freshTy with
+    | .var id => pure id
+    | _ => pure 0
+  -- Its own type parameters, and the types it leaves to implementations:
+  -- a variable each, the same in all its functions.
+  let (params, assocNames) := match items.findSome? fun
+      | .traitInfo n _ _ params assocs =>
+        -- A lifetime written of a trait is a name its functions' types
+        -- may use; it is no argument an implementation gives.
+        if n == name then some ((genericParams params).filter (!isLifetime ·), assocs) else none
+      | _ => none with
+    | some found => found
+    | none => ([], [])
+  let mut extra : List (String × Ty) := []
+  let mut tparams : List Nat := []
+  let mut assocVars : List (String × Nat) := []
+  for p in params do
+    if let .var id ← freshTy then
+      extra := extra ++ [(p, .var id)]
+      tparams := tparams ++ [id]
+  -- A name its functions write after `|` in what they perform is a row
+  -- it leaves to an implementation: held as the type of a callable that
+  -- takes nothing, gives nothing and performs that row.
+  let asRows := methods.flatMap fun (_, _, ret) =>
+    match (Syntax.methodGenerics ret).1 with
+    | some (.performs _ effects) => effects.filterMap fun
+      | (mark, [.name e []]) =>
+        match e.splitOn "::" with
+        | ["Self", a] => if mark == Syntax.rowMark then some a else none
+        | _ => none
+      | _ => none
+    | _ => []
+  let mut rowVars : List (String × Nat) := []
+  for a in assocNames do
+    if let .var id ← freshTy then
+      if asRows.contains a then
+        let k ← freshRowVar
+        extra := extra ++ [(a, .fn [] .unit [] (some k) (← freshCap))]
+        rowVars := rowVars ++ [(a, k)]
+      else extra := extra ++ [(a, .var id)]
+      assocVars := assocVars ++ [(a, id)]
+  -- (In front of what was there, which is kept as it was where it had no
+  -- shape of this trait: units checked side by side are put together.)
+  modify fun s => { s with traitShape := s.traitShape.insert name (tparams.length, assocNames) }
+  let mut index := 0
+  for (m, params, ret) in methods do
+    -- (The type parameters of its own: a variable each.)
+    let (ret, ownNames) := Syntax.methodGenerics ret
+    let uses := ownNames.filterMap Syntax.useMarked
+    let ownNames := ownNames.filter (!·.startsWith "%")
+    let mut mparams : List (String × Nat) := []
+    -- (A lifetime among them is one of its lifetimes, as any written.)
+    for g in ownNames.filter (!·.startsWith "'") do
+      if let .var id ← freshTy then mparams := mparams ++ [(g, id)]
+    modify fun s => { s with gatScope := assocNames, gatOccs := #[] }
+    if ((← get).methods[m]?).isSome then
+      throw s!"`{m}` is declared twice as a function of a trait"
+    -- A trait's function has no body its lifetimes could be found from,
+    -- so the unwritten ones are one: what it gives may borrow whatever
+    -- anything it takes borrows. A lifetime written with a name is its own.
+    let named := (params ++ ret.toList).flatMap lifetimesOf
+    let mut scope : List (String × Ty) :=
+      ("Self", .var self) :: extra ++ mparams.map fun (g, id) => (g, Ty.var id)
+    for l in named.eraseDups do
+      scope := scope ++ [(l, Ty.life (← freshCap))]
+    let one ← freshCap
+    -- (Where nothing it gives is a reference, nothing ties what it takes
+    -- together: each unwritten lifetime is then its own.)
+    modify fun s => { s with elided := if (ret.map writesRef).getD false then some one else none }
+    -- (A type another trait of `Self` leaves, `Self::Store` of a trait
+    -- this one asks: kept as written, for each implementation and use.)
+    -- (And one of what the trait leaves or of its parameters, `<Self::
+    -- Components as Registers<S>>::Out`: so each use has its own.)
+    modify fun s => { s with projecting := self :: scope.filterMap fun
+      | (_, .var id) => some id
+      | _ => none }
+    let ps ← params.mapM fun p => closeRows <$> resolveType scope false p
+    -- What it performs, where the trait says: those effects, and the
+    -- row it leaves to an implementation if it names one.
+    let (ret, row) ← match ret with
+      | some (.performs r effects) => do
+        let (effs, tail) ← resolveRow scope false effects
+        pure (some r, (⟨effs, tail⟩ : Row))
+      | other => pure (other, (⟨[], none⟩ : Row))
+    let r ← match ret with
+      | some r => closeRows <$> resolveType scope false r
+      | none => pure .unit
+    modify fun s => { s with elided := none, projecting := [] }
+    let written := scope.filterMap fun
+      | (l, .ref _ _ cap) => some (cap, l)
+      | _ => none
+    let gats := (← get).gatOccs.toList
+    modify fun s => { s with gatScope := [], gatOccs := #[] }
+    let sig : MethodSig :=
+      ⟨name, index, self, ps, r, (one, "'_") :: written, tparams, assocVars, row, rowVars, mparams, gats, uses⟩
+    modify fun s => { s with methods := s.methods.insert m sig }
+    index := index + 1
+  modify fun s => { s with traits := (name, methods.map (·.1)) :: s.traits }
+
+/-- An implementation read: what it is for, on what conditions, and what it
+leaves to its trait said (`declareTraits`). -/
+def declareImpl (params : List String) (tr head : String) (args : List String) (context : List (String × String))
+    (methods : List Item) : M Unit := do
+  let what := s!"`impl {tr} for {head}`"
+  -- `tr` is the trait at the arguments the implementation gives it.
+  let base := Syntax.traitBase tr
+  let names ← match (← get).traits.lookup base with
+    | some ns => pure ns
+    | none => throw s!"{what}: unknown trait `{base}`"
+  let arity ← if head == "Int" || Syntax.isScalar head then pure 0
+    else if head.startsWith "(tuple" then pure args.length
+    else if head == Syntax.consHead || head == Traits.fnHead then pure 2
+    -- (A function's, with what it gives after what it is given; a
+    -- reference's, with what it is to.)
+    else if head.startsWith "(fn" then pure args.length
+    else if head == "(&)" || head == "(&mut)" then pure 1
+    else match (← get).types[head]? with
+      | some d => pure d.arity
+      | none => throw s!"{what}: unknown type `{head}`"
+  unless args.length == arity do
+    throw s!"{what}: `{head}` takes {arity} type arguments, but is given {args.length}"
+  -- (A type parameter that is no argument of the head is inside a type
+  -- one of them has to be, or among the trait's own.)
+  unless args.eraseDups.length == args.length && args.all params.contains do
+    throw s!"{what}: the arguments of `{head}` must be the type parameters after `impl`, each once"
+  -- A condition is a trait of one of the head's arguments; or, said
+  -- with the trait's own arguments or of a type parameter inside an
+  -- argument, one kept apart (`extra`, below).
+  let general := fun (k : Nat) (p : String) =>
+    !args.contains p || methods.any fun
+      | .typeAlias n _ _ => n == Syntax.ctxArgName k 0
+      | _ => false
+  let ctx ← (context.zipIdx.filter fun ((p, _), k) => !general k p).mapM fun ((p, t'), _) => do
+    unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
+    match args.idxOf? p with
+    | some j => pure (t', j)
+    | none => throw s!"{what}: `{p}` is not one of its type parameters"
+  -- A type parameter said to have a trait has every trait that one needs.
+  let mut closed : List (String × Nat) := []
+  for (t', j) in ctx do
+    for s in t' :: (← supersAll t') do
+      unless closed.contains (s, j) do closed := closed ++ [(s, j)]
+  -- A function of the implementation may let go of a value of one of
+  -- its type parameters: it is given how each is destroyed.
+  -- (A lifetime is no value: there is nothing to destroy of one.)
+  let ctx := if (← get).dropMode then
+      closed ++ ((List.range args.length).filter fun j =>
+          !closed.contains (Syntax.destroyTrait, j) && !((args[j]?).getD "").startsWith "'").map
+        fun j => (Syntax.destroyTrait, j)
+    else closed
+  let given := methods.filterMap fun
+    | .fn m _ _ _ _ => some m
+    | _ => none
+  for m in names do
+    unless given.contains m do throw s!"{what} lacks the function `{m}`"
+  for m in given do
+    unless names.contains m do throw s!"{what}: `{m}` is not a function of `{tr}`"
+  unless given.eraseDups.length == given.length do
+    throw s!"{what} gives a function twice"
+  -- A callable that takes hold of a value with a `drop` has to be
+  -- called: what is and is not used is then counted, as it is where a
+  -- program declares something that has to be used.
+  if tr == "Drop" then modify fun s => { s with anyMust := true }
+  if (← get).kimpls.has tr head then
+    throw s!"`{tr}` is implemented twice for `{head}`"
+  -- The arguments it gives its trait, and the types the trait leaves to it.
+  let (arityOfTrait, assocNames) := ((← get).traitShape[base]?).getD (0, [])
+  let (pmap, _, _) ← freshParams params
+  let pvars := pmap.filterMap fun
+    | (p, .var id) => some (p, id)
+    | _ => none
+  let mut targs : List Ty := []
+  for i in List.range arityOfTrait do
+    match methods.findSome? fun
+        | .typeAlias n _ body => if n == Syntax.traitArgName i then some body else none
+        | _ => none with
+    | some body =>
+      let t ← zonk (← resolveType pmap false body)
+      targs := targs ++ [t]
+    | none => throw s!"{what}: `{base}` takes {arityOfTrait} type arguments"
+  if (methods.any fun
+      | .typeAlias n _ _ => n == Syntax.traitArgName arityOfTrait
+      | _ => false) then
+    throw s!"{what}: `{base}` takes {arityOfTrait} type arguments"
+  -- An implementation that gives its trait arguments made of its own
+  -- type parameters is for the type at all of them: it is the only one
+  -- of the trait for the type.
+  let generic := targs.any fun t => !(freeTys t).isEmpty
+  -- The conditions kept apart, in the implementation's type parameters.
+  let mut extra : List (String × List Ty × Ty) := []
+  -- (What a trait leaves to implementations, of the implementation's own
+  -- type parameters, is kept as written, to be answered at each use:
+  -- `<H as Touches>::List: Concat<..>`.)
+  modify fun s => { s with projecting := pmap.filterMap fun (_, t) => match t with
+    | .var id => some id
+    | _ => none }
+  for ((p, t'), k) in context.zipIdx do
+    if general k p then
+      unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
+      let subject ← match pmap.lookup p with
+        | some t => pure t
+        | none =>
+          match methods.findSome? fun
+              | .typeAlias n _ body => if n == Syntax.ctxSubjectName k then some body else none
+              | _ => none with
+          | some body => zonk (← resolveType pmap false body)
+          | none => throw s!"{what}: `{p}` is not one of its type parameters"
+      let mut cargs : List Ty := []
+      for i in List.range ((((← get).traitShape[t']?).map (·.1)).getD 0) do
+        match methods.findSome? fun
+            | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
+            | _ => none with
+        | some body => cargs := cargs ++ [← zonk (← resolveType pmap false body)]
+        | none => throw s!"{what}: `{Syntax.lastSegment t'}` takes arguments: `{p}: {Syntax.lastSegment t'}<..>`"
+      extra := extra ++ [(t', cargs, subject)]
+  modify fun s => { s with projecting := [] }
+  -- A type parameter inside one of the head's arguments (`H` of
+  -- `(Column<H>, R)`): its functions may let go of a value of it too, so
+  -- it is given how that is destroyed, as a head's argument is.
+  -- (Not of a callable's parameters and result: a callable holds no
+  -- value of those to destroy. Nor of a list of types.)
+  if (← get).dropMode && !head.startsWith "(fn" then
+    let said := context.filterMap fun (p, t') => if t' == Syntax.destroyTrait then some p else none
+    for p in genericParams params do
+      if !args.contains p && !p.startsWith "'" && !p.startsWith ".." && !said.contains p then
+        if let some subject := pmap.lookup p then
+          extra := extra ++ [(Syntax.destroyTrait, [], subject)]
+  -- (A value is destroyed knowing only its type's shape and how its
+  -- parts are: a `Drop` may ask its type parameters for traits without
+  -- arguments, which every value of the type then has to have, and no
+  -- more. Rust asks the same: as the type's declaration does.)
+  if tr == "Drop" && extra.any (·.1 != Syntax.destroyTrait) then
+    throw s!"{what}: a `Drop` may ask its type parameters only for traits without arguments; keep what it needs in the value instead (a callable made where the trait is known)"
+  let mut assocs : List (String × Ty) := []
+  let mut gatParams : List (String × List (Bool × Nat)) := []
+  for a in assocNames do
+    match methods.findSome? fun
+        | .typeAlias n takes body => if n == a then some (takes, body) else none
+        | _ => none with
+    | some (takes, body) =>
+      -- What an implementation gives is said, as Rust has it: every type
+      -- it gives is known before any function's body is checked.
+      if let .hole := body then
+        throw s!"{what}: `type {a} = _;`: an implementation says what each type it gives is: write it, `type {a} = ..;`"
+      -- (`type Of<T> = [T];`: what it takes, a variable each.)
+      let mut own : List (String × Ty) := []
+      let mut ids : List (Bool × Nat) := []
+      for p in takes do
+        if p.startsWith "'" then
+          let cap ← freshCap
+          own := own ++ [(p, Ty.life cap)]
+          ids := ids ++ [(true, cap)]
+        else if let .var id ← freshTy then
+          own := own ++ [(p, .var id)]
+          ids := ids ++ [(false, id)]
+      unless ids.isEmpty do gatParams := gatParams ++ [(a, ids)]
+      -- (`K::Got` of a type parameter: of the trait written of it here,
+      -- `K: KindOf<T>`, with its arguments.)
+      let written := context.zipIdx.map fun ((p, t'), k) =>
+        let targs := (List.range 16).filterMap fun i => methods.findSome? fun
+          | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
+          | _ => none
+        (p, Syntax.traitBase t', targs)
+      let projecting := pmap.filterMap fun (_, t) => match t with
+        | .var id => some id
+        | _ => none
+      modify fun s => { s with projecting := projecting, paramTraits := written }
+      let said ← resolveType (own ++ pmap) false body
+      modify fun s => { s with projecting := [], paramTraits := [] }
+      assocs := assocs ++ [(a, said)]
+    | none => throw s!"{what} does not say what `{a}` is: write `type {a} = ..;`"
+  for m in methods do
+    if let .typeAlias n _ _ := m then
+      unless n.startsWith "%" || assocNames.contains n do
+        throw s!"{what}: `{n}` is not a type `{base}` leaves to an implementation"
+  -- The arguments fixed by the name the implementation was written for.
+  let mut fixed : List (Nat × Ty) := []
+  for j in List.range arity do
+    match methods.findSome? fun
+        | .typeAlias n _ body => if n == Syntax.fixedArgName j then some body else none
+        | _ => none with
+    | some body => fixed := fixed ++ [(j, ← resolveType pmap false body)]
+    | none => pure ()
+  -- What its conditions say of types left to implementations.
+  let mut equal : List (Nat × String × String × Ty) := []
+  let mut extraEqual : List (Ty × String × String × Ty) := []
+  for m in methods do
+    if let .typeAlias n _ body := m then
+      if let some (k, name) := Syntax.equalArgParts n then
+        match context[k]? with
+        | some (subject, asked) =>
+          let left := (((← get).traitShape[asked]?).map (·.2)).getD []
+          unless left.contains name do
+            throw s!"{what}: `{Syntax.lastSegment asked}` leaves no type `{name}` to its implementations"
+          match args.idxOf? subject with
+          | some j => equal := equal ++ [(j, asked, name, ← resolveType pmap false body)]
+          | none =>
+            -- (Of another type parameter, or of a type made of them.)
+            let whole ← match pmap.lookup subject with
+              | some t => pure t
+              | none =>
+                match methods.findSome? fun
+                    | .typeAlias n _ b => if n == Syntax.ctxSubjectName k then some b else none
+                    | _ => none with
+                | some b => zonk (← resolveType pmap false b)
+                | none => throw s!"{what}: `{subject}` is not one of its type parameters"
+            -- (The trait's own arguments go with the type asked of.)
+            let mut cargs : List Ty := []
+            for i in List.range ((((← get).traitShape[asked]?).map (·.1)).getD 0) do
+              match methods.findSome? fun
+                  | .typeAlias n _ b => if n == Syntax.ctxArgName k i then some b else none
+                  | _ => none with
+              | some b => cargs := cargs ++ [← zonk (← resolveType pmap false b)]
+              | none => pure ()
+            let whole := if cargs.isEmpty then whole else Ty.tuple (whole :: cargs)
+            extraEqual := extraEqual ++ [(whole, asked, name, ← resolveType pmap false body)]
+        | none => pure ()
+  if let some other := (← get).impls.find? fun I => I.trait == tr && I.head == head then
+    unless fixed.isEmpty && other.fixed.isEmpty do
+      throw s!"{what}: `{head}` already has an implementation of `{base}`, under this name or another of its names; a type has one"
+
+  -- Chosen by fitting types: where an implementation has a condition
+  -- kept apart, or shares its trait and type with another.
+  let shared := !(← implsOfHead base head).isEmpty
+  if !extra.isEmpty || shared || head.startsWith "(fn" || head.startsWith "(&" then
+    modify fun s => { s with patterned := true }
+  -- Two implementations of a trait for one type: no type is both's
+  -- (`From<Int>`, `From<Str>`), or one asks more of the type than the
+  -- other (`Wrap<Int>`, `Wrap<T>`), and is then the one for the types it
+  -- fits. Not the same twice, and not two that some type fits with
+  -- neither asking more.
+  let patternOf := fun (targs : List Ty) (fixed : List (Nat × Ty)) (params : List String)
+      (pvars : List (String × Nat)) =>
+    targs ++ (List.range arity).map fun j =>
+      match fixed.lookup j with
+      | some t => t
+      | none => (((params[j]?).bind fun p => pvars.lookup p).map Ty.var).getD (.var 0)
+  let mine := patternOf targs fixed args pvars
+  for other in ← implsOfHead base head do
+    if other.targs.length == targs.length then
+      let theirs := patternOf other.targs other.fixed other.params other.pvars
+      let narrower := (Ty.fitsAll (other.pvars.map (·.2)) theirs mine []).isSome
+      let wider := (Ty.fitsAll (pvars.map (·.2)) mine theirs []).isSome
+      if narrower && wider then
+        throw s!"`{Syntax.traitShown other.trait}` is implemented twice for `{head}`"
+      if !narrower && !wider && (Ty.meetAll mine theirs []).isSome then
+        throw s!"`impl {Syntax.traitShown tr} for {bareName head}`: some type fits this and another implementation of `{Syntax.traitShown other.trait}` for `{bareName head}` both, and neither asks more of it than the other: say which is for those, with an implementation for just them"
+  modify fun s =>
+    { s with
+      implsByBase := s.implsByBase.insert (Syntax.traitBase tr)
+        ((s.implsByBase.getD (Syntax.traitBase tr) #[]).push s.impls.size)
+      implsByHead := s.implsByHead.insert (Syntax.traitBase tr, head)
+        ((s.implsByHead.getD (Syntax.traitBase tr, head) #[]).push s.impls.size)
+      impls := s.impls.push
+        { trait := tr, head, params := args, context := ctx, methods,
+          dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra,
+          gatParams, extraEqual }
+      kimpls := s.kimpls.push ⟨tr, head, arity, ctx⟩ }
+
 /-- Read the traits and their implementations. Types are declared by now. -/
 def declareTraits (items : List Item) : M Unit := do
   for item in items do
@@ -425,105 +863,7 @@ def declareTraits (items : List Item) : M Unit := do
         methods := s.methods.insert "drop" ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], [], ⟨[], none⟩, [], [], [], []⟩ }
   for item in items do
     if let .trait name methods := item then
-      if ((← get).traits.lookup name).isSome then throw s!"trait `{name}` is declared twice"
-      let self ← match ← freshTy with
-        | .var id => pure id
-        | _ => pure 0
-      -- Its own type parameters, and the types it leaves to implementations:
-      -- a variable each, the same in all its functions.
-      let (params, assocNames) := match items.findSome? fun
-          | .traitInfo n _ _ params assocs =>
-            -- A lifetime written of a trait is a name its functions' types
-            -- may use; it is no argument an implementation gives.
-            if n == name then some ((genericParams params).filter (!isLifetime ·), assocs) else none
-          | _ => none with
-        | some found => found
-        | none => ([], [])
-      let mut extra : List (String × Ty) := []
-      let mut tparams : List Nat := []
-      let mut assocVars : List (String × Nat) := []
-      for p in params do
-        if let .var id ← freshTy then
-          extra := extra ++ [(p, .var id)]
-          tparams := tparams ++ [id]
-      -- A name its functions write after `|` in what they perform is a row
-      -- it leaves to an implementation: held as the type of a callable that
-      -- takes nothing, gives nothing and performs that row.
-      let asRows := methods.flatMap fun (_, _, ret) =>
-        match (Syntax.methodGenerics ret).1 with
-        | some (.performs _ effects) => effects.filterMap fun
-          | (mark, [.name e []]) =>
-            match e.splitOn "::" with
-            | ["Self", a] => if mark == Syntax.rowMark then some a else none
-            | _ => none
-          | _ => none
-        | _ => []
-      let mut rowVars : List (String × Nat) := []
-      for a in assocNames do
-        if let .var id ← freshTy then
-          if asRows.contains a then
-            let k ← freshRowVar
-            extra := extra ++ [(a, .fn [] .unit [] (some k) (← freshCap))]
-            rowVars := rowVars ++ [(a, k)]
-          else extra := extra ++ [(a, .var id)]
-          assocVars := assocVars ++ [(a, id)]
-      -- (In front of what was there, which is kept as it was where it had no
-      -- shape of this trait: units checked side by side are put together.)
-      modify fun s => { s with traitShape := s.traitShape.insert name (tparams.length, assocNames) }
-      let mut index := 0
-      for (m, params, ret) in methods do
-        -- (The type parameters of its own: a variable each.)
-        let (ret, ownNames) := Syntax.methodGenerics ret
-        let uses := ownNames.filterMap Syntax.useMarked
-        let ownNames := ownNames.filter (!·.startsWith "%")
-        let mut mparams : List (String × Nat) := []
-        -- (A lifetime among them is one of its lifetimes, as any written.)
-        for g in ownNames.filter (!·.startsWith "'") do
-          if let .var id ← freshTy then mparams := mparams ++ [(g, id)]
-        modify fun s => { s with gatScope := assocNames, gatOccs := #[] }
-        if ((← get).methods[m]?).isSome then
-          throw s!"`{m}` is declared twice as a function of a trait"
-        -- A trait's function has no body its lifetimes could be found from,
-        -- so the unwritten ones are one: what it gives may borrow whatever
-        -- anything it takes borrows. A lifetime written with a name is its own.
-        let named := (params ++ ret.toList).flatMap lifetimesOf
-        let mut scope : List (String × Ty) :=
-          ("Self", .var self) :: extra ++ mparams.map fun (g, id) => (g, Ty.var id)
-        for l in named.eraseDups do
-          scope := scope ++ [(l, Ty.life (← freshCap))]
-        let one ← freshCap
-        -- (Where nothing it gives is a reference, nothing ties what it takes
-        -- together: each unwritten lifetime is then its own.)
-        modify fun s => { s with elided := if (ret.map writesRef).getD false then some one else none }
-        -- (A type another trait of `Self` leaves, `Self::Store` of a trait
-        -- this one asks: kept as written, for each implementation and use.)
-        -- (And one of what the trait leaves or of its parameters, `<Self::
-        -- Components as Registers<S>>::Out`: so each use has its own.)
-        modify fun s => { s with projecting := self :: scope.filterMap fun
-          | (_, .var id) => some id
-          | _ => none }
-        let ps ← params.mapM fun p => closeRows <$> resolveType scope false p
-        -- What it performs, where the trait says: those effects, and the
-        -- row it leaves to an implementation if it names one.
-        let (ret, row) ← match ret with
-          | some (.performs r effects) => do
-            let (effs, tail) ← resolveRow scope false effects
-            pure (some r, (⟨effs, tail⟩ : Row))
-          | other => pure (other, (⟨[], none⟩ : Row))
-        let r ← match ret with
-          | some r => closeRows <$> resolveType scope false r
-          | none => pure .unit
-        modify fun s => { s with elided := none, projecting := [] }
-        let written := scope.filterMap fun
-          | (l, .ref _ _ cap) => some (cap, l)
-          | _ => none
-        let gats := (← get).gatOccs.toList
-        modify fun s => { s with gatScope := [], gatOccs := #[] }
-        let sig : MethodSig :=
-          ⟨name, index, self, ps, r, (one, "'_") :: written, tparams, assocVars, row, rowVars, mparams, gats, uses⟩
-        modify fun s => { s with methods := s.methods.insert m sig }
-        index := index + 1
-      modify fun s => { s with traits := (name, methods.map (·.1)) :: s.traits }
+      declareTrait items name methods
   for item in items do
     if let .traitInfo name supers _ _ _ := item then
       for s in supers do
@@ -534,261 +874,7 @@ def declareTraits (items : List Item) : M Unit := do
       modify fun st => { st with supers := (name, supers) :: st.supers }
   for item in items do
     if let .impl params tr head args context methods := item then
-      let what := s!"`impl {tr} for {head}`"
-      -- `tr` is the trait at the arguments the implementation gives it.
-      let base := Syntax.traitBase tr
-      let names ← match (← get).traits.lookup base with
-        | some ns => pure ns
-        | none => throw s!"{what}: unknown trait `{base}`"
-      let arity ← if head == "Int" || Syntax.isScalar head then pure 0
-        else if head.startsWith "(tuple" then pure args.length
-        else if head == Syntax.consHead || head == Traits.fnHead then pure 2
-        -- (A function's, with what it gives after what it is given; a
-        -- reference's, with what it is to.)
-        else if head.startsWith "(fn" then pure args.length
-        else if head == "(&)" || head == "(&mut)" then pure 1
-        else match (← get).types[head]? with
-          | some d => pure d.arity
-          | none => throw s!"{what}: unknown type `{head}`"
-      unless args.length == arity do
-        throw s!"{what}: `{head}` takes {arity} type arguments, but is given {args.length}"
-      -- (A type parameter that is no argument of the head is inside a type
-      -- one of them has to be, or among the trait's own.)
-      unless args.eraseDups.length == args.length && args.all params.contains do
-        throw s!"{what}: the arguments of `{head}` must be the type parameters after `impl`, each once"
-      -- A condition is a trait of one of the head's arguments; or, said
-      -- with the trait's own arguments or of a type parameter inside an
-      -- argument, one kept apart (`extra`, below).
-      let general := fun (k : Nat) (p : String) =>
-        !args.contains p || methods.any fun
-          | .typeAlias n _ _ => n == Syntax.ctxArgName k 0
-          | _ => false
-      let ctx ← (context.zipIdx.filter fun ((p, _), k) => !general k p).mapM fun ((p, t'), _) => do
-        unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
-        match args.idxOf? p with
-        | some j => pure (t', j)
-        | none => throw s!"{what}: `{p}` is not one of its type parameters"
-      -- A type parameter said to have a trait has every trait that one needs.
-      let mut closed : List (String × Nat) := []
-      for (t', j) in ctx do
-        for s in t' :: (← supersAll t') do
-          unless closed.contains (s, j) do closed := closed ++ [(s, j)]
-      -- A function of the implementation may let go of a value of one of
-      -- its type parameters: it is given how each is destroyed.
-      -- (A lifetime is no value: there is nothing to destroy of one.)
-      let ctx := if (← get).dropMode then
-          closed ++ ((List.range args.length).filter fun j =>
-              !closed.contains (Syntax.destroyTrait, j) && !((args[j]?).getD "").startsWith "'").map
-            fun j => (Syntax.destroyTrait, j)
-        else closed
-      let given := methods.filterMap fun
-        | .fn m _ _ _ _ => some m
-        | _ => none
-      for m in names do
-        unless given.contains m do throw s!"{what} lacks the function `{m}`"
-      for m in given do
-        unless names.contains m do throw s!"{what}: `{m}` is not a function of `{tr}`"
-      unless given.eraseDups.length == given.length do
-        throw s!"{what} gives a function twice"
-      -- A callable that takes hold of a value with a `drop` has to be
-      -- called: what is and is not used is then counted, as it is where a
-      -- program declares something that has to be used.
-      if tr == "Drop" then modify fun s => { s with anyMust := true }
-      if (← get).kimpls.has tr head then
-        throw s!"`{tr}` is implemented twice for `{head}`"
-      -- The arguments it gives its trait, and the types the trait leaves to it.
-      let (arityOfTrait, assocNames) := ((← get).traitShape[base]?).getD (0, [])
-      let (pmap, _, _) ← freshParams params
-      let pvars := pmap.filterMap fun
-        | (p, .var id) => some (p, id)
-        | _ => none
-      let mut targs : List Ty := []
-      for i in List.range arityOfTrait do
-        match methods.findSome? fun
-            | .typeAlias n _ body => if n == Syntax.traitArgName i then some body else none
-            | _ => none with
-        | some body =>
-          let t ← zonk (← resolveType pmap false body)
-          targs := targs ++ [t]
-        | none => throw s!"{what}: `{base}` takes {arityOfTrait} type arguments"
-      if (methods.any fun
-          | .typeAlias n _ _ => n == Syntax.traitArgName arityOfTrait
-          | _ => false) then
-        throw s!"{what}: `{base}` takes {arityOfTrait} type arguments"
-      -- An implementation that gives its trait arguments made of its own
-      -- type parameters is for the type at all of them: it is the only one
-      -- of the trait for the type.
-      let generic := targs.any fun t => !(freeTys t).isEmpty
-      -- The conditions kept apart, in the implementation's type parameters.
-      let mut extra : List (String × List Ty × Ty) := []
-      -- (What a trait leaves to implementations, of the implementation's own
-      -- type parameters, is kept as written, to be answered at each use:
-      -- `<H as Touches>::List: Concat<..>`.)
-      modify fun s => { s with projecting := pmap.filterMap fun (_, t) => match t with
-        | .var id => some id
-        | _ => none }
-      for ((p, t'), k) in context.zipIdx do
-        if general k p then
-          unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
-          let subject ← match pmap.lookup p with
-            | some t => pure t
-            | none =>
-              match methods.findSome? fun
-                  | .typeAlias n _ body => if n == Syntax.ctxSubjectName k then some body else none
-                  | _ => none with
-              | some body => zonk (← resolveType pmap false body)
-              | none => throw s!"{what}: `{p}` is not one of its type parameters"
-          let mut cargs : List Ty := []
-          for i in List.range ((((← get).traitShape[t']?).map (·.1)).getD 0) do
-            match methods.findSome? fun
-                | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
-                | _ => none with
-            | some body => cargs := cargs ++ [← zonk (← resolveType pmap false body)]
-            | none => throw s!"{what}: `{Syntax.lastSegment t'}` takes arguments: `{p}: {Syntax.lastSegment t'}<..>`"
-          extra := extra ++ [(t', cargs, subject)]
-      modify fun s => { s with projecting := [] }
-      -- A type parameter inside one of the head's arguments (`H` of
-      -- `(Column<H>, R)`): its functions may let go of a value of it too, so
-      -- it is given how that is destroyed, as a head's argument is.
-      -- (Not of a callable's parameters and result: a callable holds no
-      -- value of those to destroy. Nor of a list of types.)
-      if (← get).dropMode && !head.startsWith "(fn" then
-        let said := context.filterMap fun (p, t') => if t' == Syntax.destroyTrait then some p else none
-        for p in genericParams params do
-          if !args.contains p && !p.startsWith "'" && !p.startsWith ".." && !said.contains p then
-            if let some subject := pmap.lookup p then
-              extra := extra ++ [(Syntax.destroyTrait, [], subject)]
-      -- (A value is destroyed knowing only its type's shape and how its
-      -- parts are: a `Drop` may ask its type parameters for traits without
-      -- arguments, which every value of the type then has to have, and no
-      -- more. Rust asks the same: as the type's declaration does.)
-      if tr == "Drop" && extra.any (·.1 != Syntax.destroyTrait) then
-        throw s!"{what}: a `Drop` may ask its type parameters only for traits without arguments; keep what it needs in the value instead (a callable made where the trait is known)"
-      let mut assocs : List (String × Ty) := []
-      let mut gatParams : List (String × List (Bool × Nat)) := []
-      for a in assocNames do
-        match methods.findSome? fun
-            | .typeAlias n takes body => if n == a then some (takes, body) else none
-            | _ => none with
-        | some (takes, body) =>
-          -- What an implementation gives is said, as Rust has it: every type
-          -- it gives is known before any function's body is checked.
-          if let .hole := body then
-            throw s!"{what}: `type {a} = _;`: an implementation says what each type it gives is: write it, `type {a} = ..;`"
-          -- (`type Of<T> = [T];`: what it takes, a variable each.)
-          let mut own : List (String × Ty) := []
-          let mut ids : List (Bool × Nat) := []
-          for p in takes do
-            if p.startsWith "'" then
-              let cap ← freshCap
-              own := own ++ [(p, Ty.life cap)]
-              ids := ids ++ [(true, cap)]
-            else if let .var id ← freshTy then
-              own := own ++ [(p, .var id)]
-              ids := ids ++ [(false, id)]
-          unless ids.isEmpty do gatParams := gatParams ++ [(a, ids)]
-          -- (`K::Got` of a type parameter: of the trait written of it here,
-          -- `K: KindOf<T>`, with its arguments.)
-          let written := context.zipIdx.map fun ((p, t'), k) =>
-            let targs := (List.range 16).filterMap fun i => methods.findSome? fun
-              | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
-              | _ => none
-            (p, Syntax.traitBase t', targs)
-          let projecting := pmap.filterMap fun (_, t) => match t with
-            | .var id => some id
-            | _ => none
-          modify fun s => { s with projecting := projecting, paramTraits := written }
-          let said ← resolveType (own ++ pmap) false body
-          modify fun s => { s with projecting := [], paramTraits := [] }
-          assocs := assocs ++ [(a, said)]
-        | none => throw s!"{what} does not say what `{a}` is: write `type {a} = ..;`"
-      for m in methods do
-        if let .typeAlias n _ _ := m then
-          unless n.startsWith "%" || assocNames.contains n do
-            throw s!"{what}: `{n}` is not a type `{base}` leaves to an implementation"
-      -- The arguments fixed by the name the implementation was written for.
-      let mut fixed : List (Nat × Ty) := []
-      for j in List.range arity do
-        match methods.findSome? fun
-            | .typeAlias n _ body => if n == Syntax.fixedArgName j then some body else none
-            | _ => none with
-        | some body => fixed := fixed ++ [(j, ← resolveType pmap false body)]
-        | none => pure ()
-      -- What its conditions say of types left to implementations.
-      let mut equal : List (Nat × String × String × Ty) := []
-      let mut extraEqual : List (Ty × String × String × Ty) := []
-      for m in methods do
-        if let .typeAlias n _ body := m then
-          if let some (k, name) := Syntax.equalArgParts n then
-            match context[k]? with
-            | some (subject, asked) =>
-              let left := (((← get).traitShape[asked]?).map (·.2)).getD []
-              unless left.contains name do
-                throw s!"{what}: `{Syntax.lastSegment asked}` leaves no type `{name}` to its implementations"
-              match args.idxOf? subject with
-              | some j => equal := equal ++ [(j, asked, name, ← resolveType pmap false body)]
-              | none =>
-                -- (Of another type parameter, or of a type made of them.)
-                let whole ← match pmap.lookup subject with
-                  | some t => pure t
-                  | none =>
-                    match methods.findSome? fun
-                        | .typeAlias n _ b => if n == Syntax.ctxSubjectName k then some b else none
-                        | _ => none with
-                    | some b => zonk (← resolveType pmap false b)
-                    | none => throw s!"{what}: `{subject}` is not one of its type parameters"
-                -- (The trait's own arguments go with the type asked of.)
-                let mut cargs : List Ty := []
-                for i in List.range ((((← get).traitShape[asked]?).map (·.1)).getD 0) do
-                  match methods.findSome? fun
-                      | .typeAlias n _ b => if n == Syntax.ctxArgName k i then some b else none
-                      | _ => none with
-                  | some b => cargs := cargs ++ [← zonk (← resolveType pmap false b)]
-                  | none => pure ()
-                let whole := if cargs.isEmpty then whole else Ty.tuple (whole :: cargs)
-                extraEqual := extraEqual ++ [(whole, asked, name, ← resolveType pmap false body)]
-            | none => pure ()
-      if let some other := (← get).impls.find? fun I => I.trait == tr && I.head == head then
-        unless fixed.isEmpty && other.fixed.isEmpty do
-          throw s!"{what}: `{head}` already has an implementation of `{base}`, under this name or another of its names; a type has one"
-
-      -- Chosen by fitting types: where an implementation has a condition
-      -- kept apart, or shares its trait and type with another.
-      let shared := !(← implsOfHead base head).isEmpty
-      if !extra.isEmpty || shared || head.startsWith "(fn" || head.startsWith "(&" then
-        modify fun s => { s with patterned := true }
-      -- Two implementations of a trait for one type: no type is both's
-      -- (`From<Int>`, `From<Str>`), or one asks more of the type than the
-      -- other (`Wrap<Int>`, `Wrap<T>`), and is then the one for the types it
-      -- fits. Not the same twice, and not two that some type fits with
-      -- neither asking more.
-      let patternOf := fun (targs : List Ty) (fixed : List (Nat × Ty)) (params : List String)
-          (pvars : List (String × Nat)) =>
-        targs ++ (List.range arity).map fun j =>
-          match fixed.lookup j with
-          | some t => t
-          | none => (((params[j]?).bind fun p => pvars.lookup p).map Ty.var).getD (.var 0)
-      let mine := patternOf targs fixed args pvars
-      for other in ← implsOfHead base head do
-        if other.targs.length == targs.length then
-          let theirs := patternOf other.targs other.fixed other.params other.pvars
-          let narrower := (Ty.fitsAll (other.pvars.map (·.2)) theirs mine []).isSome
-          let wider := (Ty.fitsAll (pvars.map (·.2)) mine theirs []).isSome
-          if narrower && wider then
-            throw s!"`{Syntax.traitShown other.trait}` is implemented twice for `{head}`"
-          if !narrower && !wider && (Ty.meetAll mine theirs []).isSome then
-            throw s!"`impl {Syntax.traitShown tr} for {bareName head}`: some type fits this and another implementation of `{Syntax.traitShown other.trait}` for `{bareName head}` both, and neither asks more of it than the other: say which is for those, with an implementation for just them"
-      modify fun s =>
-        { s with
-          implsByBase := s.implsByBase.insert (Syntax.traitBase tr)
-            ((s.implsByBase.getD (Syntax.traitBase tr) #[]).push s.impls.size)
-          implsByHead := s.implsByHead.insert (Syntax.traitBase tr, head)
-            ((s.implsByHead.getD (Syntax.traitBase tr, head) #[]).push s.impls.size)
-          impls := s.impls.push
-            { trait := tr, head, params := args, context := ctx, methods,
-              dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra,
-              gatParams, extraEqual }
-          kimpls := s.kimpls.push ⟨tr, head, arity, ctx⟩ }
+      declareImpl params tr head args context methods
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each
   -- type, on condition that each type parameter can be destroyed, and that
@@ -893,78 +979,7 @@ def declare (items : List Item) : M Unit := do
         { s with ctors := s.ctors.insert name ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩,
                  runCtors := s.runCtors.insert name }
     | .effect name params ops =>
-      -- A lifetime of an effect is given where the effect is handled: what
-      -- an operation gives or takes may borrow for that long.
-      let (pmap, _, _) ← freshParams params
-      let mut ids : List Nat := []
-      let mut lifetimes : List (Option Nat) := []
-      for (_, t) in pmap do
-        match t with
-        | .var id =>
-          ids := ids ++ [id]
-          lifetimes := lifetimes ++ [none]
-        | .ref _ _ cap =>
-          ids := ids ++ [match ← freshTy with
-            | .var id => id
-            | _ => 0]
-          lifetimes := lifetimes ++ [some cap]
-        | _ => pure ()
-      for op in ops do
-        -- (Its own lifetimes, and those it does not write: not the
-        -- declaration's, but each use's.)
-        let before := (← get).monoCaps
-        let mut own : List (String × Ty) := []
-        for l in op.lifetimes do
-          own := own ++ [(l, Ty.life (← freshCap))]
-        let opMap := own ++ pmap
-        -- (`S::Out` of a type parameter of the effect: kept as written, and
-        -- answered at each use, at the type the use gives.)
-        let projecting := (← get).projecting
-        let written := items.findSome? fun
-          | .bounds n bs => if n == name then some bs else none
-          | .module _ (some inner) => inner.findSome? fun
-            | .bounds n bs => if n == name then some bs else none
-            | _ => none
-          | _ => none
-        modify fun s => { s with projecting := ids
-                                 paramTraits := ((written.getD []).map fun b => (b.subject, b.trait, b.args)) }
-        let payload ← op.payload.mapM (resolveType opMap true)
-        let result ← if op.terminal then pure none
-          else match op.result with
-            | some t => some <$> resolveType opMap true t
-            | none => some <$> resolveType opMap true .hole
-        modify fun s => { s with projecting := projecting, paramTraits := [] }
-        -- (Of references only: a callable it is given or gives is held to
-        -- what the declaration says, as before.)
-        let rec refCaps : Ty → List Nat
-          | .ref _ t c => c :: refCaps t
-          | .con _ args => args.flatMap refCaps
-          | .tuple args => args.flatMap refCaps
-          | _ => []
-        let atRefs := (payload ++ result.toList).flatMap refCaps
-        let made := (← get).monoCaps.filter fun c => !before.contains c && atRefs.contains c
-        modify fun s => { s with monoCaps := s.monoCaps.filter (!made.contains ·) }
-        let caps := made ++ own.filterMap fun (_, t) => match t with
-          | .ref _ _ c => some c
-          | _ => none
-        -- A resumption is resumed at most once, so the most uses is one; the
-        -- fewest says whether it may simply be let go.
-        let must ← match op.quantity with
-          | none => pure false
-          | some (lower, upper) =>
-            if op.terminal then
-              throw s!"operation `{op.name}` does not return, so it has no resumption to say this of"
-            unless upper == some 1 do
-              throw s!"operation `{op.name}`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`"
-            pure (lower == 1)
-        if must then modify fun s => { s with anyMust := true }
-        modify fun s =>
-          { s with ops := (op.name, ⟨name, ids, payload, result, must, lifetimes, caps⟩) :: s.ops,
-                   runOps := s.runOps.insert op.name result.isSome,
-                   runExact := if must && result.isSome then s.runExact.insert op.name
-                     else s.runExact.erase op.name }
-      modify fun s =>
-        { s with effects := (name, ⟨ids, ops.map (·.name), lifetimes.map (·.isSome)⟩) :: s.effects }
+      declareEffect items name params ops
     | .use head lower upper =>
       unless ((← get).types[head]?).isSome do
         throw s!"`impl Use` for `{head}`: there is no such declared type"

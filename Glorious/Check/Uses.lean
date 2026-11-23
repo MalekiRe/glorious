@@ -1091,6 +1091,165 @@ partial def usedFirst (b : Body) (quiet : String → Bool) (x : String) : List S
         | none => usedFirst b quiet x rest
     | .defer _, rest => usedFirst b quiet x rest
 
+/-- One binding of `checkUses`: that its type allows how often it is used, with
+`s` the state the bindings were checked from. -/
+def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s : St) (ctx : ACtx)
+    (names : List String) (x : String) (b : Binding) : M Unit := do
+  let resumptive := fun (name : String) =>
+    match s.ops.lookup name with
+    | some sig => sig.result.isSome
+    | none => false
+  -- (A value clauses are given again, after one of them reached through a
+  -- reference in it and was not for what it found: said as that.)
+  let twice := fun (x : String) =>
+    if x.startsWith "%again" then
+      "a clause reaches through a reference inside the value, and where it is not for what it finds the clauses after it are given the value again"
+    else s!"`{x}` is used more than once"
+  let t := match b with
+    | .val t _ => some t
+    | .poly p => some p.ty
+    | _ => none
+  -- Parts of the name's value read, `x.f`. Where the name is used no other
+  -- way, each part is a value of its own: used as often as that part is
+  -- read, and the parts never read are what is let go.
+  let mine : List (Ty × Nat × String × String) := match b with
+    | .val _ bid => s.partReads.toList.filterMap fun (owner, _, subject, idx, part, at_) =>
+        if owner == bid then some (subject, idx, part, at_) else none
+    | _ => []
+  -- (A field read by name before its type was known: which field it is.)
+  let mine ← mine.mapM fun (subject, idx, part, at_) => do
+    if idx == Syntax.partUnknown then
+      match ← (try fieldIndex subject part catch _ => pure none) with
+      | some found => pure (subject, found, part, at_)
+      | none => pure (subject, idx, part, at_)
+    else pure (subject, idx, part, at_)
+  if let .val _ bid := b then
+    unless mine.isEmpty do
+      modify fun st => { st with partReads := st.partReads.filter fun (owner, _, _, _, _, _) => owner != bid }
+  let apart := !mine.isEmpty && !body.any (code.usedWholeStmt x)
+  -- A value with a `drop` to run, of which only parts that can be used
+  -- any number of times are read: reading them takes nothing out of it.
+  -- It stays whole, and is destroyed when its block is left, as a name
+  -- that nothing uses is. (Not in its own `drop`, which is what lets go
+  -- of it.)
+  let mut kept := false
+  if apart then
+    if let (some t, .val _ bid) := (t, b) then
+      if let .con n _ ← find t then
+        if s.kimpls.has "Drop" n
+            && s.owner != Syntax.implFnName "Drop" n "drop" then
+          let mut plain := true
+          for (subject, idx, _, _) in mine do
+            match ← (try fieldType subject idx catch _ => pure none) with
+            | some ft =>
+              let ft ← zonk ft
+              modify fun st => { st with seen := {} }
+              unless (freeTys ft).isEmpty && (freeCaps ft).isEmpty && !hasParam ft
+                  && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone do
+                plain := false
+            | none => plain := false
+          if plain then
+            if let some (line, col) := s.bindSites.lookup bid then
+              kept := true
+              modify fun st => { st with
+                dropCands := st.dropCands.push
+                  (⟨st.owner, line, col, (if st.letBinds.contains bid then Syntax.letSite x else x), false⟩, t, pos)
+                aparts := st.aparts.filter fun (_, _, whose) => whose != some bid }
+      -- (Of a type not known yet, as a callable's parameter may be: asked
+      -- again once the function it is in has been read.)
+      if let .var _ ← find t then
+        if let some (line, col) := s.bindSites.lookup bid then
+          let site : Elab.DropSite :=
+            ⟨s.owner, line, col, (if s.letBinds.contains bid then Syntax.letSite x else x), false⟩
+          let reads : List (Ty × Nat) := mine.map fun (subject, idx, _, _) => (subject, idx)
+          modify fun st => { st with lateKeeps := st.lateKeeps.push (site, t, reads, pos) }
+  if kept then return
+  if apart then
+    let (subject, firstAt) := match mine with
+      | (subject, _, _, at_) :: _ => (subject, at_)
+      | [] => (Ty.unit, pos)
+    let taken := (mine.map fun (_, idx, _, _) => idx).eraseDups
+    -- (The machine counts each read of a value that holds a resumption
+    -- as a use of all of it.)
+    if usesStmts code resumptive x body ≥ 2 then
+      modify fun st => { st with takenApart := st.takenApart.push (subject, pos ++ s!"`{x}` is used more than once") }
+    let others ← (try otherFields subject 0 catch _ => pure none)
+    let count := match others with
+      | some rest => rest.length + 1
+      | none => 0
+    let site := match b with
+      | .val _ bid => s.bindSites.lookup bid
+      | _ => none
+    for i in List.range count do
+      unless taken.contains i do
+        if let some ft ← (try fieldType subject i catch _ => pure none) then
+          modify fun st => { st with pos := firstAt }
+          mustDrop ft "taking one field of a value lets go of the rest"
+          -- What is let go is destroyed when the name's block is left,
+          -- as a name nothing uses is; where the name has no such place,
+          -- nothing would destroy it.
+          match site with
+          | some (line, col) =>
+            modify fun st =>
+              { st with dropCands := st.dropCands.push (⟨st.owner, line, col, Syntax.partName x i, false⟩, ft, firstAt) }
+          | none =>
+            modify fun st => { st with leftBehind := st.leftBehind.push (ft, firstAt ++ "taking one field of a value lets go of the rest") }
+          modify fun st => { st with pos := pos }
+    let mut seenParts : List String := []
+    for (_, idx, part, at_) in mine do
+      unless seenParts.contains part do
+        seenParts := part :: seenParts
+        let (ob, only) := Flat.onlyPartStmts code x part body
+        let ft := (← (try fieldType subject idx catch _ => pure none)).getD subject
+        if usesStmts ob resumptive x only ≥ 2 then
+          let ft ← zonk ft
+          modify fun st => { st with seen := {} }
+          let dropped := (← tyHasDrop [] ft).isSome
+          let twice : Bool := match ← pathUses (if dropped then { ctx with handed := true } else ctx)
+              (names.filter (· != x)) x ob only with
+            | some n => decide (n ≥ 2)
+            | none => true
+          if twice then
+            modify fun st => { st with pos := at_ }
+            mustDup ft s!"`{x}.{part}` is used more than once"
+            modify fun st => { st with pos := pos }
+        if s.anyMust && !x.startsWith "%" then
+          modify fun st =>
+            { st with lowerChecks := st.lowerChecks.push (pos, x, ft, names.filter (· != x), ob, only) }
+  else
+    -- Used as a whole too: each part read lets go of the rest of it.
+    for (subject, idx, _, at_) in mine do
+      modify fun st => { st with pos := at_ }
+      match ← otherFields subject idx with
+      | some rest =>
+        for r in rest do
+          mustDrop r "taking one field of a value lets go of the rest"
+          modify fun st => { st with leftBehind := st.leftBehind.push (r, at_ ++ "taking one field of a value lets go of the rest") }
+      | none => mustDrop subject "taking one field of a value lets go of the rest"
+      modify fun st => { st with pos := pos }
+  if apart then return
+  if let some t := t then
+    let mentions := usesStmts code resumptive x body
+    if mentions ≥ 2 then
+      let t ← zonk t
+      modify fun st => { st with seen := {} }
+      -- (A value with a `drop` to run is used where it is given away,
+      -- whatever takes it does: giving it away twice would run it twice.)
+      let dropped := (← tyHasDrop [] t).isSome
+      let settled := (freeTys t).isEmpty && (freeCaps t).isEmpty && !hasParam t
+        && !(← tyOwnsOnce [] t) && !dropped
+      unless settled do
+        match ← pathUses (if dropped then { ctx with handed := true } else ctx)
+            (names.filter (· != x)) x code body with
+        | some n => if n ≥ 2 then mustDup t (twice x)
+        | none => mustDup t (twice x)
+    -- A value that has to be used: is it, however the body goes? Looked at
+    -- once the function's types are known. A name the compiler made up
+    -- stands for nothing the program wrote.
+    if s.anyMust && !x.startsWith "%" then
+      modify fun st =>
+        { st with lowerChecks := st.lowerChecks.push (pos, x, t, names.filter (· != x), code, body) }
+
 /-- Record, for each binding used more than once in `body`, that its type must
 allow that. `outer` is the scope the bindings are added to. A binding whose
 type is already known to allow it needs no count; one that fails the coarse
@@ -1099,166 +1258,13 @@ def checkUses (code : Flat.Body) (pos : String) (outer : Scope) (binds : Scope) 
   -- Report at the statement the bindings belong to, not the last one checked.
   modify fun st => { st with pos := pos }
   let s ← get
-  let resumptive := fun (name : String) =>
-    match s.ops.lookup name with
-    | some sig => sig.result.isSome
-    | none => false
   -- What only computes: the machine's own operations and what builds a value.
   let ctx : ACtx :=
     { fns := s.runFns, ctors := s.runCtors, aliases := s.runAliases, ops := s.runOps,
       quiet := intrinsics, exact := s.runExact, now := s.runNow }
   let names := (binds ++ outer).map (·.1)
-  -- (A value clauses are given again, after one of them reached through a
-  -- reference in it and was not for what it found: said as that.)
-  let twice := fun (x : String) =>
-    if x.startsWith "%again" then
-      "a clause reaches through a reference inside the value, and where it is not for what it finds the clauses after it are given the value again"
-    else s!"`{x}` is used more than once"
   for (x, b) in binds do
-    let t := match b with
-      | .val t _ => some t
-      | .poly p => some p.ty
-      | _ => none
-    -- Parts of the name's value read, `x.f`. Where the name is used no other
-    -- way, each part is a value of its own: used as often as that part is
-    -- read, and the parts never read are what is let go.
-    let mine : List (Ty × Nat × String × String) := match b with
-      | .val _ bid => s.partReads.toList.filterMap fun (owner, _, subject, idx, part, at_) =>
-          if owner == bid then some (subject, idx, part, at_) else none
-      | _ => []
-    -- (A field read by name before its type was known: which field it is.)
-    let mine ← mine.mapM fun (subject, idx, part, at_) => do
-      if idx == Syntax.partUnknown then
-        match ← (try fieldIndex subject part catch _ => pure none) with
-        | some found => pure (subject, found, part, at_)
-        | none => pure (subject, idx, part, at_)
-      else pure (subject, idx, part, at_)
-    if let .val _ bid := b then
-      unless mine.isEmpty do
-        modify fun st => { st with partReads := st.partReads.filter fun (owner, _, _, _, _, _) => owner != bid }
-    let apart := !mine.isEmpty && !body.any (code.usedWholeStmt x)
-    -- A value with a `drop` to run, of which only parts that can be used
-    -- any number of times are read: reading them takes nothing out of it.
-    -- It stays whole, and is destroyed when its block is left, as a name
-    -- that nothing uses is. (Not in its own `drop`, which is what lets go
-    -- of it.)
-    let mut kept := false
-    if apart then
-      if let (some t, .val _ bid) := (t, b) then
-        if let .con n _ ← find t then
-          if s.kimpls.has "Drop" n
-              && s.owner != Syntax.implFnName "Drop" n "drop" then
-            let mut plain := true
-            for (subject, idx, _, _) in mine do
-              match ← (try fieldType subject idx catch _ => pure none) with
-              | some ft =>
-                let ft ← zonk ft
-                modify fun st => { st with seen := {} }
-                unless (freeTys ft).isEmpty && (freeCaps ft).isEmpty && !hasParam ft
-                    && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone do
-                  plain := false
-              | none => plain := false
-            if plain then
-              if let some (line, col) := s.bindSites.lookup bid then
-                kept := true
-                modify fun st => { st with
-                  dropCands := st.dropCands.push
-                    (⟨st.owner, line, col, (if st.letBinds.contains bid then Syntax.letSite x else x), false⟩, t, pos)
-                  aparts := st.aparts.filter fun (_, _, whose) => whose != some bid }
-        -- (Of a type not known yet, as a callable's parameter may be: asked
-        -- again once the function it is in has been read.)
-        if let .var _ ← find t then
-          if let some (line, col) := s.bindSites.lookup bid then
-            let site : Elab.DropSite :=
-              ⟨s.owner, line, col, (if s.letBinds.contains bid then Syntax.letSite x else x), false⟩
-            let reads : List (Ty × Nat) := mine.map fun (subject, idx, _, _) => (subject, idx)
-            modify fun st => { st with lateKeeps := st.lateKeeps.push (site, t, reads, pos) }
-    if kept then continue
-    if apart then
-      let (subject, firstAt) := match mine with
-        | (subject, _, _, at_) :: _ => (subject, at_)
-        | [] => (Ty.unit, pos)
-      let taken := (mine.map fun (_, idx, _, _) => idx).eraseDups
-      -- (The machine counts each read of a value that holds a resumption
-      -- as a use of all of it.)
-      if usesStmts code resumptive x body ≥ 2 then
-        modify fun st => { st with takenApart := st.takenApart.push (subject, pos ++ s!"`{x}` is used more than once") }
-      let others ← (try otherFields subject 0 catch _ => pure none)
-      let count := match others with
-        | some rest => rest.length + 1
-        | none => 0
-      let site := match b with
-        | .val _ bid => s.bindSites.lookup bid
-        | _ => none
-      for i in List.range count do
-        unless taken.contains i do
-          if let some ft ← (try fieldType subject i catch _ => pure none) then
-            modify fun st => { st with pos := firstAt }
-            mustDrop ft "taking one field of a value lets go of the rest"
-            -- What is let go is destroyed when the name's block is left,
-            -- as a name nothing uses is; where the name has no such place,
-            -- nothing would destroy it.
-            match site with
-            | some (line, col) =>
-              modify fun st =>
-                { st with dropCands := st.dropCands.push (⟨st.owner, line, col, Syntax.partName x i, false⟩, ft, firstAt) }
-            | none =>
-              modify fun st => { st with leftBehind := st.leftBehind.push (ft, firstAt ++ "taking one field of a value lets go of the rest") }
-            modify fun st => { st with pos := pos }
-      let mut seenParts : List String := []
-      for (_, idx, part, at_) in mine do
-        unless seenParts.contains part do
-          seenParts := part :: seenParts
-          let (ob, only) := Flat.onlyPartStmts code x part body
-          let ft := (← (try fieldType subject idx catch _ => pure none)).getD subject
-          if usesStmts ob resumptive x only ≥ 2 then
-            let ft ← zonk ft
-            modify fun st => { st with seen := {} }
-            let dropped := (← tyHasDrop [] ft).isSome
-            let twice : Bool := match ← pathUses (if dropped then { ctx with handed := true } else ctx)
-                (names.filter (· != x)) x ob only with
-              | some n => decide (n ≥ 2)
-              | none => true
-            if twice then
-              modify fun st => { st with pos := at_ }
-              mustDup ft s!"`{x}.{part}` is used more than once"
-              modify fun st => { st with pos := pos }
-          if s.anyMust && !x.startsWith "%" then
-            modify fun st =>
-              { st with lowerChecks := st.lowerChecks.push (pos, x, ft, names.filter (· != x), ob, only) }
-    else
-      -- Used as a whole too: each part read lets go of the rest of it.
-      for (subject, idx, _, at_) in mine do
-        modify fun st => { st with pos := at_ }
-        match ← otherFields subject idx with
-        | some rest =>
-          for r in rest do
-            mustDrop r "taking one field of a value lets go of the rest"
-            modify fun st => { st with leftBehind := st.leftBehind.push (r, at_ ++ "taking one field of a value lets go of the rest") }
-        | none => mustDrop subject "taking one field of a value lets go of the rest"
-        modify fun st => { st with pos := pos }
-    if apart then continue
-    if let some t := t then
-      let mentions := usesStmts code resumptive x body
-      if mentions ≥ 2 then
-        let t ← zonk t
-        modify fun st => { st with seen := {} }
-        -- (A value with a `drop` to run is used where it is given away,
-        -- whatever takes it does: giving it away twice would run it twice.)
-        let dropped := (← tyHasDrop [] t).isSome
-        let settled := (freeTys t).isEmpty && (freeCaps t).isEmpty && !hasParam t
-          && !(← tyOwnsOnce [] t) && !dropped
-        unless settled do
-          match ← pathUses (if dropped then { ctx with handed := true } else ctx)
-              (names.filter (· != x)) x code body with
-          | some n => if n ≥ 2 then mustDup t (twice x)
-          | none => mustDup t (twice x)
-      -- A value that has to be used: is it, however the body goes? Looked at
-      -- once the function's types are known. A name the compiler made up
-      -- stands for nothing the program wrote.
-      if s.anyMust && !x.startsWith "%" then
-        modify fun st =>
-          { st with lowerChecks := st.lowerChecks.push (pos, x, t, names.filter (· != x), code, body) }
+    checkUsesOf code pos body s ctx names x b
 
 /-- A callable of `arity` arguments that uses the environment `%env` when it
 is called. -/
