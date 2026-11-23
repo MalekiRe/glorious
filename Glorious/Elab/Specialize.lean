@@ -837,35 +837,10 @@ def Decided.of (b : Blocks) : Decided := Id.run do
   for ((call, _), _) in b.argsChosen do d := { d with calls := d.calls.insert call }
   pure d
 
-mutual
-
 partial def Decided.pat (d : Decided) : Pattern → Bool
   | .var x => (tupleRestOf x).any d.rests.contains
   | .ctor _ _ ps | .tuple ps => ps.any d.pat
   | _ => false
-
-/-- Does an expression have something in it the checker decided of? -/
-partial def Decided.expr (d : Decided) : Expr → Bool
-  | .call i f args | .tailCall i f args => d.calls.contains i || d.expr f || args.any d.expr
-  | .closure i clauses => d.closures.contains i || clauses.any d.clause
-  | .handle subject arms => d.expr subject || arms.any d.clause
-  | .labelScope _ body => body.any d.stmt
-  | .fieldOf i e _ => d.fields.contains i || d.expr e
-  | .refField i _ _ _ _ => d.fields.contains i
-  | .tuple args => args.any d.expr
-  | .proj e _ | .deref e | .reborrow _ e => d.expr e
-  | _ => false
-
-partial def Decided.clause (d : Decided) : Clause → Bool
-  | .mk pats body => pats.any d.pat || body.any d.stmt
-
-partial def Decided.stmt (d : Decided) : Stmt → Bool
-  | .let_ pat v => d.pat pat || d.expr v
-  | .expr v | .defer v | .letMut _ v => d.expr v
-  | .assign t v => d.expr t || d.expr v
-  | .located _ _ s => d.stmt s
-
-end
 
 /-- Does a body have something in it the checker decided of? Its nodes are
 looked at where they are kept, each kind in its array. -/

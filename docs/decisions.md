@@ -7412,6 +7412,26 @@ source in Lean strings 6,021, and the test table 3,928.
   an array of them (6 ms more of elaborating). The free variables of a type
   (`freeTys` and the like) keep their own arms for the same reason: through
   `Ty.parts` they took 10 ms more.
+- **Not done: one layer for every kept value.** Each is kept by a key and
+  kept again by a test of its own (by group, by function and its key, by
+  text, sharded or not, the program's own unit not kept), so what they
+  share is `saveKept`, `keptIn` and `loadShards`; one layer over them would
+  carry every one of those tests as it is.
+- **Not done: the checker's types as numbers in a pool.** Its comparisons
+  ask different things (`tyEq` all of a type, captures too; `sameTy` as far
+  as each is known, effects not; `Ty.same` as written), and a type with a
+  variable in it changes when the variable is bound, so a number for it
+  would not stay the type's. `internTy` numbers the types all known, where
+  it is needed.
+- **Not done: traits copied per type as they are written out.** A function
+  called with an implementation known is copied for it (`Specialize`)
+  after the traits are written out; doing it as they are written out moves
+  the same copying, by the same calls, to an earlier pass, and the values
+  for implementations stay for what is not known.
+- **Not done: a node of its own for each marker** (`%as`, `%inst` and the
+  rest). A marker is a call of a name: every walk takes it as a call, and a
+  node of its own would be an arm in each walk and conversion, against the
+  two lines a reading of one saves.
 - **Not done: a typed Core**, the checker's types carried onto Core so
   that certificate inference would only find regions. Read against the code,
   it does not make the compiler smaller. Infer's types carry regions, effect
