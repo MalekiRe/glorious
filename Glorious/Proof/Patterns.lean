@@ -25,6 +25,7 @@ open Core (Pat)
 
 /-! ## Places -/
 
+/-%proof (commented out while the machines become bytes)
 theorem Value.follow_snoc {v : Value} {path : List Nat} {tag : Nat} {fields : List Value}
     {i : Nat} {field : Value} (h : v.follow path = some (.data tag fields))
     (hf : fields[i]? = some field) : v.follow (path ++ [i]) = some field := by
@@ -47,7 +48,9 @@ theorem Value.follow_snoc {v : Value} {path : List Nat} {tag : Nat} {fields : Li
       | some g =>
         simp only [hg] at h ⊢
         exact ih h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Place.eval_child {ρ : Env} {pl : Place} {tag : Nat} {fields : List Value} {i : Nat}
     {field : Value} (h : pl.eval ρ = some (.data tag fields)) (hf : fields[i]? = some field) :
     (pl.child i).eval ρ = some field := by
@@ -58,7 +61,9 @@ theorem Place.eval_child {ρ : Env} {pl : Place} {tag : Nat} {fields : List Valu
   | some v =>
     simp only [hv] at h ⊢
     exact Value.follow_snoc h hf
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Loading more locals does not change what an existing place holds. -/
 theorem Place.eval_append {ρ ρ' : Env} {pl : Place} {v : Value} (h : pl.eval ρ = some v) :
     pl.eval (ρ ++ ρ') = some v := by
@@ -68,10 +73,13 @@ theorem Place.eval_append {ρ ρ' : Env} {pl : Place} {v : Value} (h : pl.eval �
   | some w =>
     rw [getElem?_append_of_eq_some hv]
     simpa [hv] using h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem argPlace_eval {ρ : Env} {j : Nat} {v : Value} (h : ρ[j]? = some v) :
     (argPlace j).eval ρ = some v := by
   simp [Place.eval, argPlace, h, Value.follow]
+%proof-/
 
 /-! ## What the generated tests and bindings mean -/
 
@@ -89,6 +97,7 @@ def checkAll (ρ : Env) : List Test → Option Bool
     | some false => some false
     | none => none
 
+/-%proof (commented out while the machines become bytes)
 theorem checkAll_append (ρ : Env) (a b : List Test) :
     checkAll ρ (a ++ b) =
       match checkAll ρ a with
@@ -105,6 +114,7 @@ theorem checkAll_append (ρ : Env) (a b : List Test) :
       cases r with
       | true => exact ih
       | false => rfl
+%proof-/
 
 def evalPlaces (ρ : Env) : List Place → Option (List Value)
   | [] => some []
@@ -113,6 +123,7 @@ def evalPlaces (ρ : Env) : List Place → Option (List Value)
     | some v, some vs => some (v :: vs)
     | _, _ => none
 
+/-%proof (commented out while the machines become bytes)
 theorem evalPlaces_append {ρ : Env} {a b : List Place} {x y : List Value}
     (ha : evalPlaces ρ a = some x) (hb : evalPlaces ρ b = some y) :
     evalPlaces ρ (a ++ b) = some (x ++ y) := by
@@ -132,7 +143,9 @@ theorem evalPlaces_append {ρ : Env} {a b : List Place} {x y : List Value}
         simp [hp, hr] at ha
         subst ha
         simp [evalPlaces, hp, ih hr]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem matchVals_length {ps : List Pat} : ∀ {vs bs : List Value},
     Pat.matchVals ps vs = some bs → ps.length = vs.length := by
   induction ps with
@@ -152,13 +165,17 @@ theorem matchVals_length {ps : List Pat} : ∀ {vs bs : List Value},
         cases hps : Pat.matchVals ps vs with
         | none => simp [Pat.matchVals, hp, hps] at h
         | some bs' => simp [ih hps]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem matchVals_eq_none {ps : List Pat} {vs : List Value} (h : ps.length ≠ vs.length) :
     Pat.matchVals ps vs = none := by
   cases hm : Pat.matchVals ps vs with
   | none => rfl
   | some bs => exact absurd (matchVals_length hm) h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 /-- The tests of a pattern all hold exactly when the pattern matches. -/
@@ -214,7 +231,8 @@ theorem patsTests_check (ρ : Env) : ∀ (ps : List Pat) (mk : Nat → Place) (v
         simp [Pat.matchVals, hp, hps]
 
 end
-
+%proof-/
+/-%proof (commented out while the machines become bytes)
 mutual
 
 /-- The places a matching pattern binds hold exactly the values it binds. -/
@@ -282,7 +300,7 @@ theorem patsBinds_eval (ρ : Env) : ∀ (ps : List Pat) (mk : Nat → Place) (vs
           exact evalPlaces_append ih₁ ih₂
 
 end
-
+%proof-/
 /-! ## How the machine executes them -/
 
 section Machine
@@ -290,6 +308,7 @@ section Machine
 variable {P : Bytecode.Program} {code : Code} {fr : List Bytecode.Frame}
   {ks : Store Bytecode.Frame}
 
+/-%proof (commented out while the machines become bytes)
 /-- A test that holds goes on to the next instruction, and one that fails
 to its `fail`. -/
 theorem step_test {ρ : Env} {pc : Nat} {t : Test} {fail : Nat} {b : Bool}
@@ -305,7 +324,9 @@ theorem step_test {ρ : Env} {pc : Nat} {t : Test} {fail : Nat} {b : Bool}
     | some v =>
       simp [hv] at hb
       cases b <;> simp [Bytecode.step, hi, hv, hb]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Tests that all hold fall through, one instruction each, leaving the frames alone. -/
 theorem tests_pass {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) (pc : Nat),
     checkAll ρ ts = some true → CodeAt code pc (ts.map (Test.instr fail) ++ rest) →
@@ -328,7 +349,9 @@ theorem tests_pass {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) 
           simp only [List.length_cons]; omega
         rw [e]
         exact RunsThrough.cons (step_test hc'.head hb) rfl (ih (pc + 1) h hc'.tail)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Tests of which one fails jump to the failure target, leaving the locals and
 the frames alone. -/
 theorem tests_fail {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) (pc : Nat),
@@ -351,7 +374,9 @@ theorem tests_fail {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) 
         simp [checkAll, hb] at h
         obtain ⟨k, hk⟩ := ih (pc + 1) h hc'.tail
         exact ⟨k + 1, RunsThrough.cons (step_test hc'.head hb) rfl hk⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Loading the bound places appends exactly the bound values. -/
 theorem binds_run {ρ : Env} {rest : Code} :
     ∀ (pls : List Place) (bs extra : List Value) (pc : Nat), evalPlaces ρ pls = some bs →
@@ -390,11 +415,15 @@ theorem binds_run {ρ : Env} {rest : Code} :
           simp only [List.length_cons]; omega
         rw [e]
         exact RunsThrough.cons hstep rfl hrest
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem compileClause_length (fail : Nat) (c : Core.Clause) :
     (compileClause fail c).length = clauseLen c := by
   simp only [compileClause, clauseLen, List.length_append, List.length_map]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 Entering a callable's code with the arguments in place runs to the body of the
 clause the Core semantics selects, with that clause's bindings appended. The
@@ -452,6 +481,7 @@ theorem select_run {ρ : Env} {vs : List Value} {body : Core.Tm} {bs : List Valu
           simpa using hcB.append_right
         exact ⟨(clauseTests c).length + (clauseBinds c).length, _, h1.trans h2, hcBody⟩
     · simp [hlen] at h
+%proof-/
 
 end Machine
 

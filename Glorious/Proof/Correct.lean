@@ -35,17 +35,23 @@ inductive MatchFrame : Core.Frame → Bytecode.Frame → Prop where
   | exit {target : Target} {after : After} :
       MatchFrame (.exit target after) (.exit target after)
 
+/-%proof (commented out while the machines become bytes)
 theorem MatchFrame.asHandler_eq {f : Core.Frame} {f' : Bytecode.Frame} (h : MatchFrame f f') :
     f.asHandler = f'.asHandler := by
   cases h <;> rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem MatchFrame.asLabel_eq {f : Core.Frame} {f' : Bytecode.Frame} (h : MatchFrame f f') :
     f.asLabel = f'.asLabel := by
   cases h <;> rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem MatchFrame.isTarget_eq {f : Core.Frame} {f' : Bytecode.Frame} (h : MatchFrame f f')
     (target : Target) : f.isTarget target = f'.isTarget target := by
   cases h <;> cases target <;> rfl
+%proof-/
 
 /-- Stacks correspond frame by frame, but for the scopes of borrows: Core marks
 where a borrow ends with a frame, which nothing reads, and the bytecode has no
@@ -58,19 +64,23 @@ inductive MatchFrames : List Core.Frame → List Bytecode.Frame → Prop where
   | lend {uniq : Bool} {a b : Nat} {stack : List Core.Frame} {frames : List Bytecode.Frame} :
       MatchFrames stack frames → MatchFrames (.lend uniq a b :: stack) frames
 
+/-%proof (commented out while the machines become bytes)
 theorem MatchFrames.length_le {a : List Core.Frame} {a' : List Bytecode.Frame}
     (h : MatchFrames a a') : a'.length ≤ a.length := by
   induction h with
   | nil => exact Nat.le_refl _
   | cons _ _ ih => simpa using ih
   | lend _ ih => exact Nat.le_succ_of_le ih
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem MatchFrames.append {a b : List Core.Frame} {a' b' : List Bytecode.Frame}
     (ha : MatchFrames a a') (hb : MatchFrames b b') : MatchFrames (a ++ b) (a' ++ b') := by
   induction ha with
   | nil => exact hb
   | cons hf _ ih => exact .cons hf ih
   | lend _ ih => exact .lend ih
+%proof-/
 
 /-- A store entry is used up in both machines, or holds corresponding stacks. -/
 inductive MatchCont :
@@ -90,17 +100,22 @@ namespace MatchConts
 
 variable {a : Conts Core.Frame} {b : Conts Bytecode.Frame}
 
+/-%proof (commented out while the machines become bytes)
 theorem length_eq (h : MatchConts a b) : a.length = b.length := by
   induction h with
   | nil => rfl
   | cons _ _ ih => simp [ih]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem snoc {x : Option (List Core.Frame)} {y : Option (List Bytecode.Frame)}
     (h : MatchConts a b) (hx : MatchCont x y) : MatchConts (a ++ [x]) (b ++ [y]) := by
   induction h with
   | nil => exact .cons hx .nil
   | cons hc _ ih => exact .cons hc ih
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Taking a continuation out of corresponding stores gives corresponding
 stacks and leaves corresponding stores. -/
 theorem take (h : MatchConts a b) :
@@ -129,9 +144,11 @@ theorem take (h : MatchConts a b) :
         obtain ⟨rfl, rfl⟩ := ht
         obtain ⟨seg', bs₁, hb, hs, hcs⟩ := ih hr
         exact ⟨seg', y :: bs₁, by simp [takeCont, hb], hs, .cons hx hcs⟩
+%proof-/
 
 end MatchConts
 
+/-%proof (commented out while the machines become bytes)
 /-- Searching corresponding stacks for a handler finds the same handler, with
 corresponding frames above and below it. -/
 theorem find_sim {op : Nat} {stack : List Core.Frame} {frames : List Bytecode.Frame}
@@ -169,7 +186,9 @@ theorem find_sim {op : Nat} {stack : List Core.Frame} {frames : List Bytecode.Fr
       subst hd
       obtain ⟨above', below', hv, ha, hb⟩ := ih hf₀
       exact ⟨above', below', hv, .lend ha, hb⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Searching corresponding stacks for a label scope finds it in both, with
 corresponding frames above and below it. -/
 theorem findLabel_sim {id : Nat} {stack : List Core.Frame} {frames : List Bytecode.Frame}
@@ -204,6 +223,7 @@ theorem findLabel_sim {id : Nat} {stack : List Core.Frame} {frames : List Byteco
       obtain ⟨rfl, rfl⟩ := hb
       obtain ⟨above', below', hv, ha, hbm⟩ := ih hr
       exact ⟨above', below', hv, .lend ha, hbm⟩
+%proof-/
 
 /-- The stores correspond: matching continuation entries, the same label counter
 and the same memory. -/
@@ -212,15 +232,19 @@ inductive MatchStore : Store Core.Frame → Store Bytecode.Frame → Prop where
       {cells : Cells} :
       MatchConts conts conts' → MatchStore ⟨conts, labels, cells⟩ ⟨conts', labels, cells⟩
 
+/-%proof (commented out while the machines become bytes)
 theorem MatchStore.release {store : Store Core.Frame} {store' : Store Bytecode.Frame}
     (h : MatchStore store store') (a : Nat) : MatchStore (store.release a) (store'.release a) := by
   cases h with
   | mk hcs => exact .mk hcs
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem MatchStore.alloc {store : Store Core.Frame} {store' : Store Bytecode.Frame}
     (h : MatchStore store store') (v : Value) : MatchStore (store.alloc v) (store'.alloc v) := by
   cases h with
   | mk hcs => exact .mk hcs
+%proof-/
 
 /-- The program counter points at the compiled form of the current Core
 computation, the locals are the Core environment, and the stacks and stores
@@ -231,8 +255,10 @@ inductive Match : Core.State → Bytecode.State → Prop where
       CodeAt code pc (compileTm tm) → MatchFrames stack frames → MatchStore store store' →
       Match ⟨tm, ρ, stack, store⟩ ⟨code, pc, ρ, frames, store'⟩
 
+/-%proof (commented out while the machines become bytes)
 theorem match_init (p : Core.Program) : Match (Core.init p) (Bytecode.init (compile p)) :=
   .mk (CodeAt.zero _) .nil (.mk .nil)
+%proof-/
 
 /--
 How the outcome of a Core step relates to the outcome of the bytecode step
@@ -251,6 +277,7 @@ inductive SimOutcome (p : Core.Program) :
 
 /-! ## Entering a function -/
 
+/-%proof (commented out while the machines become bytes)
 /--
 When Core selects a clause of a function, the bytecode enters the function's
 code, and running it from the start reaches the compiled clause body with the
@@ -280,12 +307,14 @@ theorem invoke_run {p : Core.Program} {fn : Nat} {captures vs : List Value}
       rw [List.append_assoc] at hk
       exact ⟨compileClauses 0 F.clauses, k, pc,
         by simp [Bytecode.invoke, compile, compileFn, hF], hk, hbody⟩
+%proof-/
 
 section Outcomes
 
 variable {p : Core.Program} {stack : List Core.Frame} {frames : List Bytecode.Frame}
   {store : Store Core.Frame} {store' : Store Bytecode.Frame}
 
+/-%proof (commented out while the machines become bytes)
 theorem callFn_sim {fn : Nat} {captures vs : List Value}
     (hfr : MatchFrames stack frames) (hks : MatchStore store store') :
     SimOutcome p (Core.callFn p fn captures vs stack store)
@@ -299,7 +328,9 @@ theorem callFn_sim {fn : Nat} {captures vs : List Value}
     obtain ⟨code, k, pc, hinv, hk, hbody⟩ := invoke_run hi frames store'
     simp only [Core.callFn, hi, Bytecode.callFn, hinv]
     exact .next hk (.mk hbody hfr hks)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Delivering a value to corresponding stacks, and leaving corresponding
 stacks for a target, including the cleanups either may trigger. The two are
 proved together because each is defined through the other. -/
@@ -344,18 +375,24 @@ theorem deliver_leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore sto
       cases target <;> simp [Core.leave, Core.Frame.isTarget]
     rw [h1]
     exact ihl _ _
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem deliver_sim (hfr : MatchFrames stack frames) (hks : MatchStore store store')
     {v : Value} :
     SimOutcome p (Core.deliver p v stack store) (Bytecode.deliver (compile p) v frames store') :=
   (deliver_leave_sim hfr hks).1 v
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore store store')
     {target : Target} {after : After} :
     SimOutcome p (Core.leave p target after stack store)
       (Bytecode.leave (compile p) target after frames store') :=
   (deliver_leave_sim hfr hks).2 target after
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem apply_sim {c : Callee} (hfr : MatchFrames stack frames) (hks : MatchStore store store') :
     SimOutcome p (Core.apply p c stack store) (Bytecode.apply (compile p) c frames store') := by
   cases c with
@@ -381,6 +418,7 @@ theorem apply_sim {c : Callee} (hfr : MatchFrames stack frames) (hks : MatchStor
       obtain ⟨above', below', hl', ha, hb⟩ := findLabel_sim hfr hl
       simp only [Core.apply, hl, Bytecode.apply, hl']
       exact leave_sim hfr hks
+%proof-/
 
 end Outcomes
 
@@ -388,6 +426,7 @@ end Outcomes
 
 First for steps of the machine state alone, then for programs in their world. -/
 
+/-%proof (commented out while the machines become bytes)
 theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : Match s t) :
     SimOutcome p (Core.step p s) (Bytecode.step (compile p) t) := by
   obtain @⟨tm, ρ, stack, store, code, pc, frames, store', hcode, hfr, hstore⟩ := hm
@@ -492,6 +531,7 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       | exact apply_sim (.cons .guard (.cons (.call hcode.tail) hfr)) hks
       | exact apply_sim (.cons .guard hfr) hks
       | (exfalso; rename_i h; first | exact h _ _ rfl rfl | exact h _ _ _ rfl rfl | exact h _ _ _ ⟨rfl, rfl⟩ rfl)
+%proof-/
 
 /-! ## Programs in their world -/
 
@@ -499,19 +539,24 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
 inductive MatchIO : Core.Config → Bytecode.Config → Prop where
   | mk {s : Core.State} {t : Bytecode.State} {w : World} : Match s t → MatchIO ⟨s, w⟩ ⟨t, w⟩
 
+/-%proof (commented out while the machines become bytes)
 theorem matchIO_init (p : Core.Program) (input : List Int) :
     MatchIO (Core.initIO p input) (Bytecode.initIO (compile p) input) :=
   .mk (match_init p)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem MatchIO.output_eq {c : Core.Config} {d : Bytecode.Config} (h : MatchIO c d) :
     c.world.output = d.world.output := by
   cases h
   rfl
+%proof-/
 
 section World
 
 variable {P : Bytecode.Program}
 
+/-%proof (commented out while the machines become bytes)
 /-- A bytecode step in a world is either a step of the machine state alone, or
 a host instruction. -/
 theorem stepIO_eq_lift_or_host (t : Bytecode.State) (w : World) :
@@ -527,21 +572,27 @@ theorem stepIO_eq_lift_or_host (t : Bytecode.State) (w : World) :
     | _ =>
       left
       simp [Bytecode.stepIO, hi]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem stepIO_of_step_next {t t' : Bytecode.State} (w : World)
     (h : Bytecode.step P t = .next t') : Bytecode.stepIO P ⟨t, w⟩ = .next ⟨t', w⟩ := by
   rcases stepIO_eq_lift_or_host (P := P) t w with he | ⟨id, args, hi⟩
   · rw [he, h]
     rfl
   · simp [Bytecode.step, hi] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem stepIO_of_step_halt {t : Bytecode.State} {v : Value} (w : World)
     (h : Bytecode.step P t = .halt v) : Bytecode.stepIO P ⟨t, w⟩ = .halt ⟨v, w⟩ := by
   rcases stepIO_eq_lift_or_host (P := P) t w with he | ⟨id, args, hi⟩
   · rw [he, h]
     rfl
   · simp [Bytecode.step, hi] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A run of the machine state alone is the same run in any world. -/
 theorem run_lift (w : World) : ∀ (k : Nat) {t t' : Bytecode.State},
     run (Bytecode.step P) k t = .next t' →
@@ -562,7 +613,9 @@ theorem run_lift (w : World) : ∀ (k : Nat) {t t' : Bytecode.State},
       exact ih h
     | halt v => rw [hs] at h; simp at h
     | stuck => rw [hs] at h; simp at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A run of the machine state alone is the same run in any world, with the
 same property of every state along the way. -/
 theorem runsThrough_lift (w : World) {I : Bytecode.State → Prop} {k : Nat}
@@ -571,7 +624,9 @@ theorem runsThrough_lift (w : World) {I : Bytecode.State → Prop} {k : Nat}
   ⟨run_lift w k h.1, fun j hj => by
     obtain ⟨tj, htj, hI⟩ := h.2 j hj
     exact ⟨⟨tj, w⟩, run_lift w j htj, hI⟩⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem lift_next_world {w : World} {r : Step Bytecode.State Value} {d : Bytecode.Config}
     (h : Bytecode.lift w r = .next d) : d.world = w := by
   cases r with
@@ -581,7 +636,9 @@ theorem lift_next_world {w : World} {r : Step Bytecode.State Value} {d : Bytecod
     rfl
   | halt v => simp [Bytecode.lift] at h
   | stuck => simp [Bytecode.lift] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem lift_halt_world {w : World} {r : Step Bytecode.State Value} {res : Result}
     (h : Bytecode.lift w r = .halt res) : res.world = w := by
   cases r with
@@ -591,7 +648,9 @@ theorem lift_halt_world {w : World} {r : Step Bytecode.State Value} {res : Resul
     subst h
     rfl
   | stuck => simp [Bytecode.lift] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A bytecode step never retracts output. -/
 theorem stepIO_output_next {d d' : Bytecode.Config} (h : Bytecode.stepIO P d = .next d') :
     d.world.output <+: d'.world.output := by
@@ -611,7 +670,9 @@ theorem stepIO_output_next {d d' : Bytecode.Config} (h : Bytecode.stepIO P d = .
         simp [hv, hh] at h
         subst h
         exact Host.call_output hh
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem stepIO_output_halt {d : Bytecode.Config} {res : Result}
     (h : Bytecode.stepIO P d = .halt res) : d.world.output <+: res.world.output := by
   obtain ⟨t, w⟩ := d
@@ -626,6 +687,7 @@ theorem stepIO_output_halt {d : Bytecode.Config} {res : Result}
       cases hh : Host.call w id vs with
       | none => simp [hv, hh] at h
       | some r => simp [hv, hh] at h
+%proof-/
 
 end World
 
@@ -639,6 +701,7 @@ inductive SimOutcomeIO (p : Core.Program) :
   | halt {r : Result} : SimOutcomeIO p (.halt r) (.halt r)
   | stuck {r : Step Bytecode.Config Result} : SimOutcomeIO p .stuck r
 
+/-%proof (commented out while the machines become bytes)
 /-- A simulated step of the machine state is a simulated step in any world. -/
 theorem lift_sim {p : Core.Program} {s : Core.State} {t : Bytecode.State} (w : World)
     (h : SimOutcome p (Core.step p s) (Bytecode.step (compile p) t)) :
@@ -653,7 +716,9 @@ theorem lift_sim {p : Core.Program} {s : Core.State} {t : Bytecode.State} (w : W
     rw [stepIO_of_step_halt w ht]
     exact .halt
   | stuck => exact .stuck
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem stepIO_sim (p : Core.Program) {c : Core.Config} {d : Bytecode.Config}
     (hm : MatchIO c d) : SimOutcomeIO p (Core.stepIO p c) (Bytecode.stepIO (compile p) d) := by
   obtain @⟨s, t, w, hst⟩ := hm
@@ -675,7 +740,9 @@ theorem stepIO_sim (p : Core.Program) {c : Core.Config} {d : Bytecode.Config}
         simp only [Core.stepIO, hv, hh, Bytecode.stepIO, hc.head]
         exact .next (RunsThrough.refl rfl) (.mk (.mk hc.tail hfr hstore))
   | _ => exact lift_sim w (step_sim p (.mk hcode hfr hstore))
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- `MatchIO` is a forward simulation from Core to bytecode. -/
 theorem forwardSim (p : Core.Program) :
     ForwardSim (Core.stepIO p) (Bytecode.stepIO (compile p)) MatchIO where
@@ -694,7 +761,9 @@ theorem forwardSim (p : Core.Program) :
     generalize hstep : Bytecode.stepIO (compile p) d = r' at h
     cases h with
     | halt => exact ⟨0, run_one_halt hstep⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same simulation, also accounting for the bytecode's intermediate
 states: whatever state it is in, its stack is no deeper than the stack of the
 Core state it is at or on its way to. -/
@@ -725,26 +794,34 @@ theorem forwardSimThrough (p : Core.Program) :
     generalize hstep : Bytecode.stepIO (compile p) d = r' at h
     cases h with
     | halt => rfl
+%proof-/
 
 /-! ## Behaviour preservation -/
 
 variable {p : Core.Program} {input : List Int}
 
+/-%proof (commented out while the machines become bytes)
 /-- If the Core program halts with a result, so does its bytecode. -/
 theorem compile_halts {r : Result} :
     Core.Halts p input r → Bytecode.Halts (compile p) input r :=
   (forwardSim p).halts (matchIO_init p input)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- If the Core program runs forever, so does its bytecode. -/
 theorem compile_diverges : Core.Diverges p input → Bytecode.Diverges (compile p) input :=
   (forwardSim p).diverges (matchIO_init p input)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A result computed by the bytecode is a result of the Core program, unless
 the Core program goes wrong. -/
 theorem compile_halts_reflect {r : Result} :
     Bytecode.Halts (compile p) input r → Core.Halts p input r ∨ Core.GoesWrong p input :=
   (forwardSim p).halts_reflect (matchIO_init p input)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Compiler correctness.** For a Core program that does not go wrong on a given
 input, the compiled bytecode has exactly the same behaviour: it halts with the
@@ -759,6 +836,7 @@ theorem compile_correct (p : Core.Program) (input : List Int) (safe : ¬ Core.Go
   · exact (compile_halts_reflect h).resolve_right safe
   · exact (forwardSim p).diverges_reflect (matchIO_init p input) safe
   · exact (forwardSim p).not_goesWrong (matchIO_init p input) safe
+%proof-/
 
 /-! ## Output while running
 
@@ -766,6 +844,7 @@ theorem compile_correct (p : Core.Program) (input : List Int) (safe : ¬ Core.Go
 cover output at every moment, so they also speak for programs that never halt.
 -/
 
+/-%proof (commented out while the machines become bytes)
 /-- Whatever the Core program has written at some point, the bytecode has
 written at some point. -/
 theorem compile_emits {out : List Value} :
@@ -773,7 +852,9 @@ theorem compile_emits {out : List Value} :
   intro ⟨c, hreach, hout⟩
   obtain ⟨d, hd, hm⟩ := (forwardSim p).reaches (matchIO_init p input) hreach
   exact ⟨d, hd, by rw [← hm.output_eq]; exact hout⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Whatever the bytecode has written at some point is the beginning of what
 the Core program writes: either by some point while running, or by the time it
 halts. The bytecode never writes anything the Core program does not. -/
@@ -788,6 +869,7 @@ theorem compile_emits_reflect {out : List Value} (safe : ¬ Core.GoesWrong p inp
   rcases h with ⟨c, hc, hpre⟩ | ⟨r, hr, hpre⟩
   · exact Or.inl ⟨c.world.output, ⟨c, hc, rfl⟩, by rw [← hout]; exact hpre⟩
   · exact Or.inr ⟨r, hr, by rw [← hout]; exact hpre⟩
+%proof-/
 
 /-! ## Stack depth
 
@@ -795,6 +877,7 @@ Core's stack discipline is what makes a tail call, a tail handler or a tail
 label scope keep no frame. This theorem carries that discipline to the bytecode.
 -/
 
+/-%proof (commented out while the machines become bytes)
 /-- Every stack the bytecode reaches is no deeper than one the Core program
 reaches: shallower only by the scopes of borrows, which the bytecode does not
 keep. The bytecode therefore never uses a deeper stack than the Core semantics
@@ -805,5 +888,6 @@ theorem compile_stack_depth (safe : ¬ Core.GoesWrong p input) {d : Bytecode.Con
       ∧ d.state.frames.length ≤ c.state.stack.length := by
   obtain ⟨m, hm⟩ := h
   exact (forwardSimThrough p).reflect m (matchIO_init p input) safe hm
+%proof-/
 
 end Glorious

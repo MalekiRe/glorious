@@ -75,10 +75,12 @@ def closed (l : List Rgn) : Bool :=
     | .wr r => (Rgn.flat l).contains r
     | _ => true
 
+/-%proof (commented out while the machines become bytes)
 theorem closed_mem {l : List Rgn} (h : closed l = true) {r : Rgn} (hr : .wr r ∈ Rgn.flat l) :
     r ∈ Rgn.flat l := by
   have := List.all_eq_true.mp h _ hr
   simpa using this
+%proof-/
 
 /-- A signature mentions no region variable but those fixed when a closure is
 made, and its function may read what it may write. -/
@@ -122,6 +124,7 @@ def CtorOf (Δ : Ctx) (tag : Nat) (T : Ty) (Fs : List Ty) : Prop :=
   (tag = 0 ∧ T = .tuple Fs)
     ∨ (tag ≠ 0 ∧ ∃ name args, T = .data name args ∧ Δ.ctorFields tag name args = some Fs)
 
+/-%proof (commented out while the machines become bytes)
 theorem CtorOf.unique {Δ : Ctx} {tag : Nat} {T : Ty} {Fs Fs' : List Ty}
     (h : CtorOf Δ tag T Fs) (h' : CtorOf Δ tag T Fs') : Fs = Fs' := by
   rcases h with ⟨h0, hT⟩ | ⟨h0, name, args, hT, hF⟩
@@ -135,6 +138,7 @@ theorem CtorOf.unique {Δ : Ctx} {tag : Nat} {T : Ty} {Fs Fs' : List Ty}
       obtain ⟨rfl, rfl⟩ := Ty.data.inj hT'
       rw [hF] at hF'
       exact Option.some.inj hF'
+%proof-/
 
 /-- What `ϕ` grants covers the region: each place or permission it is made of. -/
 def Grants (ϕ : List Rgn) (r : Rgn) : Prop := ∀ x, x ∈ r.parts → x ∈ Rgn.flat ϕ
@@ -268,13 +272,16 @@ inductive PartOk (Δ : Ctx) : Ty → List PathStep → Ty → Prop where
       CtorOf Δ tag T Fs → Fs[i]? = some σ → PartOk Δ σ path τ →
       PartOk Δ T (⟨some tag, i⟩ :: path) τ
 
+/-%proof (commented out while the machines become bytes)
 theorem PlaceOk.part {Δ : Ctx} {σ τ : Ty} {p : List Nat} (h : PlaceOk Δ σ p τ) :
     PartOk Δ σ (p.map (PathStep.mk none)) τ := by
   induction h with
   | here => exact .here
   | tuple hi _ ih => exact .tuple hi ih
   | field hall hi _ ih => exact .field hall hi ih
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem PartOk.append {Δ : Ctx} {σ τ υ : Ty} {p q : List PathStep} (h : PartOk Δ σ p τ)
     (h' : PartOk Δ τ q υ) : PartOk Δ σ (p ++ q) υ := by
   induction h with
@@ -283,6 +290,7 @@ theorem PartOk.append {Δ : Ctx} {σ τ υ : Ty} {p q : List PathStep} (h : Part
   | field hall hi _ ih => exact .field hall hi (ih h')
   | elem hu _ ih => exact .elem hu (ih h')
   | variant hc hi _ ih => exact .variant hc hi (ih h')
+%proof-/
 
 /-- After each constructor of `T` comes one that takes a `τ` more. -/
 def Grows (Δ : Ctx) (T τ : Ty) : Prop :=

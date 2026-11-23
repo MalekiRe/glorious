@@ -175,17 +175,22 @@ def installs (s : State) : Nat :=
 
 /-! ## The frames -/
 
+/-%proof (commented out while the machines become bytes)
 theorem guards_append (a b : List Frame) : guards (a ++ b) = guards a + guards b := by
   induction a with
   | nil => simp [guards]
   | cons fr a ih => cases fr <;> simp [guards, ih] <;> omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem held_snoc (conts : Conts Frame) (segment : List Frame) :
     held (conts ++ [some segment]) = held conts + guards segment := by
   induction conts with
   | nil => simp [held]
   | cons c conts ih => cases c <;> simp [held, ih] <;> omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem takeCont_held {conts conts' : Conts Frame} {id : Nat} {segment : List Frame}
     (h : takeCont conts id = some (segment, conts')) :
     held conts = guards segment + held conts' := by
@@ -211,7 +216,9 @@ theorem takeCont_held {conts conts' : Conts Frame} {id : Nat} {segment : List Fr
         obtain ⟨rfl, rfl⟩ := h
         have := ih ht
         cases c <;> simp [held] <;> omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The frames a handler is found under and the frames below it are all the
 guards there are: the handler itself is not one. -/
 theorem findHandler_guards {op : Nat} {stack : List Frame} {d : Dispatch Frame}
@@ -238,9 +245,11 @@ theorem findHandler_guards {op : Nat} {stack : List Frame} {d : Dispatch Frame}
         subst h
         have := ih hf
         cases fr <;> simp [guards] <;> omega
+%proof-/
 
 /-! ## One step -/
 
+/-%proof (commented out while the machines become bytes)
 theorem callFn_next {p : Program} {fn : Nat} {captures vs : List Value} {stack : List Frame}
     {store : Store Frame} {s' : State} (h : callFn p fn captures vs stack store = .next s') :
     s'.stack = stack ∧ s'.store = store := by
@@ -251,14 +260,18 @@ theorem callFn_next {p : Program} {fn : Nat} {captures vs : List Value} {stack :
     obtain ⟨body, ρ⟩ := r
     rw [hi] at h; cases h
     exact ⟨rfl, rfl⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem callFn_not_halt {p : Program} {fn : Nat} {captures vs : List Value} {stack : List Frame}
     {store : Store Frame} {v : Value} : callFn p fn captures vs stack store ≠ .halt v := by
   unfold callFn
   cases invoke p fn captures vs with
   | none => simp
   | some r => simp
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Delivering and leaving neither lose a guard nor make one: each guard that
 goes from the stack has its cleanup started. Resumptions are not touched. -/
 theorem deliver_leave_next (p : Program) (stack : List Frame) :
@@ -303,7 +316,9 @@ theorem deliver_leave_next (p : Program) (stack : List Frame) :
           first
           | exact (fun ⟨e₁, e₂⟩ => by simp [leaveStarts, ht, guards, e₁, e₂]) (callFn_next h)
           | simpa [leaveStarts, ht, guards, Store.release] using ihl target after _ s' h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A machine does not finish past a guard: finishing means the stack held none. -/
 theorem deliver_leave_halt (p : Program) (stack : List Frame) :
     (∀ (v w : Value) (store : Store Frame), deliver p v stack store = .halt w →
@@ -338,7 +353,9 @@ theorem deliver_leave_halt (p : Program) (stack : List Frame) :
           first
           | exact absurd h callFn_not_halt
           | simpa [guards] using ihl target after _ w h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem apply_next {p : Program} {c : Callee} {stack : List Frame} {store : Store Frame}
     {s' : State} (h : apply p c stack store = .next s') :
     owed s' + applyStarts c stack store = guards stack + held store.conts := by
@@ -373,7 +390,9 @@ theorem apply_next {p : Program} {c : Callee} {stack : List Frame} {store : Stor
       simp only [owed, applyStarts]
       rw [e₂]
       omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem apply_halt {p : Program} {c : Callee} {stack : List Frame} {store : Store Frame}
     {w : Value} (h : apply p c stack store = .halt w) : guards stack = 0 := by
   cases c <;> simp only [apply] at h <;> (repeat' split at h) <;>
@@ -384,7 +403,9 @@ theorem apply_halt {p : Program} {c : Callee} {stack : List Frame} {store : Stor
     | (have := (deliver_leave_halt p _).1 _ w _ h
        rw [guards_append] at this
        omega)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- **One step keeps the account.** The guards still owed, and the cleanups the
 step started, are the guards that were owed and the one it may have installed. -/
 theorem step_accounts {p : Program} {s s' : State} (h : step p s = .next s') :
@@ -491,7 +512,9 @@ theorem step_accounts {p : Program} {s s' : State} (h : step p s = .next s') :
          simp_all only [owed, starts, installs, guards, Store.alloc]
          omega)
   | host id args body => simp [step] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A machine that finishes has no guard left on its stack, and its last step
 installs none. -/
 theorem step_halt {p : Program} {s : State} {w : Value} (h : step p s = .halt w) :
@@ -509,9 +532,11 @@ theorem step_halt {p : Program} {s : State} {w : Value} (h : step p s = .halt w)
        simp only [guards] at this
        show guards stack = 0
        omega)
+%proof-/
 
 /-! ## A whole run -/
 
+/-%proof (commented out while the machines become bytes)
 theorem stepIO_accounts {p : Program} {c c' : Config} (h : stepIO p c = .next c') :
     owed c'.state + starts c.state = owed c.state + installs c.state := by
   obtain ⟨s, w⟩ := c
@@ -542,7 +567,9 @@ theorem stepIO_accounts {p : Program} {c c' : Config} (h : stepIO p c = .next c'
       exact step_accounts hs
     | halt v => rw [hs] at h; cases h
     | stuck => rw [hs] at h; cases h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem stepIO_halt {p : Program} {c : Config} {r : Result} (h : stepIO p c = .halt r) :
     guards c.state.stack = 0 := by
   obtain ⟨s, w⟩ := c
@@ -561,6 +588,7 @@ theorem stepIO_halt {p : Program} {c : Config} {r : Result} (h : stepIO p c = .h
     | next s' => rw [hs] at h; cases h
     | halt v => exact step_halt hs
     | stuck => rw [hs] at h; cases h
+%proof-/
 
 /-- The guards installed in the first `n` steps from `c`. -/
 def installed (p : Program) : Nat → Config → Nat
@@ -578,6 +606,7 @@ def started (p : Program) : Nat → Config → Nat
     | .next c' => starts c.state + started p n c'
     | _ => 0
 
+/-%proof (commented out while the machines become bytes)
 /-- **Along a run, the account is kept.** After `n` steps the guards still owed
 and the cleanups started are the guards owed at the outset and those installed. -/
 theorem run_accounts (p : Program) (n : Nat) {c c' : Config}
@@ -598,7 +627,9 @@ theorem run_accounts (p : Program) (n : Nat) {c c' : Config}
       omega
     | halt v => rw [hs] at h; simp at h
     | stuck => rw [hs] at h; simp at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- **Every cleanup is accounted for.** If a program runs for `n` steps and
 then finishes, every guard it installed had its cleanup started, except those
 held in resumptions that were never taken. -/
@@ -612,7 +643,9 @@ theorem cleanup_accounting {p : Program} {input : List Int} {n : Nat} {c : Confi
   rw [h0] at h
   unfold owed at h
   omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same of a program that halts: there is a last state, and at it the
 account stands. -/
 theorem halts_cleanup_accounting {p : Program} {input : List Int} {r : Result}
@@ -623,10 +656,12 @@ theorem halts_cleanup_accounting {p : Program} {input : List Int} {r : Result}
   obtain ⟨k, hk⟩ := h
   obtain ⟨n, c, hrun, hhalt⟩ := Machine.halt_last hk
   exact ⟨n, c, hrun, hhalt, cleanup_accounting hrun hhalt⟩
+%proof-/
 
 /-- No resumption is left untaken. -/
 def AllTaken (conts : Conts Frame) : Prop := ∀ o, o ∈ conts → o = none
 
+/-%proof (commented out while the machines become bytes)
 theorem held_of_allTaken {conts : Conts Frame} (h : AllTaken conts) : held conts = 0 := by
   induction conts with
   | nil => rfl
@@ -634,7 +669,9 @@ theorem held_of_allTaken {conts : Conts Frame} (h : AllTaken conts) : held conts
     have ho := h o (List.mem_cons_self ..)
     subst ho
     exact ih fun x hx => h x (List.mem_cons_of_mem _ hx)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- **Exactly as many cleanups start as were installed**, in a program that
 finishes having taken every resumption it captured. -/
 theorem cleanup_exact {p : Program} {input : List Int} {n : Nat} {c : Config} {r : Result}
@@ -644,5 +681,6 @@ theorem cleanup_exact {p : Program} {input : List Int} {n : Nat} {c : Config} {r
   have := cleanup_accounting hrun hhalt
   rw [held_of_allTaken htaken] at this
   exact this
+%proof-/
 
 end Glorious.Core

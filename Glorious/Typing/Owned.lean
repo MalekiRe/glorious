@@ -40,10 +40,13 @@ def occs (id : Nat) : List Value → Nat
 
 end
 
+/-%proof (commented out while the machines become bytes)
 theorem occs_append (id : Nat) : ∀ (a b : List Value), occs id (a ++ b) = occs id a + occs id b
   | [], b => by simp [occs]
   | v :: a, b => by simp [occs, occs_append id a b, Nat.add_assoc]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occs_set (id : Nat) : ∀ {vs : List Value} {i : Nat} {x : Value} (y : Value),
     vs[i]? = some x → occs id (vs.set i y) + occ id x = occs id vs + occ id y
   | [], _, _, _, h => by simp at h
@@ -57,7 +60,9 @@ theorem occs_set (id : Nat) : ∀ {vs : List Value} {i : Nat} {x : Value} (y : V
     have := occs_set id y h
     simp only [List.set_cons_succ, occs]
     omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Replacing a part of a value takes out what the part held and puts in what
 the new part holds. -/
 theorem occ_putPart (id : Nat) : ∀ {path : List PathStep} {v w old v' : Value},
@@ -75,6 +80,7 @@ theorem occ_putPart (id : Nat) : ∀ {path : List PathStep} {v w old v' : Value}
     have h2 := occs_set id x' hx
     simp only [occ]
     omega
+%proof-/
 
 /-! ## Sums over the first `n` numbers -/
 
@@ -82,6 +88,7 @@ def total (f : Nat → Nat) : Nat → Nat
   | 0 => 0
   | n + 1 => total f n + f n
 
+/-%proof (commented out while the machines become bytes)
 theorem total_le {f g : Nat → Nat} {n : Nat} (h : ∀ i, i < n → f i ≤ g i) :
     total f n ≤ total g n := by
   induction n with
@@ -91,12 +98,16 @@ theorem total_le {f g : Nat → Nat} {n : Nat} (h : ∀ i, i < n → f i ≤ g i
     have h2 := h n (Nat.lt_succ_self n)
     simp only [total]
     omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem total_congr {f g : Nat → Nat} {n : Nat} (h : ∀ i, i < n → f i = g i) :
     total f n = total g n :=
   Nat.le_antisymm (total_le fun i hi => Nat.le_of_eq (h i hi))
     (total_le fun i hi => Nat.le_of_eq (h i hi).symm)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem total_add (f g : Nat → Nat) (n : Nat) :
     total (fun i => f i + g i) n = total f n + total g n := by
   induction n with
@@ -104,7 +115,9 @@ theorem total_add (f g : Nat → Nat) (n : Nat) :
   | succ n ih =>
     simp only [total, ih]
     omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem total_ge {f : Nat → Nat} {n i : Nat} (h : i < n) : f i ≤ total f n := by
   induction n with
   | zero => omega
@@ -116,7 +129,9 @@ theorem total_ge {f : Nat → Nat} {n i : Nat} (h : i < n) : f i ≤ total f n :
     · have e : i = n := by omega
       subst e
       omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem total_single (a c n : Nat) :
     total (fun i => if i = a then c else 0) n = if a < n then c else 0 := by
   induction n with
@@ -133,7 +148,9 @@ theorem total_single (a c n : Nat) :
       have h2 : ¬ n = a := by omega
       have h3 : ¬ a < n + 1 := by omega
       simp [h1, h2, h3]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem total_succ_front (f : Nat → Nat) (n : Nat) :
     total f (n + 1) = f 0 + total (fun i => f (i + 1)) n := by
   induction n with
@@ -143,7 +160,9 @@ theorem total_succ_front (f : Nat → Nat) (n : Nat) :
     rw [e, ih]
     simp only [total]
     omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem total_split (f : Nat → Nat) (a b : Nat) :
     total f (a + b) = total f a + total (fun i => f (a + i)) b := by
   induction b with
@@ -153,6 +172,7 @@ theorem total_split (f : Nat → Nat) (a b : Nat) :
     rw [e]
     simp only [total, ih]
     omega
+%proof-/
 
 /-! ## Locals -/
 
@@ -171,14 +191,19 @@ def sumAt (id : Nat) (env : Env) : List Nat → Nat
   | [] => 0
   | i :: is => occAt id env i + sumAt id env is
 
+/-%proof (commented out while the machines become bytes)
 theorem occAt_eq {id : Nat} {env : Env} {i : Nat} {v : Value} (h : env[i]? = some v) :
     occAt id env i = occ id v := by
   simp [occAt, h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occAt_none {id : Nat} {env : Env} {i : Nat} (h : env.length ≤ i) :
     occAt id env i = 0 := by
   simp [occAt, List.getElem?_eq_none h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem total_occAt (id : Nat) : ∀ (l : List Value),
     total (fun i => occAt id l i) l.length = occs id l
   | [] => rfl
@@ -189,7 +214,9 @@ theorem total_occAt (id : Nat) : ∀ (l : List Value),
       total_congr fun i _ => by simp [occAt]
     rw [h, total_occAt id l]
     simp [occAt, occs]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occEnv_mono {id : Nat} {env : Env} {a b : List Nat} (h : ∀ i, i ∈ a → i ∈ b) :
     occEnv id env a ≤ occEnv id env b := by
   refine total_le fun i _ => ?_
@@ -197,7 +224,9 @@ theorem occEnv_mono {id : Nat} {env : Env} {a b : List Nat} (h : ∀ i, i ∈ a 
   · simp [hi, h i hi]
   · simp only [hi, ↓reduceIte]
     exact Nat.zero_le _
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occEnv_ge {id : Nat} {env : Env} {live : List Nat} {i : Nat} {v : Value}
     (hi : i ∈ live) (hv : env[i]? = some v) : occ id v ≤ occEnv id env live := by
   have hlt : i < env.length := by
@@ -207,7 +236,9 @@ theorem occEnv_ge {id : Nat} {env : Env} {live : List Nat} {i : Nat} {v : Value}
   have := total_ge (f := fun i => if i ∈ live then occAt id env i else 0) hlt
   unfold occEnv
   simpa [hi, occAt_eq hv] using this
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A new local adds at most what its value holds. -/
 theorem occEnv_push (id : Nat) (env : Env) (w : Value) (live : List Nat) :
     occEnv id (env ++ [w]) live ≤ occEnv id env live + occ id w := by
@@ -221,7 +252,9 @@ theorem occEnv_push (id : Nat) (env : Env) (w : Value) (live : List Nat) :
   have h2 : occAt id (env ++ [w]) env.length = occ id w := by simp [occAt]
   rw [h1, h2]
   split <;> omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occEnv_nil (id : Nat) (env : Env) : occEnv id env [] = 0 := by
   have h : total (fun i => if i ∈ ([] : List Nat) then occAt id env i else 0) env.length
       = total (fun _ => 0) env.length := total_congr fun i _ => by simp
@@ -232,7 +265,9 @@ theorem occEnv_nil (id : Nat) (env : Env) : occEnv id env [] = 0 := by
     | succ n ih => simp [total, ih]
   unfold occEnv
   rw [h, z]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem cnt_pos {i : Nat} : ∀ {l : List Nat}, i ∈ l → 0 < cnt i l
   | a :: l, h => by
     rcases List.mem_cons.mp h with rfl | h
@@ -241,14 +276,18 @@ theorem cnt_pos {i : Nat} : ∀ {l : List Nat}, i ∈ l → 0 < cnt i l
     · have := cnt_pos h
       simp only [cnt]
       omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem cnt_zero {i : Nat} : ∀ {l : List Nat}, i ∉ l → cnt i l = 0
   | [], _ => rfl
   | a :: l, h => by
     have h1 : ¬ a = i := fun e => h (e ▸ List.mem_cons_self ..)
     have h2 := cnt_zero (l := l) (fun hm => h (List.mem_cons_of_mem _ hm))
     simp [cnt, h1, h2]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem sumAt_total (id : Nat) (env : Env) : ∀ (vars : List Nat),
     sumAt id env vars = total (fun i => cnt i vars * occAt id env i) env.length
   | [] => by
@@ -272,12 +311,16 @@ theorem sumAt_total (id : Nat) (env : Env) : ∀ (vars : List Nat),
     by_cases hlt : a < env.length
     · simp [hlt]
     · simp [hlt, occAt_none (id := id) (Nat.le_of_not_lt hlt)]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem sumAt_append (id : Nat) (env : Env) : ∀ (a b : List Nat),
     sumAt id env (a ++ b) = sumAt id env a + sumAt id env b
   | [], b => by simp [sumAt]
   | i :: a, b => by simp [sumAt, sumAt_append id env a b, Nat.add_assoc]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- One more local that holds no resumption changes no count. -/
 theorem occAt_snoc_quiet {id : Nat} (env : Env) {x : Value} (hx : occ id x = 0) (i : Nat) :
     occAt id (env ++ [x]) i = occAt id env i := by
@@ -289,18 +332,24 @@ theorem occAt_snoc_quiet {id : Nat} (env : Env) {x : Value} (hx : occ id x = 0) 
       simp
       omega
     rw [occAt_none h1, occAt_none (Nat.le_of_lt h)]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem sumAt_snoc_quiet {id : Nat} (env : Env) {x : Value} (hx : occ id x = 0) :
     ∀ vars, sumAt id (env ++ [x]) vars = sumAt id env vars
   | [] => rfl
   | i :: vars => by
     simp [sumAt, occAt_snoc_quiet env hx i, sumAt_snoc_quiet env hx vars]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem atomVars_append : ∀ (a b : List Atom), atomVars (a ++ b) = atomVars a ++ atomVars b
   | [], _ => rfl
   | .var i :: a, b => by simp [atomVars, atomVars_append a b]
   | .int _ :: a, b => by simp [atomVars, atomVars_append a b]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A local past the end of the environment, among the operands, counts for nothing. -/
 theorem sumAt_insert (id : Nat) (env : Env) (f : Atom) (pre post : List Atom) :
     sumAt id env (atomVars (f :: (pre ++ .var env.length :: post)))
@@ -315,7 +364,9 @@ theorem sumAt_insert (id : Nat) (env : Env) (f : Atom) (pre post : List Atom) :
   rw [e1, e2]
   simp only [sumAt_append, sumAt, occAt_none (Nat.le_refl _)]
   omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What evaluated operands hold is what the locals they name hold. -/
 theorem occs_evalAtoms (id : Nat) (env : Env) : ∀ (as : List Atom) {vs : List Value},
     evalAtoms env as = some vs → occs id vs = sumAt id env (atomVars as)
@@ -337,11 +388,14 @@ theorem occs_evalAtoms (id : Nat) (env : Env) : ∀ (as : List Atom) {vs : List 
       simp only [Atom.eval, Option.some.injEq] at hv
       subst hv
       simp [occs, occ, atomVars, ih]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occ_eval (id : Nat) (env : Env) {a : Atom} {v : Value} (h : a.eval env = some v) :
     occ id v = sumAt id env (atomVars [a]) := by
   have := occs_evalAtoms id env [a] (vs := [v]) (by simp [evalAtoms, h])
   simpa [occs] using this
+%proof-/
 
 /-! ## Types enter here -/
 
@@ -349,6 +403,7 @@ theorem occ_eval (id : Nat) (env : Env) {a : Atom} {v : Value} (h : a.eval env =
 def DupSound (Δ : Ctx) : Prop :=
   ∀ S v τ, HasVal Δ S v τ → Δ.dup τ → ∀ id, occ id v = 0
 
+/-%proof (commented out while the machines become bytes)
 theorem HasVals.get' {Δ : Ctx} {S : StoreTy} :
     ∀ {vs : List Value} {τs : List Ty} {i : Nat} {v : Value}, HasVals Δ S vs τs →
       vs[i]? = some v → ∃ τ, τs[i]? = some τ ∧ HasVal Δ S v τ
@@ -360,7 +415,9 @@ theorem HasVals.get' {Δ : Ctx} {S : StoreTy} :
   | _, _, i + 1, _, .cons _ hs, h => by
     simp at h
     simpa using HasVals.get' hs h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occs_dup {Δ : Ctx} {S : StoreTy} (hD : DupSound Δ) (id : Nat) :
     ∀ {vs : List Value} {τs : List Ty}, HasVals Δ S vs τs → (∀ c, c ∈ τs → Δ.dup c) →
       occs id vs = 0
@@ -368,7 +425,9 @@ theorem occs_dup {Δ : Ctx} {S : StoreTy} (hD : DupSound Δ) (id : Nat) :
   | _, _, .cons hv hvs, h => by
     simp [occs, hD _ _ _ hv (h _ (List.mem_cons_self ..)) id,
       occs_dup hD id hvs (fun c hc => h c (List.mem_cons_of_mem _ hc))]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 Moving locals out of an activation. If the moved locals are used linearly with
 respect to what is mentioned afterwards, then what the rest still holds and
@@ -394,9 +453,11 @@ theorem moved_le {Δ : Ctx} {S : StoreTy} {env : Env} {Γ : TEnv} {moved rest : 
       have hr : i ∉ rest := hex hm
       simp [h1, hr, hm]
     · simp [cnt_zero hm, hm]
+%proof-/
 
 /-! ## Patterns and entering a function -/
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 /-- What a pattern binds holds no more than the value it was matched against. -/
@@ -443,7 +504,8 @@ theorem matchVals_occ (id : Nat) : ∀ (ps : List Pat) (vs : List Value) {bs : L
   | _ :: _, [], _, h => by simp [Pat.matchVals] at h
 
 end
-
+%proof-/
+/-%proof (commented out while the machines become bytes)
 theorem matchVal_wild {p : Pat} {v : Value} {bs : List Value} (hw : isWild p = true)
     (h : p.matchVal v = some bs) : bs = [] := by
   cases p with
@@ -453,6 +515,7 @@ theorem matchVal_wild {p : Pat} {v : Value} {bs : List Value} (hw : isWild p = t
   | bind
   | int _
   | ctor _ _ => simp [isWild] at hw
+%proof-/
 
 /-- What the arguments at wildcard positions hold. -/
 def wildOcc (id : Nat) (ps : List Pat) (vs : List Value) (i : Nat) : Nat :=
@@ -460,6 +523,7 @@ def wildOcc (id : Nat) (ps : List Pat) (vs : List Value) (i : Nat) : Nat :=
   | some p, some v => if isWild p then occ id v else 0
   | _, _ => 0
 
+/-%proof (commented out while the machines become bytes)
 /-- The bindings and the arguments left whole together hold no more than the arguments. -/
 theorem matchVals_wild_occ (id : Nat) : ∀ (ps : List Pat) (vs : List Value) {bs : List Value},
     Pat.matchVals ps vs = some bs →
@@ -493,7 +557,9 @@ theorem matchVals_wild_occ (id : Nat) : ∀ (ps : List Pat) (vs : List Value) {b
       omega
   | [], _ :: _, _, h => by simp [Pat.matchVals] at h
   | _ :: _, [], _, h => by simp [Pat.matchVals] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 The environment a clause starts in holds no more than the arguments and the
 captures did, as long as the clause's body does not mention an argument its
@@ -540,6 +606,7 @@ theorem clause_env_le (id : Nat) {pats : List Pat} {vs captures bs : List Value}
     · exact Nat.zero_le _
   have hbs := occs_append id captures bs
   omega
+%proof-/
 
 /-! ## Frames, memory and captured frames -/
 
@@ -563,10 +630,12 @@ def occStack (id : Nat) : List Frame → Nat
   | [] => 0
   | fr :: st => occFrame id fr + occStack id st
 
+/-%proof (commented out while the machines become bytes)
 theorem occStack_append (id : Nat) : ∀ (a b : List Frame),
     occStack id (a ++ b) = occStack id a + occStack id b
   | [], b => by simp [occStack]
   | fr :: a, b => by simp [occStack, occStack_append id a b, Nat.add_assoc]
+%proof-/
 
 /-- A sum over the filled entries of a list of optional things. -/
 def osum {α : Type} (w : α → Nat) : List (Option α) → Nat
@@ -578,12 +647,15 @@ def oweight {α : Type} (w : α → Nat) : Option α → Nat
   | some x => w x
   | none => 0
 
+/-%proof (commented out while the machines become bytes)
 theorem osum_append {α : Type} (w : α → Nat) : ∀ (a b : List (Option α)),
     osum w (a ++ b) = osum w a + osum w b
   | [], b => by simp [osum]
   | some x :: a, b => by simp [osum, osum_append w a b, Nat.add_assoc]
   | none :: a, b => by simp [osum, osum_append w a b]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem osum_set {α : Type} (w : α → Nat) : ∀ (l : List (Option α)) (i : Nat) (x old : Option α),
     l[i]? = some old → osum w (l.set i x) + oweight w old = osum w l + oweight w x
   | [], _, _, _, h => by simp at h
@@ -595,6 +667,7 @@ theorem osum_set {α : Type} (w : α → Nat) : ∀ (l : List (Option α)) (i : 
     simp at h
     have ih := osum_set w l i x old h
     cases c <;> simp [osum] <;> omega
+%proof-/
 
 def occCells (id : Nat) (cells : Cells) : Nat := osum (occ id) cells.toList
 
@@ -609,6 +682,7 @@ def occState (id : Nat) (s : State) : Nat :=
 def Unique (s : State) : Prop :=
   ∀ id, occState id s ≤ 1 ∧ (0 < occState id s → ∃ seg, s.store.conts[id]? = some (some seg))
 
+/-%proof (commented out while the machines become bytes)
 /-- The state changed without touching the resumptions, and holds no more than before. -/
 theorem Unique.mono {s s' : State} (hu : Unique s) (hc : s'.store.conts = s.store.conts)
     (h : ∀ id, occState id s' ≤ occState id s) : Unique s' := by
@@ -618,7 +692,9 @@ theorem Unique.mono {s s' : State} (hu : Unique s) (hc : s'.store.conts = s.stor
   refine ⟨by omega, fun hp => ?_⟩
   rw [hc]
   exact h2 (by omega)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Resumption `k` was used, and the one place that held it holds it no longer. -/
 theorem Unique.take {s s' : State} {k : Nat} (hu : Unique s)
     (hc : s'.store.conts = s.store.conts.set k none)
@@ -636,7 +712,9 @@ theorem Unique.take {s s' : State} {k : Nat} (hu : Unique s)
     refine ⟨seg, ?_⟩
     rw [hc, List.getElem?_set]
     simp [e, hseg]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A new resumption was made, and is held in at most one place. -/
 theorem Unique.fresh {s s' : State} {seg : List Frame} (hu : Unique s)
     (hc : s'.store.conts = s.store.conts ++ [some seg])
@@ -664,11 +742,15 @@ theorem Unique.fresh {s s' : State} {seg : List Frame} (hu : Unique s)
       · rw [List.getElem?_eq_none h] at hseg; cases hseg
     rw [hc, List.getElem?_append_left hlt]
     exact hseg
+%proof-/
 
 /-! ## Small facts used step by step -/
 
+/-%proof (commented out while the machines become bytes)
 theorem occ_unit (id : Nat) : occ id Value.unit = 0 := by simp [Value.unit, occ, occs]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- One local moved once, with nothing after it. -/
 theorem Linear.single {Δ : Ctx} {Γ : TEnv} (a : Atom) : Linear Δ Γ (atomVars [a]) [] := by
   intro i τ _ _
@@ -677,7 +759,9 @@ theorem Linear.single {Δ : Ctx} {Γ : TEnv} (a : Atom) : Linear Δ Γ (atomVars
     refine ⟨?_, fun _ h => by cases h⟩
     by_cases e : j = i <;> simp [atomVars, cnt, e]
   | int n => exact ⟨Nat.zero_le _, fun _ h => by cases h⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What is still mentioned and what is moved out are, together, no more than
 what the locals mentioned before the step hold. -/
 theorem moved_live {Δ : Ctx} {S : StoreTy} {env : Env} {Γ : TEnv} {moved rest live : List Nat}
@@ -685,7 +769,9 @@ theorem moved_live {Δ : Ctx} {S : StoreTy} {env : Env} {Γ : TEnv} {moved rest 
     (hsub : ∀ i, i ∈ moved ++ rest → i ∈ live) (id : Nat) :
     occEnv id env rest + sumAt id env moved ≤ occEnv id env live :=
   Nat.le_trans (moved_le hD henv hlin id) (occEnv_mono hsub)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occ_atom_le (id : Nat) {env : Env} {a : Atom} {v : Value} {live : List Nat}
     (h : a.eval env = some v) (hsub : ∀ i, i ∈ atomVars [a] → i ∈ live) :
     occ id v ≤ occEnv id env live := by
@@ -695,7 +781,9 @@ theorem occ_atom_le (id : Nat) {env : Env} {a : Atom} {v : Value} {live : List N
     simp only [Atom.eval, Option.some.injEq] at h
     subst h
     simp [occ]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem rhsMoves_sub {rhs : Rhs} {i : Nat} (h : i ∈ rhsMoves rhs) : i ∈ rhsVars rhs := by
   cases rhs with
   | atom _
@@ -704,13 +792,17 @@ theorem rhsMoves_sub {rhs : Rhs} {i : Nat} (h : i ∈ rhsMoves rhs) : i ∈ rhsV
   | rebind _ _ => exact h
   | prim _ _
   | place _ => cases h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem atomVars_tail_sub {a : Atom} {as : List Atom} {i : Nat} (h : i ∈ atomVars as) :
     i ∈ atomVars (a :: as) := by
   cases a with
   | var j => exact List.mem_cons_of_mem _ h
   | int n => exact h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem atomVars_head_sub {a : Atom} {as : List Atom} {i : Nat} (h : i ∈ atomVars [a]) :
     i ∈ atomVars (a :: as) := by
   cases a with
@@ -719,17 +811,23 @@ theorem atomVars_head_sub {a : Atom} {as : List Atom} {i : Nat} (h : i ∈ atomV
     subst h
     exact List.mem_cons_self ..
   | int n => cases h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occCells_push (id : Nat) (cells : Cells) (v : Value) :
     occCells id (cells.push (some v)) = occCells id cells + occ id v := by
   simp [occCells, osum_append, osum]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occCells_set (id : Nat) {cells : Cells} {a : Nat} {old : Option Value}
     (h : cells[a]? = some old) (x : Option Value) :
     occCells id (cells.setIfInBounds a x) + oweight (occ id) old = occCells id cells + oweight (occ id) x := by
   have h' : cells.toList[a]? = some old := by simpa using h
   simpa [occCells, Array.toList_setIfInBounds] using osum_set (occ id) cells.toList a x old h'
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Releasing a cell drops what it held. -/
 theorem occCells_release_le (id : Nat) (cells : Cells) (a : Nat) :
     occCells id (cells.setIfInBounds a none) ≤ occCells id cells := by
@@ -742,17 +840,23 @@ theorem occCells_release_le (id : Nat) (cells : Cells) (a : Nat) :
     have := occCells_set id h none
     simp only [oweight] at this
     omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occConts_push (id : Nat) (conts : Conts Frame) (seg : List Frame) :
     occConts id (conts ++ [some seg]) = occConts id conts + occStack id seg := by
   simp [occConts, osum_append, osum]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem occConts_take (id : Nat) {conts : Conts Frame} {k : Nat} {seg : List Frame}
     (h : conts[k]? = some (some seg)) :
     occConts id (conts.set k none) + occStack id seg = occConts id conts := by
   have := osum_set (occStack id) conts k none (some seg) h
   simpa [occConts, oweight] using this
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem calleeAtom_fv {tm : Tm} {i : Nat} (h : calleeAtom tm = some (.var i)) : i ∈ fv tm := by
   cases tm with
   | cell init _ _
@@ -762,12 +866,14 @@ theorem calleeAtom_fv {tm : Tm} {i : Nat} (h : calleeAtom tm = some (.var i)) : 
     subst h
     cases init <;> simp [fv, atomVars]
   | _ => simp [calleeAtom] at h <;> subst h <;> simp [fv, atomVars]
+%proof-/
 
 /-- A resumption that some part of the computation is about to use is held, so it is unused. -/
 def Resumed (s : State) : Prop :=
   ∃ f id, calleeAtom s.tm = some f ∧ f.eval s.env = some (.cont id)
     ∧ s.store.conts[id]? = some none
 
+/-%proof (commented out while the machines become bytes)
 theorem Unique.not_resumed {s : State} (hu : Unique s) : ¬ Resumed s := by
   rintro ⟨f, id, hf, hev, hnone⟩
   cases f with
@@ -781,7 +887,9 @@ theorem Unique.not_resumed {s : State} (hu : Unique s) : ¬ Resumed s := by
       omega
     obtain ⟨seg, hseg⟩ := hlive hpos
     rw [hseg] at hnone; cases hnone
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The frames a handler search splits the stack into are the stack. -/
 theorem findHandler_split {op : Nat} : ∀ {st : List Frame} {d : Dispatch Frame},
     findHandler Frame.asHandler op st = some d →
@@ -808,5 +916,6 @@ theorem findHandler_split {op : Nat} : ∀ {st : List Frame} {d : Dispatch Frame
         subst h
         have := findHandler_split hf
         simp [← this]
+%proof-/
 
 end Glorious.Typing

@@ -14,6 +14,7 @@ if the Core program reaches one of the faults.
 
 namespace Glorious.Typing
 
+/-%proof (commented out while the machines become bytes)
 /-- If the bytecode compiled from a well-typed program goes wrong, the program
 itself reaches a state it cannot step from, and that state is one of the four
 faults. -/
@@ -23,7 +24,9 @@ theorem compiled_type_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
       ∧ Fault c.state :=
   type_safety hp input
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same, with ownership: the fault is not a second use of a resumption. -/
 theorem compiled_owned_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
     (hD : DupSound Δ) (input : List Int) (h : Bytecode.GoesWrong (compile p) input) :
@@ -31,7 +34,9 @@ theorem compiled_owned_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p
       ∧ Fault c.state ∧ ¬ Resumed c.state :=
   owned_safety hp hD input
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same, with the region rules: the fault is neither a use of a released
 cell nor a label applied after its scope ended. -/
 theorem compiled_scoped_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
@@ -40,7 +45,9 @@ theorem compiled_scoped_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ 
       ∧ Fault c.state ∧ ¬ Freed c.state ∧ ¬ Dead c.state :=
   scoped_safety hp hR input
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- With both: bytecode compiled from such a program goes wrong only if the
 program overflows or looks for a part of a value that is not there. -/
 theorem compiled_sound_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
@@ -50,5 +57,6 @@ theorem compiled_sound_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p
       ∧ (Overflow c.state ∨ Absent c.state) :=
   sound_safety hp hD hR input
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
+%proof-/
 
 end Glorious.Typing

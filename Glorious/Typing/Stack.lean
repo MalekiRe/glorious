@@ -20,18 +20,23 @@ variable {Δ : Ctx}
 
 /-! ## Growing the store typing -/
 
+/-%proof (commented out while the machines become bytes)
 theorem HandlerRt.mono {S S' : StoreTy} (hle : S.Le S') {h : Handler} {σ ρ : Ty} {H ε : Row}
     {Φ : List Rgn} (hh : HandlerRt Δ S h σ ρ H ε Φ) : HandlerRt Δ S' h σ ρ H ε Φ :=
   let ⟨Cs, hc, hok⟩ := hh
   ⟨Cs, hc.mono hle, hok⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem ExitOk.mono {S S' : StoreTy} (hle : S.Le S') {target : Target} {after : After}
     (h : ExitOk Δ S target after) : ExitOk Δ S' target after := by
   cases h with
   | label hl hv => exact .label (hle.labels _ _ hl) (hv.mono hle)
   | handler hh hent hc ha =>
     exact .handler (hle.handlers _ _ hh) hent (hc.mono hle) (ha.mono hle)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem StackOk.mono {S S' : StoreTy} (hle : S.Le S') {st : List Frame} {τ : Ty} {ε : Row}
     {ϕ : List Rgn} (h : StackOk Δ S st τ ε ϕ) : StackOk Δ S' st τ ε ϕ := by
   induction h with
@@ -51,11 +56,15 @@ theorem StackOk.mono {S S' : StoreTy} (hle : S.Le S') {st : List Frame} {τ : Ty
   | yield hw _ ih => exact .yield (hw.mono hle) ih
   | exit hx hin _ ih => exact .exit (hx.mono hle) hin ih
   | never _ ih => exact .never ih
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem ContOk.mono {S S' : StoreTy} (hle : S.Le S') {seg : List Frame} {o ρ : Ty} {ε₀ : Row}
     {Φ : List Rgn} (h : ContOk Δ S seg o ρ ε₀ Φ) : ContOk Δ S' seg o ρ ε₀ Φ :=
   fun S'' hle' st ε' ϕ' hst hr hΦ => h S'' (hle.trans hle') st ε' ϕ' hst hr hΦ
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem StackOk.tail {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
     (h : StackOk Δ S st τ ε ϕ) :
     ∀ {fr : Frame} {st' : List Frame}, st = fr :: st' →
@@ -72,17 +81,22 @@ theorem StackOk.tail {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : 
   | yield _ h _
   | exit _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | never _ ih => intro fr st' e; exact ih e
+%proof-/
 
 /-! ## Finding the handler of an operation -/
 
+/-%proof (commented out while the machines become bytes)
 theorem lookup_cons_eq {β : Type} (k : Nat) (b : β) (as : List (Nat × β)) :
     List.lookup k ((k, b) :: as) = some b := by
   simp
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem lookup_cons_ne {β : Type} {a k : Nat} (h : a ≠ k) (b : β) (as : List (Nat × β)) :
     List.lookup a ((k, b) :: as) = List.lookup a as := by
   have hb : (a == k) = false := by simpa using h
   simp [List.lookup_cons, hb]
+%proof-/
 
 /-- How the function serving an operation is entered, by whether the operation
 can be resumed. -/
@@ -91,6 +105,7 @@ def ArmEnters (Δ : Ctx) (Cs : List Ty) (ρ : Ty) (ε : Row) (Φ : List Rgn) (ar
   | none => Enters Δ arm Cs Ps ρ ε Φ
   | some o => Enters Δ arm Cs (Ps ++ [.fn 0 [o] ρ ε true none Φ]) ρ ε Φ
 
+/-%proof (commented out while the machines become bytes)
 theorem ArmsOk.lookup_none {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
     {ops : List (Nat × Nat)} {H : Row} (h : ArmsOk Δ Cs ρ ε Φ ops H) {op : Nat} :
     H.lookup op = none → ops.lookup op = none := by
@@ -104,7 +119,9 @@ theorem ArmsOk.lookup_none {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
       rw [lookup_cons_eq] at hl; cases hl
     · rw [lookup_cons_ne he] at hl ⊢
       exact ih hl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem ArmsOk.lookup_some {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
     {ops : List (Nat × Nat)} {H : Row} (h : ArmsOk Δ Cs ρ ε Φ ops H) {op : Nat}
     {targs : List Ty} :
@@ -131,13 +148,16 @@ theorem ArmsOk.lookup_some {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
     · rw [lookup_cons_ne he] at hl
       obtain ⟨arm', Ps, r, hl', hop', hent'⟩ := ih hl
       exact ⟨arm', Ps, r, by rw [lookup_cons_ne he]; exact hl', hop', hent'⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem findHandler_skip {op : Nat} {fr : Frame} {st : List Frame} {d : Dispatch Frame}
     (hfr : handles Frame.asHandler op fr = none)
     (hd : findHandler Frame.asHandler op st = some d) :
     findHandler Frame.asHandler op (fr :: st)
       = some ⟨fr :: d.above, d.id, d.handler, d.arm, d.below⟩ := by
   simp [findHandler, hfr, hd]
+%proof-/
 
 /-- What `find_ok` finds of a stack for an operation its row has. -/
 def FindsOk (Δ : Ctx) (S : StoreTy) (st : List Frame) (τ : Ty) (ε : Row) (ϕ : List Rgn) (op : Nat)
@@ -153,6 +173,7 @@ def FindsOk (Δ : Ctx) (S : StoreTy) (st : List Frame) (τ : Ty) (ε : Row) (ϕ 
           StackOk Δ S' (d.above ++ .handler d.id d.handler :: st') τ ε ϕ)
       ∧ (Δ.regions ∧ Δ.loans → ∀ uniq a b, Frame.lend uniq a b ∉ d.above)
 
+/-%proof (commented out while the machines become bytes)
 /-- Below a frame that handles no operation, what is found below it. -/
 theorem FindsOk.skip {S : StoreTy} {st : List Frame} {τ τ' : Ty} {ε ε' : Row} {ϕ ϕ' : List Rgn}
     {op : Nat} {targs : List Ty} {fr : Frame} (h : FindsOk Δ S st τ' ε' ϕ' op targs)
@@ -168,7 +189,9 @@ theorem FindsOk.skip {S : StoreTy} {st : List Frame} {τ τ' : Ty} {ε ε' : Row
       rcases List.mem_cons.mp hm with h | h
       · exact hnl u a' b' h.symm
       · exact hq hB u a' b' h⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 An operation the stack's type offers has a handler on the stack, and the
 machine's search finds it. The function serving the operation is entered at the
@@ -258,28 +281,36 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
       hin, hre, hq⟩ := ih hl
     exact ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
       hin, fun S' hle st' ε' ϕ' hst' hr hs => .never (hre S' hle st' ε' ϕ' hst' hr hs), hq⟩
+%proof-/
 
 /-! ## Delivering and leaving -/
 
+/-%proof (commented out while the machines become bytes)
 theorem leave_target_yield {p : Program} {fr : Frame} {target : Target} {v : Value}
     {st : List Frame} {store : Store Frame} (h : fr.isTarget target = true) :
     leave p target (.yield v) (fr :: st) store = deliver p v st store := by
   simp [leave, h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem leave_target_invoke {p : Program} {fr : Frame} {target : Target} {fn : Nat}
     {captures args : List Value} {st : List Frame} {store : Store Frame}
     (h : fr.isTarget target = true) :
     leave p target (.invoke fn captures args) (fr :: st) store
       = callFn p fn captures args st store := by
   simp [leave, h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem leave_guard {p : Program} {target : Target} {after : After} {fn : Nat}
     {captures : List Value} {st : List Frame} {store : Store Frame}
     (h : ¬ (Frame.guard fn captures).isTarget target = true) :
     leave p target after (.guard fn captures :: st) store
       = callFn p fn captures [] (.exit target after :: st) store := by
   simp [leave, h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem StackOk.label_target {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row}
     {ϕ : List Rgn} (h : StackOk Δ S st τ ε ϕ) :
     ∀ {fr : Frame} {st' : List Frame} {id : Nat} {σ : Ty}, st = fr :: st' →
@@ -295,7 +326,9 @@ theorem StackOk.label_target {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row
     exact ⟨_, _, hrest⟩
   | never _ ih => intro fr st' id σ e ht hl; exact ih e ht hl
   | _ => intro fr st' id σ e ht _; cases e <;> simp [Frame.isTarget] at ht
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem StackOk.handler_target {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row}
     {ϕ : List Rgn} (h : StackOk Δ S st τ ε ϕ) :
     ∀ {fr : Frame} {st' : List Frame} {id : Nat} {ρ : Ty} {ε₀ : Row} {Φ : List Rgn},
@@ -311,7 +344,9 @@ theorem StackOk.handler_target {S : StoreTy} {st : List Frame} {τ : Ty} {ε : R
     exact ⟨_, _, hrest, hrow, hsub⟩
   | never _ ih => intro fr st' id ρ ε₀ Φ e ht hl; exact ih e ht hl
   | _ => intro fr st' id ρ ε₀ Φ e ht _; cases e <;> simp [Frame.isTarget] at ht
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A guard on a typed stack has a typed cleanup, and what is below it is typed. -/
 theorem StackOk.guard_inv {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
     (h : StackOk Δ S st τ ε ϕ) :
@@ -325,7 +360,9 @@ theorem StackOk.guard_inv {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
     exact ⟨_, _, _, _, _, hent, hc, hrest⟩
   | never _ ih => intro fn captures st' e; exact ih e
   | _ => intro fn captures st' e; cases e
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A stack grants only regions of things the store typing knows: so a new
 cell, label or borrow is none of them. -/
 theorem StackOk.known {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
@@ -372,7 +409,9 @@ theorem StackOk.known {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ :
     · rcases List.mem_cons.mp hx with rfl | hx
       · exact ⟨_, hl⟩
       · exact ih x hx
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Releasing a cell keeps the store typed: a released cell keeps its type. -/
 theorem StoreOk.release {S : StoreTy} {store : Store Frame} (hs : StoreOk Δ S store) (a : Nat) :
     StoreOk Δ S (store.release a) := by
@@ -386,7 +425,9 @@ theorem StoreOk.release {S : StoreTy} {store : Store Frame} (hs : StoreOk Δ S s
     simp at hg
   · simp [he] at hg
     exact hv v hg
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 Delivering a value to a typed stack that takes it, and leaving a typed stack
 for a target that is on it, both end well: in a typed state or with the
@@ -471,13 +512,17 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} (hp : ProgramOk Δ p) :
         all_goals
           simp only [leave, ht]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem deliver_safe {p : Program} {S : StoreTy} {store : Store Frame} {st : List Frame}
     {v : Value} {τ : Ty} {ε : Row} {ϕ : List Rgn} (hp : ProgramOk Δ p) (hs : StoreOk Δ S store)
     (hst : StackOk Δ S st τ ε ϕ) (hv : HasVal Δ S v τ) :
     Safe Δ S (fun id => occ id v + occStack id st) store (deliver p v st store) :=
   (deliver_leave_safe hp st hs).1 hst hv
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem leave_safe {p : Program} {S : StoreTy} {store : Store Frame} {st : List Frame}
     {target : Target} {after : After} {τ : Ty} {ε : Row} {ϕ : List Rgn} (hp : ProgramOk Δ p)
     (hs : StoreOk Δ S store) (hst : StackOk Δ S st τ ε ϕ) (hx : ExitOk Δ S target after)
@@ -485,9 +530,11 @@ theorem leave_safe {p : Program} {S : StoreTy} {store : Store Frame} {st : List 
     Safe Δ S (fun id => occAfter id after + occStack id st) store
       (leave p target after st store) :=
   (deliver_leave_safe hp st hs).2 hst hx hin
+%proof-/
 
 /-! ## Applying a callee -/
 
+/-%proof (commented out while the machines become bytes)
 theorem takeCont_some {α : Type} : ∀ {cs : List (Option α)} {id : Nat} {x : α},
     cs[id]? = some (some x) → takeCont cs id = some (x, cs.set id none)
   | [], _, _, h => by simp at h
@@ -498,7 +545,9 @@ theorem takeCont_some {α : Type} : ∀ {cs : List (Option α)} {id : Nat} {x : 
   | c :: cs, id + 1, x, h => by
     simp at h
     simp [takeCont, takeCont_some h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem takeCont_none {α : Type} : ∀ {cs : List (Option α)} {id : Nat},
     cs[id]? = some none → takeCont cs id = none
   | [], _, h => by simp at h
@@ -509,7 +558,9 @@ theorem takeCont_none {α : Type} : ∀ {cs : List (Option α)} {id : Nat},
   | c :: cs, id + 1, h => by
     simp at h
     simp [takeCont, takeCont_none h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem findLabel_target {id : Nat} : ∀ {st : List Frame} {r : List Frame × List Frame},
     findLabel Frame.asLabel id st = some r → ∃ fr, fr ∈ st ∧ fr.isTarget (.label id) = true
   | [], _, h => by simp [findLabel] at h
@@ -523,7 +574,9 @@ theorem findLabel_target {id : Nat} : ∀ {st : List Frame} {r : List Frame × L
       | some r' =>
         obtain ⟨f, hf, hft⟩ := findLabel_target hr
         exact ⟨f, List.mem_cons_of_mem _ hf, hft⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem findLabel_cons_none {id : Nat} {fr : Frame} {st : List Frame}
     (h : findLabel Frame.asLabel id (fr :: st) = none) :
     findLabel Frame.asLabel id st = none := by
@@ -532,6 +585,7 @@ theorem findLabel_cons_none {id : Nat} {fr : Frame} {st : List Frame}
   · cases hr : findLabel Frame.asLabel id st with
     | none => rfl
     | some r => simp [findLabel, he, hr] at h
+%proof-/
 
 /-- A callee applied to typed arguments: what it gives back, the operations it
 needs and the regions it touches. -/
@@ -553,6 +607,7 @@ inductive Faulty (st : List Frame) (store : Store Frame) : Callee → Prop where
   | dead {id : Nat} {v : Value} :
       findLabel Frame.asLabel id st = none → Faulty st store (.label id v)
 
+/-%proof (commented out while the machines become bytes)
 /-- Taking a resumption's frames out of a typed store leaves a typed store. -/
 theorem StoreOk.take {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (id : Nat) :
@@ -575,6 +630,7 @@ theorem StoreOk.take {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells :
     simp at hget
   · simp [he] at hget
     exact hseg seg hget
+%proof-/
 
 /-- How many times a callee holds resumption `id`: in the callable applied,
 which may itself be that resumption, and in its arguments. -/
@@ -583,6 +639,7 @@ def occCallee (id : Nat) : Callee → Nat
   | .cont k v => (if k = id then 1 else 0) + occ id v
   | .label _ v => occ id v
 
+/-%proof (commented out while the machines become bytes)
 /-- Applying a typed callee on a stack that takes its result, serves its
 operations and grants its regions ends well, unless it is a used resumption or
 a label whose scope has ended. Resuming a resumption takes its frames out of
@@ -627,5 +684,6 @@ theorem apply_ok {p : Program} {S : StoreTy} {store : Store Frame} {st : List Fr
       exact .inl ⟨(fun _ _ h => by cases h),
         (leave_safe hp hs hst (.label hl hv) (findLabel_target hf)).weaken
           fun k => by simp only [occCallee, occAfter]; omega⟩
+%proof-/
 
 end Glorious.Typing

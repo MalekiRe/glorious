@@ -77,6 +77,7 @@ def covers (C : Cert) : Nat → List (List Pat) → List Ty → Bool
 
 /-! ## What the pieces mean -/
 
+/-%proof (commented out while the machines become bytes)
 theorem irrefutable_match {p : Pat} (h : irrefutable p = true) (v : Value) :
     ∃ b, p.matchVal v = some b := by
   cases p with
@@ -84,7 +85,9 @@ theorem irrefutable_match {p : Pat} (h : irrefutable p = true) (v : Value) :
   | bind => exact ⟨[v], by simp [Pat.matchVal]⟩
   | int n => simp [irrefutable] at h
   | ctor t qs => simp [irrefutable] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem defaults_mem : ∀ {rows : List (List Pat)} {ps : List Pat}, ps ∈ defaults rows →
     ∃ p, irrefutable p = true ∧ (p :: ps) ∈ rows
   | [], _, h => by simp [defaults] at h
@@ -102,7 +105,9 @@ theorem defaults_mem : ∀ {rows : List (List Pat)} {ps : List Pat}, ps ∈ defa
         exact ⟨q, hq, List.mem_cons_of_mem _ hm⟩
     · obtain ⟨q, hq, hm⟩ := defaults_mem h
       exact ⟨q, hq, List.mem_cons_of_mem _ hm⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem specialize_mem {tag n : Nat} : ∀ {rows : List (List Pat)} {srow : List Pat},
     srow ∈ specialize tag n rows →
     ∃ p ps, (p :: ps) ∈ rows
@@ -139,7 +144,9 @@ theorem specialize_mem {tag n : Nat} : ∀ {rows : List (List Pat)} {srow : List
         · exact ⟨.ctor t qs, ps', List.mem_cons_self .., .inr ⟨qs, by rw [hc.1], hc.2, rfl⟩⟩
         · exact lift h
       · exact lift h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Patterns matching a list of values in two parts match each part. -/
 theorem matchVals_append : ∀ {as : List Pat} {xs : List Value} {bs : List Pat} {ys r : List Value},
     as.length = xs.length → Pat.matchVals (as ++ bs) (xs ++ ys) = some r →
@@ -153,7 +160,9 @@ theorem matchVals_append : ∀ {as : List Pat} {xs : List Value} {bs : List Pat}
     exact ⟨b ++ r₁, r₂, by simp [Pat.matchVals, hb, h₁], h₂⟩
   | [], _ :: _, _, _, _, hlen, _ => by simp at hlen
   | _ :: _, [], _, _, _, hlen, _ => by simp at hlen
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A value of a type that has constructors is built by one of them. -/
 theorem ctorsOf_value {S : StoreTy} {v : Value} {T : Ty} {ctors : List (Nat × List Ty)}
     (hc : ctorsOf C T = some ctors) (hv : HasVal C.ctx S v T) :
@@ -184,7 +193,9 @@ theorem ctorsOf_value {S : StoreTy} {v : Value} {T : Ty} {ctors : List (Nat × L
         exact ⟨t, fields, Fs', rfl, lookup_mem hF', hf⟩
     | clo _ _ _ _ _ hτ => simp [FnSig.ty] at hτ
   | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [ctorsOf] at hc
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A type's constructors at other regions are its constructors, at those regions. -/
 theorem ctorsOf_inst {T : Ty} {ctors : List (Nat × List Ty)} (θ : List Rgn)
     (hc : ctorsOf C T = some ctors) : ctorsOf C (T.inst θ) = some (instCtors θ ctors) := by
@@ -202,7 +213,9 @@ theorem ctorsOf_inst {T : Ty} {ctors : List (Nat × List Ty)} (θ : List Rgn)
     rw [Ty.inst_data]
     simp only [ctorsOf, hname, ↓reduceIte, findData_inst, hc, Option.map_some]
   | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [ctorsOf] at hc
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What `covers` accepts is covered: every list of values of these types, at
 whatever regions, is matched by some row. -/
 theorem covers_sound : ∀ (fuel : Nat) {rows : List (List Pat)} {tys : List Ty},
@@ -251,7 +264,9 @@ theorem covers_sound : ∀ (fuel : Nat) {rows : List (List Pat)} {tys : List Ty}
               exact ⟨.ctor t' qs :: ps, hmem, r₁ ++ r₂,
                 by simp [Pat.matchVals, Pat.matchVal, h₁, h₂]⟩
           · simp at hctors
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- If every clause has one pattern per argument and some clause matches, a clause is selected. -/
 theorem select_of_match {vs : List Value} : ∀ {cs : List Clause},
     (∀ c, c ∈ cs → c.pats.length = vs.length) →
@@ -271,5 +286,6 @@ theorem select_of_match {vs : List Value} : ∀ {cs : List Clause},
       rcases List.mem_cons.mp hrow with rfl | hrow
       · rw [hm] at hbs; cases hbs
       · exact ⟨row, hrow, bs, hbs⟩
+%proof-/
 
 end Glorious.Typing

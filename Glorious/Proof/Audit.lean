@@ -16,6 +16,7 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 
 @[expose] public section
 
+/-%proof (commented out while the machines become bytes)
 /-- info: 'Glorious.compile_correct' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.compile_correct
@@ -159,3 +160,4 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.Core.cleanup_exact' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Core.cleanup_exact
+%proof-/

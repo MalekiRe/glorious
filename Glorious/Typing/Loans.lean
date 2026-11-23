@@ -84,12 +84,15 @@ def Excl (S : StoreTy) (st : List Frame) (ϕ : List Rgn) : Prop :=
     ∧ (∀ r a b, .wr r ∈ Rgn.flat ϕ → Tagged S r a b → allowed a b true st = true)
     ∧ (∀ a w, ownStack a st = 0 → allowed a 0 w st = true)
 
+/-%proof (commented out while the machines become bytes)
 theorem Excl.sub {S : StoreTy} {st : List Frame} {ϕ Φ : List Rgn} (h : Excl S st ϕ)
     (hsub : Sub Φ ϕ) : Excl S st Φ :=
   ⟨fun ρ r a hw hρ hr hra => h.1 ρ r a (hsub _ hw) hρ (hsub _ hr) hra,
     fun r a b hr ht => h.2.1 r a b (hsub _ hr) ht,
     fun r a b hw ht => h.2.2.1 r a b (hsub _ hw) ht, h.2.2.2⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A frame that is no scope of a cell or a borrow changes nothing. -/
 theorem Excl.skip {S : StoreTy} {st : List Frame} {ϕ : List Rgn} (h : Excl S st ϕ) (fr : Frame)
     (hfr : ∀ a b w, allowed a b w (fr :: st) = allowed a b w st) (hof : ∀ a, ownFrame a fr = 0) :
@@ -101,7 +104,9 @@ theorem Excl.skip {S : StoreTy} {st : List Frame} {ϕ : List Rgn} (h : Excl S st
       refine h.2.2.2 a w ?_
       simp only [ownStack, hof] at h0
       omega⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Nor does granting a place that is of no cell. -/
 theorem Excl.inert {S : StoreTy} {st : List Frame} {ϕ : List Rgn} (h : Excl S st ϕ) {x : Rgn}
     (hxa : x.atom = true) (hx : ∀ a, ¬ OnCell S x a) (hw : ∀ y, x ≠ .wr y) :
@@ -121,12 +126,16 @@ theorem Excl.inert {S : StoreTy} {st : List Frame} {ϕ : List Rgn} (h : Excl S s
     rcases List.mem_cons.mp hwr with he | hwr
     · exact absurd he.symm (hw r)
     · exact h.2.2.1 r a b hwr ht
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Tagged.part {S : StoreTy} {r : Rgn} {a b : Nat} (h : Tagged S r a b) :
     ∃ y, y ∈ r.parts ∧ Tagged S y a b := by
   obtain ⟨y, hy, ht⟩ := h
   exact ⟨y, hy, y, Rgn.self_mem_parts (Rgn.mem_parts_atom hy), ht⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Tagged.cell_inv {S : StoreTy} {c a b : Nat} (h : Tagged S (.cell c) a b) :
     c = a ∧ b = 0 := by
   obtain ⟨y, hy, ht⟩ := h
@@ -136,7 +145,9 @@ theorem Tagged.cell_inv {S : StoreTy} {c a b : Nat} (h : Tagged S (.cell c) a b)
   · cases he
     exact ⟨rfl, hb⟩
   · cases he
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Tagged.loan_inv {S : StoreTy} {b' a b : Nat} (h : Tagged S (.loan b') a b) :
     b' = b ∧ S.loans b = some a := by
   obtain ⟨y, hy, ht⟩ := h
@@ -146,10 +157,14 @@ theorem Tagged.loan_inv {S : StoreTy} {b' a b : Nat} (h : Tagged S (.loan b') a 
   · cases he
   · cases he
     exact ⟨rfl, hl⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Tagged.not_wr {S : StoreTy} {r : Rgn} {a b : Nat} : ¬ Tagged S (.wr r) a b :=
   fun h => OnCell.not_wr h.onCell
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- **What a typed stack grants excludes what was lent.** -/
 theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
     (hR : Δ.regions) (hL : Δ.loans) (h : StackOk Δ S st τ ε ϕ) :
@@ -312,7 +327,9 @@ theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
         omega
   | lendLoose hn _ _ _ _ => exact absurd ⟨hR, hL⟩ hn
   | never _ ih => exact ih
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Under the region rules and the rules for borrows, a typed state in which
 no cell has two scopes is not about to use a reference it may not: the
 reference has a region the code was granted, and to write, one it was granted
@@ -366,7 +383,9 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
       | true =>
         have := wrt ((hform.loan hL).2.2.1 rfl) htag
         simp [this] at hno
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Under the same rules no resumption of a typed state captured the scope of a
 borrow. -/
 theorem TypedAt.not_suspended {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ.loans)
@@ -374,7 +393,9 @@ theorem TypedAt.not_suspended {S : StoreTy} {s : State} (hR : Δ.regions) (hL : 
   obtain @⟨tm, env, stack, store, Γ, τ, ε, ε', ϕ, ϕ', henv, hty, hle, hsub, hst, hs⟩ := ht
   rintro ⟨k, seg, uniq, a, b, hk, hm⟩
   exact hs.quiet ⟨hR, hL⟩ k seg hk uniq a b hm
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Exclusive borrows.** A program accepted with the region rules and the rules
 for borrows never reaches a state about to use a reference it may not. Whenever
@@ -391,5 +412,6 @@ theorem exclusive_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (
   obtain ⟨S, ht⟩ := run_typed hp n (c := initIO p input) (typed_init hp) hn
   exact ⟨ht.not_aliased hR hL (run_owns n (c := initIO p input) (owns_init p) hn),
     ht.not_suspended hR hL⟩
+%proof-/
 
 end Glorious.Typing

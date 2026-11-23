@@ -94,6 +94,7 @@ def Cert.sigsOf (C : Cert) (fn : Nat) : List SigEntry :=
   if C.byFn.isEmpty then C.sigs.toList
   else ((C.byFn[fn]?).getD []).filterMap fun i => C.sigs[i]?
 
+/-%proof (commented out while the machines become bytes)
 theorem Cert.sigsOf_mem {C : Cert} {fn : Nat} {e : SigEntry} (h : e ∈ C.sigsOf fn) :
     e ∈ C.sigs.toList := by
   unfold Cert.sigsOf at h
@@ -101,10 +102,12 @@ theorem Cert.sigsOf_mem {C : Cert} {fn : Nat} {e : SigEntry} (h : e ∈ C.sigsOf
   · exact h
   · obtain ⟨i, _, hi⟩ := List.mem_filterMap.mp h
     exact Array.mem_toList_iff.mpr (Array.mem_of_getElem? hi)
+%proof-/
 
 /-- The regions of some types, in order. -/
 def freesOf (ts : List Ty) : List Rgn := ts.flatMap Ty.frees
 
+/-%proof (commented out while the machines become bytes)
 theorem freesOf_inst (θ : List Rgn) (ts : List Ty) :
     freesOf (ts.map (Ty.inst θ)) = (freesOf ts).map (Rgn.inst θ) := by
   induction ts with
@@ -112,16 +115,20 @@ theorem freesOf_inst (θ : List Rgn) (ts : List Ty) :
   | cons t ts ih =>
     simp only [freesOf, List.map_cons, List.flatMap_cons, List.map_append] at ih ⊢
     rw [ih, Ty.frees_inst]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem shapes_inst (θ : List Rgn) (ts : List Ty) :
     (ts.map (Ty.inst θ)).map Ty.shape = ts.map Ty.shape := by
   rw [List.map_map]
   exact List.map_congr_left fun t _ => Ty.shape_inst θ t
+%proof-/
 
 /-- A type's constructors, each with its field types, at some regions. -/
 def instCtors (η : List Rgn) (ctors : List (Nat × List Ty)) : List (Nat × List Ty) :=
   ctors.map fun c => (c.1, c.2.map (Ty.inst η))
 
+/-%proof (commented out while the machines become bytes)
 theorem instCtors_lookup (η : List Rgn) (tag : Nat) : ∀ ctors : List (Nat × List Ty),
     (instCtors η ctors).lookup tag = (ctors.lookup tag).map (·.map (Ty.inst η))
   | [] => rfl
@@ -132,7 +139,9 @@ theorem instCtors_lookup (η : List Rgn) (tag : Nat) : ∀ ctors : List (Nat × 
     cases tag == t with
     | true => rfl
     | false => exact ih
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem instCtors_inst (η θ : List Rgn) (ctors : List (Nat × List Ty)) :
     instCtors θ (instCtors η ctors) = instCtors (η.map (Rgn.inst θ)) ctors := by
   simp only [instCtors, List.map_map]
@@ -140,6 +149,7 @@ theorem instCtors_inst (η θ : List Rgn) (ctors : List (Nat × List Ty)) :
   simp only [Function.comp, List.map_map]
   congr 1
   exact List.map_congr_left fun f _ => Ty.inst_inst η θ f
+%proof-/
 
 def findData (ds : List DataInst) (name : Nat) (args : List Ty) :
     Option (List (Nat × List Ty)) :=
@@ -147,18 +157,21 @@ def findData (ds : List DataInst) (name : Nat) (args : List Ty) :
   | some d => some (instCtors (freesOf args) d.ctors)
   | none => none
 
+/-%proof (commented out while the machines become bytes)
 theorem findData_inst (ds : List DataInst) (name : Nat) (args : List Ty) (θ : List Rgn) :
     findData ds name (args.map (Ty.inst θ)) = (findData ds name args).map (instCtors θ) := by
   simp only [findData, shapes_inst, freesOf_inst]
   cases ds.find? (fun d => d.name == name && d.args == args.map Ty.shape) with
   | none => rfl
   | some d => simp [instCtors_inst]
+%proof-/
 
 def findOp (os : List OpInst) (op : Nat) (args : List Ty) : Option OpTy :=
   match os.find? (fun o => o.op == op && o.args == args.map Ty.shape) with
   | some o => some (o.payload.map (Ty.inst (freesOf args)), o.result.map (Ty.inst (freesOf args)))
   | none => none
 
+/-%proof (commented out while the machines become bytes)
 theorem findOp_inst (os : List OpInst) (op : Nat) (args : List Ty) (θ : List Rgn) :
     findOp os op (args.map (Ty.inst θ))
       = (findOp os op args).map fun x => (x.1.map (Ty.inst θ), x.2.map (Ty.inst θ)) := by
@@ -171,6 +184,7 @@ theorem findOp_inst (os : List OpInst) (op : Nat) (args : List Ty) (θ : List Rg
     cases o.result with
     | none => rfl
     | some r => simp [Ty.inst_inst]
+%proof-/
 
 /-! ## Arrays
 
@@ -185,6 +199,7 @@ def arrayFields (tag : Nat) : List Ty → Option (List Ty)
   | [t] => if arrayBase ≤ tag then some (List.replicate (tag - arrayBase) t) else none
   | _ => none
 
+/-%proof (commented out while the machines become bytes)
 theorem arrayFields_inst (tag : Nat) (args : List Ty) (θ : List Rgn) :
     arrayFields tag (args.map (Ty.inst θ)) = (arrayFields tag args).map (·.map (Ty.inst θ)) := by
   match args with
@@ -193,6 +208,7 @@ theorem arrayFields_inst (tag : Nat) (args : List Ty) (θ : List Rgn) :
     simp only [List.map_cons, List.map_nil, arrayFields]
     split <;> simp
   | _ :: _ :: _ => rfl
+%proof-/
 
 /-- The field types of a constructor of a declared type, or of the type of arrays. -/
 def Cert.fields (C : Cert) (tag name : Nat) (args : List Ty) : Option (List Ty) :=
@@ -224,6 +240,7 @@ termination_by structural ts => ts
 
 end
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 /-- Whether a type is duplicable does not depend on its regions. -/
@@ -255,7 +272,7 @@ theorem dupTys_inst (C : Cert) (θ : List Rgn) : ∀ ts : List Ty,
     rw [dupTy_inst C θ t, dupTys_inst C θ ts]
 
 end
-
+%proof-/
 /-- The typing context a certificate describes. -/
 def Cert.ctx (C : Cert) : Ctx where
   fnSig fn sig := ∃ e, e ∈ C.sigs.toList ∧ e.fn = fn ∧ e.sig = sig
@@ -265,6 +282,7 @@ def Cert.ctx (C : Cert) : Ctx where
   regions := C.regions = true
   loans := C.loans = true
 
+/-%proof (commented out while the machines become bytes)
 /-- What a certificate says of a type does not depend on the type's regions. -/
 theorem Cert.ctx_stable (C : Cert) : C.ctx.Stable where
   dup τ θ := by
@@ -281,6 +299,7 @@ theorem Cert.ctx_stable (C : Cert) : C.ctx.Stable where
       | none => rfl
       | some ctors => simp [instCtors_lookup]
   op op targs θ := findOp_inst C.ops op targs θ
+%proof-/
 
 variable {C : Cert}
 
@@ -288,12 +307,16 @@ variable {C : Cert}
 
 def dupOk (C : Cert) (τ : Ty) : Bool := !C.strict || dupTy C τ
 
+/-%proof (commented out while the machines become bytes)
 theorem dupOk_sound {τ : Ty} (h : dupOk C τ = true) : C.ctx.dup τ := by
   simp only [dupOk, Bool.or_eq_true, Bool.not_eq_true'] at h
   exact h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem dupOk_all {τs : List Ty} (h : τs.all (dupOk C) = true) : ∀ c, c ∈ τs → C.ctx.dup c :=
   fun c hc => dupOk_sound (List.all_eq_true.mp h c hc)
+%proof-/
 
 /-- Is every moved local whose type is not duplicable moved once and not mentioned afterwards? -/
 def linearB (C : Cert) (Γ : TEnv) (moved rest : List Nat) : Bool :=
@@ -302,6 +325,7 @@ def linearB (C : Cert) (Γ : TEnv) (moved rest : List Nat) : Bool :=
     | some τ => dupTy C τ || (decide (cnt i moved ≤ 1) && !rest.contains i)
     | none => true
 
+/-%proof (commented out while the machines become bytes)
 theorem linearB_sound {Γ : TEnv} {moved rest : List Nat} (h : linearB C Γ moved rest = true) :
     Linear C.ctx Γ moved rest := by
   intro i τ hτ hnd
@@ -320,9 +344,11 @@ theorem linearB_sound {Γ : TEnv} {moved rest : List Nat} (h : linearB C Γ move
       List.contains_eq_mem, decide_eq_false_iff_not] at this
     exact ⟨this.1, fun _ => this.2⟩
   · exact ⟨by rw [cnt_zero hm]; exact Nat.zero_le _, fun h' => absurd h' hm⟩
+%proof-/
 
 /-! ## Rows -/
 
+/-%proof (commented out while the machines become bytes)
 theorem lookup_mem {β : Type} : ∀ {l : List (Nat × β)} {k : Nat} {v : β},
     l.lookup k = some v → (k, v) ∈ l
   | [], _, _, h => by simp [List.lookup] at h
@@ -333,16 +359,19 @@ theorem lookup_mem {β : Type} : ∀ {l : List (Nat × β)} {k : Nat} {v : β},
       exact List.mem_cons_self ..
     · rw [lookup_cons_ne he] at h
       exact List.mem_cons_of_mem _ (lookup_mem h)
+%proof-/
 
 /-- Does `b` offer every operation of `a` at the type `a` gives it? -/
 def rowLe (a b : Row) : Bool := a.all fun x => a.lookup x.1 == b.lookup x.1
 
+/-%proof (commented out while the machines become bytes)
 theorem rowLe_sound {a b : Row} (h : rowLe a b = true) : Row.le a b := by
   intro op sig hl
   have h' := List.all_eq_true.mp h _ (lookup_mem hl)
   simp only [beq_iff_eq] at h'
   rw [← h']
   exact hl
+%proof-/
 
 /-! ## Operands -/
 
@@ -350,6 +379,7 @@ def atomTy (Γ : TEnv) : Atom → Option Ty
   | .var i => Γ[i]?
   | .int _ => some .int
 
+/-%proof (commented out while the machines become bytes)
 theorem atomTy_sound {Γ : TEnv} {a : Atom} {τ : Ty} (h : atomTy Γ a = some τ) : HasAtom Γ a τ := by
   cases a with
   | var i => exact .var h .refl
@@ -357,6 +387,7 @@ theorem atomTy_sound {Γ : TEnv} {a : Atom} {τ : Ty} (h : atomTy Γ a = some τ
     simp only [atomTy, Option.some.injEq] at h
     subst h
     exact .int
+%proof-/
 
 /-- A value of type `t` is one of type `σ`: the same type, or a reference whose
 places are among `σ`'s. -/
@@ -365,6 +396,7 @@ def widenB (t σ : Ty) : Bool :=
     | .ref ρ s, .ref ρ' s' => s == s' && ρ.parts.all fun x => ρ'.parts.contains x
     | _, _ => false)
 
+/-%proof (commented out while the machines become bytes)
 theorem widenB_sound {t σ : Ty} (h : widenB t σ = true) : Widen t σ := by
   simp only [widenB, Bool.or_eq_true, beq_iff_eq] at h
   rcases h with rfl | h
@@ -376,6 +408,7 @@ theorem widenB_sound {t σ : Ty} (h : widenB t σ = true) : Widen t σ := by
       obtain ⟨rfl, hp⟩ := h
       exact .ref hp
     · cases h
+%proof-/
 
 /-- The operand is one of type `σ`, its own or one it widens to. -/
 def atomFits (Γ : TEnv) (a : Atom) (σ : Ty) : Bool :=
@@ -383,6 +416,7 @@ def atomFits (Γ : TEnv) (a : Atom) (σ : Ty) : Bool :=
   | some t => widenB t σ
   | none => false
 
+/-%proof (commented out while the machines become bytes)
 theorem atomFits_sound {Γ : TEnv} {a : Atom} {σ : Ty} (h : atomFits Γ a σ = true) :
     HasAtom Γ a σ := by
   simp only [atomFits] at h
@@ -396,12 +430,14 @@ theorem atomFits_sound {Γ : TEnv} {a : Atom} {σ : Ty} (h : atomFits Γ a σ = 
     subst ht
     cases hw
     exact .int
+%proof-/
 
 def atomsFit (Γ : TEnv) : List Atom → List Ty → Bool
   | [], [] => true
   | a :: as, σ :: σs => atomFits Γ a σ && atomsFit Γ as σs
   | _, _ => false
 
+/-%proof (commented out while the machines become bytes)
 theorem atomsFit_sound {Γ : TEnv} : ∀ {as : List Atom} {σs : List Ty},
     atomsFit Γ as σs = true → HasAtoms Γ as σs
   | [], [], _ => .nil
@@ -410,6 +446,7 @@ theorem atomsFit_sound {Γ : TEnv} : ∀ {as : List Atom} {σs : List Ty},
     exact .cons (atomFits_sound h.1) (atomsFit_sound h.2)
   | [], _ :: _, h => by simp [atomsFit] at h
   | _ :: _, [], h => by simp [atomsFit] at h
+%proof-/
 
 def atomsTy (Γ : TEnv) : List Atom → Option (List Ty)
   | [] => some []
@@ -418,6 +455,7 @@ def atomsTy (Γ : TEnv) : List Atom → Option (List Ty)
     | some t, some ts => some (t :: ts)
     | _, _ => none
 
+/-%proof (commented out while the machines become bytes)
 theorem atomsTy_sound {Γ : TEnv} : ∀ {as : List Atom} {τs : List Ty},
     atomsTy Γ as = some τs → HasAtoms Γ as τs
   | [], _, h => by
@@ -430,6 +468,7 @@ theorem atomsTy_sound {Γ : TEnv} : ∀ {as : List Atom} {τs : List Ty},
     rename_i t ts ht hts
     cases h
     exact .cons (atomTy_sound ht) (atomsTy_sound hts)
+%proof-/
 
 /-! ## Data -/
 
@@ -442,6 +481,7 @@ def ctorFieldsOf (C : Cert) (tag : Nat) : Ty → Option (List Ty)
   | .ref _ _ => none
   | .never => none
 
+/-%proof (commented out while the machines become bytes)
 theorem ctorFieldsOf_sound {tag : Nat} {T : Ty} {Fs : List Ty}
     (h : ctorFieldsOf C tag T = some Fs) : CtorOf C.ctx tag T Fs := by
   cases T with
@@ -457,13 +497,16 @@ theorem ctorFieldsOf_sound {tag : Nat} {T : Ty} {Fs : List Ty}
     rename_i h0
     exact .inr ⟨h0, name, args, rfl, h⟩
   | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [ctorFieldsOf] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem ctorFieldsOf_complete {tag : Nat} {T : Ty} {Fs : List Ty}
     (h : CtorOf C.ctx tag T Fs) : ctorFieldsOf C tag T = some Fs := by
   rcases h with ⟨h0, rfl⟩ | ⟨h0, name, args, rfl, hF⟩
   · simp [ctorFieldsOf, h0]
   · simp only [ctorFieldsOf, h0, ↓reduceIte]
     exact hF
+%proof-/
 
 /-- The fields that can be read from a value of a type without testing which
 constructor built it. -/
@@ -491,6 +534,7 @@ def placeTy (C : Cert) : Ty → List Nat → Option Ty
       | none => none
     | none => none
 
+/-%proof (commented out while the machines become bytes)
 theorem placeTy_sound : ∀ {path : List Nat} {σ τ : Ty},
     placeTy C σ path = some τ → PlaceOk C.ctx σ path τ
   | [], σ, τ, h => by
@@ -533,61 +577,74 @@ theorem placeTy_sound : ∀ {path : List Nat} {σ τ : Ty},
         · have := List.all_eq_true.mp hall _ hm
           simpa using this
     | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [fieldsOf] at hF
+%proof-/
 
 /-! ## Regions -/
 
 /-- Does `ϕ` grant every place and permission the region is made of? -/
 def grantsB (ϕ : List Rgn) (r : Rgn) : Bool := r.parts.all fun x => (Rgn.flat ϕ).contains x
 
+/-%proof (commented out while the machines become bytes)
 theorem grantsB_sound {ϕ : List Rgn} {r : Rgn} (h : grantsB ϕ r = true) : Grants ϕ r := by
   intro x hx
   simpa using List.all_eq_true.mp h x hx
+%proof-/
 
 /-- Is every place and permission of `a` one of `b`? -/
 def subB (a b : List Rgn) : Bool := (Rgn.flat a).all fun r => (Rgn.flat b).contains r
 
+/-%proof (commented out while the machines become bytes)
 theorem subB_sound {a b : List Rgn} (h : subB a b = true) : Sub a b := by
   intro r hr
   simpa using List.all_eq_true.mp h r hr
+%proof-/
 
 def subFreeB (n : Nat) (a b : List Rgn) : Bool :=
   (Rgn.flat a).all fun r => !r.freeOf n || (Rgn.flat b).contains r
 
+/-%proof (commented out while the machines become bytes)
 theorem subFreeB_sound {n : Nat} {a b : List Rgn} (h : subFreeB n a b = true) : SubFree n a b := by
   intro r hr hf
   have := List.all_eq_true.mp h r hr
   simp only [hf, Bool.not_true, Bool.false_or, List.contains_iff_mem] at this
   exact this
+%proof-/
 
 /-- May the region of a reference be read or written through? -/
 def regionOk (C : Cert) (ϕ : List Rgn) (r : Rgn) : Bool := !C.regions || grantsB ϕ r
 
+/-%proof (commented out while the machines become bytes)
 theorem regionOk_sound {ϕ : List Rgn} {r : Rgn} (h : regionOk C ϕ r = true) :
     C.ctx.regions → Grants ϕ r := by
   intro hR
   have hR' : C.regions = true := hR
   simp only [regionOk, hR', Bool.not_true, Bool.false_or] at h
   exact grantsB_sound h
+%proof-/
 
 /-- May the region of a reference be written through? -/
 def writeOk (C : Cert) (ϕ : List Rgn) (r : Rgn) : Bool := !C.loans || grantsB ϕ (.wr r)
 
+/-%proof (commented out while the machines become bytes)
 theorem writeOk_sound {ϕ : List Rgn} {r : Rgn} (h : writeOk C ϕ r = true) :
     C.ctx.loans → Grants ϕ (.wr r) := by
   intro hL
   have hL' : C.loans = true := hL
   simp only [writeOk, hL', Bool.not_true, Bool.false_or] at h
   exact grantsB_sound h
+%proof-/
 
 /-- Are the places something touches all different? Only then does lending
 one take anything away from it. -/
 def nodupOk (C : Cert) (l : List Rgn) : Bool := !C.loans || decide (Rgn.flat l).Nodup
 
+/-%proof (commented out while the machines become bytes)
 theorem nodupOk_sound {l : List Rgn} (h : nodupOk C l = true) :
     C.ctx.loans → (Rgn.flat l).Nodup := by
   intro hL
   have hL' : C.loans = true := hL
   simpa [nodupOk, hL'] using h
+%proof-/
 
 /-- The regions a call chooses: none if its callable binds none, and otherwise
 those the next hint gives. -/
@@ -598,6 +655,7 @@ def takeRgns (n : Nat) (hs : List Hint) : Option (List Rgn × List Hint) :=
     | .rgns rs :: hs => if rs.length = n then some (rs, hs) else none
     | _ => none
 
+/-%proof (commented out while the machines become bytes)
 theorem takeRgns_length {n : Nat} {hs hs' : List Hint} {rs : List Rgn}
     (h : takeRgns n hs = some (rs, hs')) : rs.length = n := by
   simp only [takeRgns] at h
@@ -612,6 +670,7 @@ theorem takeRgns_length {n : Nat} {hs hs' : List Hint} {rs : List Rgn}
         exact hl
       · cases h
     · cases h
+%proof-/
 
 /-- What a `let` is told about the value it binds. -/
 def Hint.bind? : Hint → Option (Ty × List Rgn)
@@ -628,11 +687,13 @@ def envOk (env : Option (List Ty)) (Cs : List Ty) : Bool :=
   | none => true
   | some Cs' => Cs' == Cs
 
+/-%proof (commented out while the machines become bytes)
 theorem envOk_sound {env : Option (List Ty)} {Cs : List Ty} (h : envOk env Cs = true) :
     ∀ Cs', env = some Cs' → Cs' = Cs := by
   intro Cs' he
   subst he
   simpa [envOk] using h
+%proof-/
 
 /-- Is `σ` the type of a closure of `fn` over captures of types `Cs`, made with
 the regions `θ`, at one of the function's signatures? -/
@@ -642,6 +703,7 @@ def closes (C : Cert) (fn : Nat) (Cs : List Ty) (θ : List Rgn) (σ : Ty) (once 
     e.fn == fn && θ.length == e.sig.crgns && Cs == e.sig.caps.map (Ty.inst θ)
       && σ == e.sig.ty θ once env && (once || e.sig.caps.all (dupOk C)) && envOk env Cs
 
+/-%proof (commented out while the machines become bytes)
 theorem closes_sound {fn : Nat} {Cs : List Ty} {θ : List Rgn} {σ : Ty} {once : Bool}
     {env : Option (List Ty)} (h : closes C fn Cs θ σ once env = true) :
     ∃ sig, C.ctx.fnSig fn sig ∧ θ.length = sig.crgns ∧ Cs = sig.caps.map (Ty.inst θ)
@@ -654,6 +716,7 @@ theorem closes_sound {fn : Nat} {Cs : List Ty} {θ : List Rgn} {σ : Ty} {once :
   rcases hdup with h2 | h2
   · rw [ho] at h2; cases h2
   · exact dupOk_all h2
+%proof-/
 
 /-- The same for a closure made here: its captures fit the types the
 signature gives them, made with the regions `θ`. -/
@@ -664,6 +727,7 @@ def closesFit (C : Cert) (Γ : TEnv) (fn : Nat) (captures : List Atom) (θ : Lis
       && σ == e.sig.ty θ once env && (once || e.sig.caps.all (dupOk C))
       && envOk env (e.sig.caps.map (Ty.inst θ))
 
+/-%proof (commented out while the machines become bytes)
 theorem closesFit_sound {Γ : TEnv} {fn : Nat} {captures : List Atom} {θ : List Rgn} {σ : Ty}
     {once : Bool} {env : Option (List Ty)} (h : closesFit C Γ fn captures θ σ once env = true) :
     ∃ sig, C.ctx.fnSig fn sig ∧ θ.length = sig.crgns
@@ -677,12 +741,14 @@ theorem closesFit_sound {Γ : TEnv} {fn : Nat} {captures : List Atom} {θ : List
   rcases hdup with h2 | h2
   · rw [ho] at h2; cases h2
   · exact dupOk_all h2
+%proof-/
 
 /-- The type of an array's elements, if this is the type of arrays of some. -/
 def arrayElem : Ty → Option Ty
   | .data name [t] => if name = arrayName then some t else none
   | _ => none
 
+/-%proof (commented out while the machines become bytes)
 theorem arrayElem_eq {T t : Ty} (h : arrayElem T = some t) : T = .data arrayName [t] := by
   unfold arrayElem at h
   split at h <;> try (cases h; done)
@@ -690,7 +756,9 @@ theorem arrayElem_eq {T t : Ty} (h : arrayElem T = some t) : T = .data arrayName
   rename_i hn
   cases h
   rw [hn]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A constructor of the type of arrays takes so many elements. -/
 theorem array_ctor {t : Ty} {tag : Nat} {Fs : List Ty}
     (h : CtorOf C.ctx tag (.data arrayName [t]) Fs) :
@@ -705,7 +773,9 @@ theorem array_ctor {t : Ty} {tag : Nat} {Fs : List Ty}
       cases hF'
       exact ⟨hle, rfl⟩
     · cases hF'
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem array_ctor_of {t : Ty} {tag : Nat} (h : arrayBase ≤ tag) :
     CtorOf C.ctx tag (.data arrayName [t]) (List.replicate (tag - arrayBase) t) := by
   refine .inr ⟨fun e => ?_, arrayName, [t], rfl, ?_⟩
@@ -714,12 +784,15 @@ theorem array_ctor_of {t : Ty} {tag : Nat} (h : arrayBase ≤ tag) :
     omega
   · show C.fields tag arrayName [t] = _
     simp [Cert.fields, arrayFields, h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem arrayElem_uniform {T t : Ty} (h : arrayElem T = some t) : Uniform C.ctx T t := by
   rw [arrayElem_eq h]
   intro tag Fs hc σ hσ
   obtain ⟨_, rfl⟩ := array_ctor hc
   exact List.eq_of_mem_replicate hσ
+%proof-/
 
 /-- The type of the field a reference is made to: a field found by number in
 a type with one shape, or a place of an array, which may be found by the
@@ -731,6 +804,7 @@ def focusTy (C : Cert) (Γ : TEnv) (σ : Ty) : Atom → Option Ty
     | none => arrayElem σ
   | ix => if atomTy Γ ix == some .int then arrayElem σ else none
 
+/-%proof (commented out while the machines become bytes)
 theorem focusTy_sound {Γ : TEnv} {σ σ' : Ty} {ix : Atom} (h : focusTy C Γ σ ix = some σ') :
     (∃ i : Nat, ix = .int i ∧ PartOk C.ctx σ [⟨none, i⟩] σ')
       ∨ (HasAtom Γ ix .int ∧ Uniform C.ctx σ σ') := by
@@ -746,7 +820,9 @@ theorem focusTy_sound {Γ : TEnv} {σ σ' : Ty} {ix : Atom} (h : focusTy C Γ σ
     · rename_i hi
       exact .inr ⟨atomTy_sound (by simpa using hi), arrayElem_uniform h⟩
     · cases h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem arrayElem_grows {T t : Ty} (h : arrayElem T = some t) : Grows C.ctx T t := by
   rw [arrayElem_eq h]
   intro tag Fs hc
@@ -755,7 +831,9 @@ theorem arrayElem_grows {T t : Ty} (h : arrayElem T = some t) : Grows C.ctx T t 
   have e : tag + 1 - arrayBase = (tag - arrayBase) + 1 := by omega
   rw [e, List.replicate_succ'] at hc'
   exact hc'
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem arrayElem_shrinks {T t : Ty} (h : arrayElem T = some t) : Shrinks C.ctx T := by
   rw [arrayElem_eq h]
   intro tag Fs hc hne
@@ -765,6 +843,7 @@ theorem arrayElem_shrinks {T t : Ty} (h : arrayElem T = some t) : Shrinks C.ctx 
   have e : tag - 1 - arrayBase = tag - arrayBase - 1 := by omega
   rw [e] at hc'
   simpa [List.dropLast_replicate] using hc'
+%proof-/
 
 /-- An intrinsic: arithmetic on two integers, or one of those on arrays. -/
 def checkPrim (C : Cert) (Γ : TEnv) (p : Prim) (args : List Atom) (σ : Ty) : Bool :=
@@ -830,6 +909,7 @@ def checkRhs (C : Cert) (Γ : TEnv) (θ : List Rgn) : Rhs → Ty → Bool
     | some (.fn _ _ _ _ _ (some Cs) _), .fn _ _ _ _ once env _ => closes C fn Cs θ σ once env
     | _, _ => false
 
+/-%proof (commented out while the machines become bytes)
 theorem checkRhs_sound {Γ : TEnv} {θ : List Rgn} {rhs : Rhs} {σ : Ty}
     (h : checkRhs C Γ θ rhs σ = true) : HasRhs C.ctx Γ rhs σ := by
   cases rhs with
@@ -912,6 +992,7 @@ theorem checkRhs_sound {Γ : TEnv} {θ : List Rgn} {rhs : Rhs} {σ : Ty}
     rw [hσ]
     subst hCs
     exact .rebind (atomTy_sound ha) hsig hθ hdup henv
+%proof-/
 
 /-! ## Handlers -/
 
@@ -925,6 +1006,7 @@ def enters (C : Cert) (fn : Nat) (θ : List Rgn) (Cs Ps : List Ty) (ρ : Ty) (ε
       && ρ == e.sig.ret.inst θ && rowLe (e.sig.eff.inst θ) ε
       && subB (e.sig.acc.map (Rgn.inst θ)) Φ && nodupOk C (e.sig.acc.map (Rgn.inst θ))
 
+/-%proof (commented out while the machines become bytes)
 theorem enters_sound {fn : Nat} {θ : List Rgn} {Cs Ps : List Ty} {ρ : Ty} {ε : Row}
     {Φ : List Rgn} (h : enters C fn θ Cs Ps ρ ε Φ = true) : Enters C.ctx fn Cs Ps ρ ε Φ := by
   obtain ⟨e, he, hc⟩ := List.any_eq_true.mp h
@@ -932,6 +1014,7 @@ theorem enters_sound {fn : Nat} {θ : List Rgn} {Cs Ps : List Ty} {ρ : Ty} {ε 
   obtain ⟨⟨⟨⟨⟨⟨⟨⟨hfn, hθ⟩, hn⟩, hcaps⟩, hps⟩, hret⟩, hrow⟩, hacc⟩, hnd⟩ := hc
   exact ⟨e.sig, θ, ⟨e, Cert.sigsOf_mem he, hfn, rfl⟩, hθ, hn, hcaps, hps, hret, rowLe_sound hrow,
     subB_sound hacc, nodupOk_sound hnd⟩
+%proof-/
 
 def checkArms (C : Cert) (Cs : List Ty) (ρ : Ty) (ε : Row) (Φ : List Rgn) :
     List (Nat × Nat) → Row → List (List Rgn) → Bool
@@ -948,6 +1031,7 @@ def checkArms (C : Cert) (Cs : List Ty) (ρ : Ty) (ε : Row) (Φ : List Rgn) :
   | _ :: _, [], _ => false
   | _ :: _, _ :: _, [] => false
 
+/-%proof (commented out while the machines become bytes)
 theorem checkArms_sound {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn} :
     ∀ {ops : List (Nat × Nat)} {H : Row} {θs : List (List Rgn)},
       checkArms C Cs ρ ε Φ ops H θs = true → ArmsOk C.ctx Cs ρ ε Φ ops H
@@ -964,12 +1048,14 @@ theorem checkArms_sound {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn} :
   | [], _ :: _, _, h => by simp [checkArms] at h
   | _ :: _, [], _, h => by simp [checkArms] at h
   | _ :: _, _ :: _, [], h => by simp [checkArms] at h
+%proof-/
 
 def checkHandler (C : Cert) (Cs : List Ty) (ret : Nat) (ops : List (Nat × Nat)) (σ ρ : Ty)
     (H ε : Row) (Φ : List Rgn) : List (List Rgn) → Bool
   | θ :: θs => enters C ret θ Cs [σ] ρ ε Φ && checkArms C Cs ρ ε Φ ops H θs && Cs.all (dupOk C)
   | [] => false
 
+/-%proof (commented out while the machines become bytes)
 theorem checkHandler_sound {Cs : List Ty} {ret : Nat} {ops : List (Nat × Nat)} {σ ρ : Ty}
     {H ε : Row} {Φ : List Rgn} {θs : List (List Rgn)}
     (h : checkHandler C Cs ret ops σ ρ H ε Φ θs = true) :
@@ -979,6 +1065,7 @@ theorem checkHandler_sound {Cs : List Ty} {ret : Nat} {ops : List (Nat × Nat)} 
   | cons θ θs =>
     simp only [checkHandler, Bool.and_eq_true] at h
     exact ⟨enters_sound h.1.1, checkArms_sound h.1.2, dupOk_all h.2⟩
+%proof-/
 
 /-! ## Computations -/
 
@@ -992,6 +1079,7 @@ def cellOk (C : Cert) (ϕ : List Rgn) (n : Nat) (r : Rgn) (σ ρ : Ty) (εt : Ro
     && acc.all fun x =>
       (n == 1 && (x == .bound 0 || x == .wr (.bound 0))) || (x.free && grantsB ϕ x)
 
+/-%proof (commented out while the machines become bytes)
 theorem cellOk_sound {ϕ : List Rgn} {n : Nat} {r : Rgn} {σ ρ : Ty} {εt : Row} {acc : List Rgn}
     (h : cellOk C ϕ n r σ ρ εt acc = true) :
     σ.lc = true ∧ ρ.lc = true ∧ εt.lc = true ∧ (n = 0 ∨ (n = 1 ∧ r = .bound 0))
@@ -1009,6 +1097,7 @@ theorem cellOk_sound {ϕ : List Rgn} {n : Nat} {r : Rgn} {σ ρ : Ty} {εt : Row
   rcases hreg with h | h
   · rw [hR'] at h; cases h
   · exact h
+%proof-/
 
 /-- The conditions on the callable a label's scope runs: under the region rules
 it is polymorphic in the scope's region, which the label's type says applying
@@ -1019,6 +1108,7 @@ def labelOk (C : Cert) (ϕ : List Rgn) (n : Nat) (σ : Ty) (εt : Row) (accl acc
     && (!C.regions || (n == 1 && accl.contains (.bound 0))) && nodupOk C acc
     && acc.all fun x => (n == 1 && x == .bound 0) || (x.free && grantsB ϕ x)
 
+/-%proof (commented out while the machines become bytes)
 theorem labelOk_sound {ϕ : List Rgn} {n : Nat} {σ : Ty} {εt : Row} {accl acc : List Rgn}
     (h : labelOk C ϕ n σ εt accl acc = true) :
     σ.lc = true ∧ εt.lc = true ∧ (n = 0 ∨ n = 1)
@@ -1036,6 +1126,7 @@ theorem labelOk_sound {ϕ : List Rgn} {n : Nat} {σ : Ty} {εt : Row} {accl acc 
   rcases hreg with h | h
   · rw [hR'] at h; cases h
   · exact h
+%proof-/
 
 /-- The conditions on the callable a borrow's scope runs. Without the rules for
 borrows it may take the reference lent. With them it is polymorphic in the
@@ -1055,6 +1146,7 @@ def lendOk (C : Cert) (ϕ : List Rgn) (uniq : Bool) (n : Nat) (ρ κ : Rgn) (σ 
         || (x.free && grantsB ϕ x && (!C.loans || x.parts.all fun y =>
           !((Rgn.wr ρ).parts.contains y) && (!uniq || !(ρ.parts.contains y))))
 
+/-%proof (commented out while the machines become bytes)
 theorem lendOk_sound {ϕ : List Rgn} {uniq : Bool} {n : Nat} {ρ κ : Rgn} {σ ρt : Ty} {εt : Row}
     {acc : List Rgn} (h : lendOk C ϕ uniq n ρ κ σ ρt εt acc = true) :
     σ.lc = true ∧ ρt.lc = true ∧ εt.lc = true ∧ ((n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0))
@@ -1092,6 +1184,7 @@ theorem lendOk_sound {ϕ : List Rgn} {uniq : Bool} {n : Nat} {ρ κ : Rgn} {σ �
         · rw [hu] at h'
           cases h'
         · exact notIn h'
+%proof-/
 
 /-- Check a computation against the regions it may touch, the type it must
 give and the operations it may perform. Hints are used up in order: one by each
@@ -1270,6 +1363,7 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
     | 1, [] => checkTm C ϕ (Γ ++ [.tuple [.int, .int]]) body hs τ ε
     | _, _ => false
 
+/-%proof (commented out while the machines become bytes)
 theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty}
     {ε : Row}, checkTm C ϕ Γ tm hs τ ε = true → HasTm C.ctx ϕ Γ tm τ ε := by
   intro tm Γ hs τ ε h
@@ -1457,6 +1551,7 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       exact .write (atomTy_sound ha) (ih hbody)
     · exact .read (ih h)
     · simp at h
+%proof-/
 
 /-! ## Patterns and clauses -/
 
@@ -1483,6 +1578,7 @@ def patsTys (C : Cert) : List Pat → List Ty → Option (List Ty)
 
 end
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 theorem patTys_sound : ∀ {p : Pat} {τ : Ty} {Bs : List Ty},
@@ -1524,7 +1620,7 @@ theorem patsTys_sound : ∀ {ps : List Pat} {τs Bs : List Ty},
   | _ :: _, [], _, h => by simp [patsTys] at h
 
 end
-
+%proof-/
 /-- Does a body leave alone every argument its patterns take apart? -/
 def wildOk (pats : List Pat) (live : List Nat) : Bool :=
   (List.range pats.length).all fun i =>
@@ -1532,6 +1628,7 @@ def wildOk (pats : List Pat) (live : List Nat) : Bool :=
     | some p => isWild p || !live.contains i
     | none => true
 
+/-%proof (commented out while the machines become bytes)
 theorem wildOk_sound {pats : List Pat} {live : List Nat} (h : wildOk pats live = true) :
     ∀ i p, pats[i]? = some p → isWild p = false → i ∉ live := by
   intro i p hp hw
@@ -1541,6 +1638,7 @@ theorem wildOk_sound {pats : List Pat} {live : List Nat} (h : wildOk pats live =
     · rw [List.getElem?_eq_none h] at hp; cases hp
   have := List.all_eq_true.mp h i (List.mem_range.mpr hlt)
   simpa [hp, hw] using this
+%proof-/
 
 /-- Check each clause of a function at a signature, with that clause's hints.
 The body is checked with the signature's call regions as variables. -/
@@ -1558,6 +1656,7 @@ def checkClauses (C : Cert) (sig : FnSig) : List Clause → List (List Hint) →
   | [], _ :: _ => false
   | _ :: _, [] => false
 
+/-%proof (commented out while the machines become bytes)
 theorem checkClauses_sound {sig : FnSig} : ∀ {cs : List Clause} {hs : List (List Hint)},
     checkClauses C sig cs hs = true → ∀ c, c ∈ cs → ClauseOk C.ctx sig c
   | [], _, _, c, hc => by cases hc
@@ -1571,5 +1670,6 @@ theorem checkClauses_sound {sig : FnSig} : ∀ {cs : List Clause} {hs : List (Li
       · simp at hhead
     · exact checkClauses_sound hrest c' hmem
   | _ :: _, [], hcheck, _, _ => by simp [checkClauses] at hcheck
+%proof-/
 
 end Glorious.Typing

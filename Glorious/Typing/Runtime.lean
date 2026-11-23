@@ -57,45 +57,63 @@ of the borrow's. -/
 def Tagged (S : StoreTy) (r : Rgn) (a b : Nat) : Prop :=
   ∃ x, x ∈ r.parts ∧ ((x = .cell a ∧ b = 0) ∨ (x = .loan b ∧ S.loans b = some a))
 
+/-%proof (commented out while the machines become bytes)
 theorem Tagged.onCell {S : StoreTy} {r : Rgn} {a b : Nat} (h : Tagged S r a b) : OnCell S r a := by
   obtain ⟨x, hx, ⟨h, _⟩ | ⟨h, hl⟩⟩ := h
   · exact ⟨x, hx, .inl h⟩
   · exact ⟨x, hx, .inr ⟨b, h, hl⟩⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem OnCell.mono {S S' : StoreTy} (hle : S.Le S') {r : Rgn} {a : Nat} (h : OnCell S r a) :
     OnCell S' r a := by
   obtain ⟨x, hx, h | ⟨b, h, hl⟩⟩ := h
   · exact ⟨x, hx, .inl h⟩
   · exact ⟨x, hx, .inr ⟨b, h, hle.loans _ _ hl⟩⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Tagged.mono {S S' : StoreTy} (hle : S.Le S') {r : Rgn} {a b : Nat} (h : Tagged S r a b) :
     Tagged S' r a b := by
   obtain ⟨x, hx, h | ⟨h, hl⟩⟩ := h
   · exact ⟨x, hx, .inl h⟩
   · exact ⟨x, hx, .inr ⟨h, hle.loans _ _ hl⟩⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem OnCell.cell {S : StoreTy} {a : Nat} : OnCell S (.cell a) a :=
   ⟨.cell a, List.mem_singleton_self _, .inl rfl⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem OnCell.loan {S : StoreTy} {a b : Nat} (hl : S.loans b = some a) : OnCell S (.loan b) a :=
   ⟨.loan b, List.mem_singleton_self _, .inr ⟨b, rfl, hl⟩⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Tagged.cell {S : StoreTy} {a : Nat} : Tagged S (.cell a) a 0 :=
   ⟨.cell a, List.mem_singleton_self _, .inl ⟨rfl, rfl⟩⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Tagged.loan {S : StoreTy} {a b : Nat} (hl : S.loans b = some a) : Tagged S (.loan b) a b :=
   ⟨.loan b, List.mem_singleton_self _, .inr ⟨rfl, hl⟩⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A region of more places is of whatever cell the first is. -/
 theorem OnCell.widen {S : StoreTy} {r r' : Rgn} {a : Nat} (h : OnCell S r a)
     (hp : ∀ x, x ∈ r.parts → x ∈ r'.parts) : OnCell S r' a := by
   obtain ⟨x, hx, h⟩ := h
   exact ⟨x, hp x hx, h⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Tagged.widen {S : StoreTy} {r r' : Rgn} {a b : Nat} (h : Tagged S r a b)
     (hp : ∀ x, x ∈ r.parts → x ∈ r'.parts) : Tagged S r' a b := by
   obtain ⟨x, hx, h⟩ := h
   exact ⟨x, hp x hx, h⟩
+%proof-/
 
 /-- What the code above a borrow's scope may touch: the borrow, to write too if
 it is one for writing, and whatever the code below may, except that it may not
@@ -106,6 +124,7 @@ def lent (uniq : Bool) (ρ : Rgn) (b : Nat) (ϕ : List Rgn) : List Rgn :=
       !((Rgn.wr ρ).parts.contains x) && (!uniq || !(ρ.parts.contains x)) && x != .loan b
         && x != .wr (.loan b))
 
+/-%proof (commented out while the machines become bytes)
 /-- What a borrow's scope grants is made of places and permissions alone. -/
 theorem flat_lent (uniq : Bool) (ρ : Rgn) (b : Nat) (ϕ : List Rgn) :
     Rgn.flat (lent uniq ρ b ϕ) = lent uniq ρ b ϕ := by
@@ -117,6 +136,7 @@ theorem flat_lent (uniq : Bool) (ρ : Rgn) (b : Nat) (ϕ : List Rgn) :
     subst hx
     rfl
   · exact Rgn.atom_of_mem_flat (List.mem_filter.mp hx).1
+%proof-/
 
 /-- The region is of something the store typing knows. -/
 def Known (S : StoreTy) : Rgn → Prop

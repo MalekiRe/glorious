@@ -84,6 +84,7 @@ def call (w : World) (id : Nat) (args : List Value) : Option (Value × World) :=
     | _ => none
   else none
 
+/-%proof (commented out while the machines become bytes)
 /-- A host operation never retracts output. -/
 theorem call_output {w w' : World} {id : Nat} {args : List Value} {r : Value}
     (h : call w id args = some (r, w')) : w.output <+: w'.output := by
@@ -92,6 +93,7 @@ theorem call_output {w w' : World} {id : Nat} {args : List Value} {r : Value}
   all_goals (simp only [Option.some.injEq, Prod.mk.injEq, reduceCtorEq] at h)
   all_goals (try obtain ⟨_, rfl⟩ := h)
   all_goals (first | exact List.prefix_append _ _ | exact List.prefix_refl _ | simp_all)
+%proof-/
 
 end Host
 

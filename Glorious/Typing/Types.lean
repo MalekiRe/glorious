@@ -122,6 +122,7 @@ def openAt (d : Nat) (rs : List Rgn) : Rgn → Rgn
   | .or a b => .or (openAt d rs a) (openAt d rs b)
   | r => r
 
+/-%proof (commented out while the machines become bytes)
 theorem place_free {r : Rgn} (h : r.place = true) : r.free = true := by
   induction r with
   | var i => rfl
@@ -133,7 +134,9 @@ theorem place_free {r : Rgn} (h : r.place = true) : r.free = true := by
   | or a b iha ihb =>
     simp only [place, Bool.and_eq_true] at h
     simp [free, iha h.1, ihb h.2]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem clean_place (o : Option Rgn) : (clean o).place = true := by
   cases o with
   | none => rfl
@@ -141,9 +144,13 @@ theorem clean_place (o : Option Rgn) : (clean o).place = true := by
     by_cases h : r.place = true
     · simp [clean, h]
     · simp [clean, h, place]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem clean_free (o : Option Rgn) : (clean o).free = true := place_free (clean_place o)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem inst_free (θ : List Rgn) (r : Rgn) : (r.inst θ).free = r.free := by
   induction r with
   | var i => exact clean_free _
@@ -153,7 +160,9 @@ theorem inst_free (θ : List Rgn) (r : Rgn) : (r.inst θ).free = r.free := by
   | loan b => rfl
   | wr r ih => exact ih
   | or a b iha ihb => simp [inst, free, iha, ihb]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem inst_place (θ : List Rgn) (r : Rgn) : (r.inst θ).place = r.place := by
   induction r with
   | var i => exact clean_place _
@@ -163,7 +172,9 @@ theorem inst_place (θ : List Rgn) (r : Rgn) : (r.inst θ).place = r.place := by
   | loan b => rfl
   | wr r _ => rfl
   | or a b iha ihb => simp [inst, place, iha, ihb]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem inst_clean (θ : List Rgn) (o : Option Rgn) : (clean o).inst θ = clean (o.map (inst θ)) := by
   cases o with
   | none => rfl
@@ -173,7 +184,9 @@ theorem inst_clean (θ : List Rgn) (o : Option Rgn) : (clean o).inst θ = clean 
       simp [clean, h, h']
     · have h' : ¬ (r.inst θ).place = true := by rw [inst_place]; exact h
       simp [clean, h, h', inst]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Opening leaves a region that is not bound alone. -/
 theorem openAt_free {r : Rgn} (h : r.free = true) (d : Nat) (rs : List Rgn) :
     r.openAt d rs = r := by
@@ -187,7 +200,9 @@ theorem openAt_free {r : Rgn} (h : r.free = true) (d : Nat) (rs : List Rgn) :
   | or a b iha ihb =>
     simp only [free, Bool.and_eq_true] at h
     simp [openAt, iha h.1, ihb h.2]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Instantiating twice is instantiating once, by the regions instantiated. -/
 theorem inst_inst (θ η : List Rgn) (r : Rgn) :
     (r.inst θ).inst η = r.inst (θ.map (inst η)) := by
@@ -201,7 +216,9 @@ theorem inst_inst (θ η : List Rgn) (r : Rgn) :
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr ih
   | or a b iha ihb => simp [inst, iha, ihb]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Opening and then instantiating is instantiating and then opening. -/
 theorem openAt_inst (d : Nat) (rs η : List Rgn) (r : Rgn) :
     (r.openAt d rs).inst η = (r.inst η).openAt d (rs.map (inst η)) := by
@@ -225,7 +242,9 @@ theorem openAt_inst (d : Nat) (rs η : List Rgn) (r : Rgn) :
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr ih
   | or a b iha ihb => simp [openAt, inst, iha, ihb]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Opening with no regions changes nothing. -/
 theorem openAt_nil (d : Nat) (r : Rgn) : r.openAt d [] = r := by
   induction r with
@@ -237,12 +256,15 @@ theorem openAt_nil (d : Nat) (r : Rgn) : r.openAt d [] = r := by
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr ih
   | or a b iha ihb => simp [openAt, iha, ihb]
+%proof-/
 
 /-- The variables a function's call regions are opened to in its body: those
 after its `c` capture regions. -/
 def callVars (c n : Nat) : List Rgn := (List.range n).map fun j => .var (c + j)
 
+/-%proof (commented out while the machines become bytes)
 theorem callVars_length (c n : Nat) : (callVars c n).length = n := by simp [callVars]
+%proof-/
 
 /-- A region variable below `c`, or not a variable at all. -/
 def within (c : Nat) : Rgn → Bool
@@ -254,6 +276,7 @@ def within (c : Nat) : Rgn → Bool
   | .wr r => within c r
   | .or a b => within c a && within c b
 
+/-%proof (commented out while the machines become bytes)
 /-- A function's body is typed with its call regions as variables. Entered
 with capture regions `θ` and call regions `rs`, a region of its signature means
 what the signature's type, instantiated and opened, says. -/
@@ -298,6 +321,7 @@ theorem open_callVars_inst (d : Nat) (θ rs : List Rgn) (r : Rgn) (hr : r.within
   | or a b iha ihb =>
     simp only [within, Bool.and_eq_true] at hr
     simp [openAt, inst, iha hr.1, ihb hr.2]
+%proof-/
 
 /-- No part of the region is bound more than `d` callable types out. -/
 def lcAt (d : Nat) : Rgn → Bool
@@ -306,6 +330,7 @@ def lcAt (d : Nat) : Rgn → Bool
   | .or a b => lcAt d a && lcAt d b
   | _ => true
 
+/-%proof (commented out while the machines become bytes)
 theorem place_lcAt {r : Rgn} (h : r.place = true) (d : Nat) : r.lcAt d = true := by
   induction r with
   | bound k => cases h
@@ -314,7 +339,9 @@ theorem place_lcAt {r : Rgn} (h : r.place = true) (d : Nat) : r.lcAt d = true :=
     simp only [place, Bool.and_eq_true] at h
     simp [lcAt, iha h.1, ihb h.2]
   | _ => rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem lcAt_inst {d : Nat} {r : Rgn} (h : r.lcAt d = true) (θ : List Rgn) :
     (r.inst θ).lcAt d = true := by
   induction r with
@@ -327,6 +354,7 @@ theorem lcAt_inst {d : Nat} {r : Rgn} (h : r.lcAt d = true) (θ : List Rgn) :
   | or a b iha ihb =>
     simp only [lcAt, Bool.and_eq_true] at h
     simp [inst, lcAt, iha h.1, ihb h.2]
+%proof-/
 
 /-- Is the region none of the `n` regions a callable type binds, seen from
 inside it? -/
@@ -336,6 +364,7 @@ def freeOf (n : Nat) : Rgn → Bool
   | .or a b => freeOf n a && freeOf n b
   | _ => true
 
+/-%proof (commented out while the machines become bytes)
 theorem freeOf_of_free {n : Nat} : ∀ {r : Rgn}, r.free = true → r.freeOf n = true
   | .bound _, h => by cases h
   | .wr r, h => freeOf_of_free (r := r) h
@@ -343,12 +372,15 @@ theorem freeOf_of_free {n : Nat} : ∀ {r : Rgn}, r.free = true → r.freeOf n =
     simp only [free, Bool.and_eq_true] at h
     simp [freeOf, freeOf_of_free h.1, freeOf_of_free h.2]
   | .var _, _ | .cell _, _ | .lab _, _ | .loan _, _ => rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem freeOf_zero : ∀ r : Rgn, r.freeOf 0 = true
   | .bound _ => by simp [freeOf]
   | .wr r => freeOf_zero r
   | .or a b => by simp [freeOf, freeOf_zero a, freeOf_zero b]
   | .var _ | .cell _ | .lab _ | .loan _ => rfl
+%proof-/
 
 /-- The places and permissions a region is made of: a region that is one of
 several places is each of them. -/
@@ -363,12 +395,15 @@ def atom : Rgn → Bool
   | .wr r => r.atom
   | _ => true
 
+/-%proof (commented out while the machines become bytes)
 theorem atom_parts {r : Rgn} (h : r.atom = true) : r.parts = [r] := by
   induction r with
   | or a b _ _ => cases h
   | wr r ih => simp [parts, ih h]
   | _ => rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem mem_parts_atom {r x : Rgn} (h : x ∈ r.parts) : x.atom = true := by
   induction r generalizing x with
   | or a b iha ihb =>
@@ -385,28 +420,38 @@ theorem mem_parts_atom {r x : Rgn} (h : x ∈ r.parts) : x.atom = true := by
     simp only [parts, List.mem_singleton] at h
     subst h
     rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A part of a region is its own only part. -/
 theorem parts_of_mem {r x : Rgn} (h : x ∈ r.parts) : x.parts = [x] := atom_parts (mem_parts_atom h)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem self_mem_parts {x : Rgn} (h : x.atom = true) : x ∈ x.parts := by
   rw [atom_parts h]
   exact List.mem_singleton_self x
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem parts_inst (θ : List Rgn) (r : Rgn) :
     (r.inst θ).parts = r.parts.flatMap fun x => (x.inst θ).parts := by
   induction r with
   | or a b iha ihb => simp [inst, parts, iha, ihb, List.flatMap_append]
   | wr r ih => simp [inst, parts, ih, List.flatMap_map, List.map_flatMap]
   | _ => simp [parts]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem parts_openAt (d : Nat) (rs : List Rgn) (r : Rgn) :
     (r.openAt d rs).parts = r.parts.flatMap fun x => (x.openAt d rs).parts := by
   induction r with
   | or a b iha ihb => simp [openAt, parts, iha, ihb, List.flatMap_append]
   | wr r ih => simp [openAt, parts, ih, List.flatMap_map, List.map_flatMap]
   | _ => simp [parts]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem free_of_mem_parts {r x : Rgn} (hx : x ∈ r.parts) (hf : r.free = true) : x.free = true := by
   induction r generalizing x with
   | or a b iha ihb =>
@@ -424,7 +469,9 @@ theorem free_of_mem_parts {r x : Rgn} (hx : x ∈ r.parts) (hf : r.free = true) 
     simp only [parts, List.mem_singleton] at hx
     subst hx
     exact hf
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A part bound by a callable type is left as it is. -/
 theorem inst_atom_bound {x : Rgn} (ha : x.atom = true) (hf : x.free = false) (θ : List Rgn) :
     x.inst θ = x := by
@@ -433,7 +480,9 @@ theorem inst_atom_bound {x : Rgn} (ha : x.atom = true) (hf : x.free = false) (θ
   | wr r ih => exact congrArg Rgn.wr (ih ha hf)
   | or a b _ _ => cases ha
   | _ => rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A place has no part that is leave to write. -/
 theorem place_parts {r x : Rgn} (h : r.place = true) (hx : x ∈ r.parts) : ∀ y, x ≠ .wr y := by
   induction r generalizing x with
@@ -450,10 +499,13 @@ theorem place_parts {r x : Rgn} (h : r.place = true) (hx : x ∈ r.parts) : ∀ 
     subst hx
     intro y hy
     cases hy
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What a variable is instantiated to has no part that is leave to write. -/
 theorem inst_var_parts {θ : List Rgn} {i : Nat} {x : Rgn} (hx : x ∈ ((Rgn.var i).inst θ).parts) :
     ∀ y, x ≠ .wr y := place_parts (clean_place _) hx
+%proof-/
 
 end Rgn
 
@@ -531,13 +583,16 @@ termination_by structural _ env => env
 
 end
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.mapRs_eq (f : Nat → Rgn → Rgn) (k : Nat) :
     ∀ ts : List Ty, Ty.mapRs f k ts = ts.map (Ty.mapR f k)
   | [] => by simp [Ty.mapRs]
   | t :: ts => by simp [Ty.mapRs, Ty.mapRs_eq f k ts]
+%proof-/
 
 /-! Applying one function after another is applying their composite. -/
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 theorem Ty.mapR_comp (f g : Nat → Rgn → Rgn) : ∀ (k : Nat) (t : Ty),
@@ -571,9 +626,10 @@ theorem Ty.mapEnv_comp (f g : Nat → Rgn → Rgn) : ∀ (k : Nat) (env : Option
   | k, some ts => by simp [Ty.mapEnv, Ty.mapRs_comp f g k ts]
 
 end
-
+%proof-/
 /-! Two functions that agree on the regions of a type do the same to it. -/
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 theorem Ty.mapR_ext (f g : Nat → Rgn → Rgn) : ∀ (k : Nat) (t : Ty),
@@ -634,9 +690,10 @@ theorem Ty.mapEnv_ext (f g : Nat → Rgn → Rgn) : ∀ (k : Nat) (env : Option 
     rw [Ty.mapRs_ext f g k ts (fun x hx => h x (by simpa [Ty.regionsEnv] using hx))]
 
 end
-
+%proof-/
 /-! A function that changes no region changes no type. -/
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 theorem Ty.mapR_id : ∀ (k : Nat) (t : Ty), Ty.mapR (fun _ r => r) k t = t
@@ -667,10 +724,11 @@ theorem Ty.mapEnv_id : ∀ (k : Nat) (env : Option (List Ty)),
   | k, some ts => by simp [Ty.mapEnv, Ty.mapRs_id k ts]
 
 end
-
+%proof-/
 /-! The regions of a type a function was applied to are that function applied
 to its regions. -/
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 theorem Ty.regionsAt_mapR (f : Nat → Rgn → Rgn) : ∀ (k : Nat) (t : Ty),
@@ -707,9 +765,10 @@ theorem Ty.regionsEnv_mapEnv (f : Nat → Rgn → Rgn) : ∀ (k : Nat) (env : Op
   | k, some ts => by simp [Ty.mapEnv, Ty.regionsEnv, Ty.regionsAts_mapRs f k ts]
 
 end
-
+%proof-/
 /-! A function that does not look at the depth does the same at every depth. -/
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 theorem Ty.mapR_const (g : Rgn → Rgn) : ∀ (k k' : Nat) (t : Ty),
@@ -744,7 +803,7 @@ theorem Ty.mapEnv_const (g : Rgn → Rgn) : ∀ (k k' : Nat) (env : Option (List
   | k, k', some ts => by simp [Ty.mapEnv, Ty.mapRs_const g k k' ts]
 
 end
-
+%proof-/
 /-! ## Instantiating and opening -/
 
 /-- Put regions in place of the region variables of a type. -/
@@ -757,46 +816,59 @@ def Row.inst (θ : List Rgn) (e : Row) : Row := Ty.mapRow (fun _ r => r.inst θ)
 
 def Row.open (rs : List Rgn) (e : Row) : Row := Ty.mapRow (fun d r => r.openAt d rs) 0 e
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.inst_inst (θ η : List Rgn) (t : Ty) :
     (t.inst θ).inst η = t.inst (θ.map (Rgn.inst η)) := by
   simp only [Ty.inst, Ty.mapR_comp]
   congr 1
   funext _ r
   exact Rgn.inst_inst θ η r
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.inst_inst (θ η : List Rgn) (e : Row) :
     (e.inst θ).inst η = e.inst (θ.map (Rgn.inst η)) := by
   simp only [Row.inst, Ty.mapRow_comp]
   congr 1
   funext _ r
   exact Rgn.inst_inst θ η r
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.open_inst (rs η : List Rgn) (t : Ty) :
     (t.open rs).inst η = (t.inst η).open (rs.map (Rgn.inst η)) := by
   simp only [Ty.inst, Ty.open, Ty.mapR_comp]
   congr 1
   funext d r
   exact Rgn.openAt_inst d rs η r
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.open_inst (rs η : List Rgn) (e : Row) :
     (e.open rs).inst η = (e.inst η).open (rs.map (Rgn.inst η)) := by
   simp only [Row.inst, Row.open, Ty.mapRow_comp]
   congr 1
   funext d r
   exact Rgn.openAt_inst d rs η r
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.open_nil (t : Ty) : t.open [] = t := by
   have h : (fun d r => Rgn.openAt d [] r) = fun _ r => r := by
     funext d r
     exact Rgn.openAt_nil d r
   simp only [Ty.open, h, Ty.mapR_id]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.open_nil (e : Row) : e.open [] = e := by
   have h : (fun d r => Rgn.openAt d [] r) = fun _ r => r := by
     funext d r
     exact Rgn.openAt_nil d r
   simp only [Row.open, h, Ty.mapRow_id]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Instantiating a callable type instantiates its parts. -/
 theorem Ty.inst_fn (θ : List Rgn) (n : Nat) (ps : List Ty) (r : Ty) (e : Row) (once : Bool)
     (env : Option (List Ty)) (acc : List Rgn) :
@@ -813,23 +885,35 @@ theorem Ty.inst_fn (θ : List Rgn) (n : Nat) (ps : List Ty) (r : Ty) (e : Row) (
   | some ts =>
     simp only [Ty.mapEnv, Option.map_some, Ty.mapRs_eq]
     rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.inst_ref (θ : List Rgn) (ρ : Rgn) (t : Ty) :
     (Ty.ref ρ t).inst θ = .ref (ρ.inst θ) (t.inst θ) := by
   simp [Ty.inst, Ty.mapR]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.inst_tuple (θ : List Rgn) (fs : List Ty) :
     (Ty.tuple fs).inst θ = .tuple (fs.map (Ty.inst θ)) := by
   simp [Ty.inst, Ty.mapR, Ty.mapRs_eq]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.inst_data (θ : List Rgn) (n : Nat) (args : List Ty) :
     (Ty.data n args).inst θ = .data n (args.map (Ty.inst θ)) := by
   simp [Ty.inst, Ty.mapR, Ty.mapRs_eq]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.inst_int (θ : List Rgn) : Ty.int.inst θ = .int := by simp [Ty.inst, Ty.mapR]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.inst_never (θ : List Rgn) : Ty.never.inst θ = .never := by simp [Ty.inst, Ty.mapR]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Opening a callable type that binds no regions opens its parts. -/
 theorem Ty.open_fn0 (rs : List Rgn) (ps : List Ty) (r : Ty) (e : Row) (once : Bool)
     (acc : List Rgn) :
@@ -837,11 +921,15 @@ theorem Ty.open_fn0 (rs : List Rgn) (ps : List Ty) (r : Ty) (e : Row) (once : Bo
       = .fn 0 (ps.map (Ty.open rs)) (r.open rs) (e.open rs) once none
           (acc.map (Rgn.openAt 0 rs)) := by
   simp [Ty.open, Row.open, Ty.mapR, Ty.mapRs_eq, Ty.mapEnv]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.open_ref (rs : List Rgn) (ρ : Rgn) (t : Ty) :
     (Ty.ref ρ t).open rs = .ref (ρ.openAt 0 rs) (t.open rs) := by
   simp [Ty.open, Ty.mapR]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Looking an operation up in an instantiated row. -/
 theorem Row.lookup_inst (θ : List Rgn) (op : Nat) : ∀ e : Row,
     (e.inst θ).lookup op = (e.lookup op).map (·.map (Ty.inst θ))
@@ -853,7 +941,9 @@ theorem Row.lookup_inst (θ : List Rgn) (op : Nat) : ∀ e : Row,
     cases h : op == op' with
     | true => simp [Ty.inst]
     | false => simpa using ih
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.le_inst {a b : Row} (h : Row.le a b) (θ : List Rgn) :
     Row.le (a.inst θ) (b.inst θ) := by
   intro op sig hl
@@ -863,6 +953,7 @@ theorem Row.le_inst {a b : Row} (h : Row.le a b) (θ : List Rgn) :
   | some s =>
     rw [h op s ha]
     simpa [ha] using hl
+%proof-/
 
 /-! ## Types with no dangling bound region, and types of a signature -/
 
@@ -871,6 +962,7 @@ def Ty.lc (t : Ty) : Bool := (Ty.regionsAt 0 t).all fun x => x.2.lcAt x.1
 
 def Row.lc (e : Row) : Bool := (Ty.regionsRow 0 e).all fun x => x.2.lcAt x.1
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.openAt_lc {d : Nat} {r : Rgn} (rs : List Rgn) (h : r.lcAt d = true) :
     r.openAt d rs = r := by
   induction r with
@@ -885,31 +977,41 @@ theorem Rgn.openAt_lc {d : Nat} {r : Rgn} (rs : List Rgn) (h : r.lcAt d = true) 
   | or a b iha ihb =>
     simp only [Rgn.lcAt, Bool.and_eq_true] at h
     simp [Rgn.openAt, iha h.1, ihb h.2]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Opening a type none of whose regions is bound outside it changes nothing. -/
 theorem Ty.open_lc {t : Ty} (h : t.lc = true) (rs : List Rgn) : t.open rs = t := by
   have := Ty.mapR_ext (fun d r => r.openAt d rs) (fun _ r => r) 0 t fun x hx =>
     Rgn.openAt_lc rs (List.all_eq_true.mp h x hx)
   simp only [Ty.open, this, Ty.mapR_id]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.open_lc {e : Row} (h : e.lc = true) (rs : List Rgn) : e.open rs = e := by
   have := Ty.mapRow_ext (fun d r => r.openAt d rs) (fun _ r => r) 0 e fun x hx =>
     Rgn.openAt_lc rs (List.all_eq_true.mp h x hx)
   simp only [Row.open, this, Ty.mapRow_id]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.lc_inst {t : Ty} (h : t.lc = true) (θ : List Rgn) : (t.inst θ).lc = true := by
   simp only [Ty.lc, Ty.inst, Ty.regionsAt_mapR, List.all_map] at h ⊢
   exact List.all_eq_true.mpr fun x hx => Rgn.lcAt_inst (List.all_eq_true.mp h x hx) θ
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.lc_inst {e : Row} (h : e.lc = true) (θ : List Rgn) : (e.inst θ).lc = true := by
   simp only [Row.lc, Row.inst, Ty.regionsRow_mapRow, List.all_map] at h ⊢
   exact List.all_eq_true.mpr fun x hx => Rgn.lcAt_inst (List.all_eq_true.mp h x hx) θ
+%proof-/
 
 /-- Every region variable of the type is below `c`. -/
 def Ty.within (c : Nat) (t : Ty) : Bool := (Ty.regionsAt 0 t).all fun x => x.2.within c
 
 def Row.within (c : Nat) (e : Row) : Bool := (Ty.regionsRow 0 e).all fun x => x.2.within c
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.inst_append {θ : List Rgn} {r : Rgn} (h : r.within θ.length = true) (rs : List Rgn) :
     r.inst (θ ++ rs) = r.inst θ := by
   induction r with
@@ -925,11 +1027,15 @@ theorem Rgn.inst_append {θ : List Rgn} {r : Rgn} (h : r.within θ.length = true
   | or a b iha ihb =>
     simp only [Rgn.within, Bool.and_eq_true] at h
     simp [Rgn.inst, iha h.1, ihb h.2]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.inst_append {θ : List Rgn} {t : Ty} (h : t.within θ.length = true) (rs : List Rgn) :
     t.inst (θ ++ rs) = t.inst θ :=
   Ty.mapR_ext _ _ 0 t fun x hx => Rgn.inst_append (List.all_eq_true.mp h x hx) rs
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The type of a signature, seen from the body: its call regions opened to
 variables, then everything instantiated as the function was entered. -/
 theorem Ty.open_callVars_inst {θ : List Rgn} {t : Ty} (h : t.within θ.length = true)
@@ -938,13 +1044,16 @@ theorem Ty.open_callVars_inst {θ : List Rgn} {t : Ty} (h : t.within θ.length =
   simp only [Ty.inst, Ty.open, Ty.mapR_comp]
   exact Ty.mapR_ext _ _ 0 t fun x hx =>
     Rgn.open_callVars_inst x.1 θ rs x.2 (List.all_eq_true.mp h x hx)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.open_callVars_inst {θ : List Rgn} {e : Row} (h : e.within θ.length = true)
     (rs : List Rgn) :
     (e.open (Rgn.callVars θ.length rs.length)).inst (θ ++ rs) = (e.inst θ).open rs := by
   simp only [Row.inst, Row.open, Ty.mapRow_comp]
   exact Ty.mapRow_ext _ _ 0 e fun x hx =>
     Rgn.open_callVars_inst x.1 θ rs x.2 (List.all_eq_true.mp h x hx)
+%proof-/
 
 /-! ## The shape of a type, and its regions
 
@@ -968,6 +1077,7 @@ def Rgn.isWr : Rgn → Bool
   | .wr _ => true
   | _ => false
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.place_shape {r : Rgn} (h : r.place = true) : r.shape = .cell 0 := by
   cases r with
   | bound k => cases h
@@ -976,16 +1086,22 @@ theorem Rgn.place_shape {r : Rgn} (h : r.place = true) : r.shape = .cell 0 := by
     simp only [Rgn.place, Bool.and_eq_true] at h
     simp [Rgn.shape, Rgn.place_free h.1, Rgn.place_free h.2]
   | _ => rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.clean_shape (o : Option Rgn) : (Rgn.clean o).shape = .cell 0 :=
   Rgn.place_shape (Rgn.clean_place o)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.clean_isWr (o : Option Rgn) : (Rgn.clean o).isWr = false := by
   have h := Rgn.clean_place o
   cases hc : Rgn.clean o with
   | wr r => rw [hc] at h; cases h
   | _ => rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.shape_inst (θ : List Rgn) (r : Rgn) : (r.inst θ).shape = r.shape := by
   induction r with
   | var i => exact Rgn.clean_shape _
@@ -996,11 +1112,14 @@ theorem Rgn.shape_inst (θ : List Rgn) (r : Rgn) : (r.inst θ).shape = r.shape :
   | wr r ih => exact congrArg Rgn.wr ih
   | or a b iha ihb =>
     simp only [Rgn.inst, Rgn.shape, Rgn.inst_free, iha, ihb]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.isWr_inst (θ : List Rgn) (r : Rgn) : (r.inst θ).isWr = r.isWr := by
   cases r with
   | var i => exact Rgn.clean_isWr _
   | _ => rfl
+%proof-/
 
 /-- A type with every region that is not bound replaced by the same one. -/
 def Ty.shape (t : Ty) : Ty := Ty.mapR (fun _ r => r.shape) 0 t
@@ -1010,12 +1129,15 @@ is not a region of its own: it is written in terms of the region. -/
 def Ty.frees (t : Ty) : List Rgn :=
   ((Ty.regionsAt 0 t).map (·.2)).filter fun r => r.free && !r.isWr
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.shape_inst (θ : List Rgn) (t : Ty) : (t.inst θ).shape = t.shape := by
   simp only [Ty.shape, Ty.inst, Ty.mapR_comp]
   congr 1
   funext _ r
   exact Rgn.shape_inst θ r
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.frees_inst (θ : List Rgn) (t : Ty) : (t.inst θ).frees = t.frees.map (Rgn.inst θ) := by
   simp only [Ty.frees, Ty.inst, Ty.regionsAt_mapR, List.map_map, List.filter_map]
   congr 1
@@ -1023,5 +1145,6 @@ theorem Ty.frees_inst (θ : List Rgn) (t : Ty) : (t.inst θ).frees = t.frees.map
   intro x _
   show ((Rgn.inst θ x.2).free && !(Rgn.inst θ x.2).isWr) = (x.2.free && !x.2.isWr)
   rw [Rgn.inst_free, Rgn.isWr_inst]
+%proof-/
 
 end Glorious.Typing

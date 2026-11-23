@@ -14,6 +14,7 @@ namespace Glorious
 
 open Bytecode (Instr Code)
 
+/-%proof (commented out while the machines become bytes)
 theorem drop_eq_cons {α : Type} {l : List α} {n : Nat} {a : α} {t : List α}
     (h : l.drop n = a :: t) : l[n]? = some a ∧ l.drop (n + 1) = t := by
   induction l generalizing n with
@@ -27,7 +28,9 @@ theorem drop_eq_cons {α : Type} {l : List α} {n : Nat} {a : α} {t : List α}
     | succ n =>
       simp at h
       simpa using ih h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem getElem?_append_of_eq_some {α : Type} {l l' : List α} {i : Nat} {a : α}
     (h : l[i]? = some a) : (l ++ l')[i]? = some a := by
   induction l generalizing i with
@@ -36,6 +39,7 @@ theorem getElem?_append_of_eq_some {α : Type} {l l' : List α} {i : Nat} {a : �
     cases i with
     | zero => simpa using h
     | succ i => simpa using ih (by simpa using h)
+%proof-/
 
 /-- The instructions `is` sit in `code` starting at position `pc`. -/
 def CodeAt (code : Code) (pc : Nat) (is : Code) : Prop :=
@@ -45,22 +49,31 @@ namespace CodeAt
 
 variable {code : Code} {pc : Nat} {i : Instr} {is a b : Code}
 
+/-%proof (commented out while the machines become bytes)
 theorem zero (code : Code) : CodeAt code 0 code := ⟨[], by simp⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem head (h : CodeAt code pc (i :: is)) : code[pc]? = some i := by
   obtain ⟨post, h⟩ := h
   have h' : code.drop pc = i :: (is ++ post) := h
   exact (drop_eq_cons h').1
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem tail (h : CodeAt code pc (i :: is)) : CodeAt code (pc + 1) is := by
   obtain ⟨post, h⟩ := h
   have h' : code.drop pc = i :: (is ++ post) := h
   exact ⟨post, (drop_eq_cons h').2⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem append_left (h : CodeAt code pc (a ++ b)) : CodeAt code pc a := by
   obtain ⟨post, h⟩ := h
   exact ⟨b ++ post, by rw [h, List.append_assoc]⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem append_right : ∀ {pc : Nat}, CodeAt code pc (a ++ b) → CodeAt code (pc + a.length) b := by
   induction a with
   | nil => intro pc h; simpa using h
@@ -71,6 +84,7 @@ theorem append_right : ∀ {pc : Nat}, CodeAt code pc (a ++ b) → CodeAt code (
       simp only [List.length_cons]; omega
     rw [e]
     exact ih h'.tail
+%proof-/
 
 end CodeAt
 

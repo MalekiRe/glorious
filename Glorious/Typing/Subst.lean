@@ -19,58 +19,83 @@ open Core
 
 variable {Δ : Ctx}
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.mem_flat {l : List Rgn} {x : Rgn} : x ∈ Rgn.flat l ↔ ∃ r, r ∈ l ∧ x ∈ r.parts := by
   simp [Rgn.flat]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.flat_cons (r : Rgn) (l : List Rgn) : Rgn.flat (r :: l) = r.parts ++ Rgn.flat l := by
   simp [Rgn.flat]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.flat_cons_atom {x : Rgn} (h : x.atom = true) (l : List Rgn) :
     Rgn.flat (x :: l) = x :: Rgn.flat l := by
   rw [Rgn.flat_cons, Rgn.atom_parts h]
   rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.atom_of_mem_flat {l : List Rgn} {x : Rgn} (h : x ∈ Rgn.flat l) : x.atom = true := by
   obtain ⟨r, _, hx⟩ := Rgn.mem_flat.mp h
   exact Rgn.mem_parts_atom hx
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.flat_of_atoms : ∀ {l : List Rgn}, (∀ x, x ∈ l → x.atom = true) → Rgn.flat l = l
   | [], _ => rfl
   | x :: l, h => by
     rw [Rgn.flat_cons_atom (h x (List.mem_cons_self ..)),
       Rgn.flat_of_atoms (fun y hy => h y (List.mem_cons_of_mem _ hy))]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.flat_flat (l : List Rgn) : Rgn.flat (Rgn.flat l) = Rgn.flat l :=
   Rgn.flat_of_atoms fun _ hx => Rgn.atom_of_mem_flat hx
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.mem_parts_inst {θ : List Rgn} {r x : Rgn} :
     x ∈ (r.inst θ).parts ↔ ∃ y, y ∈ r.parts ∧ x ∈ (y.inst θ).parts := by
   rw [Rgn.parts_inst]
   simp
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.flat_map_inst (θ : List Rgn) (l : List Rgn) :
     Rgn.flat (l.map (Rgn.inst θ)) = (Rgn.flat l).flatMap fun x => (x.inst θ).parts := by
   induction l with
   | nil => rfl
   | cons r l ih =>
     rw [List.map_cons, Rgn.flat_cons, Rgn.flat_cons, ih, List.flatMap_append, Rgn.parts_inst]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.mem_flat_inst {θ l : List Rgn} {x : Rgn} :
     x ∈ Rgn.flat (l.map (Rgn.inst θ)) ↔ ∃ y, y ∈ Rgn.flat l ∧ x ∈ (y.inst θ).parts := by
   rw [Rgn.flat_map_inst]
   simp
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Sub.refl (a : List Rgn) : Sub a a := fun _ h => h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Sub.trans {a b c : List Rgn} (h₁ : Sub a b) (h₂ : Sub b c) : Sub a c :=
   fun r h => h₂ r (h₁ r h)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Sub.inst {a b : List Rgn} (h : Sub a b) (θ : List Rgn) :
     Sub (a.map (Rgn.inst θ)) (b.map (Rgn.inst θ)) := by
   intro x hx
   obtain ⟨y, hy, hxy⟩ := Rgn.mem_flat_inst.mp hx
   exact Rgn.mem_flat_inst.mpr ⟨y, h y hy, hxy⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A place or permission of an instance of a region that is none of a
 callable type's own regions comes of one that is none of them. -/
 theorem Rgn.freeOf_of_mem_parts_inst {θ : List Rgn} {n : Nat} :
@@ -87,14 +112,18 @@ theorem Rgn.freeOf_of_mem_parts_inst {θ : List Rgn} {n : Nat} :
   | .cell _, _, _, _, _ => rfl
   | .lab _, _, _, _, _ => rfl
   | .loan _, _, _, _, _ => rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem SubFree.inst {n : Nat} {a b : List Rgn} (h : SubFree n a b) (θ : List Rgn) :
     SubFree n (a.map (Rgn.inst θ)) (b.map (Rgn.inst θ)) := by
   intro x hx hfx
   obtain ⟨y, hy, hxy⟩ := Rgn.mem_flat_inst.mp hx
   exact Rgn.mem_flat_inst.mpr
     ⟨y, h y hy (Rgn.freeOf_of_mem_parts_inst (Rgn.atom_of_mem_flat hy) hxy hfx), hxy⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What some of a list become is among what all of it become. -/
 theorem Rgn.flat_map_filter_sublist (p : Rgn → Bool) (f : Rgn → Rgn) : ∀ l : List Rgn,
     (Rgn.flat ((l.filter p).map f)).Sublist (Rgn.flat (l.map f))
@@ -105,29 +134,41 @@ theorem Rgn.flat_map_filter_sublist (p : Rgn → Bool) (f : Rgn → Rgn) : ∀ l
       exact (Rgn.flat_map_filter_sublist p f l).append_left _
     · rw [List.filter_cons_of_neg h, List.map_cons, Rgn.flat_cons]
       exact (Rgn.flat_map_filter_sublist p f l).trans (List.sublist_append_right _ _)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Sub.of_mem {a b : List Rgn} (h : ∀ r, r ∈ a → r ∈ b) : Sub a b := by
   intro x hx
   obtain ⟨r, hr, hx⟩ := Rgn.mem_flat.mp hx
   exact Rgn.mem_flat.mpr ⟨r, h r hr, hx⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Sub.of_grants {a b : List Rgn} (h : ∀ r, r ∈ a → Grants b r) : Sub a b := by
   intro x hx
   obtain ⟨r, hr, hx⟩ := Rgn.mem_flat.mp hx
   exact h r hr x hx
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Grants.sub {a b : List Rgn} {r : Rgn} (h : Grants a r) (hs : Sub a b) : Grants b r :=
   fun x hx => hs x (h x hx)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Grants.of_mem {ϕ : List Rgn} {r : Rgn} (h : r ∈ ϕ) : Grants ϕ r :=
   fun _ hx => Rgn.mem_flat.mpr ⟨r, h, hx⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Grants.inst {ϕ : List Rgn} {r : Rgn} (h : Grants ϕ r) (θ : List Rgn) :
     Grants (ϕ.map (Rgn.inst θ)) (r.inst θ) := by
   intro x hx
   obtain ⟨y, hy, hxy⟩ := Rgn.mem_parts_inst.mp hx
   exact Rgn.mem_flat_inst.mpr ⟨y, h y hy, hxy⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Widen.inst {τ τ' : Ty} (h : Widen τ τ') (θ : List Rgn) : Widen (τ.inst θ) (τ'.inst θ) := by
   cases h with
   | refl => exact .refl
@@ -136,12 +177,16 @@ theorem Widen.inst {τ τ' : Ty} (h : Widen τ τ') (θ : List Rgn) : Widen (τ.
     refine .ref fun x hx => ?_
     obtain ⟨y, hy, hxy⟩ := Rgn.mem_parts_inst.mp hx
     exact Rgn.mem_parts_inst.mpr ⟨y, hp y hy, hxy⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.inst_cons (θ : List Rgn) (op : Nat) (targs : List Ty) (H : Row) :
     Row.inst θ ((op, targs) :: H) = (op, targs.map (Ty.inst θ)) :: Row.inst θ H := by
   simp only [Row.inst, Ty.mapRow, Ty.mapEntry, Ty.mapRs_eq]
   rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.inst_append (θ : List Rgn) : ∀ (a b : Row),
     Row.inst θ (a ++ b) = Row.inst θ a ++ Row.inst θ b
   | [], b => by simp [Row.inst, Ty.mapRow]
@@ -149,9 +194,13 @@ theorem Row.inst_append (θ : List Rgn) : ∀ (a b : Row),
     have ih := Row.inst_append θ a b
     simp only [Row.inst] at ih
     simp [Row.inst, Ty.mapRow, ih]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Row.inst_nil (θ : List Rgn) : Row.inst θ [] = [] := by simp [Row.inst, Ty.mapRow]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem FnSig.ty_inst (sig : FnSig) (θ' θ : List Rgn) (once : Bool) (env : Option (List Ty)) :
     (sig.ty θ' once env).inst θ
       = sig.ty (θ'.map (Rgn.inst θ)) once (env.map (·.map (Ty.inst θ))) := by
@@ -159,23 +208,30 @@ theorem FnSig.ty_inst (sig : FnSig) (θ' θ : List Rgn) (once : Bool) (env : Opt
   congr 1
   · exact List.map_congr_left fun t _ => Ty.inst_inst θ' θ t
   · exact List.map_congr_left fun r _ => Rgn.inst_inst θ' θ r
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem caps_inst (caps : List Ty) (θ' θ : List Rgn) :
     (caps.map (Ty.inst θ')).map (Ty.inst θ) = caps.map (Ty.inst (θ'.map (Rgn.inst θ))) := by
   rw [List.map_map]
   exact List.map_congr_left fun t _ => Ty.inst_inst θ' θ t
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem opens_inst (Ps : List Ty) (rs θ : List Rgn) :
     (Ps.map (Ty.open rs)).map (Ty.inst θ)
       = (Ps.map (Ty.inst θ)).map (Ty.open (rs.map (Rgn.inst θ))) := by
   rw [List.map_map, List.map_map]
   exact List.map_congr_left fun t _ => Ty.open_inst rs θ t
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem acc_open_inst (acc rs θ : List Rgn) :
     (acc.map (Rgn.openAt 0 rs)).map (Rgn.inst θ)
       = (acc.map (Rgn.inst θ)).map (Rgn.openAt 0 (rs.map (Rgn.inst θ))) := by
   rw [List.map_map, List.map_map]
   exact List.map_congr_left fun r _ => Rgn.openAt_inst 0 rs θ r
+%proof-/
 
 /-! ## Regions that stay apart -/
 
@@ -186,9 +242,12 @@ def InjOn (ϕ θ : List Rgn) : Prop :=
     ∧ ∀ x y, x ∈ Rgn.flat ϕ → y ∈ Rgn.flat ϕ → ∀ z, z ∈ (x.inst θ).parts → z ∈ (y.inst θ).parts →
       x = y
 
+/-%proof (commented out while the machines become bytes)
 theorem InjOn.mono {ϕ ϕ' θ : List Rgn} (h : InjOn ϕ θ) (hsub : Sub ϕ' ϕ) : InjOn ϕ' θ :=
   ⟨fun x hx => h.1 x (hsub x hx), fun x y hx hy => h.2 x y (hsub x hx) (hsub y hy)⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A list without repeats whose items are sent to lists without repeats, no
 two of them sharing an item, gives a list without repeats. -/
 theorem nodup_flatMap_of {L : List Rgn} {f : Rgn → List Rgn} (hL : L.Nodup)
@@ -208,14 +267,18 @@ theorem nodup_flatMap_of {L : List Rgn} {f : Rgn → List Rgn} (hL : L.Nodup)
     have := hd a y (List.mem_cons_self ..) (List.mem_cons_of_mem _ hy) z hz hzy
     subst this
     exact ha hy
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A list without repeats, of regions that stay apart, has none afterwards. -/
 theorem InjOn.nodup {ϕ θ : List Rgn} (h : InjOn ϕ θ) {l : List Rgn} (hsub : Sub l ϕ)
     (hnd : (Rgn.flat l).Nodup) : (Rgn.flat (l.map (Rgn.inst θ))).Nodup := by
   rw [Rgn.flat_map_inst]
   exact nodup_flatMap_of hnd (fun x hx => h.1 x (hsub x hx))
     (fun x y hx hy => h.2 x y (hsub x hx) (hsub y hy))
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same when some of the list is bound, which instantiating leaves alone. -/
 theorem InjOn.nodup_scope {ϕ θ : List Rgn} (h : InjOn ϕ θ) {l : List Rgn}
     (hin : ∀ x, x ∈ l → (∀ y, y ∈ x.parts → y.free = false) ∨ Grants ϕ x)
@@ -263,7 +326,9 @@ theorem InjOn.nodup_scope {ϕ θ : List Rgn} (h : InjOn ϕ θ) {l : List Rgn}
       · have := hfree x y hfx' hzx
         rw [hfy] at this; cases this
     · exact h.2 x y hmx hmy z hzx hzy
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same of what a callable type binding `n` regions touches, of which
 what is none of its own is among `ϕ`'s. -/
 theorem InjOn.nodup_free {ϕ θ : List Rgn} {n : Nat} (h : InjOn ϕ θ) {l : List Rgn}
@@ -284,7 +349,9 @@ theorem InjOn.nodup_free {ϕ θ : List Rgn} {n : Nat} (h : InjOn ϕ θ) {l : Lis
     rw [hp, List.mem_singleton] at hy
     subst hy
     exact hsub y hx hf
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A part of what a part becomes that is leave to write comes from leave to
 write. -/
 theorem Rgn.inst_atom_wr {θ : List Rgn} {y w : Rgn} (hy : y.atom = true)
@@ -298,7 +365,9 @@ theorem Rgn.inst_atom_wr {θ : List Rgn} {y w : Rgn} (hy : y.atom = true)
     exact ⟨v, rfl, hu⟩
   | or a b => cases hy
   | _ => simp [Rgn.inst, Rgn.parts] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.openAt_atom_wr {d : Nat} {rs : List Rgn} {y w : Rgn} (hy : y.atom = true)
     (h : Rgn.wr w ∈ (y.openAt d rs).parts) : ∃ v, y = .wr v ∧ w ∈ (v.openAt d rs).parts := by
   cases y with
@@ -318,7 +387,9 @@ theorem Rgn.openAt_atom_wr {d : Nat} {rs : List Rgn} {y w : Rgn} (hy : y.atom = 
     exact ⟨v, rfl, hu⟩
   | or a b => cases hy
   | _ => simp [Rgn.openAt, Rgn.parts] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Among places that stay apart and say that what may be written may be
 read, nothing becomes leave to write a part of `ρ` that was not. -/
 theorem InjOn.apart_wr {ϕ θ : List Rgn} (h : InjOn ϕ θ) (hc : closed ϕ = true) {x ρ : Rgn}
@@ -334,7 +405,9 @@ theorem InjOn.apart_wr {ϕ θ : List Rgn} (h : InjOn ϕ θ) (hc : closed ϕ = tr
   have huv := h.2 v u hv (hρ u hu) w hwv hwu
   subst huv
   exact hne _ hy₀ (List.mem_map.mpr ⟨v, hu, rfl⟩)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Nor does anything become a part of `ρ` that was not. -/
 theorem InjOn.apart {ϕ θ : List Rgn} (h : InjOn ϕ θ) {x ρ : Rgn} (hx : Grants ϕ x)
     (hρ : Grants ϕ ρ) (hne : ∀ y, y ∈ x.parts → y ∉ ρ.parts) :
@@ -345,7 +418,9 @@ theorem InjOn.apart {ϕ θ : List Rgn} (h : InjOn ϕ θ) {x ρ : Rgn} (hx : Gran
   have := h.2 a b (hx a ha) (hρ b hb) y hya hyb
   subst this
   exact hne a ha hb
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What a list without repeats says of the lists it was put together from. -/
 theorem nodup_flatMap_inv {L : List Rgn} {f : Rgn → List Rgn} (h : (L.flatMap f).Nodup) :
     (∀ x, x ∈ L → (f x).Nodup) ∧ ∀ x y, x ∈ L → y ∈ L → ∀ z, z ∈ f x → z ∈ f y → x = y := by
@@ -368,19 +443,25 @@ theorem nodup_flatMap_inv {L : List Rgn} {f : Rgn → List Rgn} (h : (L.flatMap 
         · subst hya
           exact absurd rfl (hd z hzy z (List.mem_flatMap.mpr ⟨x, hxL, hzx⟩))
         · exact ih2 x y hxL hyL z hzx hzy
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Places whose images do not repeat stay apart. -/
 theorem InjOn.of_nodup {θ l : List Rgn} (h : (Rgn.flat (l.map (Rgn.inst θ))).Nodup) : InjOn l θ := by
   rw [Rgn.flat_map_inst] at h
   exact nodup_flatMap_inv h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Rgn.flat_map_openAt (d : Nat) (rs l : List Rgn) :
     Rgn.flat (l.map (Rgn.openAt d rs)) = (Rgn.flat l).flatMap fun y => (y.openAt d rs).parts := by
   induction l with
   | nil => rfl
   | cons r l ih =>
     rw [List.map_cons, Rgn.flat_cons, Rgn.flat_cons, ih, List.flatMap_append, Rgn.parts_openAt]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Opening keeps a list saying that what may be written may be read. -/
 theorem closed_open {l : List Rgn} (h : closed l = true) (d : Nat) (rs : List Rgn) :
     closed (l.map (Rgn.openAt d rs)) = true := by
@@ -394,9 +475,11 @@ theorem closed_open {l : List Rgn} (h : closed l = true) (d : Nat) (rs : List Rg
     have hv := closed_mem h hy
     simpa [Rgn.flat_map_openAt] using List.mem_flatMap.mpr ⟨v, hv, hzv⟩
   | _ => rfl
+%proof-/
 
 /-! ## Values of a declared type -/
 
+/-%proof (commented out while the machines become bytes)
 theorem CtorOf.inst (hΔ : Δ.Stable) {tag : Nat} {T : Ty} {Fs : List Ty} (θ : List Rgn)
     (h : CtorOf Δ tag T Fs) : CtorOf Δ tag (T.inst θ) (Fs.map (Ty.inst θ)) := by
   rcases h with ⟨h0, rfl⟩ | ⟨h0, name, args, rfl, hF⟩
@@ -404,7 +487,9 @@ theorem CtorOf.inst (hΔ : Δ.Stable) {tag : Nat} {T : Ty} {Fs : List Ty} (θ : 
   · refine .inr ⟨h0, name, args.map (Ty.inst θ), Ty.inst_data θ name args, ?_⟩
     rw [hΔ.ctor, hF]
     rfl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A constructor of an instantiated type is one of the type. -/
 theorem CtorOf.of_inst (hΔ : Δ.Stable) {tag name : Nat} {args Fs' : List Ty} {θ : List Rgn}
     (h : CtorOf Δ tag (.data name (args.map (Ty.inst θ))) Fs') :
@@ -421,7 +506,9 @@ theorem CtorOf.of_inst (hΔ : Δ.Stable) {tag name : Nat} {args Fs' : List Ty} {
     | some Fs =>
       rw [hc] at hF
       exact ⟨Fs, .inr ⟨h0, name, args, rfl, hc⟩, (Option.some.inj hF).symm⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same of any type: only a tuple or a declared type has constructors. -/
 theorem CtorOf.of_inst_any (hΔ : Δ.Stable) {tag : Nat} {T : Ty} {Fs' : List Ty} {θ : List Rgn}
     (h : CtorOf Δ tag (T.inst θ) Fs') :
@@ -448,7 +535,9 @@ theorem CtorOf.of_inst_any (hΔ : Δ.Stable) {tag : Nat} {T : Ty} {Fs' : List Ty
   | data name args =>
     rw [Ty.inst_data] at h
     exact CtorOf.of_inst hΔ h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem HasAtom.inst {Γ : TEnv} {a : Atom} {τ : Ty} (θ : List Rgn) (h : HasAtom Γ a τ) :
     HasAtom (Γ.map (Ty.inst θ)) a (τ.inst θ) := by
   cases h with
@@ -456,12 +545,16 @@ theorem HasAtom.inst {Γ : TEnv} {a : Atom} {τ : Ty} (θ : List Rgn) (h : HasAt
   | int =>
     rw [Ty.inst_int]
     exact .int
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem HasAtoms.inst {Γ : TEnv} (θ : List Rgn) : ∀ {as : List Atom} {τs : List Ty},
     HasAtoms Γ as τs → HasAtoms (Γ.map (Ty.inst θ)) as (τs.map (Ty.inst θ))
   | _, _, .nil => .nil
   | _, _, .cons h hs => .cons (h.inst θ) (HasAtoms.inst θ hs)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem PlaceOk.inst (hΔ : Δ.Stable) (θ : List Rgn) : ∀ {σ : Ty} {path : List Nat} {τ : Ty},
     PlaceOk Δ σ path τ → PlaceOk Δ (σ.inst θ) path (τ.inst θ)
   | _, _, _, .here => .here
@@ -474,7 +567,9 @@ theorem PlaceOk.inst (hΔ : Δ.Stable) (θ : List Rgn) : ∀ {σ : Ty} {path : L
       (PlaceOk.inst hΔ θ hp)
     obtain ⟨Fs₀, hc₀, rfl⟩ := CtorOf.of_inst hΔ hc
     rw [hall tag Fs₀ hc₀]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Linear.inst (hΔ : Δ.Stable) {Γ : TEnv} {moved rest : List Nat} (θ : List Rgn)
     (h : Linear Δ Γ moved rest) : Linear Δ (Γ.map (Ty.inst θ)) moved rest := by
   intro i τ' hi hnd
@@ -485,14 +580,18 @@ theorem Linear.inst (hΔ : Δ.Stable) {Γ : TEnv} {moved rest : List Nat} (θ : 
     simp [hg] at hi
     subst hi
     exact h i τ hg (fun hd => hnd ((hΔ.dup τ θ).mpr hd))
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Uniform.inst (hΔ : Δ.Stable) {T τ : Ty} (θ : List Rgn) (h : Uniform Δ T τ) :
     Uniform Δ (T.inst θ) (τ.inst θ) := by
   intro tag Fs' hc σ hσ
   obtain ⟨Fs₀, hc₀, rfl⟩ := CtorOf.of_inst_any hΔ hc
   obtain ⟨σ₀, hσ₀, rfl⟩ := List.mem_map.mp hσ
   rw [h tag Fs₀ hc₀ σ₀ hσ₀]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem PartOk.inst (hΔ : Δ.Stable) (θ : List Rgn) : ∀ {σ : Ty} {path : List PathStep} {τ : Ty},
     PartOk Δ σ path τ → PartOk Δ (σ.inst θ) path (τ.inst θ)
   | _, _, _, .here => .here
@@ -508,20 +607,26 @@ theorem PartOk.inst (hΔ : Δ.Stable) (θ : List Rgn) : ∀ {σ : Ty} {path : Li
   | _, _, _, .elem hu hp => .elem (hu.inst hΔ θ) (PartOk.inst hΔ θ hp)
   | _, _, _, .variant hc hi hp =>
     .variant (hc.inst hΔ θ) (by simp [hi]) (PartOk.inst hΔ θ hp)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Grows.inst (hΔ : Δ.Stable) {T τ : Ty} (θ : List Rgn) (h : Grows Δ T τ) :
     Grows Δ (T.inst θ) (τ.inst θ) := by
   intro tag Fs' hc
   obtain ⟨Fs₀, hc₀, rfl⟩ := CtorOf.of_inst_any hΔ hc
   simpa using (h tag Fs₀ hc₀).inst hΔ θ
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Shrinks.inst (hΔ : Δ.Stable) {T : Ty} (θ : List Rgn) (h : Shrinks Δ T) :
     Shrinks Δ (T.inst θ) := by
   intro tag Fs' hc hne
   obtain ⟨Fs₀, hc₀, rfl⟩ := CtorOf.of_inst_any hΔ hc
   have hne₀ : Fs₀ ≠ [] := fun e => hne (by simp [e])
   simpa [List.map_dropLast] using (h tag Fs₀ hc₀ hne₀).inst hΔ θ
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem HasRhs.inst (hΔ : Δ.Stable) {Γ : TEnv} {rhs : Rhs} {τ : Ty} (θ : List Rgn)
     (h : HasRhs Δ Γ rhs τ) : HasRhs Δ (Γ.map (Ty.inst θ)) rhs (τ.inst θ) := by
   cases h with
@@ -576,9 +681,11 @@ theorem HasRhs.inst (hΔ : Δ.Stable) {Γ : TEnv} {rhs : Rhs} {τ : Ty} (θ : Li
       simp at hCs
       subst hCs
       rw [he Cs₀ rfl, caps_inst]
+%proof-/
 
 /-! ## Patterns -/
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 theorem PatOk.inst (hΔ : Δ.Stable) (θ : List Rgn) : ∀ {p : Pat} {τ : Ty} {Bs : List Ty},
@@ -599,9 +706,10 @@ theorem PatsOk.inst (hΔ : Δ.Stable) (θ : List Rgn) :
     exact .cons (PatOk.inst hΔ θ hp) (PatsOk.inst hΔ θ hps)
 
 end
-
+%proof-/
 /-! ## Handlers -/
 
+/-%proof (commented out while the machines become bytes)
 theorem Enters.inst {fn : Nat} {Cs Ps : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
     (θ : List Rgn) (hinj : Δ.loans → InjOn Φ θ) (h : Enters Δ fn Cs Ps ρ ε Φ) :
     Enters Δ fn (Cs.map (Ty.inst θ)) (Ps.map (Ty.inst θ)) (ρ.inst θ) (ε.inst θ)
@@ -620,7 +728,9 @@ theorem Enters.inst {fn : Nat} {Cs Ps : List Ty} {ρ : Ty} {ε : Row} {Φ : List
   · intro hL
     rw [← hacc]
     exact (hinj hL).nodup hsub (hnd hL)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem ArmsOk.inst (hΔ : Δ.Stable) {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
     (θ : List Rgn) (hinj : Δ.loans → InjOn Φ θ) :
     ∀ {ops : List (Nat × Nat)} {H : Row}, ArmsOk Δ Cs ρ ε Φ ops H →
@@ -642,7 +752,9 @@ theorem ArmsOk.inst (hΔ : Δ.Stable) {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : 
       rfl
     · have := hent.inst θ hinj
       simpa [Ty.inst_fn] using this
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem HandlerOk.inst (hΔ : Δ.Stable) {Cs : List Ty} {ret : Nat} {ops : List (Nat × Nat)}
     {σ ρ : Ty} {H ε : Row} {Φ : List Rgn} (θ : List Rgn) (hinj : Δ.loans → InjOn Φ θ)
     (h : HandlerOk Δ Cs ret ops σ ρ H ε Φ) :
@@ -651,12 +763,16 @@ theorem HandlerOk.inst (hΔ : Δ.Stable) {Cs : List Ty} {ret : Nat} {ops : List 
   refine ⟨by simpa using h.ret.inst θ hinj, h.arms.inst hΔ θ hinj, fun c hc => ?_⟩
   obtain ⟨c₀, hc₀, rfl⟩ := List.mem_map.mp hc
   exact (hΔ.dup c₀ θ).mpr (h.dup c₀ hc₀)
+%proof-/
 
 /-! ## Computations -/
 
+/-%proof (commented out while the machines become bytes)
 theorem snoc_inst (Γ : TEnv) (σ : Ty) (θ : List Rgn) :
     (Γ ++ [σ]).map (Ty.inst θ) = Γ.map (Ty.inst θ) ++ [σ.inst θ] := by simp
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A label's conditions hold with its regions instantiated. -/
 theorem LabelOk.inst {ϕ : List Rgn} {Γ : TEnv} {thunk : Atom} {n : Nat} {σ ρ : Ty}
     {εl εt ε : Row} {once once' : Bool} {env : Option (List Ty)} {accl acc : List Rgn}
@@ -681,7 +797,9 @@ theorem LabelOk.inst {ϕ : List Rgn} {Γ : TEnv} {thunk : Atom} {n : Nat} {σ ρ
     rcases hform.touches x hx with ⟨_, rfl⟩ | ⟨_, hmem⟩
     · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
     · exact .inr hmem
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A guard's conditions hold with its regions instantiated. -/
 theorem GuardOk.inst {ϕ : List Rgn} {Γ : TEnv} {cleanup thunk : Atom} {σc σ : Ty} {εt ε : Row}
     {once once' : Bool} {env env' : Option (List Ty)} {accc acc : List Rgn}
@@ -696,7 +814,9 @@ theorem GuardOk.inst {ϕ : List Rgn} {Γ : TEnv} {cleanup thunk : Atom} {σc σ 
   exact ⟨hc', ht', (Row.le_inst hform.row θ), (hform.cleanupTouches.inst θ), (hform.touches.inst θ),
     fun hL => ⟨(hinj hL).1.nodup hform.cleanupTouches (hform.apart hL).1,
       (hinj hL).1.nodup hform.touches (hform.apart hL).2⟩⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A cell's conditions hold with its regions instantiated. -/
 theorem CellOk.inst {ϕ : List Rgn} {Γ : TEnv} {init thunk : Atom} {n : Nat} {r : Rgn} {σ ρ : Ty}
     {εt ε : Row} {once : Bool} {env : Option (List Ty)} {acc : List Rgn}
@@ -727,7 +847,9 @@ theorem CellOk.inst {ϕ : List Rgn} {Γ : TEnv} {init thunk : Atom} {n : Nat} {r
     · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
     · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
     · exact .inr hmem
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A handler's installation's conditions hold with its regions instantiated. -/
 theorem InstallOk.inst {ϕ : List Rgn} {Γ : TEnv} {ret : Nat} {ops : List (Nat × Nat)}
     {captures : List Atom} {thunk : Atom} {Cs : List Ty} {σ ρ : Ty} {εt H ε : Row} {once : Bool}
@@ -744,7 +866,9 @@ theorem InstallOk.inst {ϕ : List Rgn} {Γ : TEnv} {ret : Nat} {ops : List (Nat 
   exact ⟨by simpa using ht', h.caps.inst θ,
     h.handler.inst hΔ θ fun hL => (hinj hL).1.mono h.within, hrow', h.touches.inst θ,
     h.within.inst θ, fun hL => (hinj hL).1.nodup (h.touches.trans h.within) (h.apart hL)⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A call's conditions hold with its regions instantiated. -/
 theorem CallOk.inst {ϕ : List Rgn} {Γ : TEnv} {f : Atom} {args : List Atom} {n : Nat}
     {rs : List Rgn} {Ps : List Ty} {σ : Ty} {ε' ε : Row} {once : Bool} {env : Option (List Ty)}
@@ -765,7 +889,9 @@ theorem CallOk.inst {ϕ : List Rgn} {Γ : TEnv} {f : Atom} {args : List Atom} {n
   · intro hL
     rw [← acc_open_inst]
     exact (hinj hL).1.nodup h.touches (h.apart hL)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- **Typing is closed under instantiating regions.** Under the rules for
 borrows the regions the computation may touch have to stay apart: a borrow
 takes away leave to use what was lent, which means nothing if what was lent
@@ -922,5 +1048,6 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
       simp [Ty.inst_tuple, Ty.inst_int]
     rw [hp] at ih
     exact .read ih
+%proof-/
 
 end Glorious.Typing

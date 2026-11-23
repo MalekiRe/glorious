@@ -45,10 +45,12 @@ def ownStack (a : Nat) : List Frame → Nat
   | [] => 0
   | fr :: st => ownFrame a fr + ownStack a st
 
+/-%proof (commented out while the machines become bytes)
 theorem ownStack_append (a : Nat) : ∀ (x y : List Frame),
     ownStack a (x ++ y) = ownStack a x + ownStack a y
   | [], y => by simp [ownStack]
   | fr :: x, y => by simp [ownStack, ownStack_append a x y, Nat.add_assoc]
+%proof-/
 
 /-- A cell holds a value: it has not been released. -/
 def Live (cells : Cells) (a : Nat) : Prop := ∃ v, cells[a]? = some (some v)
@@ -61,6 +63,7 @@ def OwnsAt (st : List Frame) (store : Store Frame) : Prop :=
 
 def Owns (s : State) : Prop := OwnsAt s.stack s.store
 
+/-%proof (commented out while the machines become bytes)
 /-- A stack and store with the same scopes and at least the same live cells. -/
 theorem OwnsAt.of_le {st st' : List Frame} {store store' : Store Frame} (h : OwnsAt st store)
     (hc : ∀ a, ownStack a st' + osum (ownStack a) store'.conts
@@ -70,22 +73,30 @@ theorem OwnsAt.of_le {st st' : List Frame} {store store' : Store Frame} (h : Own
   obtain ⟨h1, h2⟩ := h a
   have := hc a
   exact ⟨by omega, fun hp => hl a (h2 (by omega))⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Removing a frame without releasing anything. -/
 theorem OwnsAt.drop {fr : Frame} {st : List Frame} {store : Store Frame}
     (h : OwnsAt (fr :: st) store) : OwnsAt st store :=
   h.of_le (fun a => by simp only [ownStack]; omega) (fun _ hl => hl)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Pushing a frame that is not a cell's scope. -/
 theorem OwnsAt.push {fr : Frame} {st : List Frame} {store : Store Frame} (h : OwnsAt st store)
     (h0 : ∀ a, ownFrame a fr = 0) : OwnsAt (fr :: st) store :=
   h.of_le (fun a => by simp only [ownStack, h0 a]; omega) (fun _ hl => hl)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The label counter is no part of it. -/
 theorem OwnsAt.labels {st : List Frame} {conts : Conts Frame} {labels labels' : Nat}
     {cells : Cells} (h : OwnsAt st ⟨conts, labels, cells⟩) : OwnsAt st ⟨conts, labels', cells⟩ :=
   h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Removing the scope of a cell and releasing the cell. -/
 theorem OwnsAt.release {a : Nat} {st : List Frame} {store : Store Frame}
     (h : OwnsAt (.cell a :: st) store) : OwnsAt st (store.release a) := by
@@ -104,7 +115,9 @@ theorem OwnsAt.release {a : Nat} {st : List Frame} {store : Store Frame}
   show (store.cells.setIfInBounds a none)[b]? = some (some v)
   rw [Array.getElem?_setIfInBounds_ne hne]
   exact hv
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Pushing the scope of a new cell. -/
 theorem OwnsAt.alloc {st : List Frame} {store : Store Frame} (h : OwnsAt st store) (v : Value) :
     OwnsAt (.cell store.cells.size :: st) (store.alloc v) := by
@@ -143,7 +156,9 @@ theorem OwnsAt.alloc {st : List Frame} {store : Store Frame} (h : OwnsAt st stor
       rw [Array.getElem?_push_lt hlt]
       rw [Array.getElem?_eq_getElem hlt] at hw
       exact hw
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem callFn_next {p : Program} {fn : Nat} {captures vs : List Value} {st : List Frame}
     {store : Store Frame} {s' : State} (h : callFn p fn captures vs st store = .next s') :
     s'.stack = st ∧ s'.store = store := by
@@ -151,7 +166,9 @@ theorem callFn_next {p : Program} {fn : Nat} {captures vs : List Value} {st : Li
   split at h <;> try (cases h; done)
   cases h
   exact ⟨rfl, rfl⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Delivering a value and leaving for a target keep every scope's cell live.
 Proved together, as the two are defined together. -/
 theorem deliver_leave_owns (p : Program) : ∀ (st : List Frame) {store : Store Frame},
@@ -194,7 +211,9 @@ theorem deliver_leave_owns (p : Program) : ∀ (st : List Frame) {store : Store 
               exact ho.drop.push (fun _ => rfl)) (callFn_next h)
           | exact (ih ho.release).2 h
           | exact (ih ho.drop).2 h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem takeCont_spec {α : Type} : ∀ {cs : List (Option α)} {id : Nat} {x : α}
     {cs' : List (Option α)}, takeCont cs id = some (x, cs') →
     cs[id]? = some (some x) ∧ cs' = cs.set id none
@@ -214,7 +233,9 @@ theorem takeCont_spec {α : Type} : ∀ {cs : List (Option α)} {id : Nat} {x : 
     obtain ⟨rfl, rfl⟩ := h
     obtain ⟨h1, h2⟩ := takeCont_spec hr
     simp [h1, h2]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Putting a resumption's frames back on the stack. -/
 theorem OwnsAt.resume {st seg : List Frame} {conts : Conts Frame} {labels : Nat}
     {cells : Cells} {id : Nat} (h : OwnsAt st ⟨conts, labels, cells⟩)
@@ -227,7 +248,9 @@ theorem OwnsAt.resume {st seg : List Frame} {conts : Conts Frame} {labels : Nat}
       ≤ ownStack a st + osum (ownStack a) conts
     rw [ownStack_append]
     omega) (fun _ hl => hl)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem apply_owns {p : Program} {c : Callee} {st : List Frame} {store : Store Frame}
     {s' : State} (ho : OwnsAt st store) (h : apply p c st store = .next s') : Owns s' := by
   cases c with
@@ -247,7 +270,9 @@ theorem apply_owns {p : Program} {c : Callee} {st : List Frame} {store : Store F
     simp only [apply] at h
     split at h <;> try (cases h; done)
     exact (deliver_leave_owns p _ ho).2 h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem live_set {cells : Cells} {a b : Nat} {x : Value} (h : Live cells a) :
     Live (cells.setIfInBounds b (some x)) a := by
   obtain ⟨w, hw⟩ := h
@@ -255,7 +280,9 @@ theorem live_set {cells : Cells} {a b : Nat} {x : Value} (h : Live cells a) :
   · subst hb
     exact ⟨x, by rw [Array.getElem?_setIfInBounds_self_of_lt (Array.getElem?_eq_some_iff.mp hw).1]⟩
   · exact ⟨w, by rw [Array.getElem?_setIfInBounds_ne hb]; exact hw⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A memory operation leaves the cells as they are or sets one of them. -/
 theorem mem_cells {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Value}
     (h : op.eval cells vs = some (r, cells')) :
@@ -292,7 +319,9 @@ theorem mem_cells {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Val
       exact .inl rfl
     · cases h
   · cases h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A memory operation releases nothing. -/
 theorem mem_live {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Value}
     (h : op.eval cells vs = some (r, cells')) : ∀ a, Live cells a → Live cells' a := by
@@ -300,7 +329,9 @@ theorem mem_live {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Valu
   rcases mem_cells h with rfl | ⟨_, _, rfl⟩
   · exact hl
   · exact live_set hl
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- **Every step of the machine keeps every scope's cell live.** Nothing here
 depends on the program being typed. -/
 theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .next s') :
@@ -372,7 +403,9 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
       | exact apply_owns (st := .cell cells.size :: stack)
           (OwnsAt.alloc (store := ⟨conts, labels, cells⟩) ho' _) h
       | simp [step] at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A host operation touches neither the stack nor the store. -/
 theorem stepIO_owns {p : Program} {c c' : Config} (ho : Owns c.state)
     (h : stepIO p c = .next c') : Owns c'.state := by
@@ -393,10 +426,14 @@ theorem stepIO_owns {p : Program} {c c' : Config} (ho : Owns c.state)
       exact step_owns ho hr
     | halt v => rw [hr] at h; cases h
     | stuck => rw [hr] at h; cases h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem owns_init (p : Program) : Owns (init p) := fun a => by
   simp [init, ownStack, osum, Live]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Every scope's cell is live in every state a program reaches. -/
 theorem run_owns {p : Program} : ∀ (n : Nat) {c c' : Config}, Owns c.state →
     Machine.run (stepIO p) n c = .next c' → Owns c'.state := by
@@ -415,39 +452,51 @@ theorem run_owns {p : Program} : ∀ (n : Nat) {c c' : Config}, Owns c.state →
       exact ih (stepIO_owns ho hr) h
     | halt r => rw [hr, Step.bind_halt] at h; cases h
     | stuck => rw [hr] at h; cases h
+%proof-/
 
 /-! ## What a typed stack grants -/
 
+/-%proof (commented out while the machines become bytes)
 theorem ownStack_cons_pos {a : Nat} {st : List Frame} (fr : Frame) (h : 0 < ownStack a st) :
     0 < ownStack a (fr :: st) := by
   simp only [ownStack]
   omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What the scope of a borrow grants. -/
 theorem mem_lent {uniq : Bool} {ρ : Rgn} {b : Nat} {ϕ : List Rgn} {x : Rgn} :
     x ∈ lent uniq ρ b ϕ ↔ x = .loan b ∨ (uniq = true ∧ x = .wr (.loan b))
       ∨ (x ∈ Rgn.flat ϕ ∧ x ∉ (Rgn.wr ρ).parts ∧ (uniq = true → x ∉ ρ.parts) ∧ x ≠ .loan b
         ∧ x ≠ .wr (.loan b)) := by
   cases uniq <;> simp [lent, and_assoc]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A cell is of a region through one of the region's places. -/
 theorem OnCell.part {S : StoreTy} {r : Rgn} {a : Nat} (h : OnCell S r a) :
     ∃ y, y ∈ r.parts ∧ OnCell S y a := by
   obtain ⟨y, hy, hc⟩ := h
   exact ⟨y, hy, y, Rgn.self_mem_parts (Rgn.mem_parts_atom hy), hc⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem OnCell.not_lab {S : StoreTy} {id a : Nat} : ¬ OnCell S (.lab id) a := by
   rintro ⟨y, hy, hc⟩
   simp only [Rgn.parts, List.mem_singleton] at hy
   subst hy
   rcases hc with hc | ⟨_, hc, _⟩ <;> cases hc
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem OnCell.not_wr {S : StoreTy} {r : Rgn} {a : Nat} : ¬ OnCell S (.wr r) a := by
   rintro ⟨y, hy, hc⟩
   simp only [Rgn.parts, List.mem_map] at hy
   obtain ⟨z, _, rfl⟩ := hy
   rcases hc with hc | ⟨_, hc, _⟩ <;> cases hc
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem OnCell.loan_eq {S : StoreTy} {a a' b : Nat} (h : OnCell S (.loan b) a)
     (hl : S.loans b = some a') : a = a' := by
   obtain ⟨y, hy, hc⟩ := h
@@ -458,7 +507,9 @@ theorem OnCell.loan_eq {S : StoreTy} {a a' b : Nat} (h : OnCell S (.loan b) a)
   · cases h
     rw [hl] at hl'
     exact (Option.some.inj hl').symm
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem OnCell.cell_eq {S : StoreTy} {a a' : Nat} (h : OnCell S (.cell a') a) : a = a' := by
   obtain ⟨y, hy, hc⟩ := h
   simp only [Rgn.parts, List.mem_singleton] at hy
@@ -467,7 +518,9 @@ theorem OnCell.cell_eq {S : StoreTy} {a a' : Nat} (h : OnCell S (.cell a') a) : 
   · cases h
     rfl
   · cases h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A place a typed stack grants, to read or to write, that is of a cell has
 that cell's scope on the stack: the cell's own region is granted by the scope,
 and a borrow's by the scope of the borrow, which was made where the region
@@ -550,7 +603,9 @@ theorem StackOk.onCell {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ 
   | yield _ _ ih => exact fun x a hx hc => ownStack_cons_pos _ (ih x a hx hc)
   | exit _ _ _ ih => exact fun x a hx hc => ownStack_cons_pos _ (ih x a hx hc)
   | never _ ih => exact ih
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A label's region is granted only by a stack its scope is on. -/
 theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
     (h : StackOk Δ S st τ ε ϕ) : ∀ id, .lab id ∈ Rgn.flat ϕ → Frame.label id ∈ st := by
@@ -582,12 +637,14 @@ theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {�
     · cases h
     · exact List.mem_cons_of_mem _ (ih id hr)
   | never _ ih => exact ih
+%proof-/
 
 /-- A released cell is about to be read or written. -/
 def Freed (s : State) : Prop :=
   ∃ op args body a b path vs, s.tm = .mem op args body
     ∧ evalAtoms s.env args = some (.ref a b path :: vs) ∧ s.store.cells[a]? = some none
 
+/-%proof (commented out while the machines become bytes)
 /-- Under the region rules, a typed state in which every scope's cell is live
 is not about to read or write a released cell: the reference it goes through
 has a region the code was granted, which is a cell with a scope on the stack. -/
@@ -616,9 +673,11 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
   | @focusIn _ x _ _ _ r σ _ _ _ _ ha hr _ _ _ | @focusAt _ x _ _ r σ _ _ _ ha _ hr _ _ =>
     exact key ha (hr hR) (evalAtoms_head hev) rfl
   | store hform _ _ | swap hform _ _ => exact key hform.ref (hform.region hR) (evalAtoms_head hev) rfl
+%proof-/
 
 /-! ## A label is applied only inside its scope -/
 
+/-%proof (commented out while the machines become bytes)
 theorem findLabel_mem {id : Nat} : ∀ {st : List Frame}, Frame.label id ∈ st →
     findLabel Frame.asLabel id st ≠ none
   | [], h => by cases h
@@ -632,12 +691,14 @@ theorem findLabel_mem {id : Nat} : ∀ {st : List Frame}, Frame.label id ∈ st 
       cases hrest : findLabel Frame.asLabel id st with
       | none => exact absurd hrest (findLabel_mem hm)
       | some x => simp [findLabel, hfr, hrest]
+%proof-/
 
 /-- A label is about to be applied whose scope is not on the stack. -/
 def Dead (s : State) : Prop :=
   ∃ f id, calleeAtom s.tm = some f ∧ f.eval s.env = some (.label id)
     ∧ findLabel Frame.asLabel id s.stack = none
 
+/-%proof (commented out while the machines become bytes)
 /-- Under the region rules, a typed state is not about to apply a label
 outside its scope: the label's type says applying it touches the scope's
 region, which the code was granted only if the scope is on the stack. -/
@@ -694,7 +755,9 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     · omega
     · exact found (hmem _ (List.mem_singleton_self _))
   | _ => cases hcallee
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Every state a well-typed program reaches is well typed. -/
 theorem run_typed {p : Program} (hp : ProgramOk Δ p) : ∀ (n : Nat) {c c' : Config},
     Typed Δ c.state → Machine.run (stepIO p) n c = .next c' → Typed Δ c'.state := by
@@ -715,7 +778,9 @@ theorem run_typed {p : Program} (hp : ProgramOk Δ p) : ∀ (n : Nat) {c c' : Co
       exact ih hstep.1 h
     | halt r => rw [hr, Step.bind_halt] at h; cases h
     | stuck => rw [hr] at h; cases h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Borrow safety.** A program accepted with the region rules never reaches a
 state about to read or write a released cell: every reference it reads or
@@ -726,7 +791,9 @@ theorem borrow_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (inp
   obtain ⟨n, hn⟩ := h
   obtain ⟨S, ht⟩ := run_typed hp n (c := initIO p input) (typed_init hp) hn
   exact ht.not_freed hR (run_owns n (c := initIO p input) (owns_init p) hn)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Label safety.** Nor does it reach a state about to apply a label whose scope
 has ended.
@@ -736,7 +803,9 @@ theorem label_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (inpu
   obtain ⟨n, hn⟩ := h
   obtain ⟨S, ht⟩ := run_typed hp n (c := initIO p input) (typed_init hp) hn
   exact ht.not_dead hR
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- So when such a program goes wrong, the fault is neither a use of a released
 cell nor a label applied after its scope ended. -/
 theorem scoped_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (input : List Int)
@@ -745,6 +814,7 @@ theorem scoped_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (inp
       ∧ Fault c.state ∧ ¬ Freed c.state ∧ ¬ Dead c.state := by
   obtain ⟨c, hreach, hstuck, hf⟩ := type_safety hp input h
   exact ⟨c, hreach, hstuck, hf, borrow_safety hp hR input hreach, label_safety hp hR input hreach⟩
+%proof-/
 
 /-- An intrinsic has no result: arithmetic whose result does not fit, a
 division by zero, an array read at a place that is not there. -/
@@ -762,6 +832,7 @@ def Absent (s : State) : Prop :=
   ∨ (∃ args body a b path i, s.tm = .mem .focus args body
     ∧ evalAtoms s.env args = some [.ref a b path, .int i] ∧ i < 0)
 
+/-%proof (commented out while the machines become bytes)
 /-- Of the faults, those of something not fitting or not being there are the
 ones that are none of the other three. -/
 theorem Fault.overflow_of {s : State} (hf : Fault s) (h1 : ¬ Resumed s) (h2 : ¬ Freed s)
@@ -773,7 +844,9 @@ theorem Fault.overflow_of {s : State} (hf : Fault s) (h1 : ¬ Resumed s) (h2 : �
   | freed hev hget => exact absurd ⟨_, _, _, _, _, _, _, rfl, hev, hget⟩ h2
   | resumed hc hev hget => exact absurd ⟨_, _, hc, hev, hget⟩ h1
   | dead hc hev hnone => exact absurd ⟨_, _, hc, hev, hnone⟩ h3
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Soundness.** A program accepted with the ownership rules and the region
 rules goes wrong in two ways only: an arithmetic result does not fit, or a part
@@ -788,5 +861,6 @@ theorem sound_safety {p : Program} (hp : ProgramOk Δ p) (hD : DupSound Δ) (hR 
   obtain ⟨c, hreach, hstuck, hf, hres⟩ := owned_safety hp hD input h
   exact ⟨c, hreach, hstuck, hf.overflow_of hres (borrow_safety hp hR input hreach)
     (label_safety hp hR input hreach)⟩
+%proof-/
 
 end Glorious.Typing

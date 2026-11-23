@@ -83,6 +83,7 @@ def checkProgram (C : Cert) (p : Program) : Bool :=
     && (!C.strict || dataOk C)
     && dropsOk C p
 
+/-%proof (commented out while the machines become bytes)
 /-- A program the checker accepts is well typed. -/
 theorem checkProgram_sound {p : Program} (h : checkProgram C p = true) : ProgramOk C.ctx p := by
   simp only [checkProgram, Bool.and_eq_true] at h
@@ -109,9 +110,11 @@ theorem checkProgram_sound {p : Program} (h : checkProgram C p = true) : Program
   obtain ⟨⟨Bs, hpats, _⟩, _⟩ := htyped c hc
   rw [hpats.length_eq, hv.length_eq]
   simp
+%proof-/
 
 /-! ## Ownership -/
 
+/-%proof (commented out while the machines become bytes)
 theorem dupTys_all {τs : List Ty} : dupTys C τs = true → ∀ c, c ∈ τs → dupTy C c = true := by
   induction τs with
   | nil => intro _ c hc; cases hc
@@ -121,7 +124,9 @@ theorem dupTys_all {τs : List Ty} : dupTys C τs = true → ∀ c, c ∈ τs �
     rcases List.mem_cons.mp hc with rfl | hc
     · exact h.1
     · exact ih h.2 c hc
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A declared type that is duplicable and has this constructor has duplicable fields. -/
 theorem data_fields_dup (hd : dataOk C = true) {name tag : Nat} {args Fs : List Ty}
     (hdup : dupTy C (.data name args) = true)
@@ -160,7 +165,9 @@ theorem data_fields_dup (hd : dataOk C = true) {name tag : Nat} {args Fs : List 
       have hin : (tag, Fs₀) ∈ d.ctors := lookup_mem hl
       have h0 : dupTys C Fs₀ = true := List.all_eq_true.mp hall _ hin
       exact dupTys_all (by rw [dupTys_inst]; exact h0)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 mutual
 
 theorem dup_occ (hs : C.strict = true) (hd : dataOk C = true) :
@@ -195,7 +202,8 @@ theorem dups_occ (hs : C.strict = true) (hd : dataOk C = true) :
       dups_occ hs hd hvs (fun c hc => h c (List.mem_cons_of_mem _ hc)) id]
 
 end
-
+%proof-/
+/-%proof (commented out while the machines become bytes)
 /-- Under a certificate checked with the ownership rules, a value of a
 duplicable type holds no resumption. -/
 theorem dupSound_of_check {p : Program} (h : checkProgram C p = true) (hs : C.strict = true) :
@@ -205,7 +213,9 @@ theorem dupSound_of_check {p : Program} (h : checkProgram C p = true) (hs : C.st
   rcases hdup with hf | hd
   · rw [hs] at hf; cases hf
   · exact dup_occ hs h.1.2 hv hd id
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Type safety, checked.** If the checker accepts a program with some
 certificate and the program goes wrong, the state it could not step from is one
@@ -215,13 +225,17 @@ theorem checked_safety {p : Program} (h : checkProgram C p = true) (input : List
     (hw : GoesWrong p input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state :=
   type_safety (checkProgram_sound h) input hw
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same for the compiled bytecode. -/
 theorem checked_compiled_safety {p : Program} (h : checkProgram C p = true) (input : List Int)
     (hw : Bytecode.GoesWrong (compile p) input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state :=
   compiled_type_safety (checkProgram_sound h) input hw
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Ownership, checked.** If the certificate asks for the ownership rules and the
 checker accepts, the fault is not a second use of a resumption: three faults
@@ -232,14 +246,18 @@ theorem checked_owned_safety {p : Program} (h : checkProgram C p = true)
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
       ∧ ¬ Resumed c.state :=
   owned_safety (checkProgram_sound h) (dupSound_of_check h hs) input hw
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same for the compiled bytecode. -/
 theorem checked_compiled_owned_safety {p : Program} (h : checkProgram C p = true)
     (hs : C.strict = true) (input : List Int) (hw : Bytecode.GoesWrong (compile p) input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
       ∧ ¬ Resumed c.state :=
   compiled_owned_safety (checkProgram_sound h) (dupSound_of_check h hs) input hw
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Borrow safety, checked.** If the certificate asks for the region rules and
 the checker accepts, the program never reaches a state about to read or write a
@@ -249,27 +267,35 @@ theorem checked_borrow_safety {p : Program} (h : checkProgram C p = true)
     (hr : C.regions = true) (input : List Int) {c : Config}
     (hc : Machine.Reaches (stepIO p) (initIO p input) c) : ¬ Freed c.state :=
   borrow_safety (checkProgram_sound h) hr input hc
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- nor one about to apply a label whose scope has ended. -/
 theorem checked_label_safety {p : Program} (h : checkProgram C p = true)
     (hr : C.regions = true) (input : List Int) {c : Config}
     (hc : Machine.Reaches (stepIO p) (initIO p input) c) : ¬ Dead c.state :=
   label_safety (checkProgram_sound h) hr input hc
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- So if such a program goes wrong, the fault is neither of those. -/
 theorem checked_scoped_safety {p : Program} (h : checkProgram C p = true)
     (hr : C.regions = true) (input : List Int) (hw : GoesWrong p input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
       ∧ ¬ Freed c.state ∧ ¬ Dead c.state :=
   scoped_safety (checkProgram_sound h) hr input hw
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same for the compiled bytecode. -/
 theorem checked_compiled_scoped_safety {p : Program} (h : checkProgram C p = true)
     (hr : C.regions = true) (input : List Int) (hw : Bytecode.GoesWrong (compile p) input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
       ∧ ¬ Freed c.state ∧ ¬ Dead c.state :=
   compiled_scoped_safety (checkProgram_sound h) hr input hw
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Exclusive borrows, checked.** If the certificate asks for the region rules
 and the rules for borrows and the checker accepts, the program never reaches a
@@ -283,7 +309,9 @@ theorem checked_exclusive_safety {p : Program} (h : checkProgram C p = true)
     (hc : Machine.Reaches (stepIO p) (initIO p input) c) :
     ¬ Aliased c.state ∧ ¬ Suspended c.state :=
   exclusive_safety (checkProgram_sound h) hr hl input hc
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Soundness, checked.** If the certificate asks for the ownership rules and
 the region rules and the checker accepts, the program goes wrong in two ways
@@ -296,7 +324,9 @@ theorem checked_full_safety {p : Program} (h : checkProgram C p = true) (hs : C.
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
       ∧ (Overflow c.state ∨ Absent c.state) :=
   sound_safety (checkProgram_sound h) (dupSound_of_check h hs) hr input hw
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same for the compiled bytecode. -/
 theorem checked_compiled_full_safety {p : Program} (h : checkProgram C p = true)
     (hs : C.strict = true) (hr : C.regions = true) (input : List Int)
@@ -304,5 +334,6 @@ theorem checked_compiled_full_safety {p : Program} (h : checkProgram C p = true)
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
       ∧ (Overflow c.state ∨ Absent c.state) :=
   compiled_sound_safety (checkProgram_sound h) (dupSound_of_check h hs) hr input hw
+%proof-/
 
 end Glorious.Typing

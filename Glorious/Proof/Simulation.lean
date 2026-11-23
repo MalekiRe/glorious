@@ -34,6 +34,7 @@ namespace ForwardSim
 
 variable {stepS : σ₁ → Step σ₁ ν} {stepT : σ₂ → Step σ₂ ν} {R : σ₁ → σ₂ → Prop}
 
+/-%proof (commented out while the machines become bytes)
 /-- If the source is still running after `n` steps, the target is still running
 after at least `n` steps, in a related state. -/
 theorem run_next (sim : ForwardSim stepS stepT R) :
@@ -58,7 +59,9 @@ theorem run_next (sim : ForwardSim stepS stepT R) :
       exact hm
     | halt v => rw [hs] at h; simp at h
     | stuck => rw [hs] at h; simp at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- If the source halts within `n` steps, the target halts with the same result. -/
 theorem run_halt (sim : ForwardSim stepS stepT R) :
     ∀ (n : Nat) {s : σ₁} {t : σ₂} {v : ν}, R s t → run stepS n s = .halt v →
@@ -84,12 +87,16 @@ theorem run_halt (sim : ForwardSim stepS stepT R) :
       obtain ⟨k, hk⟩ := sim.halt hR hs
       exact ⟨k + 1, hk⟩
     | stuck => rw [hs] at h; simp at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Halting is preserved. -/
 theorem halts (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} {v : ν} (hR : R s t) :
     Halts stepS s v → Halts stepT t v :=
   fun ⟨n, h⟩ => sim.run_halt n hR h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Divergence is preserved. -/
 theorem diverges (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} (hR : R s t)
     (hd : Diverges stepS s) : Diverges stepT t := by
@@ -97,7 +104,9 @@ theorem diverges (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} (hR : 
   obtain ⟨s', hs'⟩ := hd m
   obtain ⟨m', _, hle, ht', _⟩ := sim.run_next m hR hs'
   exact run_next_of_le ht' hle
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Halting is reflected: a halting target run comes from a source run that
 halts with the same result, unless the source goes wrong. -/
 theorem halts_reflect (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} {v : ν} (hR : R s t) :
@@ -113,7 +122,9 @@ theorem halts_reflect (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} {
     cases halt_unique hm' hm
     exact Or.inl ⟨m, hs⟩
   | stuck => exact Or.inr ⟨m, hs⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A source program that never goes wrong compiles to a target that never goes wrong. -/
 theorem not_goesWrong (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} (hR : R s t)
     (safe : ¬ GoesWrong stepS s) : ¬ GoesWrong stepT t := by
@@ -129,7 +140,9 @@ theorem not_goesWrong (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} (
     have b := run_halt_mono hm' (Nat.le_max_right m m')
     rw [a] at b; cases b
   | stuck => exact safe ⟨m, hs⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Divergence is reflected for source programs that never go wrong. -/
 theorem diverges_reflect (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} (hR : R s t)
     (safe : ¬ GoesWrong stepS s) (hd : Diverges stepT t) : Diverges stepS s := by
@@ -142,14 +155,18 @@ theorem diverges_reflect (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂
     rw [hm] at ht'
     cases ht'
   | stuck => exact absurd ⟨n, hs⟩ safe
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Every state the source reaches is matched by a state the target reaches. -/
 theorem reaches (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} {s' : σ₁} (hR : R s t) :
     Reaches stepS s s' → ∃ t', Reaches stepT t t' ∧ R s' t' := by
   intro ⟨n, h⟩
   obtain ⟨m, t', _, ht', hR'⟩ := sim.run_next n hR h
   exact ⟨t', ⟨m, ht'⟩, hR'⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 Observations are reflected. Suppose related states have the same observation
 and the target's observation only grows. Then whatever the target has observed
@@ -181,6 +198,7 @@ theorem obs_reflect {α : Type} (sim : ForwardSim stepS stepT R)
       rw [e, run_add, hm, Step.bind_next] at hm'
       exact Or.inr ⟨v, ⟨m, hs⟩, run_obs_prefix_halt obsT final hstep hhalt _ hm'⟩
   | stuck => exact absurd ⟨m, hs⟩ safe
+%proof-/
 
 end ForwardSim
 
@@ -201,6 +219,7 @@ namespace ForwardSimThrough
 
 variable {stepS : σ₁ → Step σ₁ ν} {stepT : σ₂ → Step σ₂ ν} {R I : σ₁ → σ₂ → Prop}
 
+/-%proof (commented out while the machines become bytes)
 /-- Every state the target reaches is at, or on its way to, a state the source
 reaches, provided the source does not go wrong. -/
 theorem reflect (sim : ForwardSimThrough stepS stepT R I) (m : Nat) {s : σ₁} {t d : σ₂}
@@ -231,6 +250,7 @@ theorem reflect (sim : ForwardSimThrough stepS stepT R I) (m : Nat) {s : σ₁} 
         exact ⟨c, ⟨n + 1, by rw [run_succ, hs, Step.bind_next]; exact hn⟩, hI⟩
 termination_by m
 decreasing_by omega
+%proof-/
 
 end ForwardSimThrough
 

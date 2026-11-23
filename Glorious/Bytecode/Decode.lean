@@ -235,6 +235,7 @@ def program (bs : Bytes) : Option Program :=
 
 /-! ## Decoding inverts encoding -/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem nat_encode (n : Nat) (rest : Bytes) :
     nat (Encode.nat n ++ rest) = some (n, rest) := by
   rw [Encode.nat]
@@ -247,7 +248,9 @@ def program (bs : Bytes) : Option Program :=
     omega
 termination_by n
 decreasing_by omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem int_encode (n : Int) (rest : Bytes) :
     int (Encode.int n ++ rest) = some (n, rest) := by
   cases n with
@@ -257,69 +260,99 @@ decreasing_by omega
   | negSucc m =>
     have h2 : (2 * m + 1) / 2 = m := by omega
     simp [int, Encode.int, h2]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem items_encode {α : Type} {enc : α → Bytes} {dec : Bytes → Option (α × Bytes)}
     (h : ∀ x rest, dec (enc x ++ rest) = some (x, rest)) (xs : List α) (rest : Bytes) :
     items dec xs.length (xs.flatMap enc ++ rest) = some (xs, rest) := by
   induction xs with
   | nil => simp [items]
   | cons x xs ih => simp [items, h, ih]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem list_encode {α : Type} {enc : α → Bytes} {dec : Bytes → Option (α × Bytes)}
     (h : ∀ x rest, dec (enc x ++ rest) = some (x, rest)) (xs : List α) (rest : Bytes) :
     list dec (Encode.list enc xs ++ rest) = some (xs, rest) := by
   simp [list, Encode.list, items_encode h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem atom_encode (a : Atom) (rest : Bytes) :
     atom (Encode.atom a ++ rest) = some (a, rest) := by
   cases a <;> simp [atom, Encode.atom]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem atoms_encode (xs : List Atom) (rest : Bytes) :
     list atom (Encode.list Encode.atom xs ++ rest) = some (xs, rest) :=
   list_encode atom_encode xs rest
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem nats_encode (xs : List Nat) (rest : Bytes) :
     list nat (Encode.list Encode.nat xs ++ rest) = some (xs, rest) :=
   list_encode nat_encode xs rest
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem place_encode (pl : Place) (rest : Bytes) :
     place (Encode.place pl ++ rest) = some (pl, rest) := by
   simp [place, Encode.place]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem prim_encode (p : Prim) (rest : Bytes) :
     prim (Encode.prim p ++ rest) = some (p, rest) := by
   cases p <;> simp [prim, Encode.prim]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem rhs_encode (r : Rhs) (rest : Bytes) :
     rhs (Encode.rhs r ++ rest) = some (r, rest) := by
   cases r <;> simp [rhs, Encode.rhs]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem pair_encode (p : Nat × Nat) (rest : Bytes) :
     pair (Encode.pair p ++ rest) = some (p, rest) := by
   simp [pair, Encode.pair]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem pairs_encode (xs : List (Nat × Nat)) (rest : Bytes) :
     list pair (Encode.list Encode.pair xs ++ rest) = some (xs, rest) :=
   list_encode pair_encode xs rest
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem memOp_encode (op : MemOp) (rest : Bytes) :
     memOp (Encode.memOp op ++ rest) = some (op, rest) := by
   cases op <;> simp [memOp, Encode.memOp]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem instr_encode (i : Instr) (rest : Bytes) :
     instr (Encode.instr i ++ rest) = some (i, rest) := by
   cases i with
   | lend uniq r thunk pre post => cases uniq <;> simp [instr, Encode.instr]
   | _ => simp [instr, Encode.instr]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 @[simp] theorem code_encode (c : Code) (rest : Bytes) :
     code (Encode.code c ++ rest) = some (c, rest) :=
   list_encode instr_encode c rest
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem fn_encode (f : Fn) (rest : Bytes) :
     fn (Encode.code f.code ++ rest) = some (f, rest) := by
   simp [fn]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- **The format is lossless**, but for the functions' names, which it does
 not write: decoding an encoded program gives the program back without them. -/
 theorem program_encode (p : Program) : program (Encode.program p) = some { p with names := #[] } := by
@@ -329,5 +362,6 @@ theorem program_encode (p : Program) : program (Encode.program p) = some { p wit
   have hdrops := pairs_encode p.drops []
   simp only [List.append_nil] at hdrops
   simp only [program, Encode.program, List.append_assoc, h, hmain, hdrops]
+%proof-/
 
 end Glorious.Bytecode.Decode

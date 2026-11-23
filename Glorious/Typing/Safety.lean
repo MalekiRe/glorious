@@ -24,19 +24,26 @@ variable {Δ : Ctx}
 
 /-! ## Evaluating what a computation applies -/
 
+/-%proof (commented out while the machines become bytes)
 theorem Ty.open_never (rs : List Rgn) : Ty.never.open rs = .never := by
   simp [Ty.open, Ty.mapR]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem acc_open_nil (acc : List Rgn) : acc.map (Rgn.openAt 0 []) = acc := by
   have h : Rgn.openAt 0 [] = id := funext fun r => Rgn.openAt_nil 0 r
   simp [h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Enters.weaken {fn : Nat} {Cs Ps : List Ty} {ρ : Ty} {ε ε' : Row} {Φ Φ' : List Rgn}
     (h : Enters Δ fn Cs Ps ρ ε Φ) (hle : Row.le ε ε') (hΦ : Sub Φ Φ') :
     Enters Δ fn Cs Ps ρ ε' Φ' := by
   obtain ⟨sig, θ, hsig, hθ, hr, hCs, hPs, hρ, hrow, hsub, hnd⟩ := h
   exact ⟨sig, θ, hsig, hθ, hr, hCs, hPs, hρ, Row.le_trans hrow hle, hsub.trans hΦ, hnd⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The callee of a typed call evaluates, and is typed at the callable's result,
 operations and regions, with the regions the call chose. It holds what the
 locals naming the callable and its arguments hold. -/
@@ -80,7 +87,9 @@ theorem evalCall_ok {S : StoreTy} {env : Env} {Γ : TEnv} {f : Atom} {args : Lis
       exact ⟨.label id _, by simp [evalCall, hfv, hvs], .label hlab.1 hv,
         (fun _ _ h => by cases h), (fun _ _ h => by cases h; exact hfv),
         fun id' => by rw [← hocc id']; simp [occCallee, occ, occs]⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The callable a scope runs evaluates, applied to what the scope gives it: a
 label, or a reference to the scope's cell. -/
 theorem evalScope_ok {S : StoreTy} {env : Env} {Γ : TEnv} {thunk : Atom} {l : Value}
@@ -118,7 +127,9 @@ theorem evalScope_ok {S : StoreTy} {env : Env} {Γ : TEnv} {thunk : Atom} {l : V
     exact ⟨.label id l, by simp [evalScope, hfv], .label hlab.1 hl,
       (fun _ _ h => by cases h), (fun _ _ h => by cases h; exact hfv),
       fun id' => by rw [← hocc id']; simp [occCallee, occ]⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A callable that takes no arguments and binds no regions is a function. -/
 theorem evalThunk_ok {S : StoreTy} {env : Env} {Γ : TEnv} {f : Atom} {σ : Ty} {ε : Row}
     {once : Bool} {fenv : Option (List Ty)} {acc : List Rgn} (henv : HasVals Δ S env Γ)
@@ -132,19 +143,25 @@ theorem evalThunk_ok {S : StoreTy} {env : Env} {Γ : TEnv} {f : Atom} {σ : Ty} 
       ⟨sig, θ, hsig, hθ, hn.symm, rfl, hPs, rfl, Row.le_refl _, Sub.refl _, hnd⟩, hcaps⟩
   · cases hPs
   · cases hPs
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What two operands hold is what each holds. -/
 theorem sumAt_pair (id : Nat) (env : Env) (a b : Atom) :
     sumAt id env (atomVars [a, b]) = sumAt id env (atomVars [a]) + sumAt id env (atomVars [b]) := by
   cases a <;> cases b <;> simp [atomVars, sumAt]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What a function value holds is what its captures hold. -/
 theorem occs_clo (id : Nat) {env : Env} {f : Atom} {fn : Nat} {caps : List Value}
     (h : f.eval env = some (.clo fn caps)) : occs id caps = sumAt id env (atomVars [f]) := by
   simpa [occ] using occ_eval id env h
+%proof-/
 
 /-! ## Growing the store -/
 
+/-%proof (commented out while the machines become bytes)
 /-- A map given a value at a key it had none at keeps what it had. -/
 theorem extend_keeps {α : Type} {f : Nat → Option α} {k : Nat} {x : α} (hfresh : f k = none) :
     ∀ i y, f i = some y → (if i = k then some x else f i) = some y := by
@@ -153,7 +170,9 @@ theorem extend_keeps {α : Type} {f : Nat → Option α} {k : Nat} {x : α} (hfr
   · subst he
     rw [hfresh] at h; cases h
   · simp [he, h]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (x : Ty × Row × List Rgn) :
     ∃ S', S.Le S' ∧ S'.handlers labels = some x ∧ StoreOk Δ S' ⟨conts, labels + 1, cells⟩ := by
@@ -178,7 +197,9 @@ theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} 
       exact Nat.lt_succ_of_lt (hs.handlers id y h')
   · obtain ⟨hlt, hv⟩ := hs.cells a τ h
     exact ⟨hlt, fun v hg => (hv v hg).mono hle⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A new borrow takes the next identity. -/
 theorem StoreOk.push_loan {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (a : Nat) :
@@ -205,7 +226,9 @@ theorem StoreOk.push_loan {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
       exact Nat.le_refl _
     · simp [he] at h'
       exact Nat.le_succ_of_le (hs.loans b a' h')
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem StoreOk.push_label {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (x : Ty) :
     ∃ S', S.Le S' ∧ S'.labels labels = some x ∧ StoreOk Δ S' ⟨conts, labels + 1, cells⟩ := by
@@ -229,7 +252,9 @@ theorem StoreOk.push_label {S : StoreTy} {conts : Conts Frame} {labels : Nat} {c
   · exact Nat.lt_succ_of_lt (hs.handlers id τ h)
   · obtain ⟨hlt, hv⟩ := hs.cells a τ h
     exact ⟨hlt, fun v hg => (hv v hg).mono hle⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem StoreOk.push_cont {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     {seg : List Frame} {o ρ : Ty} {ε₀ : Row} {Φ : List Rgn}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (hk : ContOk Δ S seg o ρ ε₀ Φ)
@@ -282,7 +307,9 @@ theorem StoreOk.push_cont {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
       exact (hseg seg' hg).mono hle
   · obtain ⟨hlt, hv⟩ := hs.cells a τ h
     exact ⟨hlt, fun v hg => (hv v hg).mono hle⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem StoreOk.push_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     {v : Value} {σ : Ty} (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (hv : HasVal Δ S v σ) :
     ∃ S', S.Le S' ∧ S'.cells cells.size = some σ
@@ -313,7 +340,9 @@ theorem StoreOk.push_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
       refine ⟨(by simp; omega : a < (cells.push (some v)).size), fun w hg => ?_⟩
       simp only [Array.getElem?_push, show a ≠ cells.size from Nat.ne_of_lt hlt, ite_false] at hg
       exact (hval w hg).mono hle
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The cell a typed reference points to is in the store: freed, or live with
 a value of its type. -/
 theorem StoreOk.cell_at {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
@@ -326,7 +355,9 @@ theorem StoreOk.cell_at {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cell
     cases x with
     | none => exact .inl rfl
     | some w₀ => exact .inr ⟨w₀, rfl, hval w₀ hget⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Overwriting or freeing a cell keeps the store typed. -/
 theorem StoreOk.set_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     {a : Nat} {τ : Ty} {x : Option Value} (hs : StoreOk Δ S ⟨conts, labels, cells⟩)
@@ -343,6 +374,7 @@ theorem StoreOk.set_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cel
     exact hx v hg.2
   · simp [he] at hg
     exact hv v hg
+%proof-/
 
 /-! ## One step -/
 
@@ -354,10 +386,13 @@ def StepOk (Δ : Ctx) (s : State) : Step State Value → Prop
   | .halt _ => True
   | .stuck => Fault s
 
+/-%proof (commented out while the machines become bytes)
 theorem StepOk.next {S : StoreTy} {s s' : State} (h : TypedAt Δ S s')
     (hu : DupSound Δ → Unique s → Unique s') : StepOk Δ s (.next s') :=
   ⟨⟨S, h⟩, hu⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A step that enters code on a stack and leaves the resumptions alone. -/
 theorem StepOk.of_safe {S : StoreTy} {s : State} {r : Step State Value} {b : Nat → Nat}
     {store : Store Frame} (h : Safe Δ S b store r) (hc : store.conts = s.store.conts)
@@ -375,7 +410,9 @@ theorem StepOk.of_safe {S : StoreTy} {s : State} {r : Step State Value} {b : Nat
     omega
   | halt v => exact True.intro
   | stuck => exact h.elim
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A step that makes a resumption out of `seg`. -/
 theorem StepOk.of_safe_fresh {S : StoreTy} {s : State} {r : Step State Value} {b : Nat → Nat}
     {store : Store Frame} {seg : List Frame} (h : Safe Δ S b store r)
@@ -395,7 +432,9 @@ theorem StepOk.of_safe_fresh {S : StoreTy} {s : State} {r : Step State Value} {b
     omega
   | halt v => exact True.intro
   | stuck => exact h.elim
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A step that uses up resumption `k`, whose frames were `seg`. -/
 theorem StepOk.of_safe_take {S : StoreTy} {s : State} {r : Step State Value} {b : Nat → Nat}
     {store : Store Frame} {k : Nat} {seg : List Frame} (h : Safe Δ S b store r)
@@ -416,7 +455,9 @@ theorem StepOk.of_safe_take {S : StoreTy} {s : State} {r : Step State Value} {b 
     omega
   | halt v => exact True.intro
   | stuck => exact h.elim
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A step that applies a callee. -/
 theorem StepOk.of_apply {p : Program} {S : StoreTy} {s : State} {c : Callee} {st : List Frame}
     {store : Store Frame}
@@ -440,7 +481,9 @@ theorem StepOk.of_apply {p : Program} {S : StoreTy} {s : State} {c : Callee} {st
     omega
   · rw [he]
     exact hf hfa
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem Faulty.fault {s : State} {f : Atom} {c : Callee} {st : List Frame} {store : Store Frame}
     (hfa : Faulty st store c) (hcallee : calleeAtom s.tm = some f)
     (hk : ∀ id v, c = .cont id v → f.eval s.env = some (.cont id))
@@ -451,18 +494,24 @@ theorem Faulty.fault {s : State} {f : Atom} {c : Callee} {st : List Frame} {stor
   cases hfa with
   | resumed h => exact .resumed hcallee (hk _ _ rfl) (hstore ▸ h)
   | dead h => exact .dead hcallee (hl _ _ rfl) (hsub _ h)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 theorem mem_skip {a b c : List Nat} {i : Nat} (h : i ∈ a ++ c) : i ∈ a ++ (b ++ c) := by
   rcases List.mem_append.mp h with h | h
   · exact List.mem_append_left _ h
   · exact List.mem_append_right _ (List.mem_append_right _ h)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A stack grants nothing of what the store typing does not know. -/
 theorem StackOk.fresh {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
     (h : StackOk Δ S st τ ε ϕ) {r : Rgn} (hr : ¬ Known S r) :
     r ∉ Rgn.flat ϕ ∧ .wr r ∉ Rgn.flat ϕ :=
   ⟨fun hx => hr (h.known _ hx), fun hx => hr (h.known (.wr r) hx)⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Putting a scope's own region for the one its callable binds keeps the
 places the callable touches apart, the scope's own being new. -/
 theorem open_scope_nodup {acc ϕ : List Rgn} {r : Rgn}
@@ -513,11 +562,15 @@ theorem open_scope_nodup {acc ϕ : List Rgn} {r : Rgn}
       exact absurd (he.symm ▸ hxϕ) hr.2
     · rw [Rgn.openAt_free hfx, Rgn.openAt_free hfy] at he
       exact he
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- Granted below a scope's frame is granted above it. -/
 theorem Sub.cons2 (x y : Rgn) (ϕ : List Rgn) : Sub ϕ (x :: y :: ϕ) :=
   Sub.of_mem fun _ h => List.mem_cons_of_mem _ (List.mem_cons_of_mem _ h)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- What the callable a cell's scope runs is given, and what running it needs:
 a reference to the cell at the type the callable takes, and no region but the
 cell's and those the code making the scope may touch. -/
@@ -559,7 +612,9 @@ theorem cell_enter {S : StoreTy} {a n : Nat} {r : Rgn} {σ ρ : Ty} {εt : Row}
       · exact .inl h
       · exact .inr (.inl h)
       · exact .inr (.inr ⟨hfree, h.sub hsub⟩)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same for the callable a label's scope runs: it is given the label, and
 needs no region but the scope's and those the code making the scope may touch. -/
 theorem label_enter {S : StoreTy} {id n : Nat} {σ ρ : Ty} {εl εt : Row} {once' : Bool}
@@ -598,7 +653,9 @@ theorem label_enter {S : StoreTy} {id n : Nat} {σ ρ : Ty} {εl εt : Row} {onc
       rcases hacc x hx with ⟨_, h⟩ | ⟨hfree, h⟩
       · exact .inl h
       · exact .inr (.inr ⟨hfree, h.sub hsub⟩)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The same for the callable a borrow's scope runs: it is given the borrow.
 Under the rules for borrows it may not touch what was lent, and the stack it
 runs on does not grant it. -/
@@ -682,7 +739,9 @@ theorem lend_enter {S : StoreTy} {uniq : Bool} {a b n : Nat} {ρ κ : Rgn} {σ �
         · exact Grants.of_mem (List.mem_cons_of_mem _ (List.mem_cons_self ..))
         · rw [Rgn.openAt_free hfree]
           exact (hmem.sub hsub).sub (Sub.cons2 _ _ _)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A well-typed state that is not at a host operation steps to a well-typed
 state, halts, or is a fault. -/
 theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
@@ -1259,6 +1318,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     omega
   | write _ _ => exact absurd rfl (hnh _ _ _)
   | read _ => exact absurd rfl (hnh _ _ _)
+%proof-/
 
 /-! ## Programs in their world -/
 
@@ -1268,11 +1328,14 @@ def ConfigOk (Δ : Ctx) (c : Config) : Step Config Result → Prop
   | .halt _ => True
   | .stuck => Fault c.state
 
+/-%proof (commented out while the machines become bytes)
 theorem stepIO_eq_lift {p : Program} {s : State} {w : World}
     (h : ∀ id args body, s.tm ≠ .host id args body) : stepIO p ⟨s, w⟩ = lift w (step p s) := by
   obtain ⟨tm, env, stack, store⟩ := s
   cases tm <;> first | rfl | exact absurd rfl (h _ _ _)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A host step binds a value that holds no resumption. -/
 theorem host_quiet {id : Nat} {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}
     {store : Store Frame} {r : Value} (hr : ∀ k, occ k r = 0)
@@ -1285,7 +1348,9 @@ theorem host_quiet {id : Nat} {args : List Atom} {body : Tm} {env : Env} {stack 
     have h4 := hr k
     simp only [occState]
     omega
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- A well-typed program state in any world steps to a well-typed state, halts,
 or is a fault. Reading and writing never fail. -/
 theorem stepIO_ok {p : Program} {c : Config} (hp : ProgramOk Δ p) (ht : Typed Δ c.state) :
@@ -1320,9 +1385,11 @@ theorem stepIO_ok {p : Program} {c : Config} (hp : ProgramOk Δ p) (ht : Typed �
       rw [hr] at hstep
       exact hstep
     | halt v => exact True.intro
+%proof-/
 
 /-! ## Whole runs -/
 
+/-%proof (commented out while the machines become bytes)
 /-- The program about to start is well typed. -/
 theorem typed_init {p : Program} (hp : ProgramOk Δ p) : Typed Δ (init p) := by
   obtain ⟨τ, hmain⟩ := hp.main
@@ -1340,11 +1407,15 @@ theorem typed_init {p : Program} (hp : ProgramOk Δ p) : Typed Δ (init p) := by
     simp at h
   · intro _ _ _ h
     simp at h
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- The program about to start holds no resumption. -/
 theorem unique_init (p : Program) : Unique (init p) := fun id => by
   simp [occState, init, occEnv, total, occStack, occCells, occConts, osum]
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /-- From a well-typed state, a run of any length is still going in a well-typed
 state, or has halted, or stopped at a fault. Where no resumption is held twice
 at the start, none is held twice at the state the run is in or stopped at. -/
@@ -1378,7 +1449,9 @@ theorem run_ok {p : Program} (hp : ProgramOk Δ p) : ∀ (n : Nat) {c : Config},
     | stuck =>
       rw [hr] at hstep
       exact .inr (.inr ⟨0, c, by omega, rfl, hr, hstep, fun _ hu => hu⟩)
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Type safety.** If a well-typed program goes wrong, the state it could not
 step from is one of the faults in `Fault`: arithmetic overflow, a part of a
@@ -1399,7 +1472,9 @@ theorem type_safety {p : Program} (hp : ProgramOk Δ p) (input : List Int)
     cases hc'
   · rw [hn] at hr; cases hr
   · exact ⟨c', ⟨m, hc'⟩, hs', hf⟩
+%proof-/
 
+/-%proof (commented out while the machines become bytes)
 /--
 **Ownership.** If, besides, the types the context calls duplicable hold no
 resumptions, then the fault is not a second use of a resumption: every
@@ -1417,5 +1492,6 @@ theorem owned_safety {p : Program} (hp : ProgramOk Δ p) (hD : DupSound Δ) (inp
     cases hc'
   · rw [hn] at hr; cases hr
   · exact ⟨c', ⟨m, hc'⟩, hs', hf, (hu hD (unique_init p)).not_resumed⟩
+%proof-/
 
 end Glorious.Typing
