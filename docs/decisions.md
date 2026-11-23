@@ -7298,6 +7298,24 @@ source in Lean strings 6,021, and the test table 3,928.
   takes away is a second way, not lines. Measured after: the chain 1.52 s
   cold, 0.28 s an edit in the middle; covey/states2 2.3 s cold, 0.53 s a
   leaf's edit, 1.18 s `main`'s; covey/sixteen 2.35 s cold (4.5 s before).
+- **Signatures first to a fixpoint, tried (not kept).** The callees-first
+  levels in `checkItems` taken out: every body checked side by side from
+  the signatures, then again from the types the bodies have, until each
+  group's callees are what it was checked from (two times at most over
+  the test programs); a refusal said callees first. The test programs
+  passed, but only with the runs of a time numbering from one place, which
+  then could not be put together and were checked again one after another
+  (105 runs in covey/states2 against 3; cold 3.85 s -> 4.6 s, the suite
+  58 s -> 68 s). With each run numbering from a place of its own, groups
+  were refused side by side that callees first accepts, settled or not
+  (`std::thread::waiting_count`'s `take_cell<Waiting>`, `ecs::Commands::
+  set_state`'s `resource_mut<Next<T>>()`): what decides them comes from a
+  group checked before them that their types do not carry. Checked one
+  after another from the signatures, `waiting_count` was refused
+  otherwise (a value holding a resumption read twice); callees first one
+  after another, not a level at a time, covey/tasks named a copy the
+  elaborator did not make. Level by level callees first decides those
+  programs, so it stays, as the way taken where signatures are not enough.
 
 ## Other standing decisions
 
