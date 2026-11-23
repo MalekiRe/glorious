@@ -75,8 +75,8 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         -- which leaves a `Got` too.)
         let mine ← (← get).paramTraits.filterMapM fun (q, tr, targs) => do
           if q != p then return none
-          match ((← get).traitShape[tr]?).map (fun x => (tr, x)) with
-          | some (_, arity, assocs) => pure (if arity == targs.length && assocs.contains name then some (tr, targs) else none)
+          match (← get).traitShape[tr]? with
+          | some (arity, assocs) => pure (if arity == targs.length && assocs.contains name then some (tr, targs) else none)
           | none => pure none
         if let some (tr, targs) := (if (mine.map (·.1)).eraseDups.length == 1 then mine.head? else none) then
           let targTys ← targs.mapM (resolveType params decl)
@@ -95,12 +95,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         -- (None without arguments: one with them written of the parameter,
         -- `B::Had` of `B: Bundle<S>`, asked of the type with those.)
         if traits.isEmpty then
-          let withArgs ← (← get).paramTraits.filterMapM fun (q, tr, targs) => do
-            if q != p || targs.isEmpty then return none
-            match ((← get).traitShape[tr]?).map (fun x => (tr, x)) with
-            | some (_, arity, assocs) => pure (if arity == targs.length && assocs.contains name then some (tr, targs) else none)
-            | none => pure none
-          if let [(tr, targs)] := withArgs then
+          if let [(tr, targs)] := mine.filter (!·.2.isEmpty) then
             let subject := Ty.tuple (self :: (← targs.mapM (resolveType params decl)))
             return ← assocOf tr name self subject
         let traits := if traits.length > 1 && !written.isEmpty then
