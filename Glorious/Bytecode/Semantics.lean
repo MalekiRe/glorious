@@ -1,7 +1,6 @@
 module
 
 public import Glorious.Machine
-public import Glorious.Control
 public import Glorious.Host
 public import Glorious.Bytecode.Ast
 

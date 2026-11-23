@@ -1,6 +1,5 @@
 module
 
-public import Glorious.Syntax.Ast
 public import Glorious.Syntax.Flat
 
 /-!
