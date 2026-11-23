@@ -7317,6 +7317,19 @@ source in Lean strings 6,021, and the test table 3,928.
   elaborator did not make. Level by level callees first decides those
   programs, so it stays, as the way taken where signatures are not enough.
 
+Against Zig 0.14 on the same chain of 2,000 functions (`gen.zig`, Debug,
+Zig's global cache warm as the library's kept check is; an edit of the
+middle function's constant; seconds):
+
+| Compiler | Fresh | Edit |
+|---|---|---|
+| Glorious | 1.52 | 0.28 |
+| Zig, x86 backend | 0.61 | 0.60 |
+| Zig, LLVM | 1.72 | 1.70 |
+
+An edit is twice as quick as Zig's quickest; a fresh build between its two
+backends. Jai is not at hand to measure.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
