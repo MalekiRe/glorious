@@ -722,27 +722,19 @@ partial def parseStmts : P (List Stmt) := do
       | none => throw s!"{here.line}:{here.col}: a field is borrowed of what an expression points to, after something else in the statement is computed: give the reference a `let` of its own first" : P (List Stmt))
     if t == .ident "let" then
       advance
-      if (← peek) == .ident "mut" then
-        advance
-        let name ← expectIdent
-        let typed ← if ← acceptPunct ":" then some <$> parseType else pure none
-        expectPunct "="
-        let value ← parseBinary 0 false
-        let value := match typed with
-          | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
-          | none => value
-        expectPunct ";"
+      let mutName ← if (← peek) == .ident "mut" then do advance; some <$> expectIdent else pure none
+      let pat ← if mutName.isSome then pure .wild else parsePattern
+      -- `let x: Type = value`: the value is made that type.
+      let typed ← if ← acceptPunct ":" then some <$> parseType else pure none
+      expectPunct "="
+      let value ← parseBinary 0 false
+      let value := match typed with
+        | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
+        | none => value
+      expectPunct ";"
+      if let some name := mutName then
         out := out ++ (← settle (.letMut name value)).toArray
       else
-        let pat ← parsePattern
-        -- `let x: Type = value`: the value is made that type.
-        let typed ← if ← acceptPunct ":" then some <$> parseType else pure none
-        expectPunct "="
-        let value ← parseBinary 0 false
-        let value := match typed with
-          | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
-          | none => value
-        expectPunct ";"
         match pat with
         | .wild =>
           -- `let _ = value;` is the value computed and let go, as `value;`
