@@ -29,13 +29,6 @@ initialize enabled : Bool ← do pure (← IO.getEnv "GLORIOUS_TRACE").isSome
 its check starts, to see where a compile that does not end is. -/
 initialize groupsTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "groups")
 
-@[noinline] unsafe def noteImpl (line : String) : Unit :=
-  if !groupsTraced then () else
-  match unsafeBaseIO (IO.eprintln line).toBaseIO with
-  | _ => ()
-
-/-- Say a line on standard error, under `GLORIOUS_TRACE=groups`. -/
-@[implemented_by noteImpl] def note (line : String) : Unit := let _ := line; ()
 initialize spans : IO.Ref (Array Span) ← IO.mkRef #[]
 initialize depth : IO.Ref Nat ← IO.mkRef 0
 

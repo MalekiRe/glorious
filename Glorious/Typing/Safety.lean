@@ -180,13 +180,6 @@ theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} 
   · obtain ⟨hlt, hv⟩ := hs.cells a τ h
     exact ⟨hlt, fun v hg => (hv v hg).mono hle⟩
 
-/-- Using up an identity that the typing says nothing of. -/
-theorem StoreOk.bump {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
-    (hs : StoreOk Δ S ⟨conts, labels, cells⟩) : StoreOk Δ S ⟨conts, labels + 1, cells⟩ :=
-  ⟨hs.conts, fun id τ h => Nat.lt_succ_of_lt (hs.labels id τ h),
-    fun id x h => Nat.lt_succ_of_lt (hs.handlers id x h), hs.cells,
-    fun b a h => Nat.le_succ_of_le (hs.loans b a h), hs.quiet⟩
-
 /-- A new borrow takes the next identity. -/
 theorem StoreOk.push_loan {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (a : Nat) :
