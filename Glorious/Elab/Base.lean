@@ -282,6 +282,9 @@ structure Blocks where
   the value's type: by the call, the function, and how the receiver, a
   variable, is now given (`0` as it was, `1` borrowed, `2` borrowed `&mut`). -/
   dotChosen : Std.HashMap Nat (String × Nat) := {}
+  /-- Each whole number written where a scalar type is wanted, by its
+  function and its place there: the type's name. -/
+  scalarLits : Std.HashMap (String × Nat) String := {}
   /-- Arguments given as other than written (`Check.argsChosen`), by the call
   and the place. -/
   argsChosen : Std.HashMap (Nat × Nat) Expr := {}

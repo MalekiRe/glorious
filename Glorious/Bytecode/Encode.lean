@@ -83,6 +83,7 @@ def prim : Prim → Bytes
   | .arrLen => [42]
   | .arrPush => [43]
   | .arrPop => [44]
+  | .cast b into => 45 :: int b ++ [if into then 1 else 0]
 
 def rhs : Rhs → Bytes
   | .atom a => 0 :: atom a

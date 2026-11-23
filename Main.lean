@@ -147,7 +147,7 @@ def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few 
     -- bytecode.)
     { lean := if run then evalCompiled compiled c.input (vmScale := if few then 200 else 20) else ""
       bytes := some (bytecodeBytes compiled)
-      certified := compiled.cert.isSome, typed := compiled.types.isSome
+      certified := compiled.cert.isSome, typed := compiled.types.get.isSome
       strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
       lent := compiled.lent, plain := compiled.plain.length
       cleanups := if run then cleanupsOf compiled.core c.input else none

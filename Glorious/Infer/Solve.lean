@@ -33,7 +33,8 @@ of its type parameters one unknown (`vars`); anything else an unknown. -/
 partial def writtenTy (vars : List (String × ITy)) : TypeExpr → M ITy
   | .name x args => do
     if let some t := vars.lookup x then return t
-    if x == "Int" || Syntax.isScalar x then return .int
+    if x == "Int" then return .int
+    if Syntax.isScalar x then return .scalar (Syntax.scalarBits x)
     let s ← get
     if s.arrayType == some x then
       return .data arrayName (← args.mapM (writtenTy vars))
@@ -473,6 +474,9 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
     | .arrPop, [a, _] =>
       unify (← atomTy Γ a) array
       pure (.tuple [array, t], none)
+    | .cast b into, [a] =>
+      if into then do unify (← atomTy Γ a) .int; pure (.scalar b, none)
+      else do unify (← atomTy Γ a) (.scalar b); pure (.int, none)
     | _, _ =>
       for a in args do
         unify (← atomTy Γ a) .int
@@ -487,6 +491,14 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
       pure (.data arrayName [t], none)
     else
       let (result, fields) ← instCtor tag
+      -- (A number written out is a scalar's where the field is one: a
+      -- constant worked out at compile time is written so.)
+      let ts ← ((args.zip ts).zip (fields ++ ts.drop fields.length)).mapM fun ((a, t), f) => do
+        match a with
+        | .int _ => match ← find f with
+          | .scalar b => pure (.scalar b)
+          | _ => pure t
+        | _ => pure t
       unifyList (← ts.mapM widenTy) fields
       pure (result, none)
   | .place pl => do
@@ -687,21 +699,23 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
     -- (Those past the first two are outside what Core's rules are about: a
     -- program with one has types, and no certificate the checker accepts.)
     let int := fun (t : ITy) => unify t .int
+    -- (An address is a `usize`.)
+    let addr := fun (t : ITy) => unify t (.scalar (-64))
     let σ ← match id, ts with
       | 0, [_] => pure ITy.unit
       | 1, [] => pure (ITy.tuple [.int, .int])
       | 2, _ => do ts.forM int; pure .int
-      | 3, [a, w] => do int a; int w; pure .int
-      | 4, [a, w, v] => do int a; int w; int v; pure .unit
-      | 5, [_, n] => do int n; pure .int
+      | 3, [a, w] => do addr a; int w; pure .int
+      | 4, [a, w, v] => do addr a; int w; int v; pure .unit
+      | 5, [_, n] => do int n; pure (.scalar (-64))
       | 6, [_] => pure .int
       | 7, [c] => do int c; freshTy
       | 8, [c, _] => do int c; pure .unit
       | 9, [v] => pure (ITy.tuple [.data arrayName [.int], v])
       | 10, [] => pure (ITy.tuple [.int, .int])
-      | 11, [s, a] => do int s; int a; pure .int
-      | 12, [a] => do int a; pure .unit
-      | 13, [a, b, n] => do int a; int b; int n; pure .unit
+      | 11, [s, a] => do addr s; addr a; pure (.scalar (-64))
+      | 12, [a] => do addr a; pure .unit
+      | 13, [a, b, n] => do addr a; addr b; addr n; pure .unit
       -- (`transmute`: the value, of another type.)
       | 14, [_] => freshTy
       | _, _ => throw s!"host operation {id} does not exist with {args.length} arguments"

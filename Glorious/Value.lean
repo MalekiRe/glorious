@@ -161,6 +161,9 @@ inductive Prim where
   | arrLen
   | arrPush
   | arrPop
+  /-- A whole number seen as a scalar of so many bits (`into`), or a scalar
+  as the whole number it is held as: the value as it is, of another type. -/
+  | cast (bits : Int) (into : Bool)
   deriving Hashable
 
 /-- A computation that produces a value without transferring control. -/
@@ -377,6 +380,7 @@ def checkedOpt : Option Int → Option Value
   | none => none
 
 def Prim.eval : Prim → List Value → Option Value
+  | .cast _ _, [.int a] => some (.int a)
   | .intAdd, [.int a, .int b] => checked (a + b)
   | .intSub, [.int a, .int b] => checked (a - b)
   | .intMul, [.int a, .int b] => checked (a * b)

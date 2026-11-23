@@ -356,7 +356,7 @@ def rejected (C : Cert) (p : Core.Program) : String :=
     | some F =>
       if Typing.checkFn C e F then none
       else if !Typing.checkClauses C e.sig F.clauses e.hints then
-        some s!"function {e.fn} is not typed at one of its signatures"
+        some s!"function {e.fn} is not typed at one of its signatures: {showSig e.sig}"
       else some s!"the clauses of function {e.fn} are not shown to cover its parameters"
     | none => some s!"function {e.fn} does not exist"
   match bad with

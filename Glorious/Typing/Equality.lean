@@ -19,6 +19,7 @@ mutual
 
 def Ty.beq : Ty → Ty → Bool
   | .int, .int => true
+  | .scalar a, .scalar b => a == b
   | .tuple a, .tuple b => Ty.beqList a b
   | .data n a, .data m b => n == m && Ty.beqList a b
   | .fn n p r e q v c, .fn n' p' r' e' q' v' c' =>
@@ -57,6 +58,9 @@ mutual
 
 theorem Ty.beq_eq : ∀ (a b : Ty), Ty.beq a b = true → a = b
   | .int, .int, _ => rfl
+  | .scalar a, .scalar b, h => by
+    simp only [Ty.beq, beq_iff_eq] at h
+    rw [h]
   | .tuple a, .tuple b, h => by
     simp only [Ty.beq] at h
     rw [Ty.beqList_eq a b h]
@@ -72,13 +76,16 @@ theorem Ty.beq_eq : ∀ (a b : Ty), Ty.beq a b = true → a = b
     simp only [Ty.beq, Bool.and_eq_true, beq_iff_eq] at h
     rw [h.1, Ty.beq_eq a b h.2]
   | .never, .never, _ => rfl
-  | .int, .tuple _, h | .int, .data _ _, h | .int, .fn _ _ _ _ _ _ _, h | .int, .ref _ _, h
-  | .int, .never, h | .tuple _, .int, h | .tuple _, .data _ _, h | .tuple _, .fn _ _ _ _ _ _ _, h
-  | .tuple _, .ref _ _, h | .tuple _, .never, h | .data _ _, .int, h | .data _ _, .tuple _, h
-  | .data _ _, .fn _ _ _ _ _ _ _, h | .data _ _, .ref _ _, h | .data _ _, .never, h | .fn _ _ _ _ _ _ _, .int, h
-  | .fn _ _ _ _ _ _ _, .tuple _, h | .fn _ _ _ _ _ _ _, .data _ _, h | .fn _ _ _ _ _ _ _, .ref _ _, h | .fn _ _ _ _ _ _ _, .never, h
-  | .ref _ _, .int, h | .ref _ _, .tuple _, h | .ref _ _, .data _ _, h | .ref _ _, .fn _ _ _ _ _ _ _, h
-  | .ref _ _, .never, h | .never, .int, h | .never, .tuple _, h | .never, .data _ _, h
+  | .int, .scalar _, h | .int, .tuple _, h | .int, .data _ _, h | .int, .fn _ _ _ _ _ _ _, h
+  | .int, .ref _ _, h | .int, .never, h | .scalar _, .int, h | .scalar _, .tuple _, h
+  | .scalar _, .data _ _, h | .scalar _, .fn _ _ _ _ _ _ _, h | .scalar _, .ref _ _, h | .scalar _, .never, h
+  | .tuple _, .int, h | .tuple _, .scalar _, h | .tuple _, .data _ _, h | .tuple _, .fn _ _ _ _ _ _ _, h
+  | .tuple _, .ref _ _, h | .tuple _, .never, h | .data _ _, .int, h | .data _ _, .scalar _, h
+  | .data _ _, .tuple _, h | .data _ _, .fn _ _ _ _ _ _ _, h | .data _ _, .ref _ _, h | .data _ _, .never, h
+  | .fn _ _ _ _ _ _ _, .int, h | .fn _ _ _ _ _ _ _, .scalar _, h | .fn _ _ _ _ _ _ _, .tuple _, h | .fn _ _ _ _ _ _ _, .data _ _, h
+  | .fn _ _ _ _ _ _ _, .ref _ _, h | .fn _ _ _ _ _ _ _, .never, h | .ref _ _, .int, h | .ref _ _, .scalar _, h
+  | .ref _ _, .tuple _, h | .ref _ _, .data _ _, h | .ref _ _, .fn _ _ _ _ _ _ _, h | .ref _ _, .never, h
+  | .never, .int, h | .never, .scalar _, h | .never, .tuple _, h | .never, .data _ _, h
   | .never, .fn _ _ _ _ _ _ _, h | .never, .ref _ _, h => by
     simp [Ty.beq] at h
 
@@ -114,6 +121,7 @@ mutual
 
 theorem Ty.beq_refl : ∀ (a : Ty), Ty.beq a a = true
   | .int => by simp [Ty.beq]
+  | .scalar _ => by simp [Ty.beq]
   | .tuple a => by simp only [Ty.beq, Ty.beqList_refl a]
   | .data n a => by simp [Ty.beq, Ty.beqList_refl a]
   | .fn n p r e q v c => by

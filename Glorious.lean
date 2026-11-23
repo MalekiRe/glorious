@@ -4,6 +4,7 @@ public import Glorious.Machine
 public import Glorious.Value
 public import Glorious.Control
 public import Glorious.Host
+public import Glorious.Lay
 public import Glorious.Core.Ast
 public import Glorious.Core.Semantics
 public import Glorious.Core.Cleanup
@@ -28,6 +29,7 @@ public import Glorious.Typing.Equality
 public import Glorious.Typing.Checker
 public import Glorious.Typing.Covers
 public import Glorious.Typing.Certify
+public import Glorious.Lower.Layout
 public import Glorious.Proof.Audit
 public import Glorious.Syntax.Ast
 public import Glorious.Syntax.Lexer

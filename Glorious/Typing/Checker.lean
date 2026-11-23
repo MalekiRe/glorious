@@ -226,6 +226,7 @@ mutual
 is not marked as callable once; a declared type, if the certificate says so. -/
 def dupTy (C : Cert) : Ty → Bool
   | .int => true
+  | .scalar _ => true
   | .tuple fs => dupTys C fs
   | .data name args => if name = arrayName then dupTys C args else dataDup C.datas name args
   | .fn _ _ _ _ once _ _ => !once
@@ -412,9 +413,13 @@ theorem widenB_sound {t σ : Ty} (h : widenB t σ = true) : Widen t σ := by
 
 /-- The operand is one of type `σ`, its own or one it widens to. -/
 def atomFits (Γ : TEnv) (a : Atom) (σ : Ty) : Bool :=
-  match atomTy Γ a with
-  | some t => widenB t σ
-  | none => false
+  match a, σ with
+  -- (A number written out is a scalar's too.)
+  | .int _, .scalar _ => true
+  | _, _ =>
+    match atomTy Γ a with
+    | some t => widenB t σ
+    | none => false
 
 /-%proof (commented out while the machines become bytes)
 theorem atomFits_sound {Γ : TEnv} {a : Atom} {σ : Ty} (h : atomFits Γ a σ = true) :
@@ -477,6 +482,7 @@ def ctorFieldsOf (C : Cert) (tag : Nat) : Ty → Option (List Ty)
   | .tuple Fs => if tag = 0 then some Fs else none
   | .data name args => if tag = 0 then none else C.fields tag name args
   | .int => none
+  | .scalar _ => none
   | .fn _ _ _ _ _ _ _ => none
   | .ref _ _ => none
   | .never => none
@@ -520,6 +526,7 @@ def fieldsOf (C : Cert) : Ty → Option (List Ty)
       | some ((_, Fs) :: rest) => if rest.all (fun c => c.2 == Fs) then some Fs else none
       | _ => none
   | .int => none
+  | .scalar _ => none
   | .fn _ _ _ _ _ _ _ => none
   | .ref _ _ => none
   | .never => none
@@ -883,6 +890,10 @@ def checkPrim (C : Cert) (Γ : TEnv) (p : Prim) (args : List Atom) (σ : Ty) : B
         | some t => σ == .tuple [T, t] && (atomTy Γ b).isSome && dupOk C σ
         | none => false
       | none => false
+    | _ => false
+  | .cast b into =>
+    match args with
+    | [a] => if into then atomTy Γ a == some .int && σ == .scalar b else atomTy Γ a == some (.scalar b) && σ == .int
     | _ => false
   | _ =>
     match args with
@@ -1561,7 +1572,9 @@ mutual
 def patTys (C : Cert) : Pat → Ty → Option (List Ty)
   | .wild, _ => some []
   | .bind, τ => some [τ]
-  | .int _, τ => if τ = .int then some [] else none
+  | .int _, τ => match τ with
+    | .int | .scalar _ => some []
+    | _ => none
   | .ctor tag ps, T =>
     match ctorFieldsOf C tag T with
     | some Fs => patsTys C ps Fs

@@ -509,7 +509,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
   let b := (← get).body
   -- A whole number written where a type of whole numbers is wanted is of it.
   if let .int n := b.expr a then
-    if let some fits ← literalAt p n then return fits.map fun e => s!"{what}: {e}"
+    if let some fits ← literalAt p n a then return fits.map fun e => s!"{what}: {e}"
   -- A block where what is wanted is known and is no callable: it is run
   -- there, and is its value (5.4).
   if let some (id, _) := b.plainBlock a then
@@ -1346,7 +1346,7 @@ partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
     if mark == Syntax.ascribeMark then
       let expected ← resolveType (← get).rigidParams false (TypeExpr.ofExpr (Flat.treeExpr b ty))
       if let .int n := b.expr value then
-        match ← literalAt expected n with
+        match ← literalAt expected n value with
         | some none => return some expected
         | some (some why) => throw why
         | none => pure ()
@@ -1765,7 +1765,7 @@ partial def inferAssignStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
         pure (inner, UseKind.through cap (placeName b e) true)
       | _ => throw "only a mutable variable or `*reference` can be assigned"
     let whole ← match b.expr value with
-      | .int n => literalAt expected n
+      | .int n => literalAt expected n value
       | _ => pure none
     match whole with
     | some none => pure ()
@@ -1823,7 +1823,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
             modify fun s => { s with wantResult := some (id, expected) }
       -- A whole number a body ends with is of the type wanted of the body.
       if let (.int n, some (expected, _)) := (b.expr e, want) then
-        match ← literalAt expected n with
+        match ← literalAt expected n e with
         | some none => return expected
         | some (some why) => throwThe Elab.Said { msg := s!"the result of a clause: {why}", result := true }
         | none => pure ()

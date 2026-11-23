@@ -160,6 +160,8 @@ enum Prim {
     ArrLen,
     ArrPush,
     ArrPop,
+    /// A whole number seen as a scalar, or back: the value as it is.
+    Cast,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -359,6 +361,11 @@ impl Reader<'_> {
             42 => Ok(Prim::ArrLen),
             43 => Ok(Prim::ArrPush),
             44 => Ok(Prim::ArrPop),
+            45 => {
+                let _bits = self.int()?;
+                let _into = self.byte()?;
+                Ok(Prim::Cast)
+            }
             t => Err(format!("unknown intrinsic {t}")),
         }
     }
@@ -1238,6 +1245,7 @@ impl Vm {
                     Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop => {
                         array_prim(*p, args)
                     }
+                    Prim::Cast => args.into_iter().next().ok_or(Stop::Wrong),
                     _ => prim(*p, &args),
                 }
             }
@@ -1916,7 +1924,7 @@ fn prim(p: Prim, args: &[Value]) -> Step<Value> {
         }
         Prim::Below => (0 <= a && a < b).then_some(a),
         // Of two integers these have no meaning.
-        Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop => None,
+        Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop | Prim::Cast => None,
     };
     result.map(Value::Int).ok_or(Stop::Wrong)
 }

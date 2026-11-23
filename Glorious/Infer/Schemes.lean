@@ -224,7 +224,8 @@ def copyVar (start : Nat) (fixed : Std.HashSet Nat) (renamed : St → Std.HashMa
 
 /-- How a scheme is copied for a use of it: its general variables renamed. -/
 def copyRen (sch : Scheme) : Ren M :=
-  { ty := copyVar sch.startTy sch.fixedTys (·.renTy) (fun s a b => { s with renTy := s.renTy.insert a b })
+  { ty := copyVar sch.startTy sch.fixedTys (·.renTy) (fun s a b =>
+        { s with renTy := s.renTy.insert a b, numeric := if s.numeric.contains a then s.numeric.insert b else s.numeric })
       (do match ← freshTy with | .var v => pure v | _ => pure 0)
     row := copyVar sch.startRow sch.fixedRows (·.renRow) (fun s a b => { s with renRow := s.renRow.insert a b })
       (do pure ((← freshRow).tail.getD 0))
@@ -380,7 +381,7 @@ def thaw (fz : Frozen) : M Scheme := do
 /-- Is this type known to hold something that cannot be duplicated? -/
 partial def nonDup (seen : List Nat) (t : ITy) : M Bool := do
   match ← find t with
-  | .var _ | .param _ | .int => pure false
+  | .var _ | .param _ | .int | .scalar _ => pure false
   | .tuple fs => fs.anyM (nonDup seen)
   | .data name args =>
     if name == arrayName then args.anyM (nonDup seen)

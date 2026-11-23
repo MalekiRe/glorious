@@ -53,8 +53,9 @@ structure Compiled where
   /-- The types of `core`'s functions, as certificate inference found them:
   the certificate where there is one; for a program with what is unsafe,
   inference's alone, which the proved checker is not asked to accept. What
-  the typed lowering is to work from. -/
-  types : Option Typing.Cert := none
+  the typed lowering is to work from; found when it is first asked (a second
+  inference of a large program takes as long as the first). -/
+  types : Thunk (Option Typing.Cert) := Thunk.pure none
   /-- How many borrows are scopes of their own in `core`: those written as
   arguments of calls of functions, if the program could then be shown to
   follow the rules for borrows. `checked_exclusive_safety` is about these. -/
@@ -962,7 +963,7 @@ def compileSource (src : String) (check : Bool := true)
   let compiled := fun (out : Elab.Output) (cert : Option Typing.Cert) (lent : Nat)
       (places : List ((String × Nat) × Nat)) (made : Infer.Made) =>
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
-       opNames := out.opNames, cert, types := cert, lent, plain := out.plain, places, checkKept := checkMade
+       opNames := out.opNames, cert, types := Thunk.pure cert, lent, plain := out.plain, places, checkKept := checkMade
        inferMade := made, firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade, frontMade := front.made,
        parsedMade, textsMade, itemsMade, elabMade := out.made
        lowerMade := match lowered with
@@ -986,8 +987,8 @@ def compileSource (src : String) (check : Bool := true)
     let way := match way with
       | some k => [(("%way", 0), k)]
       | none => []
-    let types := if cert.isSome || !check then cert
-      else (Trace.timed "types" fun _ => Infer.certify declared out.program false out.envSizes).toOption
+    let types : Thunk (Option Typing.Cert) := if cert.isSome || !check then Thunk.pure cert
+      else Thunk.mk fun _ => (Trace.timed "types" fun _ => Infer.certify declared out.program false out.envSizes).toOption
     pure { compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made with types }
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow

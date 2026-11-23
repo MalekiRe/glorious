@@ -57,6 +57,7 @@ def ctorsOf (C : Cert) : Ty → Option (List (Nat × List Ty))
   -- The type of arrays has a constructor for every length: no list has them all.
   | .data name args => if name = arrayName then none else findData C.datas name args
   | .int => none
+  | .scalar _ => none
   | .fn _ _ _ _ _ _ _ => none
   | .ref _ _ => none
   | .never => none

@@ -101,6 +101,11 @@ def prim : Bytes → Option (Prim × Bytes)
   | 42 :: bs => some (.arrLen, bs)
   | 43 :: bs => some (.arrPush, bs)
   | 44 :: bs => some (.arrPop, bs)
+  | 45 :: bs => do
+    let (b, bs) ← int bs
+    match bs with
+    | k :: bs => some (.cast b (k == 1), bs)
+    | [] => none
   | _ => none
 
 def rhs : Bytes → Option (Rhs × Bytes)

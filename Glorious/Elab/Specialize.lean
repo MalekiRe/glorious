@@ -896,12 +896,26 @@ def chosenRewrite (b : Blocks) : Flat.FRewrite where
         Flat.pushExpr (.call i f out))
     | _ => none
 
+/-- Each whole number the checker found to be of a scalar type made that
+scalar, `u8_of(200)`: Core's types say which whole numbers are what. -/
+def scalarLiterals (b : Blocks) (items : List Syntax.Item) : List Syntax.Item := Id.run do
+  if b.scalarLits.isEmpty then return items
+  let owners : Std.HashSet String := b.scalarLits.fold (fun s (f, _) _ => s.insert f) {}
+  items.map fun item => Item.decide (fun name _ body =>
+    if !owners.contains name then body else
+    let rw : Flat.FRewrite :=
+      { onExpr := fun _ body e => (b.scalarLits[(name, e)]?).map fun t => do
+          let lit ← Flat.pushExpr (body.expr e)
+          Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none s!"{t}_of")) #[lit]) }
+    rw.body body) item
+
 /-- A program with what the checker decided of it written in: `Decision`s
 first (`decideBody`), then the dot calls and arguments it chose, where they
 are (`chosenRewrite`). Only the items it
 decided something in are written again: what is decided of an item changes
 that item alone. -/
 def decidedProgram (b : Blocks) (items : List Syntax.Item) : List Syntax.Item := Id.run do
+  let items := scalarLiterals b items
   let d := Decided.of b
   if d.calls.isEmpty && d.closures.isEmpty && d.fields.isEmpty && d.rests.isEmpty && d.owners.isEmpty then
     return items

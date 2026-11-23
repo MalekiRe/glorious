@@ -81,8 +81,11 @@ mutual
 /-- A finished type. A type nothing determined is unit; an open row is closed. -/
 partial def zonk (pr : Pr) (t : ITy) : M Ty := do
   match ← find t with
-  | .var _ | .param _ => pure (.tuple [])
+  | .var id => do
+    pure (if (← get).numeric.contains id then .int else .tuple [])
+  | .param _ => pure (.tuple [])
   | .int => pure .int
+  | .scalar b => pure (.scalar b)
   | .tuple fs => do pure (.tuple (← fs.mapM (zonk pr)))
   | .data n args => do pure (.data n (← args.mapM (zonk pr)))
   | .fn ps r ops tail cls env acc => do
@@ -116,7 +119,7 @@ end
 /-- The cells' regions a type mentions, other than those its callable types bind. -/
 partial def atomsOf (t : ITy) (out : List Nat) : M (List Nat) := do
   match ← find t with
-  | .var _ | .param _ | .int => pure out
+  | .var _ | .param _ | .int | .scalar _ => pure out
   | .tuple fs | .data _ fs => fs.foldlM (fun o f => atomsOf f o) out
   | t@(.fn _ _ _ _ _ _ acc) => do
     let mut inner ← (← partsOf t).foldlM (fun o f => atomsOf f o) []
@@ -271,6 +274,7 @@ def ofAcc (env : RgEnv) (acc : List Typing.Rgn) : M Nat := do
 
 partial def ofTy (env : RgEnv) : Ty → M ITy
   | .int => pure .int
+  | .scalar b => pure (.scalar b)
   | .tuple fs => do pure (.tuple (← fs.mapM (ofTy env)))
   | .data n args => do pure (.data n (← args.mapM (ofTy env)))
   | .fn n ps r eff once stated acc => do
@@ -319,6 +323,7 @@ partial def showRgn : Typing.Rgn → String
 
 partial def showCoreTy : Typing.Ty → String
   | .int => "int"
+  | .scalar b => s!"scalar{b}"
   | .tuple fs => "(" ++ ", ".intercalate (fs.map showCoreTy) ++ ")"
   | .data n args => s!"#{n}<" ++ ", ".intercalate (args.map showCoreTy) ++ ">"
   | .fn n ps r eff once env acc =>
@@ -431,7 +436,7 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
 
 /-- Every use of a declared type inside a type. -/
 partial def dataUses : Ty → List (Nat × List Ty)
-  | .int | .never => []
+  | .int | .scalar _ | .never => []
   | .tuple fs => fs.flatMap dataUses
   | .data n args => (n, args) :: args.flatMap dataUses
   | .fn _ ps r eff _ env _ =>
@@ -441,7 +446,7 @@ partial def dataUses : Ty → List (Nat × List Ty)
 
 /-- Every use of an operation inside a type. -/
 partial def opUses : Ty → List (Nat × List Ty)
-  | .int => []
+  | .int | .scalar _ => []
   | .tuple fs | .data _ fs => fs.flatMap opUses
   | .fn _ ps r eff _ env _ =>
     ps.flatMap opUses ++ opUses r ++ eff ++ (eff.flatMap fun (_, targs) => targs.flatMap opUses)
@@ -475,6 +480,7 @@ order `Ty.frees` lists them: the form a declared type is recorded at, which
 serves the type at whatever regions it is used. -/
 partial def canonTy : Ty → StateM Nat Ty
   | .int => pure .int
+  | .scalar b => pure (.scalar b)
   | .tuple fs => do pure (.tuple (← fs.mapM canonTy))
   | .data n args => do pure (.data n (← args.mapM canonTy))
   | .fn n ps r eff once env acc => do
@@ -581,7 +587,8 @@ partial def resolveType (typeNames params : List String) (locals : List (String 
     | none =>
       -- A lifetime that is no parameter of the declaration: a region of its own.
       if x.startsWith "'" then pure (.ref (← freshRg) (.tuple []))
-      else if x == "Int" || Syntax.isScalar x then pure .int
+      else if x == "Int" then pure .int
+      else if Syntax.isScalar x then pure (.scalar (Syntax.scalarBits x))
       else if (← get).arrayType == some x then
         pure (.data arrayName (← args.mapM (resolveType typeNames params locals)))
       else

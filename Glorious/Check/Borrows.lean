@@ -962,12 +962,16 @@ def ownDropRead (subject : Ty) : M Unit := do
 wanted: if `t` is known to be a type of whole numbers, the number is of that
 type, and this is whether it fits. None if `t` is not such a type: then the
 number is an `Int`. -/
-def literalAt (t : Ty) (n : Int) : M (Option (Option String)) := do
+def literalAt (t : Ty) (n : Int) (e : Option Nat := none) : M (Option (Option String)) := do
   match ← find t with
   | .con name [] =>
     match Syntax.scalars.lookup name with
     | some (some width) =>
-      if Glorious.fits n width then pure (some none)
+      if Glorious.fits n width then
+        -- (Where it is written, `e`: made that scalar in Core.)
+        if let some e := e then
+          modify fun s => { s with scalarLits := (s.owner, e, name) :: s.scalarLits }
+        pure (some none)
       else pure (some (some s!"`{n}` does not fit in `{name}`"))
     | _ => pure none
   | _ => pure none

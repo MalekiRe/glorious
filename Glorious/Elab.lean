@@ -494,9 +494,12 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
       emit (.let_ (.construct 0 atoms))
     | .cast => do
       if isTail then throw s!"`tail` applies to calls, not to the intrinsic `{x}`"
-      match ← elabArgs scope args with
-      | [a] => emit (.let_ (.atom a))
-      | _ => throw s!"intrinsic `{x}` takes 1 argument, but is given {args.size}"
+      match ← elabArgs scope args, Syntax.scalarCast x with
+      | [a], some (t, into) =>
+        -- (Of so many bits, with a sign if positive: a float or a `char`
+        -- as the bits it is held in.)
+        emit (.let_ (.prim (.cast (Syntax.scalarBits t) into) [a]))
+      | _, _ => throw s!"intrinsic `{x}` takes 1 argument, but is given {args.size}"
     | .host id n => do
       if isTail then throw s!"`tail` applies to calls, not to the host operation `{x}`"
       if n != args.size && id != 2 then

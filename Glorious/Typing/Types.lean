@@ -43,6 +43,9 @@ inductive Rgn where
 
 inductive Ty where
   | int
+  /-- A scalar of so many bits (`Syntax.scalars`' widths: with a sign if
+  positive): held as a whole number, laid out in its own width. -/
+  | scalar (bits : Int)
   | tuple (fields : List Ty)
   /-- A declared data type applied to its arguments. -/
   | data (name : Nat) (args : List Ty)
@@ -517,6 +520,7 @@ mutual
 in scope where the region stands. -/
 def Ty.mapR (f : Nat → Rgn → Rgn) : Nat → Ty → Ty
   | _, .int => .int
+  | _, .scalar b => .scalar b
   | k, .tuple fs => .tuple (Ty.mapRs f k fs)
   | k, .data n args => .data n (Ty.mapRs f k args)
   | k, .fn n ps r e once env acc =>
@@ -553,6 +557,7 @@ mutual
 scope where it stands. -/
 def Ty.regionsAt : Nat → Ty → List (Nat × Rgn)
   | _, .int => []
+  | _, .scalar _ => []
   | k, .tuple fs => Ty.regionsAts k fs
   | k, .data _ args => Ty.regionsAts k args
   | k, .fn n ps r e _ env acc =>

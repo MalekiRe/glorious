@@ -73,6 +73,8 @@ inductive ITy where
   /-- A type parameter of the declaration this type was written in. -/
   | param (i : Nat)
   | int
+  /-- A scalar of so many bits (`Typing.Ty.scalar`). -/
+  | scalar (bits : Int)
   | tuple (fs : List ITy)
   | data (name : Nat) (args : List ITy)
   /-- A callable; its operations, each with the type arguments of its effect,
@@ -291,6 +293,9 @@ structure Made where
 
 structure St where
   fns : Array Core.Fn
+  /-- The types of numbers written out: a whole number's, or a scalar's, as
+  what they are given to says; `Int` where nothing does. -/
+  numeric : Std.HashSet Nat := {}
   /-- Counts the changes to what callables touch and to which regions are
   one: what was worked out from them is kept until the next. -/
   accVer : Nat := 0
@@ -739,6 +744,7 @@ partial def showTy (t : ITy) : M String := do
   | .var id => pure s!"?{id}"
   | .param i => pure s!"'{i}"
   | .int => pure "Int"
+  | .scalar b => pure s!"scalar{b}"
   | .tuple fs => do pure s!"({", ".intercalate (← fs.mapM showTy)})"
   | .data n args => do pure s!"#{n}<{", ".intercalate (← args.mapM showTy)}>"
   | .fn ps r ops tail _ _ _ => do
@@ -752,6 +758,9 @@ partial def showTy (t : ITy) : M String := do
 def bindTy (id : Nat) (t : ITy) : M Unit := do
   if ← occurs id t then throw s!"a type would contain itself: ?{id} in {← showTy t}"
   modify fun s => { s with tys := s.tys.set! id (some t), gen := s.gen + 1 }
+  -- (A number written out is still one where its type is another unknown.)
+  if let .var j := t then
+    if (← get).numeric.contains id then modify fun s => { s with numeric := s.numeric.insert j }
 
 def bindRow (id : Nat) (r : IRow) : M Unit :=
   modify fun s => { s with rows := s.rows.set! id (some r), gen := s.gen + 1 }
@@ -768,6 +777,7 @@ partial def unify (a b : ITy) : M Unit := do
   | .param i, .param j =>
     unless i == j do throw "two different type parameters do not match"
   | .int, .int => pure ()
+  | .scalar a, .scalar b => unless a == b do throw s!"scalar{a} does not match scalar{b}"
   | .tuple as, .tuple bs => unifyList as bs
   | .data n as, .data m bs =>
     if n == m then unifyList as bs
@@ -946,6 +956,9 @@ def coerce (r b : ITy) (widen : Bool := false) : M Unit := do
 used as one of a region of more places. -/
 def widenTy (t : ITy) : M ITy := do
   unless (← get).widen && (← get).regions do return t
+  -- (A number written out is no callable to widen.)
+  if let .var id ← find t then
+    if (← get).numeric.contains id then return t
   let b ← freshTy
   coerce t b (widen := true)
   pure b
@@ -961,7 +974,12 @@ partial def inferPat (p : Core.Pat) (t : ITy) : M (List ITy) := do
   | .wild => pure []
   | .bind => pure [t]
   | .int _ => do
-    unify t .int
+    -- (A number is a pattern of a scalar too, `5u8`: of a type not known yet,
+    -- a number's.)
+    match ← find t with
+    | .scalar _ => pure ()
+    | .var id => modify fun s => { s with numeric := s.numeric.insert id }
+    | _ => unify t .int
     pure []
   | .ctor tag ps =>
     if tag == 0 then
