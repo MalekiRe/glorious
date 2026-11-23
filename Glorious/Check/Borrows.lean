@@ -158,11 +158,9 @@ end
 mutual
 
 partial def capTouches (cap : Nat) (out : List (Nat × Bool)) : M (List (Nat × Bool)) := do
-  let root ← findCap cap
-  if (← get).seen.contains root then return out
-  modify fun s => { s with seen := s.seen.insert root }
+  let some edges ← unseenEdges cap | return out
   let mut out := out
-  for (_, what) in ← edgesFrom root do
+  for (_, what) in edges do
     match what with
     | .touch b w => unless out.contains (b, w) do out := (b, w) :: out
     | .ty t => out ← tyTouches t out
@@ -187,13 +185,12 @@ mutual
 value goes? One that takes the value uses the variable for that alone, or it
 would not be given the value. -/
 partial def capLooks (brand : Nat) (cap : Nat) : M Bool := do
+  let some edges ← unseenEdges cap | return false
   let root ← findCap cap
-  if (← get).seen.contains root then return false
-  modify fun s => { s with seen := s.seen.insert root }
   let mut takes := false
   for (c, b) in (← get).givers do
     if b == brand && (← findCap c) == root then takes := true
-  for (_, what) in ← edgesFrom root do
+  for (_, what) in edges do
     match what with
     | .touch b _ => if b == brand && !takes then return true
     | .ty t => if ← tyLooks brand t then return true

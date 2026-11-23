@@ -1102,6 +1102,14 @@ def edgesFrom (root : Nat) : M (Array (Nat × Captured)) := do
   let s ← get
   pure ((s.capOut.getD root #[]).filterMap fun i => s.capEdges.get? i)
 
+/-- What a capture variable captures (`edgesFrom`), where its class is not
+`seen` yet in this walk, which it is from now on; none where it is. -/
+def unseenEdges (cap : Nat) : M (Option (Array (Nat × Captured))) := do
+  let root ← findCap cap
+  if (← get).seen.contains root then return none
+  modify fun s => { s with seen := s.seen.insert root }
+  some <$> edgesFrom root
+
 /-- A function of the library, which is checked once for every program. -/
 def libraryOwner (owner : String) : Bool :=
   ["std::", "core::", "alloc::"].any (owner.startsWith ·)

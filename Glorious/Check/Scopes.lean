@@ -627,10 +627,8 @@ a callable to one of them is fine.
 mutual
 
 partial def capHolds (brand : Nat) (cap : Nat) : M Bool := do
-  let root ← findCap cap
-  if (← get).seen.contains root then return false
-  modify fun s => { s with seen := s.seen.insert root }
-  for (_, what) in ← edgesFrom root do
+  let some edges ← unseenEdges cap | return false
+  for (_, what) in edges do
     match what with
     | .brand b => if b == brand then return true
     | .ty t => if ← tyHolds brand t then return true
@@ -767,10 +765,8 @@ def dropDecl (name : String) : M (Option String) := do
 mutual
 
 partial def capOwnsOnce (cap : Nat) : M Bool := do
-  let root ← findCap cap
-  if (← get).seen.contains root then return false
-  modify fun s => { s with seen := s.seen.insert root }
-  for (_, what) in ← edgesFrom root do
+  let some edges ← unseenEdges cap | return false
+  for (_, what) in edges do
     match what with
     | .once => return true
     | .must => pure ()
@@ -829,10 +825,8 @@ has: the name of the first such type found. A callable holds what it has
 taken hold of. -/
 partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) :=
   walkTy dropDecl (fun visiting cap => do
-    let root ← findCap cap
-    if (← get).seen.contains root then return none
-    modify fun s => { s with seen := s.seen.insert root }
-    for (_, what) in ← edgesFrom root do
+    let some edges ← unseenEdges cap | return none
+    for (_, what) in edges do
       if let .ty held := what then
         if let some name ← tyHasDrop visiting held then return some name
     return none) visiting t

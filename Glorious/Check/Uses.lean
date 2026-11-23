@@ -1264,10 +1264,8 @@ partial def tyJumps (t : Ty) : M Bool := do
   | .fn ps r _ _ cap => do
     if ← ps.anyM tyJumps then return true
     if ← tyJumps r then return true
-    let root ← findCap cap
-    if (← get).seen.contains root then return false
-    modify fun s => { s with seen := s.seen.insert root }
-    for (_, what) in ← edgesFrom root do
+    let some edges ← unseenEdges cap | return false
+    for (_, what) in edges do
       match what with
       | .brand b => unless (← get).cells.any (·.1 == b) do return true
       | .ty t => if ← tyJumps t then return true
