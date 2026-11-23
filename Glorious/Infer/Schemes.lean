@@ -472,6 +472,12 @@ partial def refRegions (ts : List ITy) : M (List Nat) := do
     | _ => pure ()
   pure out
 
+/-- A ranked region that what `acc` touches binds. -/
+def bindRank (acc region : Nat) : M Unit := do
+  markRank region
+  let a ← findAcc acc
+  modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x => { x with binder := some region } }
+
 /-- A callable that takes a reference, to a region nothing it captured
 mentions (directly or in a tuple), can take one to any cell: its type binds
 the region. -/
@@ -482,10 +488,7 @@ def rankClosure (params caps : List ITy) (acc : Nat) : M Unit := do
     let root ← findRg ρ
     if chosen.isNone && !(← isAtom root) && !(← caps.anyM (mentionsRg root)) then
       chosen := some root
-  if let some region := chosen then
-    markRank region
-    let a ← findAcc acc
-    modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x => { x with binder := some region } }
+  if let some region := chosen then bindRank acc region
 
 /-- Settle a call if enough is known. A callable whose type binds a region
 is called at the region this call chooses: what it takes and gives are its
@@ -546,9 +549,7 @@ partial def tryCall (c : Call) : M Bool := do
                 if own.isNone && !(← isAtom rp) && (← isAtom (← findRg ρ)) then own := some rp
           match own with
           | some region =>
-            markRank region
-            let a ← findAcc acc
-            modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x => { x with binder := some region } }
+            bindRank acc region
             tryCall c
           | none =>
             plainCall c
