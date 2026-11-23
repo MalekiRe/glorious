@@ -7341,6 +7341,7 @@ source in Lean strings 6,021, and the test table 3,928.
     `liveCells` over one run; `fieldOfDeref` as `fieldOfName`.
   - `conditionUses`, the same as `equalUses`, gone: each use was asked
     twice.
+
 Against Zig 0.14 on the same chain of 2,000 functions (`gen.zig`, Debug,
 Zig's global cache warm as the library's kept check is; an edit of the
 middle function's constant; seconds):
