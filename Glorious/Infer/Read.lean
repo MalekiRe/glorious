@@ -680,29 +680,21 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
           | a => a
         if annots.any Option.isSome then declared := declared.insert f (Syntax.genericParams ps, annots)
   modify fun s => { s with declared }
+  -- (A struct is a type of one constructor, of its name.)
+  let ctor := fun (name : String) (params : List String) (c : String) (fields : List TypeExpr) => do
+    let owner := (typeNames.idxOf? name).getD 0
+    match g.ctors[c]? with
+    | some info =>
+      let fields ← fields.mapM (resolveType typeNames params [])
+      modify fun s =>
+        { s with
+          ctors := setAt s.ctors info.tag ⟨owner, params.length, fields, lifetimesOf params⟩
+          types := s.types.modify owner (· ++ [info.tag]) }
+    | none => throw s!"constructor `{c}` was not collected"
   for item in items do
     match item with
-    | .enum name params ctors =>
-      let owner := (typeNames.idxOf? name).getD 0
-      for (c, fields) in ctors do
-        match g.ctors[c]? with
-        | some info =>
-          let fields ← fields.mapM (resolveType typeNames params [])
-          modify fun s =>
-            { s with
-              ctors := setAt s.ctors info.tag ⟨owner, params.length, fields, lifetimesOf params⟩
-              types := s.types.modify owner (· ++ [info.tag]) }
-        | none => throw s!"constructor `{c}` was not collected"
-    | .struct name params fields =>
-      let owner := (typeNames.idxOf? name).getD 0
-      match g.ctors[name]? with
-      | some info =>
-        let fields ← fields.mapM (resolveType typeNames params [])
-        modify fun s =>
-          { s with
-            ctors := setAt s.ctors info.tag ⟨owner, params.length, fields, lifetimesOf params⟩
-            types := s.types.modify owner (· ++ [info.tag]) }
-      | none => throw s!"constructor `{name}` was not collected"
+    | .enum name params ctors => for (c, fields) in ctors do ctor name params c fields
+    | .struct name params fields => ctor name params name fields
     | .effect name params ops =>
       let effect := (effectNames.idxOf? name).getD 0
       for op in ops do
