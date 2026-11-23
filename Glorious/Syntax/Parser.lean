@@ -691,11 +691,11 @@ private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
         | .name "f64" [] => some (8, call1 "f64_bits", call1 "f64_of", 64)
         | .name "f32" [] => some (4, call1 "f32_bits", call1 "f32_of", -32)
         | .name "%prelude::Ptr" [_] =>
-          some (8, fun x => call1 "usize_bits" (call1 "ptr_address" x),
-            fun r => call1 "ptr_at" (call1 "usize_of" r), -64)
+          some (8, fun x => call1 "usize_bits" (.proj x 0),
+            fun r => call1 "Ptr" (call1 "usize_of" r), -64)
         | .name "%prelude::PtrMut" [_] =>
-          some (8, fun x => call1 "usize_bits" (call1 "ptr_mut_address" x),
-            fun r => call1 "ptr_mut_at" (call1 "usize_of" r), -64)
+          some (8, fun x => call1 "usize_bits" (.proj x 0),
+            fun r => call1 "PtrMut" (call1 "usize_of" r), -64)
         | .name t [] =>
           match scalars.lookup t, cTypes.lookup (lastSegment t), fuel with
           | some (some w), _, _ => some (w.natAbs / 8, call1 (t ++ "_bits"), call1 (t ++ "_of"), w)
@@ -759,11 +759,16 @@ private partial def parseExtern : P (List Item) := do
     advance
     let name ← expectIdent
     expectPunct "("
+    -- (Each with where it is written: what names the calls made of it, of
+    -- functions generic in what a pointer points to, whose callers say how
+    -- that is destroyed.)
     let params ← listUntil (atPunct ")") do
       let _ ← expectIdent
       expectPunct ":"
-      parseType
+      let id := (← read).base + (← get) + 1
+      pure (id, ← parseType)
     expectPunct ")"
+    let retId := (← read).base + (← get) + 1
     let ret ← if ← acceptPunct "->" then parseType else pure (.tuple [])
     expectPunct ";"
     -- How a type is given to C and taken from it: the type the function
@@ -772,7 +777,7 @@ private partial def parseExtern : P (List Item) := do
     -- a double, 1001 a float), and where C takes it (0 with the whole
     -- numbers and addresses, 1 as a double, 2 as a float).
     let call1 := fun (f : String) (x : Expr) => Expr.call 0 (.name none f) [x]
-    let rec kind (fuel : Nat) : TypeExpr →
+    let rec kind (site : Nat) (fuel : Nat) : TypeExpr →
         P (TypeExpr × (Expr → Expr) × (Expr → Expr) × Int × Nat) := fun t =>
       match t with
       | .name "Int" [] => pure (t, id, id, 64, 0)
@@ -780,24 +785,24 @@ private partial def parseExtern : P (List Item) := do
       | .name "f64" [] => pure (t, call1 "f64_bits", call1 "f64_of", 1000, 1)
       | .name "f32" [] => pure (t, call1 "f32_bits", call1 "f32_of", 1001, 2)
       | .name "%prelude::Ptr" [_] =>
-        pure (t, fun x => call1 "usize_bits" (call1 "ptr_address" x),
-          fun r => call1 "ptr_at" (call1 "usize_of" r), 64, 0)
+        pure (t, fun x => call1 "usize_bits" (.call site (.name none "ptr_address") [x]),
+          fun r => .call site (.name none "ptr_at") [call1 "usize_of" r], 64, 0)
       | .name "%prelude::PtrMut" [_] =>
-        pure (t, fun x => call1 "usize_bits" (call1 "ptr_mut_address" x),
-          fun r => call1 "ptr_mut_at" (call1 "usize_of" r), 64, 0)
+        pure (t, fun x => call1 "usize_bits" (.call site (.name none "ptr_mut_address") [x]),
+          fun r => .call site (.name none "ptr_mut_at") [call1 "usize_of" r], 64, 0)
       | .name name [] =>
         match scalars.lookup name, cTypes.lookup (lastSegment name), fuel with
         | some (some w), _, _ => pure (t, call1 (name ++ "_bits"), call1 (name ++ "_of"), w, 0)
         -- C's own names for its types are the types they are here.
-        | _, some as, fuel + 1 => kind fuel (.name as [])
+        | _, some as, fuel + 1 => kind site fuel (.name as [])
         | _, _, _ => failAt s!"a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`), not `{name}`"
       | _ => failAt "a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`)"
     let mut args : Array Expr := #[]
     let mut declared : Array TypeExpr := #[]
     let mut classes : Nat := 0
     let mut place : Nat := 1
-    for (p, i) in params.zipIdx do
-      let (ty, into, _, _, cls) ← kind 4 p
+    for ((pid, p), i) in params.zipIdx do
+      let (ty, into, _, _, cls) ← kind pid 4 p
       declared := declared.push ty
       args := args.push (into (Expr.name none s!"%a{i}"))
       classes := classes + cls * place
@@ -805,7 +810,7 @@ private partial def parseExtern : P (List Item) := do
     let (retTy, back, bits) ← match ret with
       | .tuple [] => pure (TypeExpr.tuple [], (id : Expr → Expr), (0 : Int))
       | t => do
-        let (ty, _, back, bits, _) ← kind 4 t
+        let (ty, _, back, bits, _) ← kind retId 4 t
         pure (ty, back, bits)
     let symbol := name.toUTF8.toList.map fun b => Expr.int b.toNat
     let call := Expr.call 0 (.name none foreignCall)

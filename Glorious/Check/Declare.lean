@@ -869,9 +869,16 @@ def declareTraits (items : List Item) : M Unit := do
       modify fun s => { s with traits := (Syntax.destroyTrait, [Syntax.destroyFn]) :: s.traits }
     let builtin := ["Int", "(callable)", "(reference)"] ++ Syntax.scalars.map (·.1)
       ++ (List.range 17).map fun n => s!"(tuple{n})"
-    let declared := (← get).types.toList.map fun (name, decl) =>
-      -- (which of its parameters are types)
-      (name, decl.arity, (List.range decl.arity).filter fun j => decl.kinds[j]? != some true)
+    let st ← get
+    let declared := st.types.toList.map fun (name, decl) =>
+      -- (which of its parameters are types, and in a field: one in none,
+      -- `PtrMut<T>`'s `T`, has nothing of its own to destroy)
+      let sigs := decl.ctors.filterMap (st.ctors[·]?)
+      let inField := fun (j : Nat) => sigs.isEmpty || sigs.any fun sig =>
+        match sig.tvars[j]? with
+        | some v => sig.fields.any fun f => (freeTys f).contains v
+        | none => true
+      (name, decl.arity, (List.range decl.arity).filter fun j => decl.kinds[j]? != some true && inField j)
     let heads := builtin.map (fun h =>
         if h.startsWith "(tuple" then
           let n := ((h.drop 6).takeWhile Char.isDigit).toString.toNat!

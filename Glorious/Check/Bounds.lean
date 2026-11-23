@@ -67,7 +67,10 @@ partial def toSTy (t : Ty) : M Traits.STy := do
   | some k => pure (.var k)
   | none =>
     match t with
-    | .con n args => pure (.con n (← args.mapM toSTy))
+    -- (What an `is` found is a tuple of it, `Elab`'s `.pack`.)
+    | .con n args =>
+      if (Syntax.packNames n).isSome then pure (.con s!"(tuple{args.length})" (← args.mapM toSTy))
+      else pure (.con n (← args.mapM toSTy))
     | .tuple args => pure (.con s!"(tuple{args.length})" (← args.mapM toSTy))
     | .fn _ _ _ _ _ => pure (.con "(callable)" [])
     | .ref _ _ _ => pure (.con "(reference)" [])

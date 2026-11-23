@@ -129,20 +129,12 @@ pub fn len_of<T>(a: [T]) -> Int where T: Use<[1, 1]> { len(a) }
 
 // A growable array changed where it is, in the shape the library
 // specification gives it (15): functions of the type, `&mut Self` to change
-// one, `Option<&T>` to look at an element. Sizes and places are `Int`.
+// one, `Option<&T>` to look at an element. Sizes and places are `Int`. Its
+// elements are in memory it allocates and frees, one after another, each laid
+// out as its type is; it holds room for `cap` of them, and `len` are there.
 use std::slice::{Slice, SliceIter};
 
-pub struct Vec<T> { items: [T] }
-
-// The last `n` elements of an array taken off, last first, and what is left.
-fn taken_off<T>(a: [T], n: Int, off: [T]) -> ([T], [T]) where T: Use<[1, 1]> {
-    if(n <= 0) { (a, off) } else {
-        match(pop(a)) {
-            Some((rest, last)) => tail taken_off(rest, n - 1, push(off, last)),
-            None => ([], off)
-        }
-    }
-}
+pub struct Vec<T> { at: *mut T, cap: Int, len: Int }
 
 // The elements of one array onto another, last first.
 fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
@@ -152,218 +144,284 @@ fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
     }
 }
 
-// What was taken off, put back in the order it had.
-fn put_back<T>(a: [T], off: [T]) -> [T] where T: Use<[1, 1]> {
-    match(pop(off)) {
-        Some((rest, next)) => tail put_back(push(a, next), rest),
-        None => a
+// Each element of an array, last first, pushed.
+fn push_each<T>(v: &mut Vec<T>, reversed: [T]) where T: Use<[1, 1]> {
+    match(pop(reversed)) {
+        Some((rest, x)) => Vec::push(v, x); push_each(v, rest),
+        None => ()
     }
 }
 
-// `v[i]`, and `v[i] = x`, as of the array it holds: a place that is not
-// there stops the program.
+// What a `Vec` is, taken apart without its elements being destroyed.
+struct VecParts<T> { at: *mut T, cap: Int, len: Int }
+
+// How many bytes one element takes.
+fn elem_size<T>(v: &Vec<T>) -> Int { usize_bits(size_of_at(v.at)) }
+// The address of the element at a place.
+fn slot<T>(v: &Vec<T>, i: Int) -> usize { usize_of(usize_bits(ptr_mut_address(v.at)) + i * elem_size(v)) }
+// The element at a place, which is there, by reference.
+fn at_ref<'a, T>(v: &'a Vec<T>, i: Int) -> &'a T { unsafe { ptr_ref_at(v.at, slot(v, i)) } }
+fn at_mut<'a, T>(v: &'a mut Vec<T>, i: Int) -> &'a mut T { let s = slot(&*v, i); let base = v.at; unsafe { ptr_mut_ref_at(base, s) } }
+// The element at a place moved out, what is left there not to be used again.
+unsafe fn take_at<T>(v: &Vec<T>, i: Int) -> T { read_out(at_ref(v, i)) }
+// An element moved to a place where none is.
+unsafe fn put_at<T>(v: &mut Vec<T>, i: Int, item: T) where T: Use<[1, 1]> { overwrite(at_mut(v, i), item) }
+// The same, where the place is one an element was taken out of.
+fn place<T>(v: &mut Vec<T>, i: Int, item: T) where T: Use<[1, 1]> { unsafe { put_at(v, i, item) } }
+// So many elements moved, from one place to another, as if through a buffer.
+unsafe fn move_within<T>(v: &mut Vec<T>, from: Int, to: Int, count: Int) {
+    if(count > 0) { mem_copy(slot(&*v, to), slot(&*v, from), usize_of(count * elem_size(&*v))) } else { () }
+}
+// Room for at least so many in all: more memory, what is there moved to it.
+fn reserve_total<T>(v: &mut Vec<T>, want: Int) {
+    if(want > v.cap) {
+        let size = elem_size(&*v);
+        let doubled = if(v.cap == 0) { 4 } else { v.cap * 2 };
+        let cap = if(doubled < want) { want } else { doubled };
+        let fresh = unsafe { mem_alloc(usize_of(cap * size), align_of_at(v.at)) };
+        if(v.cap > 0) {
+            unsafe { mem_copy(fresh, ptr_mut_address(v.at), usize_of(v.len * size)); mem_free(ptr_mut_address(v.at)) }
+        } else { () };
+        v.at = ptr_mut_at(fresh);
+        v.cap = cap
+    } else { () }
+}
+// A place that is not there stops the program.
+fn must_be_at<T>(v: &Vec<T>, i: Int) {
+    if(i < 0 or { i >= v.len }) { abort("a place of a `Vec` that is not there") } else { () }
+}
+
+// The elements destroyed, and the memory freed.
+impl<T> Drop for Vec<T> {
+    fn drop(v: &mut Vec<T>) {
+        while({ v.len > 0 }) { v.len = v.len - 1; std::value::discard(unsafe { take_at(&*v, v.len) }) };
+        if(v.cap > 0) { unsafe { mem_free(ptr_mut_address(v.at)) } } else { () };
+        v.cap = 0
+    }
+}
+
+// `v[i]`, and `v[i] = x`: a place that is not there stops the program.
 impl<T> Index for Vec<T> {
     type Elem = T;
-    fn index(v: Vec<T>, i: Int) -> T { arr_get(v.items, i) }
-    fn index_set(v: Vec<T>, i: Int, x: T) -> Vec<T> { Vec { items: arr_set(v.items, i, x) } }
+    fn index(v: Vec<T>, i: Int) -> T { arr_get(Vec::into_array(v), i) }
+    fn index_set(v: Vec<T>, i: Int, x: T) -> Vec<T> {
+        let mut v = v;
+        must_be_at(&v, i);
+        std::value::discard(replace(at_mut(&mut v, i), x));
+        v
+    }
 }
 impl<T> Indexed for Vec<T> {
     type Element = T;
-    fn element_at(v: &Vec<T>, i: Int) -> &T { element_at(&v.items, i) }
-    fn size_at(v: &Vec<T>) -> Int { len_at(&v.items) }
+    fn element_at(v: &Vec<T>, i: Int) -> &T { must_be_at(v, i); at_ref(v, i) }
+    fn size_at(v: &Vec<T>) -> Int { v.len }
 }
-impl<T> IndexedMut for Vec<T> { fn place_at(i: Int, v: &mut Vec<T>) -> &mut <Vec<T> as Indexed>::Element { place_at(i, &mut v.items) } }
-impl<T> Clone for Vec<T> where T: Clone { fn clone(v: &Vec<T>) -> Vec<T> { Vec { items: clone(&v.items) } } }
+impl<T> IndexedMut for Vec<T> {
+    fn place_at(i: Int, v: &mut Vec<T>) -> &mut <Vec<T> as Indexed>::Element { must_be_at(&*v, i); at_mut(v, i) }
+}
+impl<T> Clone for Vec<T> where T: Clone, T: Use<[1, 1]> {
+    fn clone(v: &Vec<T>) -> Vec<T> {
+        let mut out = Vec::with_capacity(v.len);
+        let mut i = 0;
+        while({ i < v.len }) { Vec::push(&mut out, clone(at_ref(v, i))); i = i + 1 };
+        out
+    }
+}
 
 impl<T> Vec<T> {
-    pub fn new() -> Self { Self { items: [] } }
-    pub fn with_capacity(capacity: Int) -> Self { Self { items: [] } }
-    pub fn from_array(items: [T]) -> Self where T: Use<[1, 1]> { Self { items: items } }
-    pub fn into_array(value: Self) -> [T] where T: Use<[1, 1]> { match(value) { Vec { items } => items } }
-    pub fn len(value: &Self) -> Int { len_at(&value.items) }
-    pub fn is_empty(value: &Self) -> Bool { len_at(&value.items) == 0 }
-    pub fn get<'a>(value: &'a Self, index: Int) -> Option<&'a T> where T: Use<[1, 1]> { element(&value.items, index) }
+    pub fn new() -> Self { Self { at: ptr_mut_at(0usize), cap: 0, len: 0 } }
+    pub fn with_capacity(capacity: Int) -> Self { let mut v = Vec::new(); reserve_total(&mut v, capacity); v }
+    pub fn from_array(items: [T]) -> Self where T: Use<[1, 1]> {
+        let mut v = Vec::new();
+        push_each(&mut v, turned(items, []));
+        v
+    }
+    pub fn into_array(value: Self) -> [T] where T: Use<[1, 1]> {
+        let parts: VecParts<T> = unsafe { transmute(value) };
+        let v = Vec { at: parts.at, cap: 0, len: 0 };
+        let mut out = [];
+        let mut i = 0;
+        while({ i < parts.len }) { push_at(&mut out, unsafe { take_at(&v, i) }); i = i + 1 };
+        if(parts.cap > 0) { unsafe { mem_free(ptr_mut_address(parts.at)) } } else { () };
+        out
+    }
+    pub fn len(value: &Self) -> Int { value.len }
+    pub fn is_empty(value: &Self) -> Bool { value.len == 0 }
+    pub fn get<'a>(value: &'a Self, index: Int) -> Option<&'a T> where T: Use<[1, 1]> {
+        if(index < 0 or { index >= value.len }) { None } else { Some(at_ref(value, index)) }
+    }
     pub fn get_mut<'a>(value: &'a mut Self, index: Int) -> Option<&'a mut T> where T: Use<[1, 1]> {
-        element_mut(&mut value.items, index)
+        if(index < 0 or { index >= value.len }) { None } else { Some(at_mut(value, index)) }
     }
-    pub fn first<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { element(&value.items, 0) }
-    pub fn last<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> {
-        element(&value.items, len_at(&value.items) - 1)
-    }
+    pub fn first<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { Vec::get(value, 0) }
+    pub fn last<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { Vec::get(value, value.len - 1) }
     pub fn push(value: &mut Self, item: T) where T: Use<[1, 1]> {
-        push_at(&mut value.items, item);
+        let n = value.len;
+        reserve_total(value, n + 1);
+        unsafe { put_at(value, n, item) };
+        value.len = n + 1
     }
     pub fn pop(value: &mut Self) -> Option<T> where T: Use<[1, 1]> {
-        pop_at(&mut value.items)
+        if(value.len == 0) { None } else { value.len = value.len - 1; Some(unsafe { take_at(&*value, value.len) }) }
     }
     // The item put at a place, what was there and after it moving up; the
     // item given back if there is no such place.
     pub fn insert(value: &mut Self, index: Int, item: T) -> Result<(), T> where T: Use<[1, 1]> {
-        let items = &mut value.items;
-        let n = len_at(&*items);
-        if(index < 0) { Err(item) } else {
-            if(index > n) { Err(item) } else {
-                match(taken_off(replace(items, []), n - index, [])) {
-                    (before, off) => unsafe { restore_at(items, put_back(push(before, item), off)) }; Ok(())
-                }
-            }
+        if(index < 0 or { index > value.len }) { Err(item) } else {
+            let n = value.len;
+            reserve_total(value, n + 1);
+            unsafe { move_within(value, index, index + 1, n - index); put_at(value, index, item) };
+            value.len = n + 1;
+            Ok(())
         }
     }
     // The element at a place taken out, what was after it moving down.
     pub fn remove(value: &mut Self, index: Int) -> Option<T> {
-        let items = &mut value.items;
-        let n = len_at(&*items);
-        if(index < 0) { None } else {
-            if(index >= n) { None } else {
-                match(taken_off(replace(items, []), n - index - 1, [])) {
-                    (upto, off) => match(pop(upto)) {
-                        Some((before, taken)) => unsafe { restore_at(items, put_back(before, off)) }; Some(taken),
-                        None => None
-                    }
-                }
-            }
+        if(index < 0 or { index >= value.len }) { None } else {
+            let taken = unsafe { take_at(&*value, index) };
+            let n = value.len;
+            unsafe { move_within(value, index + 1, index, n - index - 1) };
+            value.len = n - 1;
+            Some(taken)
         }
     }
     // Everything of another put after what is here.
-    pub fn append(value: &mut Self, source: Self) {
-        let items = &mut value.items;
-        match(source) { Vec { items: more } => let all = put_back(replace(items, []), turned(more, [])); unsafe { restore_at(items, all) } }
+    pub fn append(value: &mut Self, source: Self) where T: Use<[1, 1]> {
+        let mut source = source;
+        let n = source.len;
+        let want = value.len + n;
+        reserve_total(value, want);
+        let mut i = 0;
+        while({ i < n }) { let x = unsafe { take_at(&source, i) }; Vec::push(value, x); i = i + 1 };
+        source.len = 0
     }
-    pub fn reverse(value: &mut Self) {
-        let items = &mut value.items;
-        let all = turned(replace(items, []), []);
-        unsafe { restore_at(items, all) };
+    pub fn reverse(value: &mut Self) where T: Use<[1, 1]> {
+        let mut i = 0;
+        let mut j = value.len - 1;
+        while({ i < j }) {
+            let a = unsafe { take_at(&*value, i) };
+            let b = unsafe { take_at(&*value, j) };
+            unsafe { put_at(value, i, b); put_at(value, j, a) };
+            i = i + 1;
+            j = j - 1
+        }
     }
     // In order, by `<`, equal ones as they were to each other; or in the
     // order `before` gives.
     pub fn sort(value: &mut Self) where T: Ord, T: Use<[0, *]> {
-        let items = &mut value.items;
-        let all = sort(replace(items, []));
-        unsafe { restore_at(items, all) };
+        let all = sort(Vec::into_array(replace(value, Vec::new())));
+        *value = Vec::from_array(all)
     }
     pub fn sort_by<e: EffectRow>(value: &mut Self, before: fn(T, T) -> Bool / {| e}) / {| e} where T: Use<[0, *]> {
-        let items = &mut value.items;
-        let all = sort_by(replace(items, []), before);
-        unsafe { restore_at(items, all) };
+        let all = sort_by(Vec::into_array(replace(value, Vec::new())), before);
+        *value = Vec::from_array(all)
     }
-    // How many it holds room for without growing: as many as it holds, here.
-    pub fn capacity(value: &Self) -> Int { len_at(&value.items) }
-    pub fn reserve(value: &mut Self, additional: Int) { () }
+    // How many it holds room for without growing.
+    pub fn capacity(value: &Self) -> Int { value.cap }
+    pub fn reserve(value: &mut Self, additional: Int) { let want = value.len + additional; reserve_total(value, want) }
     pub fn shrink_to_fit(value: &mut Self) { () }
     // The element at a place, which must be there.
-    pub fn index<'a>(value: &'a Self, index: Int) -> &'a T where T: Use<[1, 1]> { element_at(&value.items, index) }
-    pub fn index_mut<'a>(value: &'a mut Self, index: Int) -> &'a mut T where T: Use<[1, 1]> { place_at(index, &mut value.items) }
-    pub fn first_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> where T: Use<[1, 1]> { element_mut(&mut value.items, 0) }
-    pub fn last_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> where T: Use<[1, 1]> {
-        let n = len_at(&value.items);
-        element_mut(&mut value.items, n - 1)
-    }
+    pub fn index<'a>(value: &'a Self, index: Int) -> &'a T where T: Use<[1, 1]> { must_be_at(value, index); at_ref(value, index) }
+    pub fn index_mut<'a>(value: &'a mut Self, index: Int) -> &'a mut T where T: Use<[1, 1]> { must_be_at(&*value, index); at_mut(value, index) }
+    pub fn first_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> where T: Use<[1, 1]> { Vec::get_mut(value, 0) }
+    pub fn last_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> where T: Use<[1, 1]> { let n = value.len; Vec::get_mut(value, n - 1) }
     // The element at a place, the last put in its place.
     pub fn swap_remove(value: &mut Self, index: Int) -> Option<T> where T: Use<[1, 1]> {
-        let n = len_at(&value.items);
-        if(index < 0 or { index >= n }) { None } else {
-            match(pop_at(&mut value.items)) {
-                Some(last) => if(index == n - 1) { Some(last) } else { Some(replace(&mut value.items[index], last)) },
-                None => None
-            }
+        if(index < 0 or { index >= value.len }) { None } else {
+            let taken = unsafe { take_at(&*value, index) };
+            let n = value.len - 1;
+            if(index < n) { let last = unsafe { take_at(&*value, n) }; unsafe { put_at(value, index, last) } } else { () };
+            value.len = n;
+            Some(taken)
         }
     }
     // What is at a place, with another put there; or the other given back.
     pub fn replace(value: &mut Self, index: Int, item: T) -> Result<T, T> where T: Use<[1, 1]> {
-        if(index < 0 or { index >= len_at(&value.items) }) { Err(item) } else { Ok(replace(&mut value.items[index], item)) }
+        if(index < 0 or { index >= value.len }) { Err(item) } else { Ok(replace(at_mut(value, index), item)) }
     }
     // The elements at two places changed over.
-    pub fn swap(value: &mut Self, left: Int, right: Int) -> Result<(), ()> {
-        let n = len_at(&value.items);
+    pub fn swap(value: &mut Self, left: Int, right: Int) -> Result<(), ()> where T: Use<[1, 1]> {
+        let n = value.len;
         if(left < 0 or { right < 0 } or { left >= n } or { right >= n }) { Err(()) } else {
             if(left != right) {
-                let first = Vec::remove(value, left);
-                let a = match(first) { Some(x) => x, None => unreachable("a place that is there") };
-                let at = if(right > left) { right - 1 } else { right };
-                let b = Vec::replace(value, at, a);
-                match(b) {
-                    Ok(y) => match(Vec::insert(value, left, y)) { Ok(_) => (), Err(z) => std::value::discard(z) },
-                    Err(z) => std::value::discard(z)
-                }
+                let a = unsafe { take_at(&*value, left) };
+                let b = unsafe { take_at(&*value, right) };
+                unsafe { put_at(value, left, b); put_at(value, right, a) }
             } else { () };
             Ok(())
         }
     }
     // The elements turned: the first `count` taken from the front to the back.
-    pub fn rotate_left(value: &mut Self, count: Int) -> Result<(), ()> {
-        let n = len_at(&value.items);
+    pub fn rotate_left(value: &mut Self, count: Int) -> Result<(), ()> where T: Use<[1, 1]> {
+        let n = value.len;
         if(count < 0 or { count > n }) { Err(()) } else {
             let rest = Vec::split_off_at(value, count);
-            let front = replace(&mut value.items, []);
-            value.items = rest;
-            Vec::append(value, Vec { items: front });
+            let front = replace(value, rest);
+            Vec::append(value, front);
             Ok(())
         }
     }
-    pub fn rotate_right(value: &mut Self, count: Int) -> Result<(), ()> {
-        let n = len_at(&value.items);
+    pub fn rotate_right(value: &mut Self, count: Int) -> Result<(), ()> where T: Use<[1, 1]> {
+        let n = value.len;
         if(count < 0 or { count > n }) { Err(()) } else { Vec::rotate_left(value, n - count) }
     }
     // The elements from a place on, taken off into a new one.
-    pub fn split_off(value: &mut Self, index: Int) -> Result<Self, ()> {
-        if(index < 0 or { index > len_at(&value.items) }) { Err(()) } else { Ok(Vec { items: Vec::split_off_at(value, index) }) }
+    pub fn split_off(value: &mut Self, index: Int) -> Result<Self, ()> where T: Use<[1, 1]> {
+        if(index < 0 or { index > value.len }) { Err(()) } else { Ok(Vec::split_off_at(value, index)) }
     }
-    fn split_off_at(value: &mut Self, index: Int) -> [T] {
-        let items = &mut value.items;
-        let n = len_at(&*items);
-        let (kept, off) = taken_off(replace(items, []), n - index, []);
-        *items = kept;
-        turned(off, [])
+    fn split_off_at(value: &mut Self, index: Int) -> Self where T: Use<[1, 1]> {
+        let n = value.len;
+        let mut off = Vec::with_capacity(n - index);
+        let mut i = index;
+        while({ i < n }) { let x = unsafe { take_at(&*value, i) }; Vec::push(&mut off, x); i = i + 1 };
+        value.len = index;
+        off
     }
     // So many elements: those after the length let go, or copies of the
     // fill put on.
-    pub fn resize(value: &mut Self, length: Int, fill: T) {
-        let n = len_at(&value.items);
-        if(length < n) { Vec::truncate(value, length) }
-        else { let mut i = n; while({ i < length }) { push_at(&mut value.items, fill); i = i + 1 } }
+    pub fn resize(value: &mut Self, length: Int, fill: T) where T: Use<[0, *]> {
+        if(length < value.len) { Vec::truncate(value, length) }
+        else { while({ value.len < length }) { Vec::push(value, fill) } }
     }
     // Those for which the test holds, kept in order; the rest let go.
     pub fn retain<e: EffectRow>(value: &mut Self, keep: for<'a> fn(&'a T) -> Bool / {| e}) / {| e} {
-        let mut all = turned(replace(&mut value.items, []), []);
-        let mut kept = [];
-        loop({
-            match(pop_at(&mut all)) {
-                Some(x) => if(keep(&x)) { push_at(&mut kept, x) } else { std::value::discard(x) },
-                None => break(())
-            }
-        });
-        value.items = kept
+        let n = value.len;
+        let mut kept = 0;
+        let mut i = 0;
+        while({ i < n }) {
+            let x = unsafe { take_at(&*value, i) };
+            if(keep(&x)) { place(value, kept, x); kept = kept + 1 } else { std::value::discard(x) };
+            i = i + 1
+        };
+        value.len = kept
     }
     pub fn into_iter(value: Self) -> std::iterator::IntoIter<T> where T: Use<[1, 1]> { std::iterator::into_iter(Vec::into_array(value)) }
     pub fn finish_empty(value: Self) -> Result<(), Self> {
-        if(len_at(&value.items) == 0) { match(value) { Vec { items } => std::value::discard(items) }; Ok(()) } else { Err(value) }
+        // (Taken apart, which nothing destroys, so that either way can have it.)
+        let parts: VecParts<T> = unsafe { transmute(value) };
+        if(parts.len == 0) {
+            if(parts.cap > 0) { unsafe { mem_free(ptr_mut_address(parts.at)) } } else { () };
+            Ok(())
+        } else { Err(unsafe { transmute(parts) }) }
     }
     // Is a value equal to one of the elements?
     pub fn contains(value: &Self, item: &T) -> Bool where T: Eq, T: Use<[0, *]> {
         let mut i = 0;
-        let n = len_at(&value.items);
         let mut found = false;
-        while({ i < n and { not found } }) { if(value.items[i] == *item) { found = true } else { () }; i = i + 1 };
+        while({ i < value.len and { not found } }) { if(*at_ref(value, i) == *item) { found = true } else { () }; i = i + 1 };
         found
     }
-    pub fn extend(value: &mut Self, more: [T]) {
-        let mut rest = turned(more, []);
-        loop({ match(pop_at(&mut rest)) { Some(x) => push_at(&mut value.items, x), None => break(()) } })
-    }
+    pub fn extend(value: &mut Self, more: [T]) where T: Use<[1, 1]> { push_each(value, turned(more, [])) }
     // Only so many kept: the rest are let go.
     pub fn truncate(value: &mut Self, length: Int) {
-        let items = &mut value.items;
-        let n = len_at(&*items);
-        // (What is taken off is destroyed: a pattern's `_` does that.)
-        let (kept, _) = taken_off(replace(items, []), n - length, []);
-        *items = kept;
+        while({ value.len > length and { value.len > 0 } }) {
+            value.len = value.len - 1;
+            std::value::discard(unsafe { take_at(&*value, value.len) })
+        }
     }
-    pub fn clear(value: &mut Self) {
-        let items = &mut value.items;
-        *items = [];
-    }
+    pub fn clear(value: &mut Self) { Vec::truncate(value, 0) }
     // The elements as a slice: looked at where they are.
-    pub fn as_slice<'a>(value: &'a Self) -> Slice<'a, T> where T: Use<[1, 1]> { Slice::of(&value.items) }
+    pub fn as_slice<'a>(value: &'a Self) -> Slice<'a, T> where T: Use<[1, 1]> { Slice::of_memory(value, value.at, value.len) }
     // The elements one after another, by reference.
-    pub fn iter<'a>(value: &'a Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { Slice::iter(&Slice::of(&value.items)) }
+    pub fn iter<'a>(value: &'a Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { Slice::iter(&Vec::as_slice(value)) }
 }

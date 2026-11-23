@@ -503,7 +503,12 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       | some C =>
         match Lower.lowered C c.checked with
         | .ok _ => IO.eprintln "lowered"
-        | .error e => IO.eprintln s!"not lowered: {e}"
+        | .error e =>
+          -- (The function named, where it is said.)
+          let e := match (e.splitOn "(in function ").getLast?.bind (fun r => (r.takeWhile Char.isDigit).toNat?) with
+            | some fn => s!"{e}: `{c.fnNames[fn]?.getD ""}`"
+            | none => e
+          IO.eprintln s!"not lowered: {e}"
         -- (And the functions with no signature, left as they are.)
         let C := C.withIndex
         let unsigned := (List.range c.checked.fns.size).filter fun f => (C.sigsOf f).isEmpty
@@ -942,7 +947,11 @@ where
   -- (Why a program goes wrong, compiled without the checks: what the
   -- `diagnose` cases of `tests/checks.cases` ask.)
   | ["diagnose", path] => do
-    IO.println (diagnose (← IO.FS.readFile path))
+    let src ← IO.FS.readFile path
+    -- (`GLORIOUS_CORE`: its Core, as compiled without the checks.)
+    if (← IO.getEnv "GLORIOUS_CORE").isSome then
+      if let .ok c := compileSource src (check := false) then IO.eprintln (showCore c.fnNames c.core)
+    IO.println (diagnose src)
     pure 0
   | ["sigs", path] =>
     match ← compileFile path with

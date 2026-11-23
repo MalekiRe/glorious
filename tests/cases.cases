@@ -11082,7 +11082,7 @@ fn main() -> Int {
         let missing = b.finish(99);
         (first, again, missing)
     }() {
-        log(m, k) => lines.push(m); k(())
+        log(m, k) => Vec::push(&mut lines, m); k(())
     };
     say(r);
     say(lines.len());
@@ -11413,7 +11413,7 @@ impl Class {
         let mut i = 0;
         while({ i < s.students.len() }) {
             let a = s.students[i].average();
-            if(a > best) { best = a; who = Some(s.students[i].name) } else { () };
+            if(a > best) { best = a; let st = &s.students[i]; who = Some(st.name) } else { () };
             i = i + 1
         };
         who
@@ -11432,7 +11432,7 @@ fn main() -> Int {
     let mut i = 0;
     while({ i < class.students.len() }) {
         let s = &class.students[i];
-        lines.push(s.name ++ ": " ++ show(s.average()) ++ " " ++ s.grade());
+        Vec::push(&mut lines, s.name ++ ": " ++ show(s.average()) ++ " " ++ s.grade());
         i = i + 1
     };
     say(join(Vec::into_array(lines), "; "));
@@ -15663,3 +15663,11 @@ fn both(r: &(Int, Int)) -> Int { match(r) { &(a, b) => *a * 10 + *b } }
 fn main() -> Int { twice(3, first) * 1000 + twice((1, 2), both) }
 #### expect
 6024
+#### case
+#### What an `is` found, in a program where a type has a `drop`: destroyed as
+#### the tuple it is.
+struct File(Int)
+impl Drop for File { fn drop(p: &mut File) { () } }
+fn main() -> Int { let o = Some(4); if(o is Some(x)) { x } else { 0 } }
+#### expect
+4

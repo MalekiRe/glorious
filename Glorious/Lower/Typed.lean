@@ -23,11 +23,17 @@ namespace Glorious.Lower
 
 open Typing Core
 
-/-- Whether a type has in it what nothing decided (`anyName`). -/
-partial def undecided : Ty → Bool
-  | .data n args => n == anyName || args.any undecided
-  | .tuple fs => fs.any undecided
-  | .ref _ t => undecided t
+/-- Whether how a type is laid out has in it what nothing decided
+(`anyName`): where it is laid out in place, not behind a reference, in what
+the machine holds, or in a type parameter no field has. -/
+partial def undecided (C : Cert) (seen : List (Nat × List Ty)) : Ty → Bool
+  | .tuple fs => fs.any (undecided C seen)
+  | .data name args =>
+    if name == anyName then true
+    else if name == arrayName || seen.contains (name, args) || holdsItself C name args then false
+    else match findData C.datas name args with
+      | some ctors => ctors.any fun (_, fs) => fs.any (undecided C ((name, args) :: seen))
+      | none => false
   | _ => false
 
 /-- Why a program is not lowered, or what it is lowered to. -/
@@ -46,7 +52,7 @@ def laidOp (C : Cert) (Γ : TEnv) (op : MemOp) (args : List Atom) : L MemOp := d
   if [.alloc, .free, .readBits, .writeBits, .copy, .sizeOf, .alignOf, .deref].contains op then return op
   let some (.ref _ σ) := args.head?.bind (atomTy Γ) | throw "a memory operation not of a reference"
   -- (What nothing decided may be laid out otherwise where it is decided.)
-  if undecided σ then throw "a reference to what nothing decided the type of"
+  if undecided C [] σ then throw "a reference to what nothing decided the type of"
   let l := (layOf C [] σ).lay
   match op with
   | .load => pure (.loadL l)
@@ -249,7 +255,8 @@ def lowered (C : Cert) (p : Program) : L (Program × List Nat) := do
   let C := C.withIndex
   let sigs := (List.range p.fns.size).toArray.map C.sigsOf
   let lowerAll := fun (T : Targets) =>
-    (p.fns.toList.zip sigs.toList).mapM fun (F, es) => es.mapM fun e => lowerClauses C T e F.clauses
+    (p.fns.toList.zip sigs.toList).zipIdx.mapM fun ((F, es), fn) => es.mapM fun e =>
+      tryCatch (lowerClauses C T e F.clauses) fun err => throw s!"{err} (in function {fn})"
   -- The signatures of a function split into kinds, one at first: a kind is
   -- split where its signatures are lowered otherwise, until none is.
   let rec settle (fuel : Nat) (kinds : Array (List Nat)) : L (Targets × List Nat × List (List (List Clause))) := do

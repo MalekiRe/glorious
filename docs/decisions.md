@@ -401,6 +401,27 @@ As it is done (`Lower.Typed`, `Lower.Layout`, `Lay`):
   now). Inference with what the last compile kept is slower still, so it
   is found anew each time, until inference is made to keep more.
 
+**`Vec<T>` over memory** (`std::vec`). `Vec { at: *mut T, cap, len }`: its
+elements one after another in memory it allocates (`mem_alloc`, growing by
+doubling, `mem_copy` to the new block) and frees, each laid out as `T` is
+(`size_of_at(v.at)`), read and written through `ptr_ref_at(v.at, address)`,
+`read_out` and `overwrite`; its `Drop` destroys what it holds and frees the
+memory. A `Vec` is not copied: `a[i]` of a mutable variable or a field
+reads the element where it is (`*element_at(&a, i)`). `Slice` is of an
+array or of memory (`Slice::of_memory`, `at` not zero), `as_slice` and
+`iter` of a `Vec` look at its memory. Converting from and to arrays, `sort`
+and `into_iter` go through an array while arrays are the compiler's.
+
+What it asked of the rest: a type parameter no field has needs nothing to
+destroy it (`PtrMut<T>`'s `T`); what an `is` found is destroyed as the tuple
+it is; a foreign function's wrapper names the calls it makes of functions
+generic in what a pointer points to. Not yet: a dotted call on a mutable
+variable a callable captures is not borrowed for a type's own function of
+the name where the prelude has one that takes the value (`lines.push(x)` in
+a loop's body, with the prelude's array `push`), and `v[i].f` reads `v[i]`
+whole: three tests write `Vec::push(&mut v, x)` and a `let` of `&v[i]` for
+now. Both go with the arrays.
+
 Stage 2 so far: `Repr` (the prelude's) writes a value to memory and reads
 it back, `repr_store` and `repr_load`, both `unsafe fn` (a trait's
 `unsafe fn` is called only in `unsafe`). `Int`'s and each scalar's are its

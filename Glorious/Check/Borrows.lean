@@ -577,7 +577,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
 def needBounds (call : Nat) (bs : List (String × Ty)) : M Unit := do
   if bs.isEmpty then return
   if call == 0 then
-    throw "a trait is needed at a call the checker has no name for; this is a compiler defect"
+    throw s!"a trait is needed at a call the checker has no name for ({", ".intercalate (bs.map (·.1))}); this is a compiler defect"
   let s ← get
   let news := (bs.zip (List.range bs.length)).map fun ((tr, ty), k) =>
     (⟨tr, ty, call, k, s.owner, s.pos, []⟩ : Bound)
