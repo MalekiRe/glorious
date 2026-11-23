@@ -479,18 +479,6 @@ theorem StackOk.fresh {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ :
     r ∉ Rgn.flat ϕ ∧ .wr r ∉ Rgn.flat ϕ :=
   ⟨fun hx => hr (h.known _ hx), fun hx => hr (h.known (.wr r) hx)⟩
 
-theorem nodup_map {α β : Type} {f : α → β} : ∀ {l : List α},
-    (∀ x y, x ∈ l → y ∈ l → f x = f y → x = y) → l.Nodup → (l.map f).Nodup
-  | [], _, _ => List.nodup_nil
-  | a :: l, h, hnd => by
-    obtain ⟨ha, hl⟩ := List.nodup_cons.mp hnd
-    refine List.nodup_cons.mpr ⟨fun hm => ?_, nodup_map (fun x y hx hy =>
-      h x y (List.mem_cons_of_mem _ hx) (List.mem_cons_of_mem _ hy)) hl⟩
-    obtain ⟨b, hb, he⟩ := List.mem_map.mp hm
-    have := h b a (List.mem_cons_of_mem _ hb) (List.mem_cons_self ..) he
-    subst this
-    exact ha hb
-
 /-- Putting a scope's own region for the one its callable binds keeps the
 places the callable touches apart, the scope's own being new. -/
 theorem open_scope_nodup {acc ϕ : List Rgn} {r : Rgn}

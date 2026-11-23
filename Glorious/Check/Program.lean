@@ -975,17 +975,6 @@ def checkFirst (items : List Syntax.Item) (modules : Syntax.ModuleInfo := {}) (d
   let (_, st) ← (action.runE { dropMode := drops }).mapError (·.msg)
   pure st
 
-/-- Check a program whose first items are already checked. -/
-def checkAfter (first : St) (items : List Syntax.Item) (modules : Syntax.ModuleInfo := {}) :
-    Except String Elab.Blocks := do
-  let action : M Elab.Blocks := do
-    modify fun s => { s with modules, ownItems := true }
-    let _ ← checkItems items
-    finish
-  let (blocks, _) ← (action.runE first).mapError (·.msg)
-  pure blocks
-
-
 /-- Check a program's units, each a module, in the order given, which has a
 module after those it uses (`deps`: for each, the units before it that it
 uses): each unit's declarations and groups are checked after the units before

@@ -159,11 +159,6 @@ theorem matchVals_append : ∀ {as : List Pat} {xs : List Value} {bs : List Pat}
   | [], _ :: _, _, _, _, hlen, _ => by simp at hlen
   | _ :: _, [], _, _, _, hlen, _ => by simp at hlen
 
-theorem matchVals_wilds : ∀ (xs : List Value),
-    Pat.matchVals (List.replicate xs.length .wild) xs = some []
-  | [] => by simp [Pat.matchVals]
-  | x :: xs => by simp [List.replicate, Pat.matchVals, Pat.matchVal, matchVals_wilds xs]
-
 /-- A value of a type that has constructors is built by one of them. -/
 theorem ctorsOf_value {S : StoreTy} {v : Value} {T : Ty} {ctors : List (Nat × List Ty)}
     (hc : ctorsOf C T = some ctors) (hv : HasVal C.ctx S v T) :

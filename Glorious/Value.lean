@@ -192,22 +192,6 @@ def follow : Value → List Nat → Option Value
   | .label _, _ :: _ => none
   | .ref _ _ _, _ :: _ => none
 
-/-- A value with the part a field path leads to replaced. -/
-def put : Value → List Nat → Value → Option Value
-  | _, [], w => some w
-  | .data tag fields, i :: path, w =>
-    match fields[i]? with
-    | some field =>
-      match field.put path w with
-      | some field' => some (.data tag (fields.set i field'))
-      | none => none
-    | none => none
-  | .int _, _ :: _, _ => none
-  | .clo _ _, _ :: _, _ => none
-  | .cont _, _ :: _, _ => none
-  | .label _, _ :: _, _ => none
-  | .ref _ _ _, _ :: _, _ => none
-
 /-- The part of a value that steps lead to. There is none where a field is
 not there, or where the value was built by another constructor than a step
 expects. -/

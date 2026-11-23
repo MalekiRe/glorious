@@ -328,13 +328,6 @@ theorem lcAt_inst {d : Nat} {r : Rgn} (h : r.lcAt d = true) (θ : List Rgn) :
     simp only [lcAt, Bool.and_eq_true] at h
     simp [inst, lcAt, iha h.1, ihb h.2]
 
-/-- Does the region have no part that is a region variable? -/
-def novar : Rgn → Bool
-  | .var _ => false
-  | .wr r => novar r
-  | .or a b => novar a && novar b
-  | _ => true
-
 /-- Is the region none of the `n` regions a callable type binds, seen from
 inside it? -/
 def freeOf (n : Nat) : Rgn → Bool
@@ -542,11 +535,6 @@ theorem Ty.mapRs_eq (f : Nat → Rgn → Rgn) (k : Nat) :
     ∀ ts : List Ty, Ty.mapRs f k ts = ts.map (Ty.mapR f k)
   | [] => by simp [Ty.mapRs]
   | t :: ts => by simp [Ty.mapRs, Ty.mapRs_eq f k ts]
-
-theorem Ty.mapRow_eq (f : Nat → Rgn → Rgn) (k : Nat) :
-    ∀ es : List (Nat × List Ty), Ty.mapRow f k es = es.map (Ty.mapEntry f k)
-  | [] => by simp [Ty.mapRow]
-  | e :: es => by simp [Ty.mapRow, Ty.mapRow_eq f k es]
 
 /-! Applying one function after another is applying their composite. -/
 
