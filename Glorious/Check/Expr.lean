@@ -475,23 +475,23 @@ partial def inferFieldOfPlace (scope : Scope) (whole : Flat.ExprId) : M (Option 
     if let some (.val t _) := scope.lookup x then
       if let .ref _ inner cap ← find t then
         if let some (_, some first) := path.head? then
-          let (field, numbered, _, through) ← fieldAtThrough inner (path.map (·.1))
-          noteFieldReads path numbered through
           modify fun s => { s with derefReads := s.derefReads.push first }
-          mustDup field "reading through a reference copies the value (`replace` takes it out instead)"
-          use scope (.through cap s!"`{x}`" false numbered)
-          return some field
+          return some (← readThrough x path inner cap)
   if let some (x, path) := fieldOfDeref (← get).body whole then
     if let some (.val t _) := scope.lookup x then
       let inner ← freshTy
       let cap ← freshCap
       unifyAt "`*` reads through a reference" (.ref (← freshTy) inner cap) t
-      let (field, numbered, _, through) ← fieldAtThrough inner (path.map (·.1))
-      noteFieldReads path numbered through
-      mustDup field "reading through a reference copies the value (`replace` takes it out instead)"
-      use scope (.through cap s!"`{x}`" false numbered)
-      return some field
+      return some (← readThrough x path inner cap)
   return none
+where
+  /-- A field read through a reference: copied out. -/
+  readThrough (x : String) (path : List (String × Option Nat)) (inner : Ty) (cap : Nat) : M Ty := do
+    let (field, numbered, _, through) ← fieldAtThrough inner (path.map (·.1))
+    noteFieldReads path numbered through
+    mustDup field "reading through a reference copies the value (`replace` takes it out instead)"
+    use scope (.through cap s!"`{x}`" false numbered)
+    pure field
 
 /-- The reference that `*e` goes through. A name is the reference it stands
 for, not one lent from it. -/
