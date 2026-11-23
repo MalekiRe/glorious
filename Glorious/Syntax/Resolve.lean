@@ -462,11 +462,42 @@ def FrontMemo.take (m : FrontMemo) (key : UInt64) (make : Unit → List FItem) :
     | none => make ()
   (v, if m.keep then { m with made := m.made.push (key, v) } else m)
 
+/-- An item's functions made so (`promoteFnClause`), as it is read, before
+its names are resolved: not a trait's defaults, made so where they are
+written out (`borrowReceivers`). -/
+partial def promoteItem : FItem → FItem
+  | .fn name ps annots ret b =>
+    let (roots, b) := (b.roots.mapM (promoteFnClause annots)).run b
+    .fn name ps annots ret { b with roots }
+  | .pub parent item => .pub parent (promoteItem item)
+  | .module name (some inner) => .module name (some (inner.map promoteItem))
+  | .impl ps tr head args context methods => .impl ps tr head args context (methods.map promoteItem)
+  | item => item
+
+/-- Every item made so (`promoteItem`), each as an earlier compile made it
+where it is the same. -/
+def promoteItems (items : List FItem) (memo : FrontMemo := {}) : List FItem × FrontMemo :=
+  let (out, memo) := items.foldl (fun ((acc : Array FItem), m) item =>
+    let (made, m) := m.take (hash ("promote", item)) fun _ => [promoteItem item]
+    (acc ++ made.toArray, m)) (#[], memo)
+  (out.toList, memo)
+
+/-- Does a body call, on what it is called on, a function that takes
+a reference (`taken`), so that `receiverExpr` may borrow it? -/
+def Body.borrowsReceiver (b : Body) (taken : Std.HashMap String Bool) (body : Array StmtId) : Bool :=
+  body.any fun s => b.anyStmt (fun n => match n with
+    | .call _ f args =>
+      match b.name? f, args[0]?.map b.expr with
+      | some (_, name), some (.call _ m _) => b.bare? m == some receiverMark && taken.contains name
+      | _, _ => false
+    | _ => false) s
+
 /-- Every dotted call of a program with what it is called on borrowed where
 the function takes a reference: see `receiverExpr`. A name that is then
 borrowed and was not a variable is kept where a reference can point, as one
-borrowed with `&` in the text is: each function's clauses made so,
-`promoteFnClause`, after its receivers are borrowed. -/
+borrowed with `&` in the text is (`promoteFnClause`): in each function's
+clause where a borrow may be made, the rest as the text's were made so
+(`promoteItems`). -/
 partial def borrowReceivers (items : List FItem) (memo : FrontMemo := {}) : List FItem × FrontMemo :=
   let decls := items.map FItem.declared
   let taken : Std.HashMap String Bool :=
@@ -479,7 +510,7 @@ partial def borrowReceivers (items : List FItem) (memo : FrontMemo := {}) : List
     | .fn name ps annots ret b =>
       let (roots, b) := (b.roots.mapM fun c => (do
         let b ← get
-        let ⟨pats, _⟩ := b.clause c
+        let ⟨pats, body⟩ := b.clause c
         let values := (pats.zip annots).filterMap fun
           | (.var _, some (.ref _ _ _)) => none
           | (.var x, some _) => some x
@@ -489,8 +520,9 @@ partial def borrowReceivers (items : List FItem) (memo : FrontMemo := {}) : List
         let refs : List String := (pats.zip annots).filterMap fun
           | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
           | _ => none
+        let borrows := b.borrowsReceiver taken body
         let c' ← nameBorrowsClause (← receiverClause taken (refs.map (·, 3)) values c)
-        if promote then promoteFnClause annots c' else pure c' : Build ClauseId)).run b
+        if promote && borrows then promoteFnClause annots c' else pure c' : Build ClauseId)).run b
       .fn name ps annots ret { b with roots }
     | .impl ps tr head args context methods => .impl ps tr head args context (methods.map (go promote))
     | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map (go false)) params assocs

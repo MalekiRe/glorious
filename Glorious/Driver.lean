@@ -715,11 +715,11 @@ function is given how to destroy the types it is generic in. -/
 def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   if !std then
     let (prelude, _) ← readPrelude.get
-    let resolved ← Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) []
+    let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (Syntax.Flat.ofItems prelude)).1 []
     let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases resolved.items).1).1
     return (all.length, ← Check.checkFirst all resolved.info drop)
   let (prelude, items, _, _, _) ← parseProgram "// std" []
-  let resolved ← Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items)
+  let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (Syntax.Flat.ofItems prelude)).1 (Syntax.Flat.promoteItems (Syntax.Flat.ofItems items)).1
   -- (Its modules in the order a program has them, marks and all, so that
   -- what a program has first is these, item for item.)
   let (first, units) := unitsOfFlat resolved.items resolved.info.unitUses
@@ -785,7 +785,13 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- Every name is given its meaning: the modules become one list of items,
   -- each module a unit, after those it uses.
   -- (Resolved, and all that follows, from flat bodies.)
-  let (flatPrelude, flatItems) := Trace.timed "flat bodies" fun _ => (Syntax.Flat.ofItems prelude, Syntax.Flat.ofItems items)
+  -- (Each item as an earlier compile made it, where what it was made from is
+  -- the same: `Syntax.Flat.FrontMemo`.)
+  let front : Syntax.Flat.FrontMemo := { kept := frontKept.getD {}, keep := frontKept.isSome }
+  let (flatPrelude, flatItems, front) := Trace.timed "flat bodies" fun _ =>
+    let (p, front) := Syntax.Flat.promoteItems (Syntax.Flat.ofItems prelude) front
+    let (i, front) := Syntax.Flat.promoteItems (Syntax.Flat.ofItems items) front
+    (p, i, front)
   let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve flatPrelude flatItems unitsKept
   let (firstItems, unitItems) := unitsOfFlat resolved.items resolved.info.unitUses
   let resolved := { resolved with items :=
@@ -800,9 +806,6 @@ def compileSourceAt (src : String) (check : Bool := true)
       else Syntax.lastSegment name
     | none => Syntax.lastSegment name
   -- A type alias is written out wherever it is used.
-  -- (Each item as an earlier compile made it, where what it was made from is
-  -- the same: `Syntax.Flat.FrontMemo`.)
-  let front : Syntax.Flat.FrontMemo := { kept := frontKept.getD {}, keep := frontKept.isSome }
   let (all, front) ← Trace.timed "expand aliases" fun _ => Syntax.Flat.expandAliases resolved.items front
   -- An implementation that does not write a function its trait gives a body
   -- has that body.
