@@ -696,9 +696,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     omega
   | @let_ _ rhs body σ _ _ hrhs hlin hbody =>
     rcases rhs_ok (S := S) henv hrhs with ⟨v, hv, hvt⟩ | ⟨q, args, vs, rfl, hargs, hq, hnone⟩
-    · have h1 : step p ⟨.let_ rhs body, env, stack, ⟨conts, labels, cells⟩⟩
-          = .next ⟨body, env ++ [v], stack, ⟨conts, labels, cells⟩⟩ := by simp [step, hv]
-      rw [h1]
+    · simp only [step, hv]
       refine .next (.mk (henv.snoc hvt) hbody hle hsub hst hs)
         (fun hD hu => hu.mono rfl fun id => ?_)
       have h2 := moved_live hD henv hlin (live := fv (.let_ rhs body))
@@ -710,9 +708,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       have h4 := rhs_occ hD henv hrhs hv id
       simp only [occState]
       omega
-    · have h1 : step p ⟨.let_ (.prim q args) body, env, stack, ⟨conts, labels, cells⟩⟩
-          = .stuck := by simp [step, hnone]
-      rw [h1]
+    · simp only [step, hnone]
       exact Fault.overflow hargs hq
   | @call _ f args body n rs Ps σ _ ε₁ _ once fenv acc hform hlin hbody =>
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hform.callee hform.len hform.argsOk
@@ -980,10 +976,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     rcases hkt.fn_inv with ⟨fn, caps, sig, θ, rfl, _, _, _, _, _, _, _, _⟩
       | ⟨id, o, rfl, hn0, he, hcont⟩ | ⟨id, τl, rfl, _, _, _⟩
-    · have h1 : step p ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩
-          = .next ⟨body, env ++ [Value.unit], stack, ⟨conts, labels, cells⟩⟩ := by
-        simp [step, hd, evalCont, hkv]
-      rw [h1]
+    · simp only [step, hd, evalCont, hkv]
       exact .next (.mk (henv.snoc .unit) hbody hle hsub hst hs) (fun _ hu => hu.mono rfl hquiet)
     · cases he
       obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₁ acc hcont
@@ -1012,10 +1005,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
           simp only [occ] at h3
           simp only [occAfter, occStack_append, occStack, occFrame]
           omega
-    · have h1 : step p ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩
-          = .next ⟨body, env ++ [Value.unit], stack, ⟨conts, labels, cells⟩⟩ := by
-        simp [step, hd, evalCont, hkv]
-      rw [h1]
+    · simp only [step, hd, evalCont, hkv]
       exact .next (.mk (henv.snoc .unit) hbody hle hsub hst hs) (fun _ hu => hu.mono rfl hquiet)
   | @cell _ init thunk body n r σ ρ _ εt _ once fenv acc hform hlin hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hform.init
@@ -1123,10 +1113,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := []) (by simp [evalAtoms, hv]) hget
       | some w₀ =>
         rcases hfw : w₀.part pth with _ | w
-        · have h1 : step p ⟨.mem .load [a] body, env, stack, ⟨conts, labels, cells⟩⟩
-              = .stuck := by
-            simp [step, evalAtoms, hv, MemOp.eval, hget, hfw]
-          rw [h1]
+        · simp only [step, evalAtoms, hv, MemOp.eval, hget, hfw]
           exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [])
             (by simp [evalAtoms, hv]) hget hfw
         have hwt := part_ok hpl (hval w₀ hget) hfw
@@ -1153,10 +1140,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         exact Fault.freed (a := addr) (b := tg) (path := pth) (vs := vs) (by simp [evalAtoms, hv, hvs]) hget
       | some w₀ =>
         rcases hfw : w₀.part pth with _ | w
-        · have h1 : step p ⟨.mem .tag (a :: path) body, env, stack, ⟨conts, labels, cells⟩⟩
-              = .stuck := by
-            simp [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
-          rw [h1]
+        · simp only [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
           exact Fault.absent (a := addr) (b := tg) (path := pth) (vs := vs)
             (by simp [evalAtoms, hv, hvs]) hget hfw
         simp only [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
@@ -1182,10 +1166,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
       | some old₀ =>
         rcases hfo : old₀.part pth with _ | old
-        · have h1 : step p ⟨.mem .store [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
-              = .stuck := by
-            simp [step, evalAtoms, hv, hw, MemOp.eval, hget, Value.putPart_none_of_part w hfo]
-          rw [h1]
+        · simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, Value.putPart_none_of_part w hfo]
           exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
             (by simp [evalAtoms, hv, hw]) hget hfo
         obtain ⟨v', hput⟩ := Value.putPart_of_part w hfo
@@ -1221,10 +1202,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
       | some old₀ =>
         rcases hfo : old₀.part pth with _ | old
-        · have h1 : step p ⟨.mem .swap [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
-              = .stuck := by
-            simp [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, Value.putPart_none_of_part w hfo]
-          rw [h1]
+        · simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, Value.putPart_none_of_part w hfo]
           exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
             (by simp [evalAtoms, hv, hw]) hget hfo
         have hot := part_ok hpl (hval old₀ hget) hfo
