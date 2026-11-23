@@ -319,6 +319,13 @@ where
 /-- The type and arguments so numbered, where each can be. -/
 def fitKey (ty : Ty) (args : List Ty) : M (Option (List Nat)) := internTy.internAll (ty :: args)
 
+/-- A type's shape as far as destroying it goes: a part that nothing
+decides, and that the function is not given how to destroy, holds nothing
+to destroy. -/
+def destroyShape (givens : Traits.Givens) : Traits.STy → Traits.STy
+  | .var k => if givens.contains (Syntax.destroyTrait, k) then .var k else .con "(reference)" []
+  | .con n args => .con n (args.map (destroyShape givens))
+
 mutual
 
 /-- How a bound is met, where implementations are chosen by fitting types
@@ -343,12 +350,9 @@ partial def solveFittingNow (givens : Traits.Givens) (fuel : Nat) (key : String)
   let ty ← find ty
   if key == Syntax.destroyTrait then
     -- How a value is destroyed: as before, by the type's shape alone.
-    let rec settle : Traits.STy → Traits.STy
-      | .var k => if givens.contains (Syntax.destroyTrait, k) then .var k else .con "(reference)" []
-      | .con n args => .con n (args.map settle)
     -- (Found once for each type in a group: the same dictionary object for
     -- each, so that it is written out once.)
-    let sty := settle (← toSTy ty)
+    let sty := destroyShape givens (← toSTy ty)
     if let some d := (← get).destroyFit[(sty, givens)]? then return d
     let d := Traits.solveIx (← get).kimpls givens 100000 key sty
     modify fun s => { s with destroyFit := s.destroyFit.insert (sty, givens) d }
@@ -1197,11 +1201,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       throw (inFunction b.owner s!"{b.pos}a bound is assumed twice; this is a compiler defect")
     -- How a value is destroyed: a part of its type that nothing decides, and
     -- the function is not given, has nothing to destroy.
-    let sty ← if b.trait == Syntax.destroyTrait then do
-        let rec settle : Traits.STy → Traits.STy
-          | .var k => if givens.contains (Syntax.destroyTrait, k) then .var k else .con "(reference)" []
-          | .con n args => .con n (args.map settle)
-        pure (settle (← toSTy b.ty))
+    let sty ← if b.trait == Syntax.destroyTrait then do pure (destroyShape givens (← toSTy b.ty))
       else toSTy b.ty
     -- (A need of the trait of a type the implementation said has it: met by
     -- what it said.)
