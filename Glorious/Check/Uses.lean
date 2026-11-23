@@ -1591,11 +1591,10 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
 /-- Can this pattern fail to match? Decided from its shape alone. -/
 partial def irrefutable : Pattern → M Bool
   | .wild => pure true
-  | .int _ => pure false
+  | .int _ | .ctor _ _ _ => pure false
   | .tuple ps => ps.allM irrefutable
   | .var x => do
     if (← resolveCtor x none).isSome then return false
     return ((← get).aliases[x]?).isNone
-  | .ctor _ _ _ => pure false
 
 end Glorious.Check

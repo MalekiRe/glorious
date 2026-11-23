@@ -1040,9 +1040,8 @@ def isBinder (x : String) : M Bool := do
 checker decides it. -/
 partial def irrefutable : Pattern → M Bool
   | .wild => pure true
-  | .int _ => pure false
+  | .int _ | .ctor _ _ _ => pure false
   | .tuple ps => ps.allM irrefutable
   | .var x => isBinder x
-  | .ctor _ _ _ => pure false
 
 end Glorious.Elab

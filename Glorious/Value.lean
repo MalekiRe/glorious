@@ -441,7 +441,7 @@ theorem evalAtoms_head {ρ : Env} {a : Atom} {as : List Atom} {v : Value} {vs : 
   · cases h
 
 def Rhs.eval (ρ : Env) : Rhs → Option Value
-  | .atom a => a.eval ρ
+  | .atom a | .place a => a.eval ρ
   | .prim p args =>
     match evalAtoms ρ args with
     | some vs => p.eval vs
@@ -450,7 +450,6 @@ def Rhs.eval (ρ : Env) : Rhs → Option Value
     match evalAtoms ρ args with
     | some vs => some (.data tag vs)
     | none => none
-  | .place pl => pl.eval ρ
   | .closure fn captures =>
     match evalAtoms ρ captures with
     | some vs => some (.clo fn vs)

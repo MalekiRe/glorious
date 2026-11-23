@@ -436,14 +436,13 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
 
 /-- Every use of a declared type inside a type. -/
 partial def dataUses : Ty → List (Nat × List Ty)
-  | .int => []
+  | .int | .never => []
   | .tuple fs => fs.flatMap dataUses
   | .data n args => (n, args) :: args.flatMap dataUses
   | .fn _ ps r eff _ env _ =>
     ps.flatMap dataUses ++ dataUses r ++ (eff.flatMap fun (_, targs) => targs.flatMap dataUses)
       ++ (env.getD []).flatMap dataUses
   | .ref _ t => dataUses t
-  | .never => []
 
 /-- Every use of an operation inside a type. -/
 partial def opUses : Ty → List (Nat × List Ty)
