@@ -7321,6 +7321,26 @@ source in Lean strings 6,021, and the test table 3,928.
   library units, checked one after another the second time). Program.lean
   +14 lines.
 
+- **Whittles: one way for each thing.** Each a commit of its own, built
+  and tested in batches (50,425 -> 49,949):
+  - Patterns that bind by reference, the program's and the checker's, by
+    the flat pass alone (`Flat.byReference`); the tree one gone.
+  - Names borrowed with `&` made variables (`promoteFnClause`) by the flat
+    pass alone, as the text is flattened, before names are resolved, kept
+    per item in the front memo (`promoteItems`); the tree promotion and the
+    tree helpers only it used gone (-170).
+  - One walk through a type for "used once", "has a `drop`", "has to be
+    used" (`walkTy`); one step over a capture's edges (`unseenEdges`); one
+    test of what a value holds (`holdsVal`).
+  - One body rewrite in any monad over the body (`FRewriteM`): the
+    specializer is one, with a hook for calls.
+  - Exhaustiveness as no uncovered case; one constant-to-pattern reader;
+    one split of a clause's parameters (`paramsOf`); one reader of patterns
+    by field name; one lookup in a module and one prelude message for both
+    resolvers; `fileModules` from `tokenModules`; `peakStack` and
+    `liveCells` over one run; `fieldOfDeref` as `fieldOfName`.
+  - `conditionUses`, the same as `equalUses`, gone: each use was asked
+    twice.
 Against Zig 0.14 on the same chain of 2,000 functions (`gen.zig`, Debug,
 Zig's global cache warm as the library's kept check is; an edit of the
 middle function's constant; seconds):
