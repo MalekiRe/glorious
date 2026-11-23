@@ -82,6 +82,22 @@ def direct (b : Body) (e : ExprId) : Array ExprId :=
   | .handle subject _ => #[subject]
   | _ => #[]
 
+/-- `direct`'s expressions folded from the left, without making the array. -/
+@[inline] def foldDirect {α : Type} (b : Body) (f : α → ExprId → α) (init : α) (e : ExprId) : α :=
+  match b.expr e with
+  | .call _ g args | .tailCall _ g args => args.foldl f (f init g)
+  | .tuple args => args.foldl f init
+  | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ | .handle x _ => f init x
+  | _ => init
+
+/-- `direct`'s expressions folded from the right, without making the array. -/
+@[inline] def foldrDirect {α : Type} (b : Body) (f : ExprId → α → α) (init : α) (e : ExprId) : α :=
+  match b.expr e with
+  | .call _ g args | .tailCall _ g args => f g (args.foldr f init)
+  | .tuple args => args.foldr f init
+  | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ | .handle x _ => f x init
+  | _ => init
+
 /-- The name an expression is, if it is one. -/
 @[inline] def name? (b : Body) (e : ExprId) : Option (Option String × String) :=
   match b.expr e with
@@ -101,15 +117,24 @@ def children (b : Body) (e : ExprId) : List ExprId :=
     | .labelScope _ body => body.toList.flatMap fun s => (b.stmtExprs s).toList
     | _ => []
 
+mutual
+
 /-- Is `p` true of an expression or of one inside it, blocks' too? -/
 partial def anyExpr (b : Body) (p : FExpr → Bool) (e : ExprId) : Bool :=
-  p (b.expr e) || (b.children e).any (b.anyExpr p)
+  let n := b.expr e
+  p n || match n with
+    | .closure _ cs => cs.any (b.anyClause p)
+    | .handle s cs => b.anyExpr p s || cs.any (b.anyClause p)
+    | .labelScope _ body => body.any (b.anyStmt p)
+    | _ => b.foldDirect (fun a x => a || b.anyExpr p x) false e
 
-def anyStmt (b : Body) (p : FExpr → Bool) (s : StmtId) : Bool :=
+partial def anyClause (b : Body) (p : FExpr → Bool) (c : ClauseId) : Bool :=
+  (b.clause c).body.any (b.anyStmt p)
+
+partial def anyStmt (b : Body) (p : FExpr → Bool) (s : StmtId) : Bool :=
   (b.stmtExprs s).any (b.anyExpr p)
 
-def anyClause (b : Body) (p : FExpr → Bool) (c : ClauseId) : Bool :=
-  (b.clause c).body.any (b.anyStmt p)
+end
 
 end Body
 

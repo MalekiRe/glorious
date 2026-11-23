@@ -18,7 +18,7 @@ partial def resolve (t : ITy) : M ITy := do
       let row ← flattenRow ⟨ops, tail⟩
       pure (.fn ps r row.ops row.tail cls env acc)
     | t => pure t
-  t.mapM { ty := resolve, rg := findRg, cls := findCls, acc := findAcc }
+  t.mapM resolve findRg findCls findAcc
 
 def resolveRow (r : IRow) : M IRow := do
   let r ← flattenRow r
@@ -94,7 +94,7 @@ def renCls : ICls → m ICls
 mutual
 partial def renTy : ITy → m ITy
   | .var id => do pure (.var (← f.ty id))
-  | t => t.mapM { ty := renTy, rg := f.rg, cls := renCls f, acc := f.acc, tail := (·.mapM f.row) }
+  | t => t.mapM renTy f.rg (renCls f) f.acc (·.mapM f.row)
 partial def renOps (ops : IOps) : m IOps :=
   ops.mapM fun (op, targs) => do pure (op, ← targs.mapM renTy)
 end

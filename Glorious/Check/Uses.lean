@@ -146,13 +146,7 @@ mutual
 `resumptive` says which operation names have arms that may run repeatedly. -/
 partial def usesExpr (b : Body) (resumptive : String → Bool) (x : String) (e : ExprId) : Nat :=
   match b.expr e with
-  | .int _ => 0
   | .name q y => if q.isNone && y == x then 1 else 0
-  | .label _ => 0
-  | .call _ f args | .tailCall _ f args =>
-    (args.map (usesExpr b resumptive x)).foldl addUses (usesExpr b resumptive x f)
-  | .tuple args => (args.map (usesExpr b resumptive x)).foldl addUses 0
-  | .proj e _ => usesExpr b resumptive x e
   | .closure _ clauses => (clauses.map (usesClause b resumptive x)).foldl max 0
   | .handle subject arms =>
     let repeated := fun (arm : ClauseId) =>
@@ -163,11 +157,7 @@ partial def usesExpr (b : Body) (resumptive : String → Bool) (x : String) (e :
     let many := if (arms.filter repeated).any (usesClause b resumptive x · > 0) then 2 else 0
     addUses (addUses (usesExpr b resumptive x subject) once) many
   | .labelScope _ body => usesStmts b resumptive x body.toList
-  | .ref _ _ => 0
-  | .deref e => usesExpr b resumptive x e
-  | .reborrow _ e => usesExpr b resumptive x e
-  | .refField _ _ _ _ _ => 0
-  | .fieldOf _ e _ => usesExpr b resumptive x e
+  | _ => b.foldDirect (fun n a => addUses n (usesExpr b resumptive x a)) 0 e
 
 partial def usesClause (b : Body) (resumptive : String → Bool) (x : String) (c : ClauseId) : Nat :=
   let ⟨pats, body⟩ := b.clause c

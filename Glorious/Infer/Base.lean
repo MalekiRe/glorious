@@ -96,23 +96,17 @@ structure IRow where
 
 def ITy.unit : ITy := .tuple []
 
-/-- What to make of each part of a type: the types directly in it (`ty`), and
-its regions, classes, accesses and row tail. -/
-structure ITy.On (m : Type → Type) [Monad m] where
-  ty : ITy → m ITy
-  rg : Nat → m Nat := pure
-  cls : ICls → m ICls := pure
-  acc : Nat → m Nat := pure
-  tail : Option Nat → m (Option Nat) := pure
-
-/-- A type with each of its parts made anew (`ITy.On`); the rest as it is. -/
-def ITy.mapM {m : Type → Type} [Monad m] (h : ITy.On m) : ITy → m ITy
-  | .tuple fs => do pure (.tuple (← fs.mapM h.ty))
-  | .data n args => do pure (.data n (← args.mapM h.ty))
-  | .fn ps r ops tail cls env acc => do
-    pure (.fn (← ps.mapM h.ty) (← h.ty r) (← ops.mapM fun (op, ts) => do pure (op, ← ts.mapM h.ty))
-      (← h.tail tail) (← h.cls cls) (← h.ty env) (← h.acc acc))
-  | .ref ρ t => do pure (.ref (← h.rg ρ) (← h.ty t))
+/-- A type with each of its parts made anew: the types directly in it by `ty`,
+and its regions, classes, accesses and row tail each by its own. -/
+@[specialize] def ITy.mapM {m : Type → Type} [Monad m] (ty : ITy → m ITy) (rg : Nat → m Nat := pure)
+    (cls : ICls → m ICls := pure) (acc : Nat → m Nat := pure)
+    (tail : Option Nat → m (Option Nat) := pure) : ITy → m ITy
+  | .tuple fs => do pure (.tuple (← fs.mapM ty))
+  | .data n args => do pure (.data n (← args.mapM ty))
+  | .fn ps r ops t c env a => do
+    pure (.fn (← ps.mapM ty) (← ty r) (← ops.mapM fun (op, ts) => do pure (op, ← ts.mapM ty))
+      (← tail t) (← cls c) (← ty env) (← acc a))
+  | .ref ρ t => do pure (.ref (← rg ρ) (← ty t))
   | t => pure t
 
 /-- The types directly in a type, a callable's operations' last. -/
@@ -857,7 +851,7 @@ partial def subst (args : List ITy) : ITy → ITy
       | some (.ref ρ' _) => .ref ρ' (subst args t)
       | _ => .ref ρ (subst args t)
     else .ref ρ (subst args t)
-  | t => Id.run (t.mapM { ty := pure ∘ subst args })
+  | t => Id.run (t.mapM (pure ∘ subst args))
 
 def ctorDecl (tag : Nat) : M CtorDecl := do
   match (← get).ctors[tag]? with

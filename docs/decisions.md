@@ -7396,6 +7396,22 @@ source in Lean strings 6,021, and the test table 3,928.
   built program in that format, now says it is written and the asker reads
   it from the build directory. Reading a built `covey/states2` takes 0.4 ms
   against 7.3, writing it 31 ms against 40 (on a thread of its own).
+- **One functor per tree of types and per flat node**: `ITy.mapM`/`parts`
+  (inference), `Ty.mapM`/`parts` (the checker), `TypeExpr.mapParts`/`parts`
+  (written types) and `FExpr.mapIds`/`FStmt.mapIds` (flat bodies), with
+  `Body.direct`/`children` for walks. A walker is then the cases that are
+  its own and the functor for the rest: substitution, resolving, renaming,
+  free variables, occurs checks, compaction, rewriting and the like, about
+  150 lines in all. Walkers whose parts are other (a callable's effects left
+  out, a reference's kind, an order the regions are numbered in) keep their
+  own arms: one functor for them would change what they find. The
+  functors take their functions as arguments, `@[specialize]`d, not as a
+  structure of them (which Lean does not specialize: the checker's `zonk`
+  through one took 90 ms more of a `states2` edit), and a walk folds
+  `direct`'s parts in place (`foldDirect`, `foldrDirect`) rather than making
+  an array of them (6 ms more of elaborating). The free variables of a type
+  (`freeTys` and the like) keep their own arms for the same reason: through
+  `Ty.parts` they took 10 ms more.
 - **Not done: a typed Core**, the checker's types carried onto Core so
   that certificate inference would only find regions. Read against the code,
   it does not make the compiler smaller. Infer's types carry regions, effect

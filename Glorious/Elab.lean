@@ -1437,8 +1437,6 @@ private partial def untraitExpr (tr : TraitInfo) (owner : String) (e : ExprId) :
   match b.expr e with
   | .call id f args => untraitCall tr owner id f args false
   | .tailCall id f args => untraitCall tr owner id f args true
-  | .tuple args => do pushExpr (.tuple (← args.mapM (untraitExpr tr owner)))
-  | .proj x idx => do pushExpr (.proj (← untraitExpr tr owner x) idx)
   | .closure id clauses => do
     -- What the callable captures is destroyed if it is let go uncalled.
     let written := b.hashClosure id clauses
@@ -1453,14 +1451,10 @@ private partial def untraitExpr (tr : TraitInfo) (owner : String) (e : ExprId) :
       stmts := stmts.push (← pushStmt (.expr (← pushExpr (.tuple #[]))))
       let destroyer ← pushExpr (.closure 0 #[← pushClause ⟨[], stmts⟩])
       pushExpr (.call 0 (← pushExpr (.name none Syntax.destroyedMark)) #[c, destroyer])
-  | .handle subject arms => do
-    pushExpr (.handle (← untraitExpr tr owner subject) (← arms.mapM (untraitClause tr owner)))
-  | .labelScope l body => do
-    pushExpr (.labelScope l (← untraitStmts tr owner (0, 0) body.toList).toArray)
-  | .deref x => do pushExpr (.deref (← untraitExpr tr owner x))
-  | .reborrow uniq x => do pushExpr (.reborrow uniq (← untraitExpr tr owner x))
-  | .fieldOf id x name => do pushExpr (.fieldOf id (← untraitExpr tr owner x) name)
-  | _ => pure e
+  | n => do
+    let n' ← n.mapIds (untraitExpr tr owner) (untraitClause tr owner)
+      fun body => do pure (← untraitStmts tr owner (0, 0) body.toList).toArray
+    if n' == n then pure e else pushExpr n'
 
 private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f : ExprId)
     (args : Array ExprId) (isTail : Bool) : Build ExprId := do

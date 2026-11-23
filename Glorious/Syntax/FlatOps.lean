@@ -36,7 +36,7 @@ partial def fvExprAcc (b : Body) (bound : List String) (e : ExprId) (acc : List 
   | .ref _ x | .refField _ _ x _ _ => if bound.contains x then acc else x :: acc
   | .closure _ cs => cs.foldr (fun c acc => b.fvClauseAcc bound c acc) acc
   | .handle s cs => b.fvExprAcc bound s (cs.foldr (fun c acc => b.fvClauseAcc bound c acc) acc)
-  | _ => (b.direct e).foldr (fun a acc => b.fvExprAcc bound a acc) acc
+  | _ => b.foldrDirect (b.fvExprAcc bound) acc e
 
 partial def fvClauseAcc (b : Body) (bound : List String) (c : ClauseId) (acc : List String) : List String :=
   let ⟨pats, body⟩ := b.clause c
@@ -184,7 +184,7 @@ partial def nameUseExpr (b : Body) (noDefers : Bool) (x : String) (e : ExprId) :
     (NameUse.inside (arms.foldl (fun u c => u.or (b.nameUseClause noDefers x c)) ({} : NameUse))).or
       (b.nameUseExpr noDefers x subject)
   | .labelScope _ body => b.nameUseStmts noDefers x body.toList
-  | _ => (b.direct e).foldl (fun u e => u.or (b.nameUseExpr noDefers x e)) {}
+  | _ => b.foldDirect (fun u e => u.or (b.nameUseExpr noDefers x e)) {} e
 
 partial def nameUseClause (b : Body) (noDefers : Bool) (x : String) (c : ClauseId) : NameUse :=
   let ⟨pats, body⟩ := b.clause c
@@ -245,7 +245,9 @@ partial def borrowAfterValue (b : Body) (x : String) (seen : Bool) (e : ExprId) 
     body.foldl (fun (seen, bad) s =>
       let (seen', bad') := b.borrowAfterValueStmt x seen s
       (seen', bad || bad')) (seen, false)
-  | _ => b.borrowAfterValues x seen (b.direct e).toList
+  | _ => b.foldDirect (fun (seen, bad) e =>
+      let (seen', bad') := b.borrowAfterValue x seen e
+      (seen', bad || bad')) (seen, false) e
 
 partial def borrowAfterValues (b : Body) (x : String) (seen : Bool) (es : List ExprId) : Bool × Bool :=
   es.foldl (fun (seen, bad) e =>

@@ -60,21 +60,17 @@ It is a capture variable, as a reference's is, and says what a value of the
 type may be holding borrows of. -/
 def Ty.life (cap : Nat) : Ty := .ref (.con "'" []) (.tuple []) cap
 
-/-- What to make of each part of a type: the types directly in it (`ty`), a
-callable's row tail, and what callables and references capture. -/
-structure Ty.On (m : Type → Type) [Monad m] where
-  ty : Ty → m Ty
-  tail : Option Nat → m (Option Nat) := pure
-  cap : Nat → m Nat := pure
-
-/-- A type with each of its parts made anew (`Ty.On`). -/
-def Ty.mapM {m : Type → Type} [Monad m] (h : Ty.On m) : Ty → m Ty
-  | .con n args => do pure (.con n (← args.mapM h.ty))
-  | .tuple args => do pure (.tuple (← args.mapM h.ty))
-  | .fn ps r effs tail cap => do
-    pure (.fn (← ps.mapM h.ty) (← h.ty r) (← effs.mapM fun (e, args) => do pure (e, ← args.mapM h.ty))
-      (← h.tail tail) (← h.cap cap))
-  | .ref how t cap => do pure (.ref (← h.ty how) (← h.ty t) (← h.cap cap))
+/-- A type with each of its parts made anew: the types directly in it by `ty`,
+a callable's row tail by `tail`, and what callables and references capture by
+`cap`. -/
+@[specialize] def Ty.mapM {m : Type → Type} [Monad m] (ty : Ty → m Ty)
+    (tail : Option Nat → m (Option Nat) := pure) (cap : Nat → m Nat := pure) : Ty → m Ty
+  | .con n args => do pure (.con n (← args.mapM ty))
+  | .tuple args => do pure (.tuple (← args.mapM ty))
+  | .fn ps r effs t c => do
+    pure (.fn (← ps.mapM ty) (← ty r) (← effs.mapM fun (e, args) => do pure (e, ← args.mapM ty))
+      (← tail t) (← cap c))
+  | .ref how t c => do pure (.ref (← ty how) (← ty t) (← cap c))
   | t => pure t
 
 /-- The types directly in a type, a callable's effects' last. -/
@@ -1397,7 +1393,7 @@ partial def zonk (t : Ty) : M Ty := do
   | .fn ps r effs tail cap => do
     let row ← zonkRow ⟨effs, tail⟩
     pure (.fn (← ps.mapM zonk) (← zonk r) row.effs row.tail (← findCap cap))
-  | t => t.mapM { ty := zonk, cap := findCap }
+  | t => t.mapM zonk (cap := findCap)
 
 partial def zonkRow (r : Row) : M Row := do
   let r ← flattenRow r
@@ -1457,19 +1453,27 @@ mutual
 
 partial def freeTys : Ty → List Nat
   | .var id => [id]
-  | t => t.parts.flatMap freeTys
+  | .con _ args | .tuple args => args.flatMap freeTys
+  | .fn ps r effs _ _ =>
+    ps.flatMap freeTys ++ freeTys r ++ effs.flatMap (fun e => e.2.flatMap freeTys)
+  | .ref how t _ => freeTys how ++ freeTys t
 
-partial def freeRows (t : Ty) : List Nat :=
-  t.parts.flatMap freeRows ++ (match t with
-    | .fn _ _ _ tail _ => tail.toList
-    | _ => [])
+partial def freeRows : Ty → List Nat
+  | .var _ => []
+  | .con _ args | .tuple args => args.flatMap freeRows
+  | .fn ps r effs tail _ =>
+    ps.flatMap freeRows ++ freeRows r ++ effs.flatMap (fun e => e.2.flatMap freeRows)
+      ++ tail.toList
+  | .ref _ t _ => freeRows t
 
 end
 
-partial def freeCaps (t : Ty) : List Nat :=
-  (match t with
-    | .fn _ _ _ _ cap | .ref _ _ cap => [cap]
-    | _ => []) ++ t.parts.flatMap freeCaps
+partial def freeCaps : Ty → List Nat
+  | .var _ => []
+  | .con _ args | .tuple args => args.flatMap freeCaps
+  | .fn ps r effs _ cap =>
+    cap :: (ps.flatMap freeCaps ++ freeCaps r ++ effs.flatMap (fun e => e.2.flatMap freeCaps))
+  | .ref _ t cap => cap :: freeCaps t
 
 /-- Replace variables: type variables by types, row and capture variables by
 variables of their own kind. -/
@@ -1478,7 +1482,7 @@ partial def subst (tm : List (Nat × Ty)) (rm cm : List (Nat × Nat)) : Ty → T
   | t =>
     let row := fun (id : Nat) => (rm.lookup id).getD id
     let cap := fun (c : Nat) => (cm.lookup c).getD c
-    Id.run (t.mapM { ty := pure ∘ subst tm rm cm, tail := pure ∘ Option.map row, cap := pure ∘ cap })
+    Id.run (t.mapM (pure ∘ subst tm rm cm) (pure ∘ Option.map row) (pure ∘ cap))
 
 /-- A constructor's field types in a value of its type applied to `args`,
 which are types and, where the type has lifetime parameters, lifetimes. -/
@@ -1526,7 +1530,7 @@ partial def unproject : Ty → M Ty
         pure a
       | _ => pure (.con n args)
     else pure (.con n (← args.mapM unproject))
-  | t => t.mapM { ty := unproject }
+  | t => t.mapM unproject
 
 /-- A type with every capture variable replaced by a new one. -/
 def freshenCaps (t : Ty) : M Ty := do

@@ -348,6 +348,11 @@ def loadShards {α : Type} (dir : System.FilePath) (name key : String) : IO (Lis
       all := part ++ all
   pure all
 
+/-- Keep `v` as `dir/name`, on a thread of its own, pointing into what was
+read. -/
+def saveKept {α : Type} (dir : System.FilePath) (name : String) (v : α) : IO Unit :=
+  keep <| Trace.timedIO s!"save: {name}" (Store.save (dir / name) name v (chain := 64))
+
 /-- What `file` keeps, if this compiler wrote it from `key` and `fresh`
 (`GLORIOUS_FRESH`) is not set; `none_` otherwise. -/
 def keptIn {α : Type} [Nonempty α] (fresh : Bool) (file : System.FilePath) (key : String) (none_ : α) :
@@ -459,14 +464,11 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     -- (Saved again only where something was made anew; pointing into what
     -- was read, up to 64 files, then all written again.)
     saveShards dir "front" "front" c.frontMade.toList (frontKept.contains ·)
-    if c.lowerMade.size != lowerKept.size
-        || c.lowerMade.fold (fun b n k => b || ((lowerKept[n]?).map (·.key)) != some k.key) false then
-      keep <| Trace.timedIO "save: lower" (Store.save (dir / "lower") "lower" c.lowerMade (chain := 64))
-    if c.elabMade.size != elabKept.size
-        || c.elabMade.fold (fun b n k => b || ((elabKept[n]?).map (·.key)) != some k.key) false then
-      keep <| Trace.timedIO "save: elab" (Store.save (dir / "elab") "elab" c.elabMade (chain := 64))
-    if c.itemsMade.fold (fun b i (_, h, _, _) => b || ((itemsKept[i]?).map (·.2.1)) != some h) false then
-      keep <| Trace.timedIO "save: items" (Store.save (dir / "items") "items" c.itemsMade (chain := 64))
+    let changed := fun {κ α : Type} [BEq κ] [Hashable κ] (made kept : Std.HashMap κ α) (key : α → UInt64) =>
+      made.size != kept.size || made.fold (fun b n k => b || ((kept[n]?).map key) != some (key k)) false
+    if changed c.lowerMade lowerKept (·.key) then saveKept dir "lower" c.lowerMade
+    if changed c.elabMade elabKept (·.key) then saveKept dir "elab" c.elabMade
+    if changed c.itemsMade itemsKept (·.2.1) then saveKept dir "items" c.itemsMade
     -- (Not where the only unit made anew is the one the program's `main` is
     -- in: the text being edited, resolved again the next time it changes,
     -- which is each time; the others' are what a next compile finds.)
@@ -475,7 +477,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       | _ => false
     let anew := c.unitsMade.filter fun (k, _) => !unitsKept.contains k
     unless anew.isEmpty || anew.all (fun (_, items, _) => isMain items) do
-      keep <| Trace.timedIO "save: resolved" (Store.save (dir / "resolved") "resolved" c.unitsMade (chain := 64))
+      saveKept dir "resolved" c.unitsMade
     -- (Saved again only where a group was checked anew, pointing into what
     -- was read. Those of earlier versions of the program are kept, for an
     -- edit taken back: up to 4096, this compile's first.)
