@@ -121,22 +121,18 @@ theorem specialize_mem {tag n : Nat} : ∀ {rows : List (List Pat)} {srow : List
       intro h'
       obtain ⟨q, qs, hm, hcase⟩ := specialize_mem h'
       exact ⟨q, qs, List.mem_cons_of_mem _ hm, hcase⟩
-    cases p with
-    | wild =>
-      simp only [specialize] at h
+    cases p <;> simp only [specialize] at h
+    case wild =>
       rcases List.mem_cons.mp h with rfl | h
       · exact ⟨.wild, ps', List.mem_cons_self .., .inl ⟨rfl, rfl⟩⟩
       · exact lift h
-    | bind =>
-      simp only [specialize] at h
+    case bind =>
       rcases List.mem_cons.mp h with rfl | h
       · exact ⟨.bind, ps', List.mem_cons_self .., .inl ⟨rfl, rfl⟩⟩
       · exact lift h
-    | int k =>
-      simp only [specialize] at h
+    case int k =>
       exact lift h
-    | ctor t qs =>
-      simp only [specialize] at h
+    case ctor t qs =>
       split at h
       · rename_i hc
         rcases List.mem_cons.mp h with rfl | h
