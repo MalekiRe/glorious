@@ -26,28 +26,6 @@ namespace Glorious.Elab
 
 open Glorious.Syntax
 
-/-- A type as it is written into a name. -/
-partial def typeKey : TypeExpr → String
-  | .name n [] => n
-  | .name n args => s!"{n}<{", ".intercalate (args.map typeKey)}>"
-  | .tuple args => s!"({", ".intercalate (args.map typeKey)})"
-  | .fn ps r => s!"fn({", ".intercalate (ps.map typeKey)}) -> {typeKey r}"
-  | .performs r _ => typeKey r
-  | .ref true t _ => s!"&mut {typeKey t}"
-  | .ref false t _ => s!"&{typeKey t}"
-  | .never => "!"
-  | .hole => "_"
-
-/-- A written type with types for its parameters. -/
-partial def substType (σ : List (String × TypeExpr)) : TypeExpr → TypeExpr
-  | .name n [] => (σ.lookup n).getD (.name n [])
-  | .name n args => .name n (args.map (substType σ))
-  | .tuple args => .tuple (args.map (substType σ))
-  | .fn ps r => .fn (ps.map (substType σ)) (substType σ r)
-  | .performs r effs => .performs (substType σ r) (effs.map fun (e, args) => (e, args.map (substType σ)))
-  | .ref uniq t life => .ref uniq (substType σ t) life
-  | other => other
-
 def instName (x key : String) : String := s!"{x}@<{key}>"
 
 /-- What a function's text is rewritten by: its places, the types of this
@@ -63,7 +41,7 @@ structure Copy where
   self : String × String
 
 def Copy.key (c : Copy) (off len : Nat) : String :=
-  ", ".intercalate (((c.types.drop off).take len).map typeKey)
+  ", ".intercalate (((c.types.drop off).take len).map TypeExpr.spell)
 
 /-- The name called at the call numbered `id`, as this copy has it. -/
 def Copy.callee (c : Copy) (id : Nat) (x : String) : String :=
@@ -149,7 +127,7 @@ partial def instancesOf (b : Blocks) (written : List Item) : Except String Insta
         let more := (tableOf f).filterMap fun (_, kind, g, off, len) =>
           if kind == "call" && copied.contains g then
             let slice := (types.drop off).take len
-            some (g, instName g (", ".intercalate (slice.map typeKey)), slice)
+            some (g, instName g (", ".intercalate (slice.map TypeExpr.spell)), slice)
           else none
         reach fuel (more ++ rest) ((f, name, types) :: done)
   let all ← reach 100000 roots []
@@ -159,7 +137,7 @@ partial def instancesOf (b : Blocks) (written : List Item) : Except String Insta
     for (_, kind, e, off, len) in tableOf f do
       if kind == "op" || kind == "handle" then
         let slice := (types.drop off).take len
-        let key := ", ".intercalate (slice.map typeKey)
+        let key := ", ".intercalate (slice.map TypeExpr.spell)
         let known := (found.lookup e).getD []
         unless known.any (·.1 == key) do
           found := (e, known ++ [(key, slice)]) :: found.filter (·.1 != e)
@@ -204,8 +182,8 @@ partial def instancesOf (b : Blocks) (written : List Item) : Except String Insta
             ((found.lookup name).getD []).map fun (key, types) =>
               let σ := places.zip types
               (.effect (instName name key) (ps.filter (·.startsWith "'")) (ops.map fun o =>
-                { o with name := instName o.name key, payload := o.payload.map (substType σ)
-                         result := o.result.map (substType σ) }))
+                { o with name := instName o.name key, payload := o.payload.map (substTypeExpr σ)
+                         result := o.result.map (substTypeExpr σ) }))
           else [item]
         | _ => [item] }
 
