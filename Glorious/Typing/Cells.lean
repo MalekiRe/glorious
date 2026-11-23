@@ -359,45 +359,6 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
   obtain ⟨conts, labels, cells⟩ := store
   have ho' : OwnsAt stack ⟨conts, labels, cells⟩ := ho
   cases tm with
-  | ret a =>
-    simp only [step] at h
-    split at h
-    · cases h
-    · exact (deliver_leave_owns p _ ho').1 h
-  | let_ rhs body =>
-    simp only [step] at h
-    split at h
-    · cases h
-    · cases h
-      exact ho'
-  | call f args body =>
-    simp only [step] at h
-    split at h
-    · cases h
-    · exact apply_owns (ho'.push (fun _ => rfl)) h
-  | tail f args =>
-    simp only [step] at h
-    split at h
-    · cases h
-    · exact apply_owns ho' h
-  | handle ret ops captures thunk body =>
-    simp only [step] at h
-    split at h
-    · exact apply_owns (((ho'.push (fr := .call env body) (fun _ => rfl)).push
-        (fun _ => rfl)).labels) h
-    · cases h
-  | handleTail ret ops captures thunk =>
-    simp only [step] at h
-    split at h
-    · exact apply_owns ((ho'.push (fun _ => rfl)).labels) h
-    · cases h
-  | raise op args =>
-    simp only [step] at h
-    split at h
-    · cases h
-    · split at h
-      · cases h
-      · exact (deliver_leave_owns p _ ho').2 h
   | perform op args body =>
     simp only [step] at h
     split at h
@@ -416,27 +377,6 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
           ≤ ownStack a stack + osum (ownStack a) conts
         simp only [osum_append, osum, ownStack, ownFrame, ownStack_append]
         omega
-  | label thunk body =>
-    simp only [step] at h
-    split at h
-    · cases h
-    · exact apply_owns (((ho'.push (fr := .call env body) (fun _ => rfl)).push
-        (fun _ => rfl)).labels) h
-  | labelTail thunk =>
-    simp only [step] at h
-    split at h
-    · cases h
-    · exact apply_owns ((ho'.push (fun _ => rfl)).labels) h
-  | guard cleanup thunk body =>
-    simp only [step] at h
-    split at h
-    · exact apply_owns ((ho'.push (fr := .call env body) (fun _ => rfl)).push (fun _ => rfl)) h
-    · cases h
-  | guardTail cleanup thunk =>
-    simp only [step] at h
-    split at h
-    · exact apply_owns (ho'.push (fun _ => rfl)) h
-    · cases h
   | cancel k body =>
     simp only [step] at h
     split at h
@@ -462,18 +402,6 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
         (OwnsAt.alloc (st := .call env body :: stack) (store := ⟨conts, labels, cells⟩)
           (ho'.push (fun _ => rfl)) _) h
     · cases h
-  | cellTail init thunk =>
-    simp only [step] at h
-    split at h
-    · exact apply_owns (st := .cell cells.size :: stack)
-        (OwnsAt.alloc (store := ⟨conts, labels, cells⟩) ho' _) h
-    · cases h
-  | lend uniq r thunk pre post body =>
-    simp only [step] at h
-    split at h
-    · cases h
-    · exact apply_owns (((ho'.push (fr := .call env body) (fun _ => rfl)).push
-        (fun _ => rfl)).labels) h
   | mem op args body =>
     simp only [step] at h
     split at h
@@ -483,7 +411,22 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
       · rename_i vs _ r cells' hev
         cases h
         exact ho'.of_le (fun _ => Nat.le_refl _) (mem_live hev)
-  | host id args body => simp [step] at h
+  | _ =>
+    simp only [step] at h
+    repeat' split at h
+    all_goals first
+      | (cases h; done)
+      | (cases h; exact ho')
+      | exact (deliver_leave_owns p _ ho').1 h
+      | exact (deliver_leave_owns p _ ho').2 h
+      | exact apply_owns ho' h
+      | exact apply_owns (ho'.push (fun _ => rfl)) h
+      | exact apply_owns ((ho'.push (fun _ => rfl)).labels) h
+      | exact apply_owns ((ho'.push (fr := .call env _) (fun _ => rfl)).push (fun _ => rfl)) h
+      | exact apply_owns (((ho'.push (fr := .call env _) (fun _ => rfl)).push (fun _ => rfl)).labels) h
+      | exact apply_owns (st := .cell cells.size :: stack)
+          (OwnsAt.alloc (store := ⟨conts, labels, cells⟩) ho' _) h
+      | simp [step] at h
 
 /-- A host operation touches neither the stack nor the store. -/
 theorem stepIO_owns {p : Program} {c c' : Config} (ho : Owns c.state)
@@ -671,7 +614,8 @@ theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {�
     (h : StackOk Δ S st τ ε ϕ) : ∀ id, .lab id ∈ Rgn.flat ϕ → Frame.label id ∈ st := by
   induction h with
   | nil => intro id hr; cases hr
-  | call _ _ _ _ _ ih | guard _ _ _ ih | yield _ _ ih | exit _ _ _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id hr)
+  | call _ _ _ _ _ ih | guard _ _ _ ih | yield _ _ ih | exit _ _ _ ih =>
+    exact fun id hr => List.mem_cons_of_mem _ (ih id hr)
   | handler _ _ _ hsub _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id (hsub _ hr))
   | label _ _ ih =>
     intro id hr
@@ -768,8 +712,6 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
         simp [evalAtoms, hx, hi] at hev
         exact key ha (hr hR) hx hev.1
   | @store _ x y _ r σ _ _ hform _ _ =>
-    have ha := hform.ref
-    have hr := hform.region
     cases hx : Atom.eval env x with
     | none => simp [evalAtoms, hx] at hev
     | some w =>
@@ -777,10 +719,8 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
       | none => simp [evalAtoms, hx, hy] at hev
       | some w' =>
         simp [evalAtoms, hx, hy] at hev
-        exact key ha (hr hR) hx hev.1
+        exact key hform.ref (hform.region hR) hx hev.1
   | @swap _ x y _ r σ _ _ hform _ _ =>
-    have ha := hform.ref
-    have hr := hform.region
     cases hx : Atom.eval env x with
     | none => simp [evalAtoms, hx] at hev
     | some w =>
@@ -788,7 +728,7 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
       | none => simp [evalAtoms, hx, hy] at hev
       | some w' =>
         simp [evalAtoms, hx, hy] at hev
-        exact key ha (hr hR) hx hev.1
+        exact key hform.ref (hform.region hR) hx hev.1
 
 /-! ## A label is applied only inside its scope -/
 
@@ -852,26 +792,19 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     omega
   cases hty with
   | call hform _ _ | tail hform _ _ | callNever hform _ _ | tailNever hform _ =>
-    have hf := hform.callee
-    have hn := hform.len
-    have hacc := hform.touches
     cases hcallee
-    obtain ⟨h0, hin⟩ := isLabel rfl hf
-    exact opened h0 hn hin hacc
+    obtain ⟨h0, hin⟩ := isLabel rfl hform.callee
+    exact opened h0 hform.len hin hform.touches
   | label hform _ _ | labelTail hform | cell hform _ _ | cellTail hform _ =>
-    have hthunk := hform.thunk
-    have hreg := hform.region
     cases hcallee
-    exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
+    exact scoped' (acc := []) (isLabel rfl hform.thunk).1 (fun h => ⟨(hform.region h).1, trivial⟩)
   | cancel hk _ hacc _ _ _ =>
     cases hcallee
     exact found (hacc _ (Rgn.mem_flat.mpr ⟨_, (isLabel rfl hk).2, List.mem_singleton_self _⟩) rfl)
   | lend hform _ _ =>
-    have hthunk := hform.thunk
-    have hacc := hform.touches
     cases hcallee
-    obtain ⟨h0, hin⟩ := isLabel rfl hthunk
-    rcases hacc _ hin with ⟨h1, _⟩ | ⟨_, hmem, _⟩
+    obtain ⟨h0, hin⟩ := isLabel rfl hform.thunk
+    rcases hform.touches _ hin with ⟨h1, _⟩ | ⟨_, hmem, _⟩
     · omega
     · exact found (hmem _ (List.mem_singleton_self _))
   | _ => cases hcallee
