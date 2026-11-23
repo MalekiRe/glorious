@@ -407,8 +407,6 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
           have := rd (hr hR) (key ha hx)
           simp [writes, this] at hno
     | @store _ x y _ r σ _ _ hform _ _ =>
-      have ha := hform.ref
-      have hw := hform.write
       cases hx : Atom.eval env x with
       | none => simp [evalAtoms, hx] at hev
       | some w =>
@@ -417,11 +415,9 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         | some w' =>
           simp [evalAtoms, hx, hy] at hev
           rw [hev.1] at hx
-          have := wrt (hw hL) (key ha hx)
+          have := wrt (hform.write hL) (key hform.ref hx)
           simp [writes, this] at hno
     | @swap _ x y _ r σ _ _ hform _ _ =>
-      have ha := hform.ref
-      have hw := hform.write
       cases hx : Atom.eval env x with
       | none => simp [evalAtoms, hx] at hev
       | some w =>
@@ -430,22 +426,19 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         | some w' =>
           simp [evalAtoms, hx, hy] at hev
           rw [hev.1] at hx
-          have := wrt (hw hL) (key ha hx)
+          have := wrt (hform.write hL) (key hform.ref hx)
           simp [writes, this] at hno
   · simp only at htm hev hno
     subst htm
     cases hty with
     | lend hform _ _ =>
-      have hr := hform.ref
-      have hreg := hform.region
-      have hloan := hform.loan
-      have htag := key hr hev
+      have htag := key hform.ref hev
       cases uniq with
       | false =>
-        have := rd (hreg hR) htag
+        have := rd (hform.region hR) htag
         simp [this] at hno
       | true =>
-        have := wrt ((hloan hL).2.2.1 rfl) htag
+        have := wrt ((hform.loan hL).2.2.1 rfl) htag
         simp [this] at hno
 
 /-- Under the same rules no resumption of a typed state captured the scope of a

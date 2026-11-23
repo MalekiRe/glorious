@@ -683,118 +683,88 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
     exact .let_ (hrhs.inst hΔ θ) (hlin.inst hΔ θ) ih
   | @call Γ f args body n rs Ps σ τ ε' ε once env acc hform hlin _ ih =>
     have hf := hform.callee
-    have hn := hform.len
-    have hargs := hform.argsOk
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hnd := hform.apart
     have hf' := hf.inst θ
     rw [Ty.inst_fn] at hf'
     rw [snoc_inst, Ty.open_inst] at ih
-    refine .call (rs := rs.map (Rgn.inst θ)) ⟨hf', (by simpa using hn), ?_, ?_, ?_, ?_⟩
+    refine .call (rs := rs.map (Rgn.inst θ)) ⟨hf', (by simpa using hform.len), ?_, ?_, ?_, ?_⟩
       (hlin.inst hΔ θ) ih
     · rw [← opens_inst]
-      exact hargs.inst θ
+      exact hform.argsOk.inst θ
     · rw [← Row.open_inst]
-      exact Row.le_inst hrow θ
+      exact Row.le_inst hform.row θ
     · rw [← acc_open_inst]
-      exact hacc.inst θ
+      exact hform.touches.inst θ
     · intro hL
       rw [← acc_open_inst]
-      exact (hinj hL).1.nodup hacc (hnd hL)
+      exact (hinj hL).1.nodup hform.touches (hform.apart hL)
   | @tail Γ f args n rs Ps σ τ ε' ε once env acc hform hret hlin =>
     have hf := hform.callee
-    have hn := hform.len
-    have hargs := hform.argsOk
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hnd := hform.apart
     have hf' := hf.inst θ
     rw [Ty.inst_fn] at hf'
-    refine .tail (rs := rs.map (Rgn.inst θ)) ⟨hf', (by simpa using hn), ?_, ?_, ?_, ?_⟩ ?_
+    refine .tail (rs := rs.map (Rgn.inst θ)) ⟨hf', (by simpa using hform.len), ?_, ?_, ?_, ?_⟩ ?_
       (hlin.inst hΔ θ)
     · rw [← opens_inst]
-      exact hargs.inst θ
+      exact hform.argsOk.inst θ
     · rw [← Row.open_inst]
-      exact Row.le_inst hrow θ
+      exact Row.le_inst hform.row θ
     · rw [← acc_open_inst]
-      exact hacc.inst θ
+      exact hform.touches.inst θ
     · intro hL
       rw [← acc_open_inst]
-      exact (hinj hL).1.nodup hacc (hnd hL)
+      exact (hinj hL).1.nodup hform.touches (hform.apart hL)
     · rw [← Ty.open_inst, hret]
   | @callNever Γ f args body n rs Ps σ τ ε' ε once env acc hform hlin _ ih =>
     have hf := hform.callee
-    have hn := hform.len
-    have hargs := hform.argsOk
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hnd := hform.apart
     have hf' := hf.inst θ
     rw [Ty.inst_fn, Ty.inst_never] at hf'
     rw [snoc_inst] at ih
-    refine .callNever (rs := rs.map (Rgn.inst θ)) ⟨hf', (by simpa using hn), ?_, ?_, ?_, ?_⟩
+    refine .callNever (rs := rs.map (Rgn.inst θ)) ⟨hf', (by simpa using hform.len), ?_, ?_, ?_, ?_⟩
       (hlin.inst hΔ θ) ih
     · rw [← opens_inst]
-      exact hargs.inst θ
+      exact hform.argsOk.inst θ
     · rw [← Row.open_inst]
-      exact Row.le_inst hrow θ
+      exact Row.le_inst hform.row θ
     · rw [← acc_open_inst]
-      exact hacc.inst θ
+      exact hform.touches.inst θ
     · intro hL
       rw [← acc_open_inst]
-      exact (hinj hL).1.nodup hacc (hnd hL)
+      exact (hinj hL).1.nodup hform.touches (hform.apart hL)
   | @tailNever Γ f args n rs Ps τ ε' ε once env acc hform hlin =>
     have hf := hform.callee
-    have hn := hform.len
-    have hargs := hform.argsOk
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hnd := hform.apart
     have hf' := hf.inst θ
     rw [Ty.inst_fn, Ty.inst_never] at hf'
-    refine .tailNever (rs := rs.map (Rgn.inst θ)) ⟨hf', (by simpa using hn), ?_, ?_, ?_, ?_⟩
+    refine .tailNever (rs := rs.map (Rgn.inst θ)) ⟨hf', (by simpa using hform.len), ?_, ?_, ?_, ?_⟩
       (hlin.inst hΔ θ)
     · rw [← opens_inst]
-      exact hargs.inst θ
+      exact hform.argsOk.inst θ
     · rw [← Row.open_inst]
-      exact Row.le_inst hrow θ
+      exact Row.le_inst hform.row θ
     · rw [← acc_open_inst]
-      exact hacc.inst θ
+      exact hform.touches.inst θ
     · intro hL
       rw [← acc_open_inst]
-      exact (hinj hL).1.nodup hacc (hnd hL)
+      exact (hinj hL).1.nodup hform.touches (hform.apart hL)
   | handle hform hlin _ ih =>
-    have hthunk := hform.thunk
-    have hcaps := hform.caps
-    have hok := hform.handler
     have hrow := hform.row
-    have hacc := hform.touches
-    have hΦ := hform.within
-    have hnd := hform.apart
-    have ht' := hthunk.inst θ
+    have ht' := hform.thunk.inst θ
     rw [Ty.inst_fn] at ht'
     rw [snoc_inst] at ih
     have hrow' := Row.le_inst hrow θ
     rw [Row.inst_append] at hrow'
-    exact .handle ⟨(by simpa using ht'), (hcaps.inst θ),
-      (hok.inst hΔ θ fun hL => (hinj hL).1.mono hΦ), hrow', (hacc.inst θ), (hΦ.inst θ),
-      (fun hL => (hinj hL).1.nodup (hacc.trans hΦ) (hnd hL))⟩ (hlin.inst hΔ θ) ih
+    exact .handle ⟨(by simpa using ht'), (hform.caps.inst θ),
+      (hform.handler.inst hΔ θ fun hL => (hinj hL).1.mono hform.within), hrow', (hform.touches.inst
+          θ), (hform.within.inst θ),
+      (fun hL => (hinj hL).1.nodup (hform.touches.trans hform.within) (hform.apart hL))⟩ (hlin.inst hΔ θ) ih
   | handleTail hform =>
-    have hthunk := hform.thunk
-    have hcaps := hform.caps
-    have hok := hform.handler
     have hrow := hform.row
-    have hacc := hform.touches
-    have hΦ := hform.within
-    have hnd := hform.apart
-    have ht' := hthunk.inst θ
+    have ht' := hform.thunk.inst θ
     rw [Ty.inst_fn] at ht'
     have hrow' := Row.le_inst hrow θ
     rw [Row.inst_append] at hrow'
-    exact .handleTail ⟨(by simpa using ht'), (hcaps.inst θ),
-      (hok.inst hΔ θ fun hL => (hinj hL).1.mono hΦ), hrow', (hacc.inst θ), (hΦ.inst θ),
-      (fun hL => (hinj hL).1.nodup (hacc.trans hΦ) (hnd hL))⟩
+    exact .handleTail ⟨(by simpa using ht'), (hform.caps.inst θ),
+      (hform.handler.inst hΔ θ fun hL => (hinj hL).1.mono hform.within), hrow', (hform.touches.inst
+          θ), (hform.within.inst θ),
+      (fun hL => (hinj hL).1.nodup (hform.touches.trans hform.within) (hform.apart hL))⟩
   | @raise Γ op args targs Ps τ ε hl hop hargs hlin =>
     refine .raise (targs := targs.map (Ty.inst θ)) (Ps := Ps.map (Ty.inst θ)) ?_ ?_
       (hargs.inst θ) (hlin.inst hΔ θ)
@@ -811,82 +781,60 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
     · rw [hΔ.op, hop]
       rfl
   | label hform hlin _ ih =>
-    have hthunk := hform.thunk
-    have hσ := hform.lcGiven
-    have hε := hform.lcRow
     have hn := hform.arity
-    have hreg := hform.region
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hrow := hform.row
-    have ht' := hthunk.inst θ
+    have ht' := hform.thunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Option.map_none] at ht'
     rw [snoc_inst] at ih
-    refine .label ⟨ht', (Ty.lc_inst hσ θ), (Row.lc_inst hε θ), hn, ?_, ?_, ?_, (Row.le_inst hrow θ)⟩
+    refine .label ⟨ht', (Ty.lc_inst hform.lcGiven θ), (Row.lc_inst hform.lcRow θ), hn, ?_, ?_, ?_,
+        (Row.le_inst hform.row θ)⟩
       (hlin.inst hΔ θ) ih
     · intro hr
-      exact ⟨(hreg hr).1, List.mem_map.mpr ⟨_, (hreg hr).2, rfl⟩⟩
+      exact ⟨(hform.region hr).1, List.mem_map.mpr ⟨_, (hform.region hr).2, rfl⟩⟩
     · intro x hx
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
-      rcases hacc x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
+      rcases hform.touches x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
       · exact .inl ⟨h1, rfl⟩
       · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, hmem.inst θ⟩
     · intro hL
-      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hnd hL)
-      rcases hacc x hx with ⟨_, rfl⟩ | ⟨_, hmem⟩
+      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hform.apart hL)
+      rcases hform.touches x hx with ⟨_, rfl⟩ | ⟨_, hmem⟩
       · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
       · exact .inr hmem
   | labelTail hform =>
-    have hthunk := hform.thunk
-    have hσ := hform.lcGiven
-    have hε := hform.lcRow
     have hn := hform.arity
-    have hreg := hform.region
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hrow := hform.row
-    have ht' := hthunk.inst θ
+    have ht' := hform.thunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Option.map_none] at ht'
-    refine .labelTail ⟨ht', (Ty.lc_inst hσ θ), (Row.lc_inst hε θ), hn, ?_, ?_, ?_,
-      (Row.le_inst hrow θ)⟩
+    refine .labelTail ⟨ht', (Ty.lc_inst hform.lcGiven θ), (Row.lc_inst hform.lcRow θ), hn, ?_, ?_, ?_,
+      (Row.le_inst hform.row θ)⟩
     · intro hr
-      exact ⟨(hreg hr).1, List.mem_map.mpr ⟨_, (hreg hr).2, rfl⟩⟩
+      exact ⟨(hform.region hr).1, List.mem_map.mpr ⟨_, (hform.region hr).2, rfl⟩⟩
     · intro x hx
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
-      rcases hacc x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
+      rcases hform.touches x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
       · exact .inl ⟨h1, rfl⟩
       · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, hmem.inst θ⟩
     · intro hL
-      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hnd hL)
-      rcases hacc x hx with ⟨_, rfl⟩ | ⟨_, hmem⟩
+      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hform.apart hL)
+      rcases hform.touches x hx with ⟨_, rfl⟩ | ⟨_, hmem⟩
       · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
       · exact .inr hmem
   | guard hform hlin _ ih =>
-    have hcl := hform.cleanup
-    have hthunk := hform.thunk
-    have hrow := hform.row
-    have haccc := hform.cleanupTouches
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hc' := hcl.inst θ
-    have ht' := hthunk.inst θ
+    have hc' := hform.cleanup.inst θ
+    have ht' := hform.thunk.inst θ
     simp only [Ty.inst_fn, List.map_nil, Row.inst_nil] at hc' ht'
     rw [snoc_inst] at ih
-    exact .guard ⟨hc', ht', (Row.le_inst hrow θ), (haccc.inst θ), (hacc.inst θ),
-      (fun hL => ⟨(hinj hL).1.nodup haccc (hnd hL).1, (hinj hL).1.nodup hacc (hnd hL).2⟩)⟩
+    exact .guard ⟨hc', ht', (Row.le_inst hform.row θ), (hform.cleanupTouches.inst θ), (hform.touches.inst θ),
+      (fun hL => ⟨(hinj hL).1.nodup hform.cleanupTouches (hform.apart hL).1, (hinj hL).1.nodup
+          hform.touches (hform.apart hL).2⟩)⟩
       (hlin.inst hΔ θ) ih
   | guardTail hform hlin =>
-    have hcl := hform.cleanup
-    have hthunk := hform.thunk
-    have hrow := hform.row
-    have haccc := hform.cleanupTouches
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hc' := hcl.inst θ
-    have ht' := hthunk.inst θ
+    have hc' := hform.cleanup.inst θ
+    have ht' := hform.thunk.inst θ
     simp only [Ty.inst_fn, List.map_nil, Row.inst_nil] at hc' ht'
-    exact .guardTail ⟨hc', ht', (Row.le_inst hrow θ), (haccc.inst θ), (hacc.inst θ),
-      (fun hL => ⟨(hinj hL).1.nodup haccc (hnd hL).1, (hinj hL).1.nodup hacc (hnd hL).2⟩)⟩
+    exact .guardTail ⟨hc', ht', (Row.le_inst hform.row θ), (hform.cleanupTouches.inst θ),
+        (hform.touches.inst θ),
+      (fun hL => ⟨(hinj hL).1.nodup hform.cleanupTouches (hform.apart hL).1, (hinj hL).1.nodup
+          hform.touches (hform.apart hL).2⟩)⟩
       (hlin.inst hΔ θ)
   | cancel hk hrow hacc hnd hlin _ ih =>
     have hk' := hk.inst θ
@@ -897,85 +845,58 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
     exact .cancel hk' (Row.le_inst hrow θ) (SubFree.inst hacc θ)
       (fun hL => (hinj hL).1.nodup_free hacc (hnd hL)) (hlin.inst hΔ θ) ih
   | @cell Γ init thunk body n r σ ρ τ εt ε once env acc hform hlin _ ih =>
-    have hinit := hform.init
-    have hthunk := hform.thunk
-    have hσ := hform.lcHeld
-    have hρ := hform.lcGiven
-    have hε := hform.lcRow
-    have hn := hform.arity
-    have hreg := hform.region
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hrow := hform.row
-    have ht' := hthunk.inst θ
+    have ht' := hform.thunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Ty.inst_ref] at ht'
     rw [snoc_inst] at ih
-    refine .cell ⟨(hinit.inst θ), ht', (Ty.lc_inst hσ θ), (Ty.lc_inst hρ θ), (Row.lc_inst hε θ), ?_,
-      ?_, ?_, ?_, (Row.le_inst hrow θ)⟩ (hlin.inst hΔ θ) ih
-    · rcases hn with h0 | ⟨h1, rfl⟩
+    refine .cell ⟨(hform.init.inst θ), ht', (Ty.lc_inst hform.lcHeld θ), (Ty.lc_inst hform.lcGiven
+        θ), (Row.lc_inst hform.lcRow θ), ?_,
+      ?_, ?_, ?_, (Row.le_inst hform.row θ)⟩ (hlin.inst hΔ θ) ih
+    · rcases hform.arity with h0 | ⟨h1, rfl⟩
       · exact .inl h0
       · exact .inr ⟨h1, rfl⟩
     · intro hr
-      obtain ⟨h1, rfl⟩ := hreg hr
+      obtain ⟨h1, rfl⟩ := hform.region hr
       exact ⟨h1, rfl⟩
     · intro x hx
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
-      rcases hacc x₀ hx₀ with ⟨h1, rfl | rfl⟩ | ⟨hfree, hmem⟩
+      rcases hform.touches x₀ hx₀ with ⟨h1, rfl | rfl⟩ | ⟨hfree, hmem⟩
       · exact .inl ⟨h1, .inl rfl⟩
       · exact .inl ⟨h1, .inr rfl⟩
       · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, hmem.inst θ⟩
     · intro hL
-      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hnd hL)
-      rcases hacc x hx with ⟨_, rfl | rfl⟩ | ⟨_, hmem⟩
+      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hform.apart hL)
+      rcases hform.touches x hx with ⟨_, rfl | rfl⟩ | ⟨_, hmem⟩
       · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
       · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
       · exact .inr hmem
   | @cellTail Γ init thunk n r σ τ εt ε once env acc hform hlin =>
-    have hinit := hform.init
-    have hthunk := hform.thunk
-    have hσ := hform.lcHeld
-    have hτ := hform.lcGiven
-    have hε := hform.lcRow
-    have hn := hform.arity
-    have hreg := hform.region
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hrow := hform.row
-    have ht' := hthunk.inst θ
+    have ht' := hform.thunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Ty.inst_ref] at ht'
-    refine .cellTail ⟨(hinit.inst θ), ht', (Ty.lc_inst hσ θ), (Ty.lc_inst hτ θ), (Row.lc_inst hε θ),
-      ?_, ?_, ?_, ?_, (Row.le_inst hrow θ)⟩ (hlin.inst hΔ θ)
-    · rcases hn with h0 | ⟨h1, rfl⟩
+    refine .cellTail ⟨(hform.init.inst θ), ht', (Ty.lc_inst hform.lcHeld θ), (Ty.lc_inst
+        hform.lcGiven θ), (Row.lc_inst hform.lcRow θ),
+      ?_, ?_, ?_, ?_, (Row.le_inst hform.row θ)⟩ (hlin.inst hΔ θ)
+    · rcases hform.arity with h0 | ⟨h1, rfl⟩
       · exact .inl h0
       · exact .inr ⟨h1, rfl⟩
     · intro hr
-      obtain ⟨h1, rfl⟩ := hreg hr
+      obtain ⟨h1, rfl⟩ := hform.region hr
       exact ⟨h1, rfl⟩
     · intro x hx
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
-      rcases hacc x₀ hx₀ with ⟨h1, rfl | rfl⟩ | ⟨hfree, hmem⟩
+      rcases hform.touches x₀ hx₀ with ⟨h1, rfl | rfl⟩ | ⟨hfree, hmem⟩
       · exact .inl ⟨h1, .inl rfl⟩
       · exact .inl ⟨h1, .inr rfl⟩
       · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, hmem.inst θ⟩
     · intro hL
-      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hnd hL)
-      rcases hacc x hx with ⟨_, rfl | rfl⟩ | ⟨_, hmem⟩
+      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hform.apart hL)
+      rcases hform.touches x hx with ⟨_, rfl | rfl⟩ | ⟨_, hmem⟩
       · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
       · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
       · exact .inr hmem
   | @lend Γ uniq r thunk pre post body n ρ κ σ ρt τ Pre Post εt ε once env acc hform hlin _ ih =>
     have hr := hform.ref
-    have hthunk := hform.thunk
-    have hσ := hform.lcHeld
-    have hρ := hform.lcGiven
-    have hε := hform.lcRow
-    have hn := hform.arity
-    have hreg := hform.region
-    have hloan := hform.loan
-    have hacc := hform.touches
-    have hrow := hform.row
     have hr' := hr.inst θ
-    have ht' := hthunk.inst θ
+    have ht' := hform.thunk.inst θ
     simp only [Ty.inst_fn, List.map_append, List.map_cons, Ty.inst_ref] at hr' ht'
     rw [snoc_inst] at ih
     have hlc : ∀ t, t ∈ Pre.map (Ty.inst θ) ++ Post.map (Ty.inst θ) → t.lc = true := by
@@ -983,29 +904,29 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
       rw [← List.map_append] at ht
       obtain ⟨t₀, h₀, rfl⟩ := List.mem_map.mp ht
       exact Ty.lc_inst (hform.lcArgs t₀ h₀) θ
-    refine .lend ⟨hr', ht', hform.before.inst θ, hform.after.inst θ, hlc, (Ty.lc_inst hσ θ),
-      (Ty.lc_inst hρ θ), (Row.lc_inst hε θ), ?_, ?_, ?_, ?_, (Row.le_inst hrow θ)⟩
+    refine .lend ⟨hr', ht', hform.before.inst θ, hform.after.inst θ, hlc, (Ty.lc_inst hform.lcHeld θ),
+      (Ty.lc_inst hform.lcGiven θ), (Row.lc_inst hform.lcRow θ), ?_, ?_, ?_, ?_, (Row.le_inst hform.row θ)⟩
       (hlin.inst hΔ θ) ih
-    · rcases hn with ⟨h0, rfl⟩ | ⟨h1, rfl⟩
+    · rcases hform.arity with ⟨h0, rfl⟩ | ⟨h1, rfl⟩
       · exact .inl ⟨h0, rfl⟩
       · exact .inr ⟨h1, rfl⟩
-    · exact fun hR => (hreg hR).inst θ
+    · exact fun hR => (hform.region hR).inst θ
     · intro hL
-      obtain ⟨h1, hρϕ, hw, hnd, hquiet⟩ := hloan hL
+      obtain ⟨h1, hρϕ, hw, hnd, hquiet⟩ := hform.loan hL
       refine ⟨h1, hρϕ.inst θ, fun hu => (hw hu).inst θ, ?_, by rw [hquiet, Row.inst_nil]⟩
       refine (hinj hL).1.nodup_scope (fun x hx => ?_) hnd
-      rcases hacc x hx with ⟨_, rfl | ⟨_, rfl⟩⟩ | ⟨_, hmem, _⟩
+      rcases hform.touches x hx with ⟨_, rfl | ⟨_, rfl⟩⟩ | ⟨_, hmem, _⟩
       · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
       · exact .inl fun y hy => by simp [Rgn.parts] at hy; subst hy; rfl
       · exact .inr hmem
     · intro x hx
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
-      rcases hacc x₀ hx₀ with ⟨h1, rfl | ⟨hu, rfl⟩⟩ | ⟨hfree, hmem, hne⟩
+      rcases hform.touches x₀ hx₀ with ⟨h1, rfl | ⟨hu, rfl⟩⟩ | ⟨hfree, hmem, hne⟩
       · exact .inl ⟨h1, .inl rfl⟩
       · exact .inl ⟨h1, .inr ⟨hu, rfl⟩⟩
       · refine .inr ⟨by rw [Rgn.inst_free]; exact hfree, hmem.inst θ, fun hL y hy => ?_⟩
         obtain ⟨hinj', hcl⟩ := hinj hL
-        obtain ⟨_, hρϕ, _, _, _⟩ := hloan hL
+        obtain ⟨_, hρϕ, _, _, _⟩ := hform.loan hL
         exact ⟨hinj'.apart_wr hcl hmem hρϕ (fun z hz => ((hne hL) z hz).1) y hy,
           fun hu => hinj'.apart hmem hρϕ (fun z hz => ((hne hL) z hz).2 hu) y hy⟩
   | load ha hr hd _ ih =>
@@ -1037,26 +958,20 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
     exact .focusAt ha' hix' (fun h => (hr h).inst θ) (hu.inst hΔ θ) ih
   | store hform hlin _ ih =>
     have ha := hform.ref
-    have hr := hform.region
-    have hw := hform.write
-    have hb := hform.value
     have ha' := ha.inst θ
     rw [Ty.inst_ref] at ha'
     rw [snoc_inst] at ih
     have hu : Ty.unit.inst θ = Ty.unit := by simp [Ty.unit, Ty.inst_tuple]
     rw [hu] at ih
-    exact .store ⟨ha', (fun h => (hr h).inst θ),
-      (fun h => (hw h).inst θ), (hb.inst θ)⟩ (hlin.inst hΔ θ) ih
+    exact .store ⟨ha', (fun h => (hform.region h).inst θ),
+      (fun h => (hform.write h).inst θ), (hform.value.inst θ)⟩ (hlin.inst hΔ θ) ih
   | swap hform hlin _ ih =>
     have ha := hform.ref
-    have hr := hform.region
-    have hw := hform.write
-    have hb := hform.value
     have ha' := ha.inst θ
     rw [Ty.inst_ref] at ha'
     rw [snoc_inst] at ih
-    exact .swap ⟨ha', (fun h => (hr h).inst θ),
-      (fun h => (hw h).inst θ), (hb.inst θ)⟩ (hlin.inst hΔ θ) ih
+    exact .swap ⟨ha', (fun h => (hform.region h).inst θ),
+      (fun h => (hform.write h).inst θ), (hform.value.inst θ)⟩ (hlin.inst hΔ θ) ih
   | write ha _ ih =>
     rw [snoc_inst] at ih
     have hu : Ty.unit.inst θ = Ty.unit := by simp [Ty.unit, Ty.inst_tuple]

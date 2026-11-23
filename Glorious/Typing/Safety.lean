@@ -717,37 +717,26 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       rw [h1]
       exact Fault.overflow hargs hq
   | @call _ f args body n rs Ps σ _ ε₁ _ once fenv acc hform hlin hbody =>
-    have hf := hform.callee
-    have hn := hform.len
-    have hargs := hform.argsOk
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hnd := hform.apart
-    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hn hargs
+    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hform.callee hform.len hform.argsOk
     have h1 : step p ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.call env body :: stack) ⟨conts, labels, cells⟩ := by simp [step, hc]
     rw [h1]
     refine .of_apply
-      (apply_ok hp hs hcok (.call henv hbody hle hsub hst) (Row.le_trans hrow hle)
-        (hacc.trans hsub) hnd) rfl (fun hD id => ?_) (fun hfa => ?_)
+      (apply_ok hp hs hcok (.call henv hbody hle hsub hst) (Row.le_trans hform.row hle)
+        (hform.touches.trans hsub) hform.apart) rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.call f args body)) (fun i hi => hi) id
       simp only [hocc id, occStack, occFrame]
       omega
     · exact hfa.fault (s := ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none h)
   | @tail _ f args n rs Ps σ _ ε₁ _ once fenv acc hform hret hlin =>
-    have hf := hform.callee
-    have hn := hform.len
-    have hargs := hform.argsOk
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hnd := hform.apart
-    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hn hargs
+    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hform.callee hform.len hform.argsOk
     have h1 : step p ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c stack ⟨conts, labels, cells⟩ := by simp [step, hc]
     rw [h1]
     rw [hret] at hcok
-    refine .of_apply (apply_ok hp hs hcok hst (Row.le_trans hrow hle) (hacc.trans hsub) hnd) rfl
+    refine .of_apply (apply_ok hp hs hcok hst (Row.le_trans hform.row hle) (hform.touches.trans
+        hsub) hform.apart) rfl
       (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.tail f args))
         (fun i hi => by simpa [fv] using hi) id
@@ -756,39 +745,27 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     · exact hfa.fault (s := ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => h)
   | @callNever _ f args body n rs Ps σ _ ε₁ _ once fenv acc hform hlin hbody =>
-    have hf := hform.callee
-    have hn := hform.len
-    have hargs := hform.argsOk
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hnd := hform.apart
-    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hn hargs
+    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hform.callee hform.len hform.argsOk
     have h1 : step p ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.call env body :: stack) ⟨conts, labels, cells⟩ := by simp [step, hc]
     rw [h1]
     rw [Ty.open_never] at hcok
     refine .of_apply
-      (apply_ok hp hs hcok (.never (.call henv hbody hle hsub hst)) (Row.le_trans hrow hle)
-        (hacc.trans hsub) hnd) rfl (fun hD id => ?_) (fun hfa => ?_)
+      (apply_ok hp hs hcok (.never (.call henv hbody hle hsub hst)) (Row.le_trans hform.row hle)
+        (hform.touches.trans hsub) hform.apart) rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.call f args body)) (fun i hi => hi) id
       simp only [hocc id, occStack, occFrame]
       omega
     · exact hfa.fault (s := ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none h)
   | @tailNever _ f args n rs Ps _ ε₁ _ once fenv acc hform hlin =>
-    have hf := hform.callee
-    have hn := hform.len
-    have hargs := hform.argsOk
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hnd := hform.apart
-    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hn hargs
+    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hform.callee hform.len hform.argsOk
     have h1 : step p ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c stack ⟨conts, labels, cells⟩ := by simp [step, hc]
     rw [h1]
     rw [Ty.open_never] at hcok
-    refine .of_apply (apply_ok hp hs hcok (.never hst) (Row.le_trans hrow hle)
-      (hacc.trans hsub) hnd) rfl (fun hD id => ?_) (fun hfa => ?_)
+    refine .of_apply (apply_ok hp hs hcok (.never hst) (Row.le_trans hform.row hle)
+      (hform.touches.trans hsub) hform.apart) rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.tail f args))
         (fun i hi => by simpa [fv] using hi) id
       simp only [hocc id]
@@ -796,23 +773,17 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     · exact hfa.fault (s := ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => h)
   | @handle _ ret ops captures thunk body Cs σ ρ _ εt H _ once fenv acc Φ hform hlin hbody =>
-    have hthunk := hform.thunk
-    have hcaps := hform.caps
     have hok := hform.handler
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hΦ := hform.within
-    have hnd := hform.apart
-    obtain ⟨caps, hcv, hcvt⟩ := atoms_ok (S := S) henv hcaps
-    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hthunk hnd
+    obtain ⟨caps, hcv, hcvt⟩ := atoms_ok (S := S) henv hform.caps
+    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hform.thunk hform.apart
     have h1 : step p ⟨.handle ret ops captures thunk body, env, stack, ⟨conts, labels, cells⟩⟩
         = callFn p fn tcaps [] (.handler labels ⟨ret, ops, caps⟩ :: .call env body :: stack)
             ⟨conts, labels + 1, cells⟩ := by
       simp [step, hcv, hcall, apply]
     rw [h1]
     obtain ⟨S', hS, hid, hs'⟩ := hs.push_handler (ρ, ε, Φ)
-    refine .of_safe (enter_safe hp hent (htc.mono hS) .nil hrow hacc
-      (.handler hid ⟨Cs, hcvt.mono hS, hok⟩ hle (hΦ.trans hsub)
+    refine .of_safe (enter_safe hp hent (htc.mono hS) .nil hform.row hform.touches
+      (.handler hid ⟨Cs, hcvt.mono hS, hok⟩ hle (hform.within.trans hsub)
         (.call (henv.mono hS) hbody hle hsub (hst.mono hS))) hs') rfl (fun hD id => ?_)
     have h2 := moved_live hD henv hlin
       (live := fv (.handle ret ops captures thunk body)) (fun i hi => mem_skip hi) id
@@ -821,23 +792,17 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     simp only [occStack, occFrame, occs]
     omega
   | @handleTail _ ret ops captures thunk Cs σ _ εt H _ once fenv acc Φ hform =>
-    have hthunk := hform.thunk
-    have hcaps := hform.caps
     have hok := hform.handler
-    have hrow := hform.row
-    have hacc := hform.touches
-    have hΦ := hform.within
-    have hnd := hform.apart
-    obtain ⟨caps, hcv, hcvt⟩ := atoms_ok (S := S) henv hcaps
-    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hthunk hnd
+    obtain ⟨caps, hcv, hcvt⟩ := atoms_ok (S := S) henv hform.caps
+    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hform.thunk hform.apart
     have h1 : step p ⟨.handleTail ret ops captures thunk, env, stack, ⟨conts, labels, cells⟩⟩
         = callFn p fn tcaps [] (.handler labels ⟨ret, ops, caps⟩ :: stack)
             ⟨conts, labels + 1, cells⟩ := by
       simp [step, hcv, hcall, apply]
     rw [h1]
     obtain ⟨S', hS, hid, hs'⟩ := hs.push_handler (τ, ε, Φ)
-    refine .of_safe (enter_safe hp hent (htc.mono hS) .nil hrow hacc
-      (.handler hid ⟨Cs, hcvt.mono hS, hok⟩ hle (hΦ.trans hsub) (hst.mono hS)) hs') rfl
+    refine .of_safe (enter_safe hp hent (htc.mono hS) .nil hform.row hform.touches
+      (.handler hid ⟨Cs, hcvt.mono hS, hok⟩ hle (hform.within.trans hsub) (hst.mono hS)) hs') rfl
       (fun hD id => ?_)
     have h2 := occ_atom_le id (live := fv (.handleTail ret ops captures thunk)) hteval
       (fun i hi => atomVars_head_sub hi)
@@ -900,22 +865,15 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     simp only [occs_append, occs, occ, occStack, occFrame, occStack_append]
     omega
   | @label _ thunk body n σ ρ _ εl εt _ once once' fenv accl acc hform hlin hbody =>
-    have hthunk := hform.thunk
-    have hσ := hform.lcGiven
-    have hε := hform.lcRow
-    have hn := hform.arity
-    have hreg := hform.region
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hrow := hform.row
     have hfr := hst.fresh (r := .lab labels)
       fun ⟨_, h⟩ => absurd (hs.labels _ _ h) (Nat.lt_irrefl _)
     obtain ⟨S', hS, hlab, hs'⟩ := hs.push_label σ
     obtain ⟨rs, hrs, hl, hσo, hεo, hgrant, hnd'⟩ :=
-      label_enter (Δ := Δ) (ρ := ρ) (εl := εl) (once' := once') hlab hσ hε hn hreg hacc hsub
-        hnd hfr
+      label_enter (Δ := Δ) (ρ := ρ) (εl := εl) (once' := once') hlab hform.lcGiven hform.lcRow
+          hform.arity hform.region hform.touches hsub
+        hform.apart hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S') (l := .label labels) (henv.mono hS) hthunk hrs hl
+      evalScope_ok (S := S') (l := .label labels) (henv.mono hS) hform.thunk hrs hl
     rw [hσo, hεo] at hcok
     have h1 : step p ⟨.label thunk body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.label labels :: .call env body :: stack) ⟨conts, labels + 1, cells⟩ := by
@@ -923,36 +881,29 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     rw [h1]
     refine .of_apply
       (apply_ok hp hs' hcok (.label hlab (.call (henv.mono hS) hbody hle hsub (hst.mono hS)))
-        (Row.le_trans hrow hle) hgrant hnd') rfl (fun hD id => ?_) (fun hfa => ?_)
+        (Row.le_trans hform.row hle) hgrant hnd') rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.label thunk body)) (fun i hi => hi) id
       simp only [hocc id, occ, occStack, occFrame]
       omega
     · exact hfa.fault (s := ⟨.label thunk body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none (findLabel_cons_none h))
   | @labelTail _ thunk n ρ _ εl εt _ once once' fenv accl acc hform =>
-    have hthunk := hform.thunk
-    have hσ := hform.lcGiven
-    have hε := hform.lcRow
-    have hn := hform.arity
-    have hreg := hform.region
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hrow := hform.row
     have hfr := hst.fresh (r := .lab labels)
       fun ⟨_, h⟩ => absurd (hs.labels _ _ h) (Nat.lt_irrefl _)
     obtain ⟨S', hS, hlab, hs'⟩ := hs.push_label τ
     obtain ⟨rs, hrs, hl, hσo, hεo, hgrant, hnd'⟩ :=
-      label_enter (Δ := Δ) (ρ := ρ) (εl := εl) (once' := once') hlab hσ hε hn hreg hacc hsub
-        hnd hfr
+      label_enter (Δ := Δ) (ρ := ρ) (εl := εl) (once' := once') hlab hform.lcGiven hform.lcRow
+          hform.arity hform.region hform.touches hsub
+        hform.apart hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S') (l := .label labels) (henv.mono hS) hthunk hrs hl
+      evalScope_ok (S := S') (l := .label labels) (henv.mono hS) hform.thunk hrs hl
     rw [hσo, hεo] at hcok
     have h1 : step p ⟨.labelTail thunk, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.label labels :: stack) ⟨conts, labels + 1, cells⟩ := by
       simp [step, hc]
     rw [h1]
     refine .of_apply
-      (apply_ok hp hs' hcok (.label hlab (hst.mono hS)) (Row.le_trans hrow hle) hgrant hnd') rfl
+      (apply_ok hp hs' hcok (.label hlab (hst.mono hS)) (Row.le_trans hform.row hle) hgrant hnd') rfl
       (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv (Linear.single thunk) (live := fv (.labelTail thunk))
         (fun i hi => by simpa [fv] using hi) id
@@ -961,23 +912,17 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     · exact hfa.fault (s := ⟨.labelTail thunk, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none h)
   | @guard _ cleanup thunk body σc σ _ εt _ once once' fenv fenv' accc acc hform hlin hbody =>
-    have hcl := hform.cleanup
-    have hthunk := hform.thunk
-    have hrow := hform.row
-    have haccc := hform.cleanupTouches
-    have hacc := hform.touches
-    have hnd := hform.apart
     obtain ⟨gfn, gcaps, GCs, _, hgev, hgent, hgc⟩ :=
-      evalThunk_ok (S := S) henv hcl fun h => (hnd h).1
+      evalThunk_ok (S := S) henv hform.cleanup fun h => (hform.apart h).1
     obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ :=
-      evalThunk_ok (S := S) henv hthunk fun h => (hnd h).2
+      evalThunk_ok (S := S) henv hform.thunk fun h => (hform.apart h).2
     have h1 : step p ⟨.guard cleanup thunk body, env, stack, ⟨conts, labels, cells⟩⟩
         = callFn p fn tcaps [] (.guard gfn gcaps :: .call env body :: stack)
             ⟨conts, labels, cells⟩ := by
       simp [step, evalClosure, hgev, hcall, apply]
     rw [h1]
-    refine .of_safe (enter_safe hp hent htc .nil (Row.le_trans hrow hle) (hacc.trans hsub)
-      (.guard (hgent.weaken (Row.le_refl _) (haccc.trans hsub)) hgc
+    refine .of_safe (enter_safe hp hent htc .nil (Row.le_trans hform.row hle) (hform.touches.trans hsub)
+      (.guard (hgent.weaken (Row.le_refl _) (hform.cleanupTouches.trans hsub)) hgc
         (.call henv hbody hle hsub hst)) hs) rfl (fun hD id => ?_)
     have h2 := moved_live hD henv hlin (live := fv (.guard cleanup thunk body))
       (fun i hi => hi) id
@@ -987,22 +932,16 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     simp only [occStack, occFrame, occs]
     omega
   | @guardTail _ cleanup thunk σc _ εt _ once once' fenv fenv' accc acc hform hlin =>
-    have hcl := hform.cleanup
-    have hthunk := hform.thunk
-    have hrow := hform.row
-    have haccc := hform.cleanupTouches
-    have hacc := hform.touches
-    have hnd := hform.apart
     obtain ⟨gfn, gcaps, GCs, _, hgev, hgent, hgc⟩ :=
-      evalThunk_ok (S := S) henv hcl fun h => (hnd h).1
+      evalThunk_ok (S := S) henv hform.cleanup fun h => (hform.apart h).1
     obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ :=
-      evalThunk_ok (S := S) henv hthunk fun h => (hnd h).2
+      evalThunk_ok (S := S) henv hform.thunk fun h => (hform.apart h).2
     have h1 : step p ⟨.guardTail cleanup thunk, env, stack, ⟨conts, labels, cells⟩⟩
         = callFn p fn tcaps [] (.guard gfn gcaps :: stack) ⟨conts, labels, cells⟩ := by
       simp [step, evalClosure, hgev, hcall, apply]
     rw [h1]
-    refine .of_safe (enter_safe hp hent htc .nil (Row.le_trans hrow hle) (hacc.trans hsub)
-      (.guard (hgent.weaken (Row.le_refl _) (haccc.trans hsub)) hgc hst) hs) rfl
+    refine .of_safe (enter_safe hp hent htc .nil (Row.le_trans hform.row hle) (hform.touches.trans hsub)
+      (.guard (hgent.weaken (Row.le_refl _) (hform.cleanupTouches.trans hsub)) hgc hst) hs) rfl
       (fun hD id => ?_)
     have h2 := moved_live hD henv hlin (live := fv (.guardTail cleanup thunk))
       (fun i hi => by simpa [fv] using hi) id
@@ -1126,24 +1065,15 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       rw [h1]
       exact .next (.mk (henv.snoc .unit) hbody hle hsub hst hs) (fun _ hu => hu.mono rfl hquiet)
   | @cell _ init thunk body n r σ ρ _ εt _ once fenv acc hform hlin hbody =>
-    have hinit := hform.init
-    have hthunk := hform.thunk
-    have hσ := hform.lcHeld
-    have hρ := hform.lcGiven
-    have hε := hform.lcRow
-    have hn := hform.arity
-    have hreg := hform.region
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hrow := hform.row
-    obtain ⟨v, hv, hvt⟩ := atom_ok henv hinit
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv hform.init
     have hfr := hst.fresh (r := .cell cells.size)
       fun ⟨_, h⟩ => absurd (hs.cells _ _ h).1 (Nat.lt_irrefl _)
     obtain ⟨S', hS, hcell, hs'⟩ := hs.push_cell hvt
     obtain ⟨rs, hrs, hl, hρo, hεo, hgrant, hnd'⟩ :=
-      cell_enter (Δ := Δ) hcell hσ hρ hε hn hreg hacc hsub hnd hfr
+      cell_enter (Δ := Δ) hcell hform.lcHeld hform.lcGiven hform.lcRow hform.arity hform.region
+          hform.touches hsub hform.apart hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S') (l := .ref cells.size 0 []) (henv.mono hS) hthunk hrs hl
+      evalScope_ok (S := S') (l := .ref cells.size 0 []) (henv.mono hS) hform.thunk hrs hl
     rw [hρo, hεo] at hcok
     have h1 : step p ⟨.cell init thunk body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.cell cells.size :: .call env body :: stack)
@@ -1152,7 +1082,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     rw [h1]
     refine .of_apply
       (apply_ok hp hs' hcok (.cell hcell (.call (henv.mono hS) hbody hle hsub (hst.mono hS)))
-        (Row.le_trans hrow hle) hgrant hnd') rfl (fun hD id => ?_) (fun hfa => ?_)
+        (Row.le_trans hform.row hle) hgrant hnd') rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.cell init thunk body)) (fun i hi => hi) id
       have h3 := sumAt_pair id env init thunk
       have h4 := occ_eval id env hv
@@ -1161,31 +1091,22 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     · exact hfa.fault (s := ⟨.cell init thunk body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck
         hcl rfl (fun _ h => findLabel_cons_none (findLabel_cons_none h))
   | @cellTail _ init thunk n r σ _ εt _ once fenv acc hform hlin =>
-    have hinit := hform.init
-    have hthunk := hform.thunk
-    have hσ := hform.lcHeld
-    have hτ := hform.lcGiven
-    have hε := hform.lcRow
-    have hn := hform.arity
-    have hreg := hform.region
-    have hacc := hform.touches
-    have hnd := hform.apart
-    have hrow := hform.row
-    obtain ⟨v, hv, hvt⟩ := atom_ok henv hinit
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv hform.init
     have hfr := hst.fresh (r := .cell cells.size)
       fun ⟨_, h⟩ => absurd (hs.cells _ _ h).1 (Nat.lt_irrefl _)
     obtain ⟨S', hS, hcell, hs'⟩ := hs.push_cell hvt
     obtain ⟨rs, hrs, hl, hρo, hεo, hgrant, hnd'⟩ :=
-      cell_enter (Δ := Δ) hcell hσ hτ hε hn hreg hacc hsub hnd hfr
+      cell_enter (Δ := Δ) hcell hform.lcHeld hform.lcGiven hform.lcRow hform.arity hform.region
+          hform.touches hsub hform.apart hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S') (l := .ref cells.size 0 []) (henv.mono hS) hthunk hrs hl
+      evalScope_ok (S := S') (l := .ref cells.size 0 []) (henv.mono hS) hform.thunk hrs hl
     rw [hρo, hεo] at hcok
     have h1 : step p ⟨.cellTail init thunk, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.cell cells.size :: stack) ⟨conts, labels, cells.push (some v)⟩ := by
       simp [step, hv, hc, Store.alloc]
     rw [h1]
     refine .of_apply
-      (apply_ok hp hs' hcok (.cell hcell (hst.mono hS)) (Row.le_trans hrow hle) hgrant hnd') rfl
+      (apply_ok hp hs' hcok (.cell hcell (hst.mono hS)) (Row.le_trans hform.row hle) hgrant hnd') rfl
       (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.cellTail init thunk))
         (fun i hi => by simpa [fv] using hi) id
@@ -1197,9 +1118,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         hcl rfl (fun _ h => findLabel_cons_none h)
   | @lend _ uniq r thunk pre post body n ρ κ σ ρt _ Pre Post εt _ once fenv acc hform hlin
       hbody =>
-    have hr := hform.ref
-    have hthunk := hform.thunk
-    obtain ⟨rv, hrv, hrt⟩ := atom_ok henv hr
+    obtain ⟨rv, hrv, hrt⟩ := atom_ok henv hform.ref
     obtain ⟨a, b, pth, σ₀, rfl, hcell, hpl, hon, _⟩ := hrt.ref_inv
     have hfr := hst.fresh (r := .loan (labels + 1))
       fun ⟨_, h⟩ => absurd (hs.loans _ _ h) (Nat.not_succ_le_self _)
@@ -1222,9 +1141,9 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       exact (hform.before.snoc _).append
         (.cons (.var (by rw [henv.length_eq]; simp) .refl) (hform.after.snoc _))
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalCall_ok (S := S') ((henv.mono hS).snoc hl') (hthunk.snoc _) hrs hargs
+      evalCall_ok (S := S') ((henv.mono hS).snoc hl') (hform.thunk.snoc _) hrs hargs
     rw [hρo, hεo] at hcok
-    obtain ⟨tv, htv, _⟩ := atom_ok henv hthunk
+    obtain ⟨tv, htv, _⟩ := atom_ok henv hform.thunk
     have htv' := eval_snoc (.ref a (labels + 1) pth) htv
     have h1 : step p ⟨.lend uniq r thunk pre post body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.lend uniq a (labels + 1) :: .call env body :: stack)
@@ -1319,10 +1238,8 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         simp only [occState]
         omega
   | @store _ a b body r σ _ _ hform hlin hbody =>
-    have ha := hform.ref
-    have hb := hform.value
-    obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
-    obtain ⟨w, hw, hwt⟩ := atom_ok henv hb
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv hform.ref
+    obtain ⟨w, hw, hwt⟩ := atom_ok henv hform.value
     obtain ⟨addr, tag, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
     cases hget : cells[addr]? with
@@ -1367,10 +1284,8 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         simp only [occState]
         omega
   | @swap _ a b body r σ _ _ hform hlin hbody =>
-    have ha := hform.ref
-    have hb := hform.value
-    obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
-    obtain ⟨w, hw, hwt⟩ := atom_ok henv hb
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv hform.ref
+    obtain ⟨w, hw, hwt⟩ := atom_ok henv hform.value
     obtain ⟨addr, tag, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
     cases hget : cells[addr]? with
