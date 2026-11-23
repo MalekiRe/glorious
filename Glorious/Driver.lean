@@ -767,12 +767,12 @@ def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
-def compileSourceAt (src : String) (check : Bool := true)
+def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
-    (lexed : List (List String × Array Syntax.Token) := []) (parsedKept : Parsed := {})
+    (parsedKept : Parsed := {})
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
@@ -780,6 +780,11 @@ def compileSourceAt (src : String) (check : Bool := true)
     (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
     (lowerKept : Option Elab.LowerMemo := none) :
     Except String Compiled := do
+  -- (Each text lexed, once: each that an earlier compile read as it is,
+  -- `texts`, not.)
+  let lexed ← Trace.timed "lex" fun _ =>
+    ((([], src) :: files).filter fun (path, text) => !texts.contains (textKey path text)).mapM fun (path, text) => do
+      pure (path, ← Syntax.lex text)
   let (prelude, items, parsedMade, textsMade, itemsMade) ← Trace.timed "parse" fun _ =>
     parseProgram src files check few lexed parsedKept preludeKept texts itemsKept
   -- Every name is given its meaning: the modules become one list of items,
@@ -1216,31 +1221,6 @@ def compileSourceAt (src : String) (check : Bool := true)
     match blocks with
     | some b => if b.links.isEmpty then throw e else build (some { b with links := {} })
     | none => throw e
-
-/-- Compile a program, its texts lexed once. -/
-def compileSource (src : String) (check : Bool := true)
-    (files : List (List String × String) := []) (few : Bool := false)
-    (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
-    (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
-    (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) (parsedKept : Parsed := {})
-    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
-    (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
-    (unitsKept : Option Syntax.Modules.UnitsKept := none)
-    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Item)) := none)
-    (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
-    (lowerKept : Option Elab.LowerMemo := none) :
-    Except String Compiled := do
-  -- (What the default prelude has from the library, where the text uses it;
-  -- and each text lexed, once: each that an earlier compile read as it is,
-  -- `texts`, not.)
-  let all := ([], src) :: files
-  let lexed ← Trace.timed "lex" fun _ =>
-    (all.filter fun (path, text) => !texts.contains (textKey path text)).mapM fun (path, text) => do
-      pure (path, ← Syntax.lex text)
-  compileSourceAt src check files few known kept checkKept (search := search) (memo := memo)
-    (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts)
-    (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) (frontKept := frontKept)
-    (itemsKept := itemsKept) (elabKept := elabKept) (lowerKept := lowerKept)
 
 /-- Whether a program's Core was shown to follow the ownership rules: `some true`
 if so, `some false` if it was only shown to be well typed, `none` if it does not compile. -/
