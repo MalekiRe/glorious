@@ -186,8 +186,7 @@ theorem HasVal.ctor_inv {S : StoreTy} {v : Value} {T : Ty} {tag : Nat} {Fs : Lis
   | clo _ _ _ _ _ hτ =>
     subst hτ
     exact hc.not_fn.elim
-  | cont _ => exact hc.not_fn.elim
-  | label _ _ => exact hc.not_fn.elim
+  | cont _ | label _ _ => exact hc.not_fn.elim
   | ref _ _ => exact hc.not_ref.elim
 
 theorem HasVal.unit {S : StoreTy} : HasVal Δ S Value.unit Ty.unit :=

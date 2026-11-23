@@ -247,11 +247,7 @@ theorem part_cons {v : Value} {s : PathStep} {path : List PathStep} {w : Value}
       | some x =>
         simp only [hfit, hx] at h
         exact ⟨tag, fields, x, rfl, hfit, hx, h⟩
-  | int _ => simp [part] at h
-  | clo _ _ => simp [part] at h
-  | cont _ => simp [part] at h
-  | label _ => simp [part] at h
-  | ref _ _ _ => simp [part] at h
+  | int _ | clo _ _ | cont _ | label _ | ref _ _ _ => simp [part] at h
 
 theorem part_data {tag : Nat} {fields : List Value} {s : PathStep} {x : Value} (path : List PathStep)
     (hfit : s.fits tag = true) (hx : fields[s.field]? = some x) :
@@ -284,11 +280,7 @@ theorem putPart_cons {v : Value} {s : PathStep} {path : List PathStep} {w v' : V
         | some x' =>
           simp only [hx', Option.map_some, Option.some.injEq] at h
           exact ⟨tag, fields, x, x', rfl, hfit, hx, hx', h.symm⟩
-  | int _ => simp [putPart] at h
-  | clo _ _ => simp [putPart] at h
-  | cont _ => simp [putPart] at h
-  | label _ => simp [putPart] at h
-  | ref _ _ _ => simp [putPart] at h
+  | int _ | clo _ _ | cont _ | label _ | ref _ _ _ => simp [putPart] at h
 
 /-- A part that is there can be replaced. -/
 theorem putPart_of_part : ∀ {path : List PathStep} {v old : Value} (w : Value),

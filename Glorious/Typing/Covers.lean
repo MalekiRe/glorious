@@ -188,10 +188,7 @@ theorem ctorsOf_value {S : StoreTy} {v : Value} {T : Ty} {ctors : List (Nat × L
         rw [hc] at hF'
         exact ⟨t, fields, Fs', rfl, lookup_mem hF', hf⟩
     | clo _ _ _ _ _ hτ => simp [FnSig.ty] at hτ
-  | int => simp [ctorsOf] at hc
-  | fn _ _ _ _ _ _ _ => simp [ctorsOf] at hc
-  | ref _ _ => simp [ctorsOf] at hc
-  | never => simp [ctorsOf] at hc
+  | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [ctorsOf] at hc
 
 /-- A type's constructors at other regions are its constructors, at those regions. -/
 theorem ctorsOf_inst {T : Ty} {ctors : List (Nat × List Ty)} (θ : List Rgn)
@@ -209,10 +206,7 @@ theorem ctorsOf_inst {T : Ty} {ctors : List (Nat × List Ty)} (θ : List Rgn)
     rename_i hname
     rw [Ty.inst_data]
     simp only [ctorsOf, hname, ↓reduceIte, findData_inst, hc, Option.map_some]
-  | int => simp [ctorsOf] at hc
-  | fn _ _ _ _ _ _ _ => simp [ctorsOf] at hc
-  | ref _ _ => simp [ctorsOf] at hc
-  | never => simp [ctorsOf] at hc
+  | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [ctorsOf] at hc
 
 /-- What `covers` accepts is covered: every list of values of these types, at
 whatever regions, is matched by some row. -/

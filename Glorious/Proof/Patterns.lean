@@ -175,15 +175,13 @@ theorem patTests_check (ρ : Env) : ∀ (p : Pat) (pl : Place) (v : Value), pl.e
         simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal, h, hb]
     | data t fs => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
     | clo f cs => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
-    | cont id => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
-    | label id => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
+    | cont id | label id => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
     | ref a => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
   | .ctor tag ps, pl, v, hv => by
     cases v with
     | int m => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | clo f cs => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
-    | cont id => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
-    | label id => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
+    | cont id | label id => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | ref a => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | data t fs =>
       by_cases ht : tag = t
@@ -240,15 +238,13 @@ theorem patBinds_eval (ρ : Env) : ∀ (p : Pat) (pl : Place) (v : Value) (bs : 
       · simp [Pat.matchVal, h] at hm
     | data t fs => simp [Pat.matchVal] at hm
     | clo f cs => simp [Pat.matchVal] at hm
-    | cont id => simp [Pat.matchVal] at hm
-    | label id => simp [Pat.matchVal] at hm
+    | cont id | label id => simp [Pat.matchVal] at hm
     | ref a => simp [Pat.matchVal] at hm
   | .ctor tag ps, pl, v, bs, hv, hm => by
     cases v with
     | int m => simp [Pat.matchVal] at hm
     | clo f cs => simp [Pat.matchVal] at hm
-    | cont id => simp [Pat.matchVal] at hm
-    | label id => simp [Pat.matchVal] at hm
+    | cont id | label id => simp [Pat.matchVal] at hm
     | ref a => simp [Pat.matchVal] at hm
     | data t fs =>
       by_cases ht : tag = t

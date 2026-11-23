@@ -62,14 +62,14 @@ theorem StackOk.tail {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : 
       ∃ τ' ε' ϕ', StackOk Δ S st' τ' ε' ϕ' := by
   induction h with
   | nil => intro fr st' e; cases e
-  | call _ _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
-  | handler _ _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
-  | label _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
-  | guard _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
-  | cell _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
-  | lend _ _ _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
-  | lendLoose _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
-  | yield _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
+  | call _ _ _ _ h _
+  | handler _ _ _ _ h _
+  | label _ h _
+  | guard _ _ h _
+  | cell _ h _
+  | lend _ _ _ _ _ h _
+  | lendLoose _ _ _ h _
+  | yield _ h _
   | exit _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | never _ ih => intro fr st' e; exact ih e
 

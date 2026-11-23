@@ -671,7 +671,7 @@ theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {�
     (h : StackOk Δ S st τ ε ϕ) : ∀ id, .lab id ∈ Rgn.flat ϕ → Frame.label id ∈ st := by
   induction h with
   | nil => intro id hr; cases hr
-  | call _ _ _ _ _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id hr)
+  | call _ _ _ _ _ ih | guard _ _ _ ih | yield _ _ ih | exit _ _ _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id hr)
   | handler _ _ _ hsub _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id (hsub _ hr))
   | label _ _ ih =>
     intro id hr
@@ -680,8 +680,7 @@ theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {�
     · cases h
       exact List.mem_cons_self ..
     · exact List.mem_cons_of_mem _ (ih id hr)
-  | guard _ _ _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id hr)
-  | cell _ _ ih =>
+  | cell _ _ ih | lendLoose _ _ _ _ ih =>
     intro id hr
     rw [Rgn.flat_cons_atom rfl, Rgn.flat_cons_atom rfl] at hr
     rcases List.mem_cons.mp hr with h | hr
@@ -696,16 +695,6 @@ theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {�
     · cases h
     · cases h
     · exact List.mem_cons_of_mem _ (ih id hr)
-  | lendLoose _ _ _ _ ih =>
-    intro id hr
-    rw [Rgn.flat_cons_atom rfl, Rgn.flat_cons_atom rfl] at hr
-    rcases List.mem_cons.mp hr with h | hr
-    · cases h
-    · rcases List.mem_cons.mp hr with h | hr
-      · cases h
-      · exact List.mem_cons_of_mem _ (ih id hr)
-  | yield _ _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id hr)
-  | exit _ _ _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id hr)
   | never _ ih => exact ih
 
 /-- A released cell is about to be read or written. -/
@@ -862,65 +851,21 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     have := (hreg hR).1
     omega
   cases hty with
-  | ret _ => cases hcallee
-  | let_ _ _ _ => cases hcallee
-  | call hform _ _ =>
+  | call hform _ _ | tail hform _ _ | callNever hform _ _ | tailNever hform _ =>
     have hf := hform.callee
     have hn := hform.len
     have hacc := hform.touches
     cases hcallee
     obtain ⟨h0, hin⟩ := isLabel rfl hf
     exact opened h0 hn hin hacc
-  | tail hform _ _ =>
-    have hf := hform.callee
-    have hn := hform.len
-    have hacc := hform.touches
-    cases hcallee
-    obtain ⟨h0, hin⟩ := isLabel rfl hf
-    exact opened h0 hn hin hacc
-  | callNever hform _ _ =>
-    have hf := hform.callee
-    have hn := hform.len
-    have hacc := hform.touches
-    cases hcallee
-    obtain ⟨h0, hin⟩ := isLabel rfl hf
-    exact opened h0 hn hin hacc
-  | tailNever hform _ =>
-    have hf := hform.callee
-    have hn := hform.len
-    have hacc := hform.touches
-    cases hcallee
-    obtain ⟨h0, hin⟩ := isLabel rfl hf
-    exact opened h0 hn hin hacc
-  | handle _ _ _ => cases hcallee
-  | handleTail _ => cases hcallee
-  | raise _ _ _ _ => cases hcallee
-  | perform _ _ _ _ _ => cases hcallee
-  | label hform _ _ =>
+  | label hform _ _ | labelTail hform | cell hform _ _ | cellTail hform _ =>
     have hthunk := hform.thunk
     have hreg := hform.region
     cases hcallee
     exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
-  | labelTail hform =>
-    have hthunk := hform.thunk
-    have hreg := hform.region
-    cases hcallee
-    exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
-  | guard _ _ _ => cases hcallee
-  | guardTail _ _ => cases hcallee
   | cancel hk _ hacc _ _ _ =>
     cases hcallee
     exact found (hacc _ (Rgn.mem_flat.mpr ⟨_, (isLabel rfl hk).2, List.mem_singleton_self _⟩) rfl)
-  | cell hform _ _ =>
-    have hthunk := hform.thunk
-    have hreg := hform.region
-    cases hcallee
-    exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
-  | cellTail hform _ =>
-    have hthunk := hform.thunk
-    have hreg := hform.region
-    cases hcallee
-    exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
   | lend hform _ _ =>
     have hthunk := hform.thunk
     have hacc := hform.touches
@@ -929,15 +874,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     rcases hacc _ hin with ⟨h1, _⟩ | ⟨_, hmem, _⟩
     · omega
     · exact found (hmem _ (List.mem_singleton_self _))
-  | load _ _ _ _ => cases hcallee
-  | tag _ _ _ _ => cases hcallee
-  | focus _ _ _ _ => cases hcallee
-  | focusAt _ _ _ _ _ => cases hcallee
-  | focusIn _ _ _ _ _ => cases hcallee
-  | store _ _ _ => cases hcallee
-  | swap _ _ _ => cases hcallee
-  | write _ _ => cases hcallee
-  | read _ => cases hcallee
+  | _ => cases hcallee
 
 /-- Every state a well-typed program reaches is well typed. -/
 theorem run_typed {p : Program} (hp : ProgramOk Δ p) : ∀ (n : Nat) {c c' : Config},

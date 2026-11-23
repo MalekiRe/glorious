@@ -461,10 +461,7 @@ theorem ctorFieldsOf_sound {tag : Nat} {T : Ty} {Fs : List Ty}
     · cases h
     · rename_i h0
       exact .inr ⟨h0, name, args, rfl, h⟩
-  | int => simp [ctorFieldsOf] at h
-  | fn _ _ _ _ _ _ _ => simp [ctorFieldsOf] at h
-  | ref _ _ => simp [ctorFieldsOf] at h
-  | never => simp [ctorFieldsOf] at h
+  | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [ctorFieldsOf] at h
 
 theorem ctorFieldsOf_complete {tag : Nat} {T : Ty} {Fs : List Ty}
     (h : CtorOf C.ctx tag T Fs) : ctorFieldsOf C tag T = some Fs := by
@@ -542,10 +539,7 @@ theorem placeTy_sound : ∀ {path : List Nat} {σ τ : Ty},
                   simpa using this
             · cases hF
           · cases hF
-        | int => simp [fieldsOf] at hF
-        | fn _ _ _ _ _ _ _ => simp [fieldsOf] at hF
-        | ref _ _ => simp [fieldsOf] at hF
-        | never => simp [fieldsOf] at hF
+        | int | fn _ _ _ _ _ _ _ | ref _ _ | never => simp [fieldsOf] at hF
       · cases h
     · cases h
 
