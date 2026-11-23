@@ -46,59 +46,46 @@ callable has to be called if it holds something that has to be used, or
 something with a `drop` to run: nothing destroys what a callable holds, so
 one that is let go without being called would take the value with it. -/
 partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty)
-    (callables : Bool := false) : M (Option String) := do
-  match ← find t with
-  | .var _ => pure none
-  | .tuple args => args.findSomeM? (tyMustUse info visiting · callables)
-  | .fn _ _ _ _ cap => do
-    let root ← findCap cap
-    -- What it captures, by place among the program's captures.
-    let s ← get
-    let mine := (s.capOut.getD root #[]).filterMap fun i => (s.capEdges.get? i).map fun e => (i, e.2)
-    -- A resumption that has to be used.
-    if mine.any (fun (_, what) => match what with | .must => true | _ => false) then
-      return some "a resumption of an operation declared `[1, 1]`"
-    -- A resumption at all: what one mentions is the computation it
-    -- suspended, not something it holds.
-    if mine.any (fun (_, what) => match what with | .once => true | _ => false)
-        && !info.blocks.contains root then return none
-    if s.seen.contains root then return none
-    modify fun s => { s with seen := s.seen.insert root }
-    -- (What a block shares with the one it runs in place of, the other holds.)
-    for (i, what) in mine do
-      if let .ty held := what then
-        unless s.sharedEdges.contains i || s.givenEdges.contains i do
-          if let some what ← tyMustUse info visiting held callables then
-            return some s!"a callable that holds {what}"
-          -- (A callable let go is given up, which destroys what it holds;
-          -- `callables` asks of one that is let go where nothing does.)
-          if callables then
-            if let some name ← tyHasDrop [] held then
-              return some s!"a callable that holds a `{name}`, whose `drop` would then not run,"
-    -- The value of a variable that gives it away: the variable's cleanup
-    -- runs its `drop` where the callable did not use it, so only what has
-    -- to be used makes the callable one that has to be called.
-    for (i, what) in mine do
-      if let .ty held := what then
-        if s.givenEdges.contains i && !s.sharedEdges.contains i then
-          if let some what ← tyMustUse info visiting held callables then
-            return some s!"a callable that holds {what}"
-    return none
-  | .ref _ _ _ => pure none
-  | .con name args => do
-    if let some (must, _) := (← get).useDecls[name]? then
-      if must then return some s!"a `{bareName name}`"
-    if let some w ← args.findSomeM? (tyMustUse info visiting · callables) then return some w
-    if visiting.contains name then return none
-    match (← get).types[name]? with
-    | none => pure none
-    | some decl =>
-      decl.ctors.findSomeM? fun c => do
-        match (← get).ctors[c]? with
-        | none => pure none
-        | some sig =>
-          (sig.fieldsAt args).findSomeM?
-            (tyMustUse info (name :: visiting) · callables)
+    (callables : Bool := false) : M (Option String) :=
+  walkTy (fun name => do
+      pure (match (← get).useDecls[name]? with
+        | some (true, _) => some s!"a `{bareName name}`"
+        | _ => none))
+    (fun visiting cap => do
+      let root ← findCap cap
+      -- What it captures, by place among the program's captures.
+      let s ← get
+      let mine := (s.capOut.getD root #[]).filterMap fun i => (s.capEdges.get? i).map fun e => (i, e.2)
+      -- A resumption that has to be used.
+      if mine.any (fun (_, what) => match what with | .must => true | _ => false) then
+        return some "a resumption of an operation declared `[1, 1]`"
+      -- A resumption at all: what one mentions is the computation it
+      -- suspended, not something it holds.
+      if mine.any (fun (_, what) => match what with | .once => true | _ => false)
+          && !info.blocks.contains root then return none
+      if s.seen.contains root then return none
+      modify fun s => { s with seen := s.seen.insert root }
+      -- (What a block shares with the one it runs in place of, the other holds.)
+      for (i, what) in mine do
+        if let .ty held := what then
+          unless s.sharedEdges.contains i || s.givenEdges.contains i do
+            if let some what ← tyMustUse info visiting held callables then
+              return some s!"a callable that holds {what}"
+            -- (A callable let go is given up, which destroys what it holds;
+            -- `callables` asks of one that is let go where nothing does.)
+            if callables then
+              if let some name ← tyHasDrop [] held then
+                return some s!"a callable that holds a `{name}`, whose `drop` would then not run,"
+      -- The value of a variable that gives it away: the variable's cleanup
+      -- runs its `drop` where the callable did not use it, so only what has
+      -- to be used makes the callable one that has to be called.
+      for (i, what) in mine do
+        if let .ty held := what then
+          if s.givenEdges.contains i && !s.sharedEdges.contains i then
+            if let some what ← tyMustUse info visiting held callables then
+              return some s!"a callable that holds {what}"
+      return none)
+    visiting t
 
 /-- Does a type mention a type parameter the function being checked wrote?
 What such a type is, is known only where the function is used. -/

@@ -782,6 +782,40 @@ nothing about which callables a function goes on to call, so two callables that
 each use a resumption count as two uses even if only one of them ever runs.
 -/
 
+/-- The first thing found in a type, gone through as a value holds what it
+holds: a tuple's parts; at a declared type, what `atCon` finds of its name,
+then its arguments, then each constructor's fields (once for each type,
+`visiting`); at a callable, what `atFn` finds of its capture, with the types
+being gone through. Nothing in a reference, which is another's value, or in a
+type not yet known. -/
+partial def walkTy {α : Type} (atCon : String → M (Option α)) (atFn : List String → Nat → M (Option α))
+    (visiting : List String) (t : Ty) : M (Option α) := do
+  match ← find t with
+  | .tuple args => args.findSomeM? (walkTy atCon atFn visiting)
+  | .fn _ _ _ _ cap => atFn visiting cap
+  | .con name args => do
+    if let some a ← atCon name then return some a
+    if let some a ← args.findSomeM? (walkTy atCon atFn visiting) then return some a
+    if visiting.contains name then return none
+    match (← get).types[name]? with
+    | none => pure none
+    | some decl =>
+      decl.ctors.findSomeM? fun c => do
+        match (← get).ctors[c]? with
+        | none => pure none
+        | some sig => (sig.fieldsAt args).findSomeM? (walkTy atCon atFn (name :: visiting))
+  | _ => pure none
+
+/-- A declared type that says its values are used once. -/
+def usedOnceDecl (name : String) : M (Option String) := do
+  pure (match (← get).useDecls[name]? with
+    | some (_, true) => some name
+    | _ => none)
+
+/-- A declared type with a `drop` of its own. -/
+def dropDecl (name : String) : M (Option String) := do
+  pure (if (← get).kimpls.has "Drop" name then some (bareName name) else none)
+
 mutual
 
 partial def capOwnsOnce (cap : Nat) : M Bool := do
@@ -800,29 +834,13 @@ partial def capOwnsOnce (cap : Nat) : M Bool := do
   return false
 
 /-- Can a value of this type be used only once? One that holds a resumption,
-and one of a declared type that says so. -/
+and one of a declared type that says so, or that has a `drop` of its own (a
+copy would run it again). -/
 partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
-  match ← find t with
-  | .var _ => pure false
-  | .tuple args => args.anyM (tyOwnsOnce visiting)
-  | .fn _ _ _ _ cap => capOwnsOnce cap
-  | .ref _ _ _ => pure false
-  | .con name args => do
-    if let some (_, once) := (← get).useDecls[name]? then
-      if once then return true
-    -- A type with a `drop` of its own: a copy would run it again.
-    if (← get).kimpls.has "Drop" name then return true
-    if ← args.anyM (tyOwnsOnce visiting) then return true
-    if visiting.contains name then return false
-    match (← get).types[name]? with
-    | none => pure false
-    | some decl =>
-      decl.ctors.anyM fun c => do
-        match (← get).ctors[c]? with
-        | none => pure false
-        | some sig =>
-          (sig.fieldsAt args).anyM
-            (tyOwnsOnce (name :: visiting))
+  let atCon := fun (name : String) => do
+    pure ((← usedOnceDecl name) <|> (← dropDecl name))
+  let atFn := fun (_ : List String) (cap : Nat) => do pure (if ← capOwnsOnce cap then some "" else none)
+  pure (← walkTy atCon atFn visiting t).isSome
 
 end
 
@@ -855,52 +873,21 @@ def mustDup (t : Ty) (why : String) : M Unit :=
 
 /-- The declared type, if any, that makes a type one whose values are used
 only once. Only to say why. -/
-partial def onceBy (visiting : List String) (t : Ty) : M (Option String) := do
-  match ← find t with
-  | .tuple args => args.findSomeM? (onceBy visiting)
-  | .con name args => do
-    if let some (_, once) := (← get).useDecls[name]? then
-      if once then return some name
-    if let some n ← args.findSomeM? (onceBy visiting) then return some n
-    if visiting.contains name then return none
-    match (← get).types[name]? with
-    | none => pure none
-    | some decl =>
-      decl.ctors.findSomeM? fun c => do
-        match (← get).ctors[c]? with
-        | none => pure none
-        | some sig =>
-          (sig.fieldsAt args).findSomeM?
-            (onceBy (name :: visiting))
-  | _ => pure none
+def onceBy (visiting : List String) (t : Ty) : M (Option String) :=
+  walkTy usedOnceDecl (fun _ _ => pure none) visiting t
 
 /-- A type whose values have a `drop` of their own to run, or hold one that
 has: the name of the first such type found. A callable holds what it has
 taken hold of. -/
-partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := do
-  match ← find t with
-  | .tuple args => args.findSomeM? (tyHasDrop visiting)
-  | .fn _ _ _ _ cap => do
+partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) :=
+  walkTy dropDecl (fun visiting cap => do
     let root ← findCap cap
     if (← get).seen.contains root then return none
     modify fun s => { s with seen := s.seen.insert root }
     for (_, what) in ← edgesFrom root do
       if let .ty held := what then
         if let some name ← tyHasDrop visiting held then return some name
-    return none
-  | .con name args => do
-    if (← get).kimpls.has "Drop" name then
-      return some (bareName name)
-    if let some w ← args.findSomeM? (tyHasDrop visiting) then return some w
-    if visiting.contains name then return none
-    match (← get).types[name]? with
-    | none => pure none
-    | some decl =>
-      decl.ctors.findSomeM? fun c => do
-        match (← get).ctors[c]? with
-        | none => pure none
-        | some sig => (sig.fieldsAt args).findSomeM? (tyHasDrop (name :: visiting))
-  | _ => pure none
+    return none) visiting t
 
 def checkDups (dups : Array (Ty × String)) : M Unit := do
   for (t, why) in dups do
@@ -926,22 +913,9 @@ def checkDups (dups : Array (Ty × String)) : M Unit := do
 
 /-- Does a value of this type hold a callable that can be called only once: a
 resumption, or a callable that holds what is used once? -/
-partial def tyHoldsOnceCallable (visiting : List String) (t : Ty) : M Bool := do
-  match ← find t with
-  | .var _ => pure false
-  | .tuple args => args.anyM (tyHoldsOnceCallable visiting)
-  | .fn _ _ _ _ cap => capOwnsOnce cap
-  | .ref _ _ _ => pure false
-  | .con name args => do
-    if ← args.anyM (tyHoldsOnceCallable visiting) then return true
-    if visiting.contains name then return false
-    match (← get).types[name]? with
-    | none => pure false
-    | some decl =>
-      decl.ctors.anyM fun c => do
-        match (← get).ctors[c]? with
-        | none => pure false
-        | some sig => (sig.fieldsAt args).anyM (tyHoldsOnceCallable (name :: visiting))
+def tyHoldsOnceCallable (visiting : List String) (t : Ty) : M Bool := do
+  pure (← walkTy (fun _ => pure none) (fun _ cap => do pure (if ← capOwnsOnce cap then some () else none))
+    visiting t).isSome
 
 /-- A field left behind where nothing destroys it has no `drop` to run. -/
 def checkUnrun : M Unit := do
