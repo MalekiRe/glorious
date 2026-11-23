@@ -21,11 +21,7 @@ namespace Glorious.Syntax
 /-- The type with these lifetimes left out of its references. -/
 partial def elideLifetimes (lifes : List String) : TypeExpr → TypeExpr
   | .ref uniq t life => .ref uniq (elideLifetimes lifes t) (if life.any lifes.contains then none else life)
-  | .name x args => .name x (args.map (elideLifetimes lifes))
-  | .tuple args => .tuple (args.map (elideLifetimes lifes))
-  | .fn ps r => .fn (ps.map (elideLifetimes lifes)) (elideLifetimes lifes r)
-  | .performs r effects => .performs (elideLifetimes lifes r) (effects.map fun (e, args) => (e, args.map (elideLifetimes lifes)))
-  | t => t
+  | t => t.mapParts (elideLifetimes lifes)
 
 /-- The type a default's alias (`defaultKey`) is of, with whether it is of a
 place among the types (`~`). -/
@@ -262,16 +258,11 @@ partial def typedField (known : Std.HashSet String) (ps : List String) : TypeExp
 /-- A type with `Self::Name` in it written `<Self as Trait<..>>::Name`, of
 the implementation's own trait and type. -/
 partial def selfAssocs (self : TypeExpr) (tr : String) (targs : List TypeExpr) : TypeExpr → TypeExpr
-  | .name x args =>
+  | .name x [] =>
     match x.splitOn "::" with
-    | ["Self", name] => if args.isEmpty then .name assocOfMark [self, .name tr targs, .name name []]
-      else .name x (args.map (selfAssocs self tr targs))
-    | _ => .name x (args.map (selfAssocs self tr targs))
-  | .tuple ts => .tuple (ts.map (selfAssocs self tr targs))
-  | .fn ps r => .fn (ps.map (selfAssocs self tr targs)) (selfAssocs self tr targs r)
-  | .performs r effs => .performs (selfAssocs self tr targs r) (effs.map fun (e, as) => (e, as.map (selfAssocs self tr targs)))
-  | .ref u t l => .ref u (selfAssocs self tr targs t) l
-  | t => t
+    | ["Self", name] => .name assocOfMark [self, .name tr targs, .name name []]
+    | _ => .name x []
+  | t => t.mapParts (selfAssocs self tr targs)
 
 namespace Flat
 

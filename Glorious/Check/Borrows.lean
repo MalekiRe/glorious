@@ -168,10 +168,8 @@ partial def capTouches (cap : Nat) (out : List (Nat × Bool)) : M (List (Nat × 
 assign. -/
 partial def tyTouches (t : Ty) (out : List (Nat × Bool)) : M (List (Nat × Bool)) := do
   match ← find t with
-  | .var _ => pure out
-  | .con _ args | .tuple args => args.foldlM (fun o a => tyTouches a o) out
   | .fn _ _ _ _ cap => capTouches cap out
-  | .ref _ t _ => tyTouches t out
+  | t => t.parts.foldlM (fun o a => tyTouches a o) out
 
 end
 
@@ -195,10 +193,8 @@ partial def capLooks (brand : Nat) (cap : Nat) : M Bool := do
 
 partial def tyLooks (brand : Nat) (t : Ty) : M Bool := do
   match ← find t with
-  | .var _ => pure false
-  | .con _ args | .tuple args => args.anyM (tyLooks brand)
   | .fn _ _ _ _ cap => capLooks brand cap
-  | .ref _ t _ => tyLooks brand t
+  | t => t.parts.anyM (tyLooks brand)
 
 end
 

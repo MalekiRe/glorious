@@ -376,16 +376,11 @@ partial def supersAll (tr : String) : M (List String) := do
   pure (go 64 [] [tr])
 
 /-- The lifetimes a type names, but for `'_` and `'static`. -/
-partial def lifetimesOf : TypeExpr → List String
-  | .name x args => (if isLifetime x && x != "'_" && x != "'static" then [x] else []) ++ args.flatMap lifetimesOf
-  | .tuple args => args.flatMap lifetimesOf
-  | .fn ps r => ps.flatMap lifetimesOf ++ lifetimesOf r
-  | .performs r effects => lifetimesOf r ++ effects.flatMap fun (_, args) => args.flatMap lifetimesOf
-  | .ref _ t life =>
-    (match life with
-      | some l => if l != "'_" && l != "'static" then [l] else []
-      | none => []) ++ lifetimesOf t
-  | _ => []
+partial def lifetimesOf (t : TypeExpr) : List String :=
+  (match t with
+    | .name x _ => if isLifetime x && x != "'_" && x != "'static" then [x] else []
+    | .ref _ _ (some l) => if l != "'_" && l != "'static" then [l] else []
+    | _ => []) ++ t.parts.flatMap lifetimesOf
 
 /-- Is a reference written anywhere in a type? -/
 partial def writesRef : TypeExpr → Bool

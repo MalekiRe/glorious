@@ -396,14 +396,8 @@ private partial def parseItem : P Item := do
     let implLives := params.filter (·.startsWith "'")
     let rec unnamed (mine : List String) : TypeExpr → TypeExpr
       | .name x [] => if implLives.contains x && !mine.contains x then .name "'_" [] else .name x []
-      | .name x args => .name x (args.map (unnamed mine))
-      | .tuple args => .tuple (args.map (unnamed mine))
-      | .fn ps r => .fn (ps.map (unnamed mine)) (unnamed mine r)
-      | .performs r effects => .performs (unnamed mine r) (effects.map fun (e, args) => (e, args.map (unnamed mine)))
       | .ref uniq t (some l) => .ref uniq (unnamed mine t) (if implLives.contains l && !mine.contains l then none else some l)
-      | .ref uniq t none => .ref uniq (unnamed mine t) none
-      | .never => .never
-      | .hole => .hole
+      | t => t.mapParts (unnamed mine)
     let written := methods.toList.map fun
       | .fn name ps annots ret body =>
         let fix := unnamed ps ∘ TypeExpr.withSelf self ∘ called

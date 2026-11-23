@@ -384,35 +384,38 @@ inductive TypeExpr where
   | hole
   deriving Inhabited, Hashable
 
+/-- A written type with each type directly in it made by `f`. -/
+def TypeExpr.mapParts (f : TypeExpr → TypeExpr) : TypeExpr → TypeExpr
+  | .name x args => .name x (args.map f)
+  | .tuple args => .tuple (args.map f)
+  | .fn ps r => .fn (ps.map f) (f r)
+  | .performs r effects => .performs (f r) (effects.map fun (e, args) => (e, args.map f))
+  | .ref uniq t life => .ref uniq (f t) life
+  | t => t
+
+/-- The types directly in a written type. -/
+def TypeExpr.parts : TypeExpr → List TypeExpr
+  | .name _ args | .tuple args => args
+  | .fn ps r => ps ++ [r]
+  | .performs r effects => r :: effects.flatMap (·.2)
+  | .ref _ t _ => [t]
+  | _ => []
+
 /-- A type with `Self` written out as the type an implementation is for. -/
 partial def TypeExpr.withSelf (self : TypeExpr) : TypeExpr → TypeExpr
   | .name "Self" [] => self
-  | .name x args => .name x (args.map (withSelf self))
-  | .tuple args => .tuple (args.map (withSelf self))
-  | .fn ps r => .fn (ps.map (withSelf self)) (withSelf self r)
-  | .performs r effects =>
-    .performs (withSelf self r) (effects.map fun (e, args) => (e, args.map (withSelf self)))
-  | .ref uniq t life => .ref uniq (withSelf self t) life
-  | .never => .never
-  | .hole => .hole
+  | t => t.mapParts (withSelf self)
 
 /-- A type with each of the named parameters replaced. -/
 partial def substTypeExpr (m : List (String × TypeExpr)) : TypeExpr → TypeExpr
-  | .name x args =>
-    match m.lookup x, args with
-    | some t, [] => t
-    | _, _ => .name x (args.map (substTypeExpr m))
-  | .tuple args => .tuple (args.map (substTypeExpr m))
-  | .fn ps r => .fn (ps.map (substTypeExpr m)) (substTypeExpr m r)
-  | .performs r effects =>
-    .performs (substTypeExpr m r) (effects.map fun (e, args) => (e, args.map (substTypeExpr m)))
+  | .name x [] => (m.lookup x).getD (.name x [])
   | .ref uniq t life =>
     -- A lifetime parameter is replaced by the lifetime it is given.
     let life := match life.bind fun l => m.lookup l with
       | some (TypeExpr.name l []) => some l
       | _ => life
     .ref uniq (substTypeExpr m t) life
-  | t => t
+  | t => t.mapParts (substTypeExpr m)
 
 /-- A type as it is written in the name of a trait at its arguments,
 `From<Option<Int>>`: one spelling for one type. -/

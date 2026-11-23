@@ -1696,12 +1696,8 @@ private partial def eraseLifetimesTy : TypeExpr → TypeExpr
     .name x ((args.filter fun
       | .name n [] => !n.startsWith "'"
       | _ => true).map eraseLifetimesTy)
-  | .tuple args => .tuple (args.map eraseLifetimesTy)
-  | .fn ps r => .fn (ps.map eraseLifetimesTy) (eraseLifetimesTy r)
-  | .performs r effects =>
-    .performs (eraseLifetimesTy r) (effects.map fun (e, args) => (e, args.map eraseLifetimesTy))
   | .ref uniq t _ => .ref uniq (eraseLifetimesTy t) none
-  | t => t
+  | t => t.mapParts eraseLifetimesTy
 
 partial def eraseLifetimes (items : List Syntax.Item) : List Syntax.Item :=
   let params := fun (ps : List String) => ps.filter fun p => !p.startsWith "'"
