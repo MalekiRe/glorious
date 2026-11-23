@@ -505,40 +505,26 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} (hp : ProgramOk Δ p) :
             (.exit hx hin' hrest') hs).weaken
             fun id => by simp only [occStack, occFrame, occs]; omega
         | call env body =>
-          have h1 : leave p target after (.call env body :: st) store
-              = leave p target after st store := by simp [leave, ht]
-          rw [h1]
+          simp only [leave, ht]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
         | handler id h =>
-          have h1 : leave p target after (.handler id h :: st) store
-              = leave p target after st store := by simp [leave, ht]
-          rw [h1]
+          simp only [leave, ht]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
         | label id =>
-          have h1 : leave p target after (.label id :: st) store
-              = leave p target after st store := by simp [leave, ht]
-          rw [h1]
+          simp only [leave, ht]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
         | lend uniq a b =>
-          have h1 : leave p target after (.lend uniq a b :: st) store
-              = leave p target after st store := by simp [leave, ht]
-          rw [h1]
+          simp only [leave, ht]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
         | cell a =>
-          have h1 : leave p target after (.cell a :: st) store
-              = leave p target after st (store.release a) := by simp [leave, ht]
-          rw [h1]
+          simp only [leave, ht]
           exact (((ih (hs.release a)).2 hrest hx hin').release).weaken
             fun id => by simp only [occStack]; omega
         | yield w =>
-          have h1 : leave p target after (.yield w :: st) store
-              = leave p target after st store := by simp [leave, ht]
-          rw [h1]
+          simp only [leave, ht]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
         | exit t a =>
-          have h1 : leave p target after (.exit t a :: st) store
-              = leave p target after st store := by simp [leave, ht]
-          rw [h1]
+          simp only [leave, ht]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
 
 theorem deliver_safe {p : Program} {S : StoreTy} {store : Store Frame} {st : List Frame}
@@ -684,10 +670,7 @@ theorem apply_ok {p : Program} {S : StoreTy} {store : Store Frame} {st : List Fr
         exact .inr (.inr ⟨by simp [apply, takeCont_none hget], .resumed hget⟩)
       | some seg =>
         obtain ⟨ε'', ϕ'', hst'⟩ := hseg seg hget S (StoreTy.Le.refl S) st ε ϕ hst hle hsub
-        have h1 : apply p (.cont id v) st ⟨conts, labels, cells⟩
-            = deliver p v (seg ++ st) ⟨conts.set id none, labels, cells⟩ := by
-          simp [apply, takeCont_some hget]
-        rw [h1]
+        simp only [apply, takeCont_some hget]
         exact .inr (.inl ⟨id, v, seg, rfl, hget,
           (deliver_safe hp (hs.take id) hst' hv).weaken
             fun k => by simp only [occStack_append]; omega⟩)
@@ -695,9 +678,7 @@ theorem apply_ok {p : Program} {S : StoreTy} {store : Store Frame} {st : List Fr
     cases hf : findLabel Frame.asLabel id st with
     | none => exact .inr (.inr ⟨by simp [apply, hf], .dead hf⟩)
     | some r =>
-      have h1 : apply p (.label id v) st store = leave p (.label id) (.yield v) st store := by
-        simp [apply, hf]
-      rw [h1]
+      simp only [apply, hf]
       exact .inl ⟨(fun _ _ h => by cases h),
         (leave_safe hp hs hst (.label hl hv) (findLabel_target hf)).weaken
           fun k => by simp only [occCallee, occAfter]; omega⟩

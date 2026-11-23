@@ -797,9 +797,7 @@ theorem callFn_safe {p : Program} {S : StoreTy} {fn : Nat} {sig : FnSig} {θ rs 
     have hb := hbody.inst hp.stable (θ ++ rs) fun hL =>
       ⟨InjOn.of_nodup (by rw [hac]; exact hnd hL), closed_open (by simpa [closed] using hcl) _ _⟩
     rw [List.map_append, List.map_append, hcaps, hret, heff, hac] at hb
-    have h1 : callFn p fn captures vs st store = .next ⟨c.body, vs ++ captures ++ bs, st, store⟩ := by
-      simp [callFn, invoke, hF, hsel]
-    rw [h1]
+    simp only [callFn, invoke, hF, hsel]
     refine ⟨.mk ((hv'.append hc).append hbs) hb hle hacc hst hs, Kept.refl _, fun id => ?_⟩
     have := clause_env_le id (captures := captures) (live := fv c.body) hm hlen hwild
     show occEnv id (vs ++ captures ++ bs) (fv c.body) + occStack id st
