@@ -25,13 +25,6 @@ def forKeeping (st : St) : St :=
 program's as it is now, which `adopt` keeps. -/
 def noBodies (st : St) : St := { st with body := {}, fnBodies := {} }
 
-/-- An item as its declarations have it: its functions without their bodies. -/
-partial def withoutBodies : Item → Item
-  | .fn name params annots ret _ => .fn name params annots ret {}
-  | .impl params tr head args ctx methods => .impl params tr head args ctx (methods.map withoutBodies)
-  | .pub parent item => .pub parent (withoutBodies item)
-  | other => other
-
 /-- A group of functions, as what its check is made from. -/
 def groupKey (key : UInt64) (group : List FnDecl) : UInt64 :=
   group.foldl (fun h d => mixHash h (hash (d.name, d.params, d.annots, d.ret, d.body, d.bounds))) key
@@ -499,7 +492,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
       | .pub _ (.fn ..) => false
       | .bounds f _ => !fnNames.contains f
       | _ => true
-    let mut key := mixHash seed (hash (declared.map withoutBodies))
+    let mut key := mixHash seed (hash (declared.map Item.declared))
     -- (A state kept from before has the implementations that program
     -- declared, each with its functions whole; the declarations do not
     -- depend on the bodies, so the ones put in their place are this

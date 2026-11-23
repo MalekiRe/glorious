@@ -1922,20 +1922,13 @@ def collect (items : List Syntax.Item) :
       throw s!"an implementation of `{tr}`: a program with traits is elaborated only after it is checked"
   pure (g, fns.toList, names)
 
-/-- Flat items as what they declare, for what reads declarations alone (the
+/-- Items as what they declare, for what reads declarations alone (the
 certificate): each function without its body. -/
-def declaredOf (items : List Syntax.Item) : List Item :=
-  items.map fun
-    | .fn n ps annots ret _ => .fn n ps annots ret {}
-    | item => item
+def declaredOf (items : List Syntax.Item) : List Item := items.map Item.declared
 
-/-- What tree items declare, for what reads declarations alone (the
-certificate): their functions' bodies are not asked. -/
+/-- What items declare, for what reads declarations alone (the certificate). -/
 def collectDeclared (items : List Item) : Except String Globals := do
-  let (g, _, _) ← collect (items.map fun
-    | .fn n ps annots ret _ => Syntax.Item.fn n ps annots ret {}
-    | item => item)
-  pure g
+  pure (← collect (declaredOf items)).1
 
 /-- A function whose body mentions its own label `@name` runs inside that label's
 scope, so applying the label returns from the function. -/
