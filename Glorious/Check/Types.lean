@@ -1439,16 +1439,14 @@ mutual
 
 partial def freeTys : Ty → List Nat
   | .var id => [id]
-  | .con _ args => args.flatMap freeTys
-  | .tuple args => args.flatMap freeTys
+  | .con _ args | .tuple args => args.flatMap freeTys
   | .fn ps r effs _ _ =>
     ps.flatMap freeTys ++ freeTys r ++ effs.flatMap (fun e => e.2.flatMap freeTys)
   | .ref how t _ => freeTys how ++ freeTys t
 
 partial def freeRows : Ty → List Nat
   | .var _ => []
-  | .con _ args => args.flatMap freeRows
-  | .tuple args => args.flatMap freeRows
+  | .con _ args | .tuple args => args.flatMap freeRows
   | .fn ps r effs tail _ =>
     ps.flatMap freeRows ++ freeRows r ++ effs.flatMap (fun e => e.2.flatMap freeRows)
       ++ tail.toList
@@ -1458,8 +1456,7 @@ end
 
 partial def freeCaps : Ty → List Nat
   | .var _ => []
-  | .con _ args => args.flatMap freeCaps
-  | .tuple args => args.flatMap freeCaps
+  | .con _ args | .tuple args => args.flatMap freeCaps
   | .fn ps r effs _ cap =>
     cap :: (ps.flatMap freeCaps ++ freeCaps r ++ effs.flatMap (fun e => e.2.flatMap freeCaps))
   | .ref _ t cap => cap :: freeCaps t

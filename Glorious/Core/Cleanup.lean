@@ -164,8 +164,7 @@ def starts (s : State) : Nat :=
     | some (a, c) =>
       applyStarts c (.lend uniq a (s.store.labels + 1) :: .call s.env body :: s.stack)
         ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
-  | .mem _ _ _ => 0
-  | .host _ _ _ => 0
+  | .mem _ _ _ | .host _ _ _ => 0
 
 /-- How many guards a step installs: one, if it is a guard that is stepping. -/
 def installs (s : State) : Nat :=

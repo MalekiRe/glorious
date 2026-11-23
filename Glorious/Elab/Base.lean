@@ -671,8 +671,7 @@ partial def patVars : Pattern → List String
   | .wild => []
   | .var x => [x]
   | .int _ => []
-  | .ctor _ _ args => args.flatMap patVars
-  | .tuple args => args.flatMap patVars
+  | .ctor _ _ args | .tuple args => args.flatMap patVars
 
 open Flat in
 /-- The names a statement gives values that may hold what `tracked` names hold. -/

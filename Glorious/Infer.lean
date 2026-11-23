@@ -24,17 +24,13 @@ partial def tmRefs : Core.Tm → List Nat
   | .handle ret ops _ _ body => ret :: ops.map (·.2) ++ tmRefs body
   | .handleTail ret ops _ _ => ret :: ops.map (·.2)
   | .raise _ _ => []
-  | .perform _ _ body => tmRefs body
-  | .label _ body => tmRefs body
+  | .perform _ _ body | .label _ body => tmRefs body
   | .labelTail _ => []
-  | .cell _ _ body => tmRefs body
-  | .lend _ _ _ _ _ body => tmRefs body
+  | .cell _ _ body | .lend _ _ _ _ _ body => tmRefs body
   | .cellTail _ _ => []
   | .guard _ _ body => tmRefs body
   | .guardTail _ _ => []
-  | .cancel _ body => tmRefs body
-  | .mem _ _ body => tmRefs body
-  | .host _ _ body => tmRefs body
+  | .cancel _ body | .mem _ _ body | .host _ _ body => tmRefs body
 
 /-- For each function, the least function it is mutually recursive with:
 the strongly connected parts of what each refers to (Tarjan's way, with a

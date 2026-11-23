@@ -173,8 +173,7 @@ def ofInt (f : Format) (n : Int) : Nat :=
 
 /-- A number without what is after its point; none for infinity and NaN. -/
 def toInt : Num → Option Int
-  | .nan => none
-  | .inf _ => none
+  | .nan | .inf _ => none
   | .fin s m e =>
     let whole : Nat := if e ≥ 0 then m * 2 ^ e.toNat else m / 2 ^ (-e).toNat
     some (if s then -(whole : Int) else whole)
@@ -212,8 +211,7 @@ def decimal (x : Num) (p : Nat) : Option (Nat × Int) :=
   if p == 0 || p > 17 then none
   else
     match x with
-    | .nan => none
-    | .inf _ => none
+    | .nan | .inf _ => none
     | .fin _ m e =>
       if m == 0 then some (0, 0)
       else

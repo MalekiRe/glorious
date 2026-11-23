@@ -712,10 +712,8 @@ partial def flattenRow (r : IRow) : M IRow := do
 partial def occurs (id : Nat) (t : ITy) : M Bool := do
   match ← find t with
   | .var j => pure (id == j)
-  | .param _ => pure false
-  | .int => pure false
-  | .tuple fs => fs.anyM (occurs id)
-  | .data _ args => args.anyM (occurs id)
+  | .param _ | .int => pure false
+  | .tuple fs | .data _ fs => fs.anyM (occurs id)
   | .fn ps r ops tail _ env _ => do
     if ← ps.anyM (occurs id) then return true
     if ← occurs id r then return true

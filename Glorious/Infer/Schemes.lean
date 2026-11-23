@@ -59,10 +59,8 @@ def Vars.size (v : Vars) : Nat := v.tys.size + v.rows.size + v.clss.size
 partial def varsOf (t : ITy) (acc : Vars) : Vars :=
   match t with
   | .var id => { acc with tys := acc.tys.insert id }
-  | .param _ => acc
-  | .int => acc
-  | .tuple fs => fs.foldl (fun a f => varsOf f a) acc
-  | .data _ args => args.foldl (fun a f => varsOf f a) acc
+  | .param _ | .int => acc
+  | .tuple fs | .data _ fs => fs.foldl (fun a f => varsOf f a) acc
   | .fn ps r ops tail cls env _ =>
     let acc := ps.foldl (fun a f => varsOf f a) acc
     let acc := varsOf r acc
@@ -401,9 +399,7 @@ def thaw (fz : Frozen) : M Scheme := do
 /-- Is this type known to hold something that cannot be duplicated? -/
 partial def nonDup (seen : List Nat) (t : ITy) : M Bool := do
   match ← find t with
-  | .var _ => pure false
-  | .param _ => pure false
-  | .int => pure false
+  | .var _ | .param _ | .int => pure false
   | .tuple fs => fs.anyM (nonDup seen)
   | .data name args =>
     if name == arrayName then args.anyM (nonDup seen)
@@ -417,8 +413,7 @@ partial def nonDup (seen : List Nat) (t : ITy) : M Bool := do
     match ← findCls cls with
     | .lit once => pure once
     | .var _ => pure false
-  | .ref _ _ => pure false
-  | .never => pure false
+  | .ref _ _ | .never => pure false
 
 /-- Does a type have a reference to this region in it, or a callable that
 takes or gives one? -/
@@ -666,11 +661,8 @@ partial def settle : M Unit := do
 callable types in it. (Not what those include in turn.) -/
 partial def namedAccs (t : ITy) (out : Std.HashSet Nat) : M (Std.HashSet Nat) := do
   match ← find t with
-  | .var _ => pure out
-  | .param _ => pure out
-  | .int => pure out
-  | .tuple fs => fs.foldlM (fun o f => namedAccs f o) out
-  | .data _ args => args.foldlM (fun o f => namedAccs f o) out
+  | .var _ | .param _ | .int => pure out
+  | .tuple fs | .data _ fs => fs.foldlM (fun o f => namedAccs f o) out
   | .fn ps r ops tail _ env a => do
     let mut out ← ps.foldlM (fun o f => namedAccs f o) out
     out ← namedAccs r out
@@ -692,11 +684,8 @@ those include: gathered for the types the whole program shares. -/
 partial def sharedRegions (t : ITy) (acc : Std.HashSet Nat × Std.HashSet Nat) :
     M (Std.HashSet Nat × Std.HashSet Nat) := do
   match ← find t with
-  | .var _ => pure acc
-  | .param _ => pure acc
-  | .int => pure acc
-  | .tuple fs => fs.foldlM (fun a f => sharedRegions f a) acc
-  | .data _ args => args.foldlM (fun a f => sharedRegions f a) acc
+  | .var _ | .param _ | .int => pure acc
+  | .tuple fs | .data _ fs => fs.foldlM (fun a f => sharedRegions f a) acc
   | .fn ps r ops tail _ env a => do
     let mut acc ← ps.foldlM (fun a f => sharedRegions f a) acc
     acc ← sharedRegions r acc

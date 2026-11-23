@@ -393,8 +393,7 @@ instance (priority := low) {κ ν : Type} [BEq κ] [Hashable κ] [Absorb ν] : D
     -- (Made by both: the same, as both took it from what is the same.)
     | none, some cur => if samePtr cur v then some m else
         match p with
-        | some _ => none
-        | none => none
+        | some _ | none => none
     | none, none => some (m.insert k v)
     | some _, none => none
   fits _ a d := d.all fun (k, was, v) =>
@@ -690,8 +689,7 @@ def fitsDelta (p : Option St) (a : St) (d : StDelta) : Bool :=
     | some p => samePtr a.modules p.modules && samePtr a.dropMode p.dropMode
     | none => true
   let left := match d.assocUses with
-    | .grown _ tail => tail.isEmpty
-    | .whole all => all.isEmpty
+    | .grown _ tail | .whole tail => tail.isEmpty
   sameBase && (a.assocUses.isEmpty && left || Delta.fits (p.map (·.assocUses)) a.assocUses d.assocUses)
     && fitsPart0 p a d.part0 && fitsPart1 p a d.part1 && fitsPart2 p a d.part2 && fitsPart3 p a d.part3
     && fitsPart4 p a d.part4 && fitsPart5 p a d.part5 && fitsPart6 p a d.part6 && fitsPart7 p a d.part7
@@ -715,8 +713,7 @@ def applyDelta (p : Option St) (a : St) (d : StDelta) : Option St := do
     if mine.isEmpty then m else m.insert key ((m.getD key #[]) ++ mine)
   -- (Emptied as each group's are gone through: empty if both left it so.)
   let left := match d.assocUses with
-    | .grown _ tail => tail.isEmpty
-    | .whole all => all.isEmpty
+    | .grown _ tail | .whole tail => tail.isEmpty
   let assocUses ← if a.assocUses.isEmpty && left then pure #[] else Delta.apply (p.map (·.assocUses)) a.assocUses d.assocUses
   -- (The parts put together on `a`, then the rest as `d` left it.)
   let mut s := a

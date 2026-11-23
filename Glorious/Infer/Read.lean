@@ -81,8 +81,7 @@ mutual
 /-- A finished type. A type nothing determined is unit; an open row is closed. -/
 partial def zonk (pr : Pr) (t : ITy) : M Ty := do
   match ← find t with
-  | .var _ => pure (.tuple [])
-  | .param _ => pure (.tuple [])
+  | .var _ | .param _ => pure (.tuple [])
   | .int => pure .int
   | .tuple fs => do pure (.tuple (← fs.mapM (zonk pr)))
   | .data n args => do pure (.data n (← args.mapM (zonk pr)))
@@ -117,11 +116,8 @@ end
 /-- The cells' regions a type mentions, other than those its callable types bind. -/
 partial def atomsOf (t : ITy) (out : List Nat) : M (List Nat) := do
   match ← find t with
-  | .var _ => pure out
-  | .param _ => pure out
-  | .int => pure out
-  | .tuple fs => fs.foldlM (fun o f => atomsOf f o) out
-  | .data _ args => args.foldlM (fun o f => atomsOf f o) out
+  | .var _ | .param _ | .int => pure out
+  | .tuple fs | .data _ fs => fs.foldlM (fun o f => atomsOf f o) out
   | .fn ps r ops tail _ env acc => do
     let mut inner ← ps.foldlM (fun o f => atomsOf f o) []
     inner ← atomsOf r inner
@@ -261,10 +257,7 @@ partial def ofRg (env : RgEnv) : Typing.Rgn → M Nat
       match env.own with
       | some r => pure r
       | none => freshRg
-  | .cell _ => freshRg
-  | .lab _ => freshRg
-  | .loan _ => freshRg
-  | .wr _ => freshRg
+  | .cell _ | .lab _ | .loan _ | .wr _ => freshRg
   | .or a b => do
     -- (One of several places: a region of its own, used as each.)
     let x ← ofRg env a
@@ -455,8 +448,7 @@ partial def dataUses : Ty → List (Nat × List Ty)
 /-- Every use of an operation inside a type. -/
 partial def opUses : Ty → List (Nat × List Ty)
   | .int => []
-  | .tuple fs => fs.flatMap opUses
-  | .data _ args => args.flatMap opUses
+  | .tuple fs | .data _ fs => fs.flatMap opUses
   | .fn _ ps r eff _ env _ =>
     ps.flatMap opUses ++ opUses r ++ eff ++ (eff.flatMap fun (_, targs) => targs.flatMap opUses)
       ++ (env.getD []).flatMap opUses
@@ -464,14 +456,12 @@ partial def opUses : Ty → List (Nat × List Ty)
   | .never => []
 
 def hintTypes : Hint → List Ty
-  | .ty t => [t]
-  | .clo t _ => [t]
+  | .ty t | .clo t _ => [t]
   | .handler ρ H _ _ => ρ :: H.flatMap (·.2)
   | .rgns _ => []
 
 def hintOps : Hint → List (Nat × List Ty)
-  | .ty _ => []
-  | .clo _ _ => []
+  | .ty _ | .clo _ _ => []
   | .handler _ H _ _ => H
   | .rgns _ => []
 

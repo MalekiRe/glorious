@@ -81,23 +81,11 @@ inductive Frame where
 
 def Frame.asHandler : Frame → Option (Nat × Handler)
   | .handler id h => some (id, h)
-  | .call _ _ => none
-  | .label _ => none
-  | .guard _ _ => none
-  | .cell _ => none
-  | .lend _ _ _ => none
-  | .yield _ => none
-  | .exit _ _ => none
+  | .call _ _ | .label _ | .guard _ _ | .cell _ | .lend _ _ _ | .yield _ | .exit _ _ => none
 
 def Frame.asLabel : Frame → Option Nat
   | .label id => some id
-  | .call _ _ => none
-  | .handler _ _ => none
-  | .guard _ _ => none
-  | .cell _ => none
-  | .lend _ _ _ => none
-  | .yield _ => none
-  | .exit _ _ => none
+  | .call _ _ | .handler _ _ | .guard _ _ | .cell _ | .lend _ _ _ | .yield _ | .exit _ _ => none
 
 /-- Is this frame what an exit is heading for? -/
 def Frame.isTarget : Frame → Target → Bool

@@ -119,10 +119,8 @@ partial def capHoldsLoan (loan : Nat) (cap : Nat) (suspended : Bool := false)
         | _ => false
       if !given then
         if ← tyHoldsLoan loan t suspended plain then return true
-    | .brand b => if ← cellHoldsLoan loan b suspended plain then return true
-    | .touch b _ => if ← cellHoldsLoan loan b suspended plain then return true
-    | .once => pure ()
-    | .must => pure ()
+    | .brand b | .touch b _ => if ← cellHoldsLoan loan b suspended plain then return true
+    | .once | .must => pure ()
   return false
 
 /-- A callable that uses a mutable variable can reach what the variable holds. -/
@@ -146,8 +144,7 @@ partial def tyHoldsLoan (loan : Nat) (t : Ty) (suspended : Bool := false)
         if r' == v then
           if ← lives.anyM (capHoldsLoan loan · suspended plain) then return true
     pure false
-  | .con _ args => args.anyM (tyHoldsLoan loan · suspended plain)
-  | .tuple args => args.anyM (tyHoldsLoan loan · suspended plain)
+  | .con _ args | .tuple args => args.anyM (tyHoldsLoan loan · suspended plain)
   | .fn _ _ _ _ cap => capHoldsLoan loan cap suspended plain
   | .ref _ t cap => do
     if ← capHoldsLoan loan cap suspended plain then return true
@@ -172,8 +169,7 @@ assign. -/
 partial def tyTouches (t : Ty) (out : List (Nat × Bool)) : M (List (Nat × Bool)) := do
   match ← find t with
   | .var _ => pure out
-  | .con _ args => args.foldlM (fun o a => tyTouches a o) out
-  | .tuple args => args.foldlM (fun o a => tyTouches a o) out
+  | .con _ args | .tuple args => args.foldlM (fun o a => tyTouches a o) out
   | .fn _ _ _ _ cap => capTouches cap out
   | .ref _ t _ => tyTouches t out
 
@@ -200,8 +196,7 @@ partial def capLooks (brand : Nat) (cap : Nat) : M Bool := do
 partial def tyLooks (brand : Nat) (t : Ty) : M Bool := do
   match ← find t with
   | .var _ => pure false
-  | .con _ args => args.anyM (tyLooks brand)
-  | .tuple args => args.anyM (tyLooks brand)
+  | .con _ args | .tuple args => args.anyM (tyLooks brand)
   | .fn _ _ _ _ cap => capLooks brand cap
   | .ref _ t _ => tyLooks brand t
 
@@ -210,16 +205,12 @@ end
 /-- Whether doing this to a variable is forbidden by a borrow of it. -/
 def Using.forbiddenBy (how : Using) (uniq : Bool) : Bool :=
   match how with
-  | .read => uniq
-  | .share => uniq
-  | .write => true
-  | .move => true
-  | .lend => true
+  | .read | .share => uniq
+  | .write | .move | .lend => true
 
 /-- The types a binding's value has, for looking into what it holds. -/
 def Binding.held : Binding → Option Ty
-  | .val t _ => some t
-  | .cell t _ => some t
+  | .val t _ | .cell t _ => some t
   | .poly s => some s.ty
   | .label _ _ => none
 

@@ -308,21 +308,13 @@ theorem putPart_none_of_part : ∀ {path : List PathStep} {v : Value} (w : Value
 def isCtor (v : Value) (tag arity : Nat) : Bool :=
   match v with
   | .data t fields => tag == t && arity == fields.length
-  | .int _ => false
-  | .clo _ _ => false
-  | .cont _ => false
-  | .label _ => false
-  | .ref _ _ _ => false
+  | .int _ | .clo _ _ | .cont _ | .label _ | .ref _ _ _ => false
 
 /-- Is this value the integer `n`? -/
 def isInt (v : Value) (n : Int) : Bool :=
   match v with
   | .int m => n == m
-  | .data _ _ => false
-  | .clo _ _ => false
-  | .cont _ => false
-  | .label _ => false
-  | .ref _ _ _ => false
+  | .data _ _ | .clo _ _ | .cont _ | .label _ | .ref _ _ _ => false
 
 end Value
 

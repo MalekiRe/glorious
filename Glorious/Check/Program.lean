@@ -164,8 +164,7 @@ def sideThreads : Nat := 16
 partial def capsOf : Ty → List Nat
   | .ref how t c => capsOf how ++ capsOf t ++ [c]
   | .fn ps r _ _ c => ps.flatMap capsOf ++ capsOf r ++ [c]
-  | .con _ args => args.flatMap capsOf
-  | .tuple args => args.flatMap capsOf
+  | .con _ args | .tuple args => args.flatMap capsOf
   | .var _ => []
 
 /-- The lifetimes of the references a type is made of, outermost first. -/

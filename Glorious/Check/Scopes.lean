@@ -621,11 +621,7 @@ partial def capHolds (brand : Nat) (cap : Nat) : M Bool := do
     match what with
     | .brand b => if b == brand then return true
     | .ty t => if ← tyHolds brand t then return true
-    | .once => pure ()
-    | .must => pure ()
-    | .loan _ => pure ()
-    | .touch _ _ => pure ()
-    | .inner _ => pure ()
+    | .once | .must | .loan _ | .touch _ _ | .inner _ => pure ()
   return false
 
 /-- Does the type mention a callable that holds the brand? -/
@@ -639,8 +635,7 @@ partial def tyHolds (brand : Nat) (t : Ty) : M Bool := do
         if r' == v then
           if ← lives.anyM (capHolds brand ·) then return true
     pure false
-  | .con _ args => args.anyM (tyHolds brand)
-  | .tuple args => args.anyM (tyHolds brand)
+  | .con _ args | .tuple args => args.anyM (tyHolds brand)
   | .fn ps r effs tail cap => do
     if ← capHolds brand cap then return true
     if ← ps.anyM (tyHolds brand) then return true
@@ -692,8 +687,7 @@ def jumpsAfter (label : String) : String :=
 def scopeRoots (scope : Scope) : List (String × Ty) :=
   scope.map fun (name, b) =>
     match b with
-    | .val t _ => (s!"`{name}`, which outlives the scope, could hold it", t)
-    | .cell t _ => (s!"`{name}`, which outlives the scope, could hold it", t)
+    | .val t _ | .cell t _ => (s!"`{name}`, which outlives the scope, could hold it", t)
     | .label t _ => (s!"it can be passed out through `{name}`", t)
     | .poly s => (s!"`{name}`, which outlives the scope, could hold it", s.ty)
 
@@ -760,10 +754,7 @@ partial def capOwnsOnce (cap : Nat) : M Bool := do
     | .once => return true
     | .must => pure ()
     | .ty t => if ← tyOwnsOnce [] t then return true
-    | .brand _ => pure ()
-    | .loan _ => pure ()
-    | .touch _ _ => pure ()
-    | .inner _ => pure ()
+    | .brand _ | .loan _ | .touch _ _ | .inner _ => pure ()
   return false
 
 /-- Can a value of this type be used only once? One that holds a resumption,
@@ -784,8 +775,7 @@ partial def tyHoldsVar (visiting : List String) (id : Nat) (t : Ty) : M Bool := 
   match ← find t with
   | .var v => pure (v == id)
   | .tuple args => args.anyM (tyHoldsVar visiting id)
-  | .fn _ _ _ _ _ => pure false
-  | .ref _ _ _ => pure false
+  | .fn _ _ _ _ _ | .ref _ _ _ => pure false
   | .con name args => do
     if visiting.contains name then return false
     match (← get).types[name]? with

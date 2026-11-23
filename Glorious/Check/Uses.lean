@@ -334,12 +334,10 @@ partial def ACtx.ctorOf (ctx : ACtx) (name : String) : Option String :=
 
 /-- The names a pattern binds, leaving out constructors and constants. -/
 partial def binders (ctx : ACtx) : Pattern → List String
-  | .wild => []
-  | .int _ => []
+  | .wild | .int _ => []
   | .var x =>
     if (ctx.ctorOf x).isSome || (ctx.aliases[x]?).isSome then [] else [x]
-  | .ctor _ _ ps => ps.flatMap (binders ctx)
-  | .tuple ps => ps.flatMap (binders ctx)
+  | .ctor _ _ ps | .tuple ps => ps.flatMap (binders ctx)
 
 inductive Fit where
   | yes
@@ -649,8 +647,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String ×
       | .gone t => (.gone t, n)
       | .probe => (.probe, n)
       | _ => (.unknown, n))
-  | .call id f args => runCall ctx depth b env f args.toList id
-  | .tailCall id f args => runCall ctx depth b env f args.toList id
+  | .call id f args | .tailCall id f args => runCall ctx depth b env f args.toList id
   | .closure id clauses =>
     if id != 0 && ctx.now.contains id then applyClauses ctx depth b clauses env []
     else
@@ -720,8 +717,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String ×
     else
       -- Leaving through the label gives a value the count does not follow.
       pure (alts ++ [(.unknown, maxUses alts)])
-  | .ref _ _ => pure [(.unknown, 0)]
-  | .refField _ _ _ _ _ => pure [(.unknown, 0)]
+  | .ref _ _ | .refField _ _ _ _ _ => pure [(.unknown, 0)]
   | .fieldOf _ e _ => do
     let alts ← runExpr ctx depth b env e
     pure (alts.map fun (v, n) =>
@@ -1249,8 +1245,7 @@ def usesEnv (arity : Nat) : AVal :=
 partial def tyJumps (t : Ty) : M Bool := do
   match ← find t with
   | .var _ => pure false
-  | .con _ args => args.anyM tyJumps
-  | .tuple args => args.anyM tyJumps
+  | .con _ args | .tuple args => args.anyM tyJumps
   | .ref _ inner _ => tyJumps inner
   | .fn ps r _ _ cap => do
     if ← ps.anyM tyJumps then return true

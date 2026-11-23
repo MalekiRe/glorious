@@ -840,8 +840,7 @@ def Decided.of (b : Blocks) : Decided := Id.run do
   for decision in b.decided do
     d := match decision with
       | .rest id _ => { d with rests := d.rests.insert id }
-      | .eta owner _ _ => { d with owners := d.owners.insert owner }
-      | .letMut owner _ _ _ => { d with owners := d.owners.insert owner }
+      | .eta owner _ _ | .letMut owner _ _ _ => { d with owners := d.owners.insert owner }
       | .refPats id _ => { d with closures := d.closures.insert id }
       | .receiver call _ _ => { d with calls := d.calls.insert call }
       | .derefField id _ => { d with fields := d.fields.insert id }

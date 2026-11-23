@@ -37,15 +37,13 @@ structure Token where
   deriving Inhabited, Hashable
 
 def Tok.describe : Tok → String
-  | .ident s => s!"`{s}`"
-  | .int n => s!"`{n}`"
+  | .ident s | .int s => s!"`{s}`"
   | .typed n suffix => s!"`{n}{suffix}`"
   | .float _ _ _ => "a number"
   | .char _ => "a character"
   | .str _ => "a text"
   | .bytes _ => "bytes"
-  | .op s => s!"`{s}`"
-  | .punct s => s!"`{s}`"
+  | .op s | .punct s => s!"`{s}`"
   | .eof => "end of input"
 
 private def isIdentStart (c : Char) : Bool := c.isAlpha || c == '_'

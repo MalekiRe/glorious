@@ -1625,9 +1625,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     let mut keep : List Ty := [.func [] .unit amb (← freshCap)]
     for (_, bd) in scope do
       keep := (match bd with
-        | .val t _ => t
-        | .cell t _ => t
-        | .label t _ => t
+        | .val t _ | .cell t _ | .label t _ => t
         | .poly p => p.ty) :: keep
     for (_, t) in s.group do
       keep := t :: keep
