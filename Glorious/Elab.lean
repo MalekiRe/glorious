@@ -1548,23 +1548,19 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
     | .let_ pat value =>
       let value ← untraitExpr tr owner value
       let rest ← untraitStmts tr owner pos rest
-      match pat with
-      | .var x =>
-        let hooks := (dropHook tr ⟨owner, pos.1, pos.2, x, false⟩).toList ++ partHooks tr owner pos x
-        -- (Before a `tail` call there is no later: see the clause's own.)
-        let now := tailsStmts (← get) rest
-        let hooks ← hooks.mapM fun h => hookS h now
-        pure ((← pushStmt (.let_ pat value)) :: hooks ++ rest)
-      | _ =>
-        -- What the pattern takes under a name nothing uses, or under `_`
-        -- (given a name for it), is destroyed likewise.
-        let site := fun (x : String) => (⟨owner, pos.1, pos.2, Syntax.letSite x, false⟩ : DropSite)
-        let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome) [pat] 0
-        let pat := letWilds pos ((pats.head?).getD pat)
-        let hooks := (patVars pat).flatMap fun x => (dropHook tr (site x)).toList ++ partHooks tr owner pos x
-        let now := tailsStmts (← get) rest
-        let hooks ← hooks.mapM fun h => hookS h now
-        pure ((← pushStmt (.let_ pat value)) :: hooks ++ rest)
+      let (pat, hooks) := match pat with
+        | .var x => (pat, (dropHook tr ⟨owner, pos.1, pos.2, x, false⟩).toList ++ partHooks tr owner pos x)
+        | _ =>
+          -- What the pattern takes under a name nothing uses, or under `_`
+          -- (given a name for it), is destroyed likewise.
+          let site := fun (x : String) => (⟨owner, pos.1, pos.2, Syntax.letSite x, false⟩ : DropSite)
+          let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome) [pat] 0
+          let pat := letWilds pos ((pats.head?).getD pat)
+          (pat, (patVars pat).flatMap fun x => (dropHook tr (site x)).toList ++ partHooks tr owner pos x)
+      -- (Before a `tail` call there is no later: see the clause's own.)
+      let now := tailsStmts (← get) rest
+      let hooks ← hooks.mapM fun h => hookS h now
+      pure ((← pushStmt (.let_ pat value)) :: hooks ++ rest)
     | .assign target value =>
       let value ← untraitExpr tr owner value
       let target ← untraitExpr tr owner target
