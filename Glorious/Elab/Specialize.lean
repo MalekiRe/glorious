@@ -665,6 +665,18 @@ def reborrowed (taken : Std.HashMap String Bool) (values refs : List String) (c 
     Flat.Build Flat.ClauseId := do
   Flat.promoteClause values (← Flat.nameBorrowsClause (← Flat.receiverClause taken (refs.map (·, 3)) values c))
 
+/-- Each clause of a body with a node `asks` of, rewritten by `marked` and
+its borrows made again (`reborrowed`); the others as they are. -/
+def reborrowWhere (b : Flat.Body) (asks : Flat.FExpr → Bool) (taken : Std.HashMap String Bool)
+    (annots : List (Option TypeExpr)) (marked : Flat.FRewrite) : Flat.Body :=
+  let (roots, b) := (b.roots.mapM fun c => (do
+    let b ← get
+    let ⟨pats, body⟩ := b.clause c
+    if !body.any (b.anyStmt asks) then return c
+    let (values, refs) := Flat.paramsOf pats annots
+    reborrowed taken values refs (← marked.clause c) : Flat.Build Flat.ClauseId)).run b
+  { b with roots }
+
 /-- The dot call `call` of `fn` (or of the function it is of), its receiver
 given as that takes it: borrowed as the resolver borrows a receiver
 (`receiverClause`), a name given whole borrowed where `fn` is none; and then
@@ -712,13 +724,7 @@ def receiverBody (call : Nat) (fn : Option String) (borrow : Option Bool) (annot
   let calls := fun (n : Flat.FExpr) => match n with
     | .call i _ _ | .tailCall i _ _ => i == call
     | _ => false
-  let (roots, b) := (b.roots.mapM fun c => (do
-    let b ← get
-    let ⟨pats, body⟩ := b.clause c
-    if !body.any (b.anyStmt calls) then return c
-    let (values, refs) := Flat.paramsOf pats annots
-    reborrowed taken values refs (← marked.clause c) : Flat.Build Flat.ClauseId)).run b
-  { b with roots }
+  reborrowWhere b calls taken annots marked
 
 /-- The name the field borrow `id` is of, in an expression outside any
 block in it. -/
@@ -791,13 +797,7 @@ def derefBody (id : Nat) (uniq : Bool) (annots : List (Option TypeExpr)) (b : Fl
     | .fieldOf i _ _ | .refField i _ _ _ _ => i == id
     | _ => false
   let taken : Std.HashMap String Bool := ({} : Std.HashMap String Bool).insert fn uniq
-  let (roots, b) := (b.roots.mapM fun c => (do
-    let b ← get
-    let ⟨pats, body⟩ := b.clause c
-    if !body.any (b.anyStmt found) then return c
-    let (values, refs) := Flat.paramsOf pats annots
-    reborrowed taken values refs (← marked.clause c) : Flat.Build Flat.ClauseId)).run b
-  { b with roots }
+  reborrowWhere b found taken annots marked
 
 /-- A function's body with one thing the checker decided written in: `name`
 is the name the function is checked by, `annots` what its parameters are
