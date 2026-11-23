@@ -164,6 +164,11 @@ def call (w : World) (id : Nat) (args : List Value) : Option (Value × World) :=
       let mem ← w.mem.write to.toNat n.toNat raw
       some (.data 0 [], { w with mem })
     | _ => none
+  else if id = 14 then
+    -- (`transmute`: the value as it is.)
+    match args with
+    | [v] => some (v, w)
+    | _ => none
   else if id = 9 then
     match args with
     | [v] =>

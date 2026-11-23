@@ -683,10 +683,27 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
       | _, _ => throw "a memory operation has the wrong number of arguments"
     inferTm self amb τ (Γ.push σ) body
   | .host id args body => do
-    let _ ← args.mapM (atomTy Γ)
-    let σ ← match id, args.length with
-      | 0, 1 => pure ITy.unit
-      | 1, 0 => pure (ITy.tuple [.int, .int])
+    let ts ← args.mapM (atomTy Γ)
+    -- (Those past the first two are outside what Core's rules are about: a
+    -- program with one has types, and no certificate the checker accepts.)
+    let int := fun (t : ITy) => unify t .int
+    let σ ← match id, ts with
+      | 0, [_] => pure ITy.unit
+      | 1, [] => pure (ITy.tuple [.int, .int])
+      | 2, _ => do ts.forM int; pure .int
+      | 3, [a, w] => do int a; int w; pure .int
+      | 4, [a, w, v] => do int a; int w; int v; pure .unit
+      | 5, [_, n] => do int n; pure .int
+      | 6, [_] => pure .int
+      | 7, [c] => do int c; freshTy
+      | 8, [c, _] => do int c; pure .unit
+      | 9, [v] => pure (ITy.tuple [.data arrayName [.int], v])
+      | 10, [] => pure (ITy.tuple [.int, .int])
+      | 11, [s, a] => do int s; int a; pure .int
+      | 12, [a] => do int a; pure .unit
+      | 13, [a, b, n] => do int a; int b; int n; pure .unit
+      -- (`transmute`: the value, of another type.)
+      | 14, [_] => freshTy
       | _, _ => throw s!"host operation {id} does not exist with {args.length} arguments"
     inferTm self amb τ (Γ.push σ) body
 where

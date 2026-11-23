@@ -1732,6 +1732,8 @@ impl Vm {
                         unsafe { std::ptr::copy(*from as usize as *const u8, *to as usize as *mut u8, *n as usize) };
                         unit()
                     }
+                    // `transmute`: the value as it is.
+                    (14, [v]) => v.clone(),
                     // The name of the function a callable is of, and the
                     // callable back.
                     (9, [v]) => {

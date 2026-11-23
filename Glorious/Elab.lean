@@ -552,7 +552,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
       -- sees one as of another has no certificate, as one that is foreign.)
       modify fun s => { s with foreign := true }
       match ← elabArgs scope args with
-      | [a] => emit (.let_ (.atom a))
+      | [a] => emit (.host 14 [a])
       | _ => throw "`transmute` takes one value"
     | .const e => do
       let (cb, ce) := Flat.ofExpr e

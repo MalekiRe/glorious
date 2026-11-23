@@ -121,6 +121,7 @@ structure Outcome where
   bytes : Option ByteArray := none
   /-- What the typing of its Core shows. -/
   certified : Bool := false
+  typed : Bool := false
   strict : Bool := false
   regions : Bool := false
   loans : Bool := false
@@ -146,7 +147,7 @@ def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few 
     -- bytecode.)
     { lean := if run then evalCompiled compiled c.input (vmScale := if few then 200 else 20) else ""
       bytes := some (bytecodeBytes compiled)
-      certified := compiled.cert.isSome
+      certified := compiled.cert.isSome, typed := compiled.types.isSome
       strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
       lent := compiled.lent, plain := compiled.plain.length
       cleanups := if run then cleanupsOf compiled.core c.input else none
@@ -770,7 +771,7 @@ def selftest (vm : Option String) : IO UInt32 := do
   let count := fun (f : Outcome → Bool) => (found.filter f).size
   let scopes := found.foldl (fun n o => n + o.lent) 0
   let plain := found.foldl (fun n o => n + o.plain) 0
-  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.certified)} with a certificate; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
+  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.typed)} typed; {count (·.certified)} with a certificate; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
   IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {count (·.plain > 0)} programs"
   let installs := count fun o => match o.cleanups with
     | some (n, _, _) => decide (n > 0)
