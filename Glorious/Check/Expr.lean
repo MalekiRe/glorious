@@ -121,8 +121,25 @@ def derefAt (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M Unit 
 mutual
 
 partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := do
-  match ← node e0 with
+  let n ← node e0
+  match n with
   | .int _ => pure .int
+  | .name .. | .label _ | .tuple _ => inferExprNamed scope amb n
+  | .refField .. | .fieldOf .. | .proj .. => inferExprField scope amb e0 n
+  | .call .. | .tailCall .. | .closure .. => inferExprCall scope amb n
+  | .handle subject arms => inferHandle scope amb e0 subject arms
+  | .labelScope l body => do
+    let t ← freshTy
+    let brand ← freshBrand
+    let found ← inferStmts (("@" ++ l, .label t brand) :: scope) amb body.toList
+    unifyAt s!"the result of the scope `@{l}`" t found
+    checkEscape brand (jumpsAfter l) (("it is the result of the scope", t) :: scopeRoots scope) amb
+    pure t
+  | .ref .. | .reborrow .. | .deref _ => inferExprRef scope amb n
+
+/-- A name, a label or a tuple (`inferExpr`). -/
+partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
+  match n with
   | .name q x => do
     match ← resolveName scope q x with
     | .local (.val t _) => lend scope x t
@@ -193,6 +210,11 @@ partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := d
       pushAnon e t
       ts := ts.push t
     pure (.tuple ts.toList)
+  | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
+
+/-- A field or a trait's function taken out (`inferExpr`). -/
+partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Flat.FExpr) : M Ty := do
+  match n with
   | .refField id uniq x path star => do
     derefAt scope id uniq x (path.headD "")
     match scope.lookup x with
@@ -312,6 +334,11 @@ partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := d
       let t ← freshTy
       modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos, 0) }
       pure t
+  | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
+
+/-- A call or a callable (`inferExpr`). -/
+partial def inferExprCall (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
+  match n with
   | .call id f args => do
     let b := (← get).body
     -- Whether what a reference points to was built by a constructor: the
@@ -368,14 +395,11 @@ partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := d
         if !pats.isEmpty && pats.all (fun | .var x => x.startsWith "%eta" | _ => false) then
           rankParams (.fn ps .unit [] none cap)
     pure t
-  | .handle subject arms => inferHandle scope amb e0 subject arms
-  | .labelScope l body => do
-    let t ← freshTy
-    let brand ← freshBrand
-    let found ← inferStmts (("@" ++ l, .label t brand) :: scope) amb body.toList
-    unifyAt s!"the result of the scope `@{l}`" t found
-    checkEscape brand (jumpsAfter l) (("it is the result of the scope", t) :: scopeRoots scope) amb
-    pure t
+  | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
+
+/-- A borrow, a borrow again or what a reference points to (`inferExpr`). -/
+partial def inferExprRef (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
+  match n with
   | .ref uniq x =>
     match scope.lookup x with
     | some (.cell t brand) => do
@@ -431,6 +455,8 @@ partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := d
       mustDup inner "reading through a reference copies the value to choose a clause"
     else mustDup inner "reading through a reference copies the value (`replace` takes it out instead)"
     pure inner
+  | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
+
 
 /-- A field of what a mutable variable holds, or of what a reference points
 to, is read where it is: only the field is copied, and only a borrow of that
@@ -939,6 +965,512 @@ partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List
       back saved
       throw e
 
+/-- A call of a constructor, an operation, a primitive, what an `is` found, a
+cast or a host function (`inferCall`). -/
+partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (call : Nat) (x : String)
+    (head : Head) : M Ty := do
+  let b := (← get).body
+  match head with
+  | .ctor sig written => do
+    let (fields, result) ← instCtor sig
+    -- A name given to the constructor with a type: built at that type.
+    if let some ty := written then
+      let said ← resolveType [] false (TypeExpr.ofExpr ty)
+      unifyAt s!"`{x}` is written with a type" said (.fn fields result [] none (← freshCap))
+    checkArgs scope amb s!"constructor `{x}`" fields args call
+    -- What the type's declaration asks of its parameters.
+    if let .con owner targs := result then
+      if let some asked := (← get).typeBounds.lookup owner then
+        -- (Asked, and not handed over: under a number no call has.)
+        if call != 0 then
+          needBounds (100000000000000000 + call) (asked.filterMap fun (tr, i) => targs[i]?.map (tr, ·))
+    pure result
+  | .op sig => do
+    -- (An operation declared `[1, 1]` comes back: its resumption is resumed.)
+    unless sig.must && sig.result.isSome do abandons (← get).anon s!"operation `{x}`"
+    let decl := ((← get).effects.lookup sig.effect).getD ⟨[], [], []⟩
+    let inst ← decl.fresh
+    -- `operation<A>(..)`: which instance of its effect, said.
+    if let some written := (← get).instWith then
+      modify fun s => { s with instWith := none }
+      let types := (inst.zip (decl.lifetimes ++ List.replicate inst.length false)).filterMap fun (t, life) =>
+        if life then none else some t
+      unless written.length == types.length do
+        throw s!"`{sig.effect}` has {types.length} type parameters, and `{x}` is written with {written.length}"
+      for (t, w) in types.zip written do
+        unify t w
+    let own ← sig.caps.mapM fun c => do pure (c, ← freshCap)
+    let (payload, result) := instOp sig inst own
+    -- (What a type parameter of the effect leaves to an implementation,
+    -- `S::Out`: asked now, of the type this use gives.)
+    let payload ← payload.mapM unproject
+    let result ← result.mapM unproject
+    -- (What it is given first: that can say which instance of its effect
+    -- this is, where there are several.)
+    checkArgs scope amb s!"operation `{x}`" payload args call
+    try
+      match ← findInstance (← flattenRow amb).effs (sig.effect, inst) with
+      | some (_, args') => unifyAll inst args'
+      | none => unifyRow amb ⟨[(sig.effect, inst)], some (← freshRowVar)⟩
+    catch e => throw s!"operation `{x}` cannot be performed here: {e}"
+    -- Which instance of its effect this is, for when each is made an
+    -- effect of its own.
+    let which := (inst.zip (decl.lifetimes ++ List.replicate inst.length false)).filterMap fun (t, life) =>
+      if life then none else some t
+    unless which.isEmpty do
+      modify fun s => { s with instSites := s.instSites.push (s.owner, call, "op", sig.effect, which) }
+    -- What the effect's declaration asks of its parameters.
+    if let some asked := (← get).typeBounds.lookup sig.effect then
+      if call != 0 then
+        needBounds (100000000000000000 + call) (asked.filterMap fun (tr, i) => inst[i]?.map (tr, ·))
+    -- The handler may run a callable it is given, there and then.
+    use scope (.call s!"operation `{x}`" payload)
+    match result with
+    | some r => pure r
+    | none => freshTy
+  | .prim => do
+    -- The intrinsics of arrays, of whatever their elements are. Reading a
+    -- place and putting another value at one let go of what is not given
+    -- back.
+    let named := ((← get).arrayType).getD "Array"
+    let array := fun (t : Ty) => Ty.con named [t]
+    let t ← freshTy
+    match x with
+    | "arr_new" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [] args call
+      pure (array t)
+    | "arr_at" =>
+      -- The reference to a place of an array, from a reference to the
+      -- array: the same kind of reference, borrowing from the same things.
+      let how ← freshTy
+      let cap ← freshCap
+      checkArgs scope amb s!"intrinsic `{x}`" [.ref how (array t) cap, .int] args call
+      pure (.ref how t cap)
+    | "arr_len_at" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [.ref (← freshTy) (array t) (← freshCap)] args call
+      pure .int
+    | "arr_get" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
+      mustDrop t "reading a place of an array lets go of the rest of it"
+      pure t
+    | "arr_set" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int, t] args call
+      mustDrop t "putting a value at a place of an array lets go of what was there"
+      pure (array t)
+    | "arr_len" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
+      pure .int
+    | "arr_push" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [array t, t] args call
+      pure (array t)
+    | "arr_pop" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
+      pure (.tuple [array t, t])
+    | _ =>
+      checkArgs scope amb s!"intrinsic `{x}`" [.int, .int] args call
+      pure .int
+  | .pack name => do
+    let ts ← args.toList.mapM fun _ => freshTy
+    checkArgs scope amb "what an `is` found" ts args call
+    pure (.con name ts)
+  | .cast scalar into => do
+    checkArgs scope amb s!"intrinsic `{x}`" [if into then .int else .con scalar []] args call
+    pure (if into then .con scalar [] else .int)
+  | .host id => do
+    if id ≥ 2 then
+      let s ← get
+      unless s.unsafeBlock || s.unsafeFns.contains s.owner do
+        throw s!"`{x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
+    if id == 0 then
+      checkArgs scope amb s!"`{x}`" [← freshTy] args call
+      pure .unit
+    else if id == 2 then
+      -- A foreign function's name, how many bits it gives, and what it is given.
+      checkArgs scope amb s!"`{x}`" (args.toList.map fun _ => Ty.int) args call
+      pure .int
+    else if id == 3 then
+      checkArgs scope amb s!"`{x}`" [.con "usize" [], .int] args call
+      pure .int
+    else if id == 4 then
+      checkArgs scope amb s!"`{x}`" [.con "usize" [], .int, .int] args call
+      pure .unit
+    else if id == 5 then
+      -- The callable is given to C for as long as the program runs. What
+      -- it takes and gives is C's to get right: whole numbers and
+      -- addresses, as `usize`.
+      -- An effect cannot pass C, so the callable performs none.
+      let arity ← match args.toList.map b.expr with
+        | [_, .int n] => pure n.toNat
+        | _ => throw s!"`{x}` is given a callable and how many whole numbers C gives it, written out: `{x}(f, 2)`"
+      unless arity ≤ 5 do throw s!"`{x}`: C gives a callable at most five whole numbers"
+      let given := Ty.func (List.replicate arity (.con "usize" [])) .int ⟨[], none⟩ (← freshCap)
+      checkArgs scope amb s!"`{x}`" [given, .int] args call
+      pure (.con "usize" [])
+    else if id == 6 then
+      checkArgs scope amb s!"`{x}`" [← freshTy] args call
+      pure .int
+    else if id == 7 then
+      checkArgs scope amb s!"`{x}`" [.int] args call
+      freshTy
+    else if id == 8 then
+      checkArgs scope amb s!"`{x}`" [.int, ← freshTy] args call
+      pure .unit
+    else if id == 9 then
+      -- (A value, given back with the codes of its function's name.)
+      let v ← freshTy
+      checkArgs scope amb s!"`{x}`" [v] args call
+      pure (.tuple [.con ((← get).arrayType.getD "Array") [.int], v])
+    else
+      checkArgs scope amb s!"`{x}`" [] args call
+      pure (.tuple [.int, .int])
+  | _ => throw "a call's callee was taken for one of another kind; this is a compiler defect"
+
+/-- A call of what works on a place (`cancel`, `replace`, `swap`,
+`overwrite`, `transmute`) or of a local (`inferCall`). -/
+partial def inferCallPlace (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (call : Nat) (x : String)
+    (head : Head) : M Ty := do
+  let b := (← get).body
+  match head with
+  | .cancel => do
+    -- Giving up a callable: a resumption, or any other callable, which
+    -- destroys what it holds. (Of one argument unless it is a name whose
+    -- type says otherwise.)
+    let row ← freshRow
+    let known ← match args.toList.map b.expr with
+      | [.name none y] =>
+        match scope.lookup y with
+        | some (.val t _) => pure (some t)
+        | some (.poly p) => pure (some p.ty)
+        | _ => pure none
+      | _ => pure none
+    let arity ← match known with
+      | some t => do
+        match ← find t with
+        | .fn ps .. => pure ps.length
+        | _ => pure 1
+      | none => pure 1
+    let given := Ty.func (← (List.range arity).mapM fun _ => freshTy) (← freshTy) row (← freshCap)
+    checkArgs scope amb "`cancel`" [given] args call
+    -- A resumption of an operation declared `[1, 1]` is resumed: giving
+    -- it up is letting it go.
+    mustDrop given "`cancel` lets go of what it is given"
+    -- A cleanup of a cancelled computation may jump to a label inside it, and
+    -- the computation then runs on from there, where it is being cancelled.
+    -- So what it may perform must be handled here, as if it were called.
+    includeRow row amb "`cancel`"
+    pure .unit
+  | .replace => do
+    let t ← freshTy
+    let cap ← freshCap
+    checkArgs scope amb "`replace`" [.ref .uniq t cap, t] args call
+    use scope (.through cap "the reference given to `replace`" true)
+    pure t
+  | .swap => do
+    -- What two references point to, exchanged: nothing is asked of the
+    -- type, since nothing is copied or let go.
+    let t ← freshTy
+    let first ← freshCap
+    let second ← freshCap
+    checkArgs scope amb "`swap`" [.ref .uniq t first, .ref .uniq t second] args call
+    use scope (.through first "the first reference given to `swap`" true)
+    use scope (.through second "the second reference given to `swap`" true)
+    pure .unit
+  | .overwrite => do
+    -- A value put where a reference points, with what was there neither
+    -- given back nor destroyed. Nothing is asked of the type, which is
+    -- why it is unsafe: whoever writes it says that nothing is there.
+    let s ← get
+    unless s.unsafeBlock || s.unsafeFns.contains s.owner do
+      throw "`overwrite` is unsafe: what the reference pointed to is neither given back nor destroyed. It can be named only in `unsafe { .. }` or in an `unsafe fn`; `replace` gives what was there back"
+    let t ← freshTy
+    let cap ← freshCap
+    checkArgs scope amb "`overwrite`" [.ref .uniq t cap, t] args call
+    use scope (.through cap "the reference given to `overwrite`" true)
+    pure .unit
+  | .transmute => do
+    -- A value seen as of another type, which nothing is asked of: a
+    -- reference's borrow, given, is not one the result is said to hold.
+    -- What the two types are is the writer's word, which is why it is
+    -- unsafe.
+    let s ← get
+    unless s.unsafeBlock || s.unsafeFns.contains s.owner do
+      throw "`transmute` is unsafe: a value is seen as of another type, which nothing checks. It can be named only in `unsafe { .. }` or in an `unsafe fn`"
+    checkArgs scope amb "`transmute`" [← freshTy] args call
+    freshTy
+  | .local (.val t _) => applyTy scope amb s!"`{x}`" t args call
+  | .local (.cell t brand) => do
+    mustDup t (readsCell x)
+    use scope (.var brand x .read)
+    applyTy scope amb s!"`{x}`" t args call
+  | .local (.label t brand) => do
+    applyTy scope amb s!"the label `{x}`" (← labelType t brand) args call
+  | .local (.poly s) => do
+    applyTy scope amb s!"`{x}`" (← instantiate s (some x)) args call
+  | _ => throw "a call's callee was taken for one of another kind; this is a compiler defect"
+
+/-- A call of a function, a trait's function or a constant (`inferCall`). -/
+partial def inferCallFn (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (call : Nat) (x : String)
+    (head : Head) : M Ty := do
+  let b := (← get).body
+  match head with
+  | .fn t bounds inGroup => do
+    -- The instances of effects the function called is about, at this call.
+    unless inGroup do
+      let sites := (← get).lastSites
+      unless sites.isEmpty do
+        modify fun s => { s with instSites := s.instSites.push (s.owner, call, "call", x, sites) }
+    -- Blocks given to run in an environment, as the function says; of
+    -- them, those given what holds it run in its place (`checkArg`).
+    for (i, inPlace) in ((← get).fnRunsIn.lookup x).getD [] do
+      if let some (id, _) := (args[i]?).bind b.plainBlock then
+        modify fun s =>
+          { s with envBlocks := s.envBlocks.insert id
+                   inPlace := if inPlace then s.inPlace.insert id else s.inPlace }
+    let before := (← get).blockCaps.size
+    let r ← applyTy scope amb s!"`{x}`" t args call
+    -- One of them is certainly called, and the rest let go: what has to be
+    -- used must then be held by every one, and nothing but a block may
+    -- hold such a thing.
+    if (← get).envMust.contains x then
+      for group in ((← get).fnGroups.lookup x).getD [] do
+        let mut caps : List Nat := []
+        for i in group do
+          match args[i]? with
+          | some a =>
+            match b.plainBlock a with
+            | some (id, _) =>
+              let made := ((← get).blockCaps.toList.drop before).filter (·.1 == id)
+              caps := caps ++ made.map (·.2)
+            | none =>
+              if let .fn ps _ _ _ _ ← find t then
+                if let some p := ps[i]? then
+                  mustDrop p s!"argument {i + 1} of `{x}` may not be the one that is called"
+          | none => pure ()
+        modify fun s => { s with envHeld := s.envHeld.push (s.pos, x, caps) }
+    needBounds call bounds
+    if inGroup then
+      modify fun s => { s with groupUses := s.groupUses.push ⟨call, x, s.owner, s.pos⟩ }
+    pure r
+  | .method sig => do
+    if sig.trait == "Drop" then
+      throw s!"`{x}` is run when what holds a value ends; a program does not call it"
+    -- A trait's function at the type it is used at, which must have the trait.
+    let self ← freshTy
+    -- The trait's own arguments are found from how the function is used,
+    -- and so is what each type it leaves to an implementation is.
+    let targs ← sig.tparams.mapM fun _ => freshTy
+    -- `<Type as Trait<A>>::f(..)`: the type, and the trait's arguments,
+    -- are the ones written.
+    if let some written := (← get).instWith then
+      modify fun s => { s with instWith := none }
+      if written.length > 1 + targs.length then
+        throw s!"`{x}` is a function of `{Syntax.lastSegment sig.trait}`, which takes {targs.length} argument{if targs.length == 1 then "" else "s"}"
+      for (w, t) in written.zip (self :: targs) do
+        unifyAt s!"the type written for `{x}`" t w
+    -- (A row it leaves to an implementation is asked for as the type of a
+    -- callable that performs it.)
+    let mut rm : List (Nat × Nat) := []
+    let mut found : List Ty := []
+    for (name, _) in sig.assocs do
+      match sig.rowAssocs.lookup name with
+      | some k =>
+        let k' ← freshRowVar
+        rm := (k, k') :: rm
+        found := found ++ [.fn [] .unit [] (some k') (← freshCap)]
+      | none => found := found ++ [← freshTy]
+    -- (Its own type parameters anew, and an answer for each place its
+    -- types ask a type the trait leaves at types.)
+    let mut anew : List (Nat × Ty) := []
+    for (g, id) in sig.mparams do
+      let t ← freshTy
+      anew := anew ++ [(id, t)]
+      -- (How often it uses a value of one, as the trait says: at most
+      -- once, where it says nothing.)
+      let (lower, upper) := (sig.uses.find? (·.1 == g)).map (·.2) |>.getD (0, some 1)
+      let pos := (← get).pos
+      if lower == 0 then
+        modify fun s => { s with drops := s.drops.push (t, s!"{pos}`{x}` may leave a `{g}` unused") }
+      if upper.isNone then
+        modify fun s => { s with dups := s.dups.push (t, s!"{pos}`{x}` may use a `{g}` more than once") }
+    for (_, _, id) in sig.gats do
+      anew := anew ++ [(id, ← freshTy)]
+    let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found ++ anew
+    let subject := if targs.isEmpty then self else Ty.tuple (self :: targs)
+    for ((name, _), a) in sig.assocs.zip found do
+      modify fun s =>
+        { s with assocUses := s.assocUses.push (sig.trait, subject, name, a, s.owner, s.pos) }
+    let row : Row :=
+      ⟨sig.row.effs.map fun (e, args) => (e, args.map (subst tm rm [])),
+        sig.row.tail.map fun k => (rm.lookup k).getD k⟩
+    -- (Where a type left at types is asked at a lifetime, that lifetime
+    -- is the one of this use: the function's lifetimes and those asked
+    -- are made new together.)
+    let asking := sig.gats.map fun (_, asked, _) => Ty.tuple (asked.map (subst tm [] []))
+    let both ← freshenCaps (← unproject (.tuple
+      (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap) :: asking)))
+    let (callee, asking) := match both with
+      | .tuple (c :: rest) => (c, rest)
+      | other => (other, asking)
+    for ((name, _, id), asked) in sig.gats.zip asking do
+      let asked := match asked with
+        | .tuple ts => ts
+        | t => [t]
+      let answer := subst tm [] [] (.var id)
+      let use := (sig.trait, Ty.con Syntax.gatMark (self :: asked), name, answer, (← get).owner, (← get).pos)
+      modify fun s => { s with assocUses := s.assocUses.push use }
+      let lives := asked.filterMap fun | .ref (.con "'" []) _ c => some c | _ => none
+      if let .var v := answer then
+        unless lives.isEmpty do modify fun s => { s with gatHolds := s.gatHolds.push (v, lives) }
+    -- (A callable it is given may be called any number of times, or not
+    -- at all, by an implementation, as a function's may: what it holds
+    -- is asked to be one that can be.)
+    if let .fn ps _ _ _ _ ← find callee then
+      let pos := (← get).pos
+      for p in ps do
+        if let .fn .. ← find p then
+          modify fun s =>
+            { s with dups := s.dups.push (p, s!"{pos}`{x}` may call what it is given more than once")
+                     drops := s.drops.push (p, s!"{pos}`{x}` may leave what it is given uncalled") }
+    let r ← applyTy scope amb s!"`{x}`" callee args call
+    needBounds call [(sig.trait, subject)]
+    modify fun s => { s with methodCalls := s.methodCalls.push (call, sig.index) }
+    -- (`a[i]` copies the element out: one that cannot be copied is taken
+    -- out with `pop` or `remove`, or borrowed.)
+    if x == "index" && Syntax.lastSegment sig.trait == "Index" then
+      mustDup r "`a[i]` copies the element (take it out with `pop` or `remove`, or borrow it, `&a[i]`)"
+    pure r
+  | .const e => do
+    let (cb, ce) := Flat.ofExpr e
+    applyTy scope amb s!"`{x}`" (← withBody cb (inferExpr [] amb ce)) args call
+  | _ => throw "a call's callee was taken for one of another kind; this is a compiler defect"
+
+/-- A call that is a mark the parser wrote, `move x`, `f<A>(..)` or `let x:
+Type = value`: its type; none where it is not one (`inferCall`). -/
+partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Array Flat.ExprId) :
+    M (Option Ty) := do
+  let b := (← get).body
+  -- `let x: Type = value`: the value is made that type.
+  if let (some mark, #[operand]) := (b.bare? f, args) then
+    if mark == Syntax.moveMark then
+      -- `move x`: the value of `x`. That `x` is not used after is looked at
+      -- where its statement is.
+      match b.expr operand with
+      | .name none x =>
+        match scope.lookup x with
+        | some (.cell _ _) =>
+          throw s!"`move {x}`: `{x}` is a mutable variable, which holds a value while it is there; `replace({x}, value)` takes what it holds and leaves another"
+        | _ => return some (← inferExpr scope amb operand)
+      | .deref _ =>
+        throw "`move *reference` would leave the reference pointing at nothing until it is written again, and that is not followed: `replace(reference, value)` takes what is there and leaves another"
+      | _ => return some (← inferExpr scope amb operand)
+  if let (some mark, #[value, ty]) := (b.bare? f, args) then
+    if mark == Syntax.instMark then
+      -- `f<A, B>(..)`: the call, with the types written kept for when the
+      -- function called is found.
+      let tys ← match TypeExpr.ofExpr (Flat.treeExpr b ty) with
+        | .tuple tys => (tys.filter fun
+            | .name l [] => !l.startsWith "'"
+            | _ => true).mapM (resolveType (← get).rigidParams false)
+        | _ => pure []
+      modify fun s => { s with instWith := some tys }
+      let t ← inferExpr scope amb value
+      if (← get).instWith.isSome then
+        modify fun s => { s with instWith := none }
+        throw "types are written, `f<A, B>(..)`, for a function of a module that has type parameters; what is called here is not one"
+      return some t
+    if mark == Syntax.ascribeMark then
+      let expected ← resolveType (← get).rigidParams false (TypeExpr.ofExpr (Flat.treeExpr b ty))
+      if let .int n := b.expr value then
+        match ← literalAt expected n with
+        | some none => return some expected
+        | some (some why) => throw why
+        | none => pure ()
+      -- A callable written with its parameters' types: its clauses are
+      -- read knowing them, so a field read through a parameter that is a
+      -- reference is found.
+      let found ← match b.expr value, ← find expected with
+        | .closure id clauses, .fn ps _ _ _ _ =>
+          let arity := match clauses[0]? with
+            | some c => (b.clause c).pats.length
+            | none => 0
+          if arity == ps.length && arity != 0 then
+            inferCallable scope (ps.map some) none none clauses "the clauses of this callable do" id
+          else inferExpr scope amb value
+        | _, _ => inferExpr scope amb value
+      match ← fitAt scope amb "the value of a `let` with a type" none expected found with
+      | none => return some expected
+      | some e => throw e
+  pure none
+
+/-- A dot call taken as the function of the value's type: its type; none
+where it is not taken so (`inferCall`). -/
+partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Array Flat.ExprId)
+    (call : Nat) : M (Option Ty) := do
+  let b := (← get).body
+  -- A dot call the resolver could not tell: the function of the value's
+  -- type, where it takes its first argument as the one written does (so
+  -- that the receiver is borrowed as it should be); the program is read
+  -- again only where it does not.
+  if let some x := b.bare? f then
+    if let some alts := dotAltsOf (← get).modules call then
+      if let some a := args[0]? then
+        if let some alt ← dotAltFor scope amb call a then
+          if alt != x && alts.contains alt then
+            let (mine, theirs) ← receiverKinds x alt
+            if mine.isSome && mine == theirs then
+              modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
+              return some (← inferCall scope amb (← pushE (.name none alt)) args call)
+            -- (The one in scope takes a reference, the type's own the value
+            -- whole: the receiver, a name borrowed for the one in scope, is
+            -- given as it is.)
+            if let (some k, some 0, .ref _ v) := (mine, theirs, b.expr a) then
+              let moved := (← get).movedCells
+              let held := match scope.lookup v with
+                | some (.cell _ brand) => moved.contains brand
+                | _ => false
+              if k != 0 && (!v.startsWith "borrowed%" || held) then
+                let given := Expr.name none v
+                modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
+                                         argsChosen := ((call, 0), given) :: s.argsChosen }
+                let given ← flatIn given
+                return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+            -- (The one in scope takes the value whole, the type's own a
+            -- reference: a mutable variable is borrowed for it.)
+            if let (some 0, some k, .name none v) := (mine, theirs, b.expr a) then
+              if k != 0 then
+                if let some (.cell held _) := scope.lookup v then
+                  -- (One that holds a reference already is given as it is.)
+                  if let .ref .. ← find held then
+                    modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
+                    return some (← inferCall scope amb (← pushE (.name none alt)) args call)
+                  modify fun s => { s with dotChosen := (call, alt, k) :: s.dotChosen }
+                  let given ← pushE (.ref (k == 2) v)
+                  return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+            if let (some 0, some k) := (mine, theirs) then
+              if k != 0 then
+                -- (What is a reference already, a name that holds one or a
+                -- call that gives one, is given as it is.)
+                let saved ← get
+                let given ← try some <$> inferExpr scope amb a catch _ => pure none
+                let isRef ← match given with
+                  | some t => do pure (match ← find t with | .ref .. => true | _ => false)
+                  | none => pure false
+                set saved
+                if isRef then
+                  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
+                  return some (← inferCall scope amb (← pushE (.name none alt)) args call)
+                -- (A field of what a name points to, or of a mutable
+                -- variable: borrowed where it is.)
+                let borrowed ← match ← fieldThroughRef scope a with
+                  | some (x, path, fid) => pure (some (Expr.refField fid (k == 2) x path true))
+                  | none => pure ((cellField (← get).body scope a).map fun (x, path, fid) => Expr.refField fid (k == 2) x path false)
+                if let some bt := borrowed then
+                  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
+                                           argsChosen := ((call, 0), bt) :: s.argsChosen }
+                  let given ← flatIn bt
+                  return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+  pure none
+
 /-- Apply a callee of a given type in the ambient effects. -/
 partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (args : Array Flat.ExprId)
     (call : Nat := 0) : M Ty := do
@@ -988,119 +1520,8 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
 partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Array Flat.ExprId)
     (call : Nat := 0) : M Ty := do
   let b := (← get).body
-  -- `let x: Type = value`: the value is made that type.
-  if let (some mark, #[operand]) := (b.bare? f, args) then
-    if mark == Syntax.moveMark then
-      -- `move x`: the value of `x`. That `x` is not used after is looked at
-      -- where its statement is.
-      match b.expr operand with
-      | .name none x =>
-        match scope.lookup x with
-        | some (.cell _ _) =>
-          throw s!"`move {x}`: `{x}` is a mutable variable, which holds a value while it is there; `replace({x}, value)` takes what it holds and leaves another"
-        | _ => return ← inferExpr scope amb operand
-      | .deref _ =>
-        throw "`move *reference` would leave the reference pointing at nothing until it is written again, and that is not followed: `replace(reference, value)` takes what is there and leaves another"
-      | _ => return ← inferExpr scope amb operand
-  if let (some mark, #[value, ty]) := (b.bare? f, args) then
-    if mark == Syntax.instMark then
-      -- `f<A, B>(..)`: the call, with the types written kept for when the
-      -- function called is found.
-      let tys ← match TypeExpr.ofExpr (Flat.treeExpr b ty) with
-        | .tuple tys => (tys.filter fun
-            | .name l [] => !l.startsWith "'"
-            | _ => true).mapM (resolveType (← get).rigidParams false)
-        | _ => pure []
-      modify fun s => { s with instWith := some tys }
-      let t ← inferExpr scope amb value
-      if (← get).instWith.isSome then
-        modify fun s => { s with instWith := none }
-        throw "types are written, `f<A, B>(..)`, for a function of a module that has type parameters; what is called here is not one"
-      return t
-    if mark == Syntax.ascribeMark then
-      let expected ← resolveType (← get).rigidParams false (TypeExpr.ofExpr (Flat.treeExpr b ty))
-      if let .int n := b.expr value then
-        match ← literalAt expected n with
-        | some none => return expected
-        | some (some why) => throw why
-        | none => pure ()
-      -- A callable written with its parameters' types: its clauses are
-      -- read knowing them, so a field read through a parameter that is a
-      -- reference is found.
-      let found ← match b.expr value, ← find expected with
-        | .closure id clauses, .fn ps _ _ _ _ =>
-          let arity := match clauses[0]? with
-            | some c => (b.clause c).pats.length
-            | none => 0
-          if arity == ps.length && arity != 0 then
-            inferCallable scope (ps.map some) none none clauses "the clauses of this callable do" id
-          else inferExpr scope amb value
-        | _, _ => inferExpr scope amb value
-      match ← fitAt scope amb "the value of a `let` with a type" none expected found with
-      | none => return expected
-      | some e => throw e
-  -- A dot call the resolver could not tell: the function of the value's
-  -- type, where it takes its first argument as the one written does (so
-  -- that the receiver is borrowed as it should be); the program is read
-  -- again only where it does not.
-  if let some x := b.bare? f then
-    if let some alts := dotAltsOf (← get).modules call then
-      if let some a := args[0]? then
-        if let some alt ← dotAltFor scope amb call a then
-          if alt != x && alts.contains alt then
-            let (mine, theirs) ← receiverKinds x alt
-            if mine.isSome && mine == theirs then
-              modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
-              return ← inferCall scope amb (← pushE (.name none alt)) args call
-            -- (The one in scope takes a reference, the type's own the value
-            -- whole: the receiver, a name borrowed for the one in scope, is
-            -- given as it is.)
-            if let (some k, some 0, .ref _ v) := (mine, theirs, b.expr a) then
-              let moved := (← get).movedCells
-              let held := match scope.lookup v with
-                | some (.cell _ brand) => moved.contains brand
-                | _ => false
-              if k != 0 && (!v.startsWith "borrowed%" || held) then
-                let given := Expr.name none v
-                modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
-                                         argsChosen := ((call, 0), given) :: s.argsChosen }
-                let given ← flatIn given
-                return ← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call
-            -- (The one in scope takes the value whole, the type's own a
-            -- reference: a mutable variable is borrowed for it.)
-            if let (some 0, some k, .name none v) := (mine, theirs, b.expr a) then
-              if k != 0 then
-                if let some (.cell held _) := scope.lookup v then
-                  -- (One that holds a reference already is given as it is.)
-                  if let .ref .. ← find held then
-                    modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
-                    return ← inferCall scope amb (← pushE (.name none alt)) args call
-                  modify fun s => { s with dotChosen := (call, alt, k) :: s.dotChosen }
-                  let given ← pushE (.ref (k == 2) v)
-                  return ← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call
-            if let (some 0, some k) := (mine, theirs) then
-              if k != 0 then
-                -- (What is a reference already, a name that holds one or a
-                -- call that gives one, is given as it is.)
-                let saved ← get
-                let given ← try some <$> inferExpr scope amb a catch _ => pure none
-                let isRef ← match given with
-                  | some t => do pure (match ← find t with | .ref .. => true | _ => false)
-                  | none => pure false
-                set saved
-                if isRef then
-                  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
-                  return ← inferCall scope amb (← pushE (.name none alt)) args call
-                -- (A field of what a name points to, or of a mutable
-                -- variable: borrowed where it is.)
-                let borrowed ← match ← fieldThroughRef scope a with
-                  | some (x, path, fid) => pure (some (Expr.refField fid (k == 2) x path true))
-                  | none => pure ((cellField (← get).body scope a).map fun (x, path, fid) => Expr.refField fid (k == 2) x path false)
-                if let some bt := borrowed then
-                  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
-                                           argsChosen := ((call, 0), bt) :: s.argsChosen }
-                  let given ← flatIn bt
-                  return ← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call
+  if let some t ← inferMarkedCall scope amb f args then return t
+  if let some t ← inferDotAltCall scope amb f args call then return t
   -- `T::f(..)` of a type parameter `T` and a trait's function `f`: as
   -- `<T as Trait>::f(..)` is.
   if let .name (some q) x := b.expr f then
@@ -1123,362 +1544,9 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
           if alt != x then throwThe Elab.Said { e with decision := some (← receiverDecision call alt) }
       throwThe Elab.Said e
     match head with
-    | .ctor sig written => do
-      let (fields, result) ← instCtor sig
-      -- A name given to the constructor with a type: built at that type.
-      if let some ty := written then
-        let said ← resolveType [] false (TypeExpr.ofExpr ty)
-        unifyAt s!"`{x}` is written with a type" said (.fn fields result [] none (← freshCap))
-      checkArgs scope amb s!"constructor `{x}`" fields args call
-      -- What the type's declaration asks of its parameters.
-      if let .con owner targs := result then
-        if let some asked := (← get).typeBounds.lookup owner then
-          -- (Asked, and not handed over: under a number no call has.)
-          if call != 0 then
-            needBounds (100000000000000000 + call) (asked.filterMap fun (tr, i) => targs[i]?.map (tr, ·))
-      pure result
-    | .op sig => do
-      -- (An operation declared `[1, 1]` comes back: its resumption is resumed.)
-      unless sig.must && sig.result.isSome do abandons (← get).anon s!"operation `{x}`"
-      let decl := ((← get).effects.lookup sig.effect).getD ⟨[], [], []⟩
-      let inst ← decl.fresh
-      -- `operation<A>(..)`: which instance of its effect, said.
-      if let some written := (← get).instWith then
-        modify fun s => { s with instWith := none }
-        let types := (inst.zip (decl.lifetimes ++ List.replicate inst.length false)).filterMap fun (t, life) =>
-          if life then none else some t
-        unless written.length == types.length do
-          throw s!"`{sig.effect}` has {types.length} type parameters, and `{x}` is written with {written.length}"
-        for (t, w) in types.zip written do
-          unify t w
-      let own ← sig.caps.mapM fun c => do pure (c, ← freshCap)
-      let (payload, result) := instOp sig inst own
-      -- (What a type parameter of the effect leaves to an implementation,
-      -- `S::Out`: asked now, of the type this use gives.)
-      let payload ← payload.mapM unproject
-      let result ← result.mapM unproject
-      -- (What it is given first: that can say which instance of its effect
-      -- this is, where there are several.)
-      checkArgs scope amb s!"operation `{x}`" payload args call
-      try
-        match ← findInstance (← flattenRow amb).effs (sig.effect, inst) with
-        | some (_, args') => unifyAll inst args'
-        | none => unifyRow amb ⟨[(sig.effect, inst)], some (← freshRowVar)⟩
-      catch e => throw s!"operation `{x}` cannot be performed here: {e}"
-      -- Which instance of its effect this is, for when each is made an
-      -- effect of its own.
-      let which := (inst.zip (decl.lifetimes ++ List.replicate inst.length false)).filterMap fun (t, life) =>
-        if life then none else some t
-      unless which.isEmpty do
-        modify fun s => { s with instSites := s.instSites.push (s.owner, call, "op", sig.effect, which) }
-      -- What the effect's declaration asks of its parameters.
-      if let some asked := (← get).typeBounds.lookup sig.effect then
-        if call != 0 then
-          needBounds (100000000000000000 + call) (asked.filterMap fun (tr, i) => inst[i]?.map (tr, ·))
-      -- The handler may run a callable it is given, there and then.
-      use scope (.call s!"operation `{x}`" payload)
-      match result with
-      | some r => pure r
-      | none => freshTy
-    | .prim => do
-      -- The intrinsics of arrays, of whatever their elements are. Reading a
-      -- place and putting another value at one let go of what is not given
-      -- back.
-      let named := ((← get).arrayType).getD "Array"
-      let array := fun (t : Ty) => Ty.con named [t]
-      let t ← freshTy
-      match x with
-      | "arr_new" =>
-        checkArgs scope amb s!"intrinsic `{x}`" [] args call
-        pure (array t)
-      | "arr_at" =>
-        -- The reference to a place of an array, from a reference to the
-        -- array: the same kind of reference, borrowing from the same things.
-        let how ← freshTy
-        let cap ← freshCap
-        checkArgs scope amb s!"intrinsic `{x}`" [.ref how (array t) cap, .int] args call
-        pure (.ref how t cap)
-      | "arr_len_at" =>
-        checkArgs scope amb s!"intrinsic `{x}`" [.ref (← freshTy) (array t) (← freshCap)] args call
-        pure .int
-      | "arr_get" =>
-        checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
-        mustDrop t "reading a place of an array lets go of the rest of it"
-        pure t
-      | "arr_set" =>
-        checkArgs scope amb s!"intrinsic `{x}`" [array t, .int, t] args call
-        mustDrop t "putting a value at a place of an array lets go of what was there"
-        pure (array t)
-      | "arr_len" =>
-        checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
-        pure .int
-      | "arr_push" =>
-        checkArgs scope amb s!"intrinsic `{x}`" [array t, t] args call
-        pure (array t)
-      | "arr_pop" =>
-        checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
-        pure (.tuple [array t, t])
-      | _ =>
-        checkArgs scope amb s!"intrinsic `{x}`" [.int, .int] args call
-        pure .int
-    | .pack name => do
-      let ts ← args.toList.mapM fun _ => freshTy
-      checkArgs scope amb "what an `is` found" ts args call
-      pure (.con name ts)
-    | .cast scalar into => do
-      checkArgs scope amb s!"intrinsic `{x}`" [if into then .int else .con scalar []] args call
-      pure (if into then .con scalar [] else .int)
-    | .host id => do
-      if id ≥ 2 then
-        let s ← get
-        unless s.unsafeBlock || s.unsafeFns.contains s.owner do
-          throw s!"`{x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
-      if id == 0 then
-        checkArgs scope amb s!"`{x}`" [← freshTy] args call
-        pure .unit
-      else if id == 2 then
-        -- A foreign function's name, how many bits it gives, and what it is given.
-        checkArgs scope amb s!"`{x}`" (args.toList.map fun _ => Ty.int) args call
-        pure .int
-      else if id == 3 then
-        checkArgs scope amb s!"`{x}`" [.con "usize" [], .int] args call
-        pure .int
-      else if id == 4 then
-        checkArgs scope amb s!"`{x}`" [.con "usize" [], .int, .int] args call
-        pure .unit
-      else if id == 5 then
-        -- The callable is given to C for as long as the program runs. What
-        -- it takes and gives is C's to get right: whole numbers and
-        -- addresses, as `usize`.
-        -- An effect cannot pass C, so the callable performs none.
-        let arity ← match args.toList.map b.expr with
-          | [_, .int n] => pure n.toNat
-          | _ => throw s!"`{x}` is given a callable and how many whole numbers C gives it, written out: `{x}(f, 2)`"
-        unless arity ≤ 5 do throw s!"`{x}`: C gives a callable at most five whole numbers"
-        let given := Ty.func (List.replicate arity (.con "usize" [])) .int ⟨[], none⟩ (← freshCap)
-        checkArgs scope amb s!"`{x}`" [given, .int] args call
-        pure (.con "usize" [])
-      else if id == 6 then
-        checkArgs scope amb s!"`{x}`" [← freshTy] args call
-        pure .int
-      else if id == 7 then
-        checkArgs scope amb s!"`{x}`" [.int] args call
-        freshTy
-      else if id == 8 then
-        checkArgs scope amb s!"`{x}`" [.int, ← freshTy] args call
-        pure .unit
-      else if id == 9 then
-        -- (A value, given back with the codes of its function's name.)
-        let v ← freshTy
-        checkArgs scope amb s!"`{x}`" [v] args call
-        pure (.tuple [.con ((← get).arrayType.getD "Array") [.int], v])
-      else
-        checkArgs scope amb s!"`{x}`" [] args call
-        pure (.tuple [.int, .int])
-    | .cancel => do
-      -- Giving up a callable: a resumption, or any other callable, which
-      -- destroys what it holds. (Of one argument unless it is a name whose
-      -- type says otherwise.)
-      let row ← freshRow
-      let known ← match args.toList.map b.expr with
-        | [.name none y] =>
-          match scope.lookup y with
-          | some (.val t _) => pure (some t)
-          | some (.poly p) => pure (some p.ty)
-          | _ => pure none
-        | _ => pure none
-      let arity ← match known with
-        | some t => do
-          match ← find t with
-          | .fn ps .. => pure ps.length
-          | _ => pure 1
-        | none => pure 1
-      let given := Ty.func (← (List.range arity).mapM fun _ => freshTy) (← freshTy) row (← freshCap)
-      checkArgs scope amb "`cancel`" [given] args call
-      -- A resumption of an operation declared `[1, 1]` is resumed: giving
-      -- it up is letting it go.
-      mustDrop given "`cancel` lets go of what it is given"
-      -- A cleanup of a cancelled computation may jump to a label inside it, and
-      -- the computation then runs on from there, where it is being cancelled.
-      -- So what it may perform must be handled here, as if it were called.
-      includeRow row amb "`cancel`"
-      pure .unit
-    | .replace => do
-      let t ← freshTy
-      let cap ← freshCap
-      checkArgs scope amb "`replace`" [.ref .uniq t cap, t] args call
-      use scope (.through cap "the reference given to `replace`" true)
-      pure t
-    | .swap => do
-      -- What two references point to, exchanged: nothing is asked of the
-      -- type, since nothing is copied or let go.
-      let t ← freshTy
-      let first ← freshCap
-      let second ← freshCap
-      checkArgs scope amb "`swap`" [.ref .uniq t first, .ref .uniq t second] args call
-      use scope (.through first "the first reference given to `swap`" true)
-      use scope (.through second "the second reference given to `swap`" true)
-      pure .unit
-    | .overwrite => do
-      -- A value put where a reference points, with what was there neither
-      -- given back nor destroyed. Nothing is asked of the type, which is
-      -- why it is unsafe: whoever writes it says that nothing is there.
-      let s ← get
-      unless s.unsafeBlock || s.unsafeFns.contains s.owner do
-        throw "`overwrite` is unsafe: what the reference pointed to is neither given back nor destroyed. It can be named only in `unsafe { .. }` or in an `unsafe fn`; `replace` gives what was there back"
-      let t ← freshTy
-      let cap ← freshCap
-      checkArgs scope amb "`overwrite`" [.ref .uniq t cap, t] args call
-      use scope (.through cap "the reference given to `overwrite`" true)
-      pure .unit
-    | .transmute => do
-      -- A value seen as of another type, which nothing is asked of: a
-      -- reference's borrow, given, is not one the result is said to hold.
-      -- What the two types are is the writer's word, which is why it is
-      -- unsafe.
-      let s ← get
-      unless s.unsafeBlock || s.unsafeFns.contains s.owner do
-        throw "`transmute` is unsafe: a value is seen as of another type, which nothing checks. It can be named only in `unsafe { .. }` or in an `unsafe fn`"
-      checkArgs scope amb "`transmute`" [← freshTy] args call
-      freshTy
-    | .local (.val t _) => applyTy scope amb s!"`{x}`" t args call
-    | .local (.cell t brand) => do
-      mustDup t (readsCell x)
-      use scope (.var brand x .read)
-      applyTy scope amb s!"`{x}`" t args call
-    | .local (.label t brand) => do
-      applyTy scope amb s!"the label `{x}`" (← labelType t brand) args call
-    | .local (.poly s) => do
-      applyTy scope amb s!"`{x}`" (← instantiate s (some x)) args call
-    | .fn t bounds inGroup => do
-      -- The instances of effects the function called is about, at this call.
-      unless inGroup do
-        let sites := (← get).lastSites
-        unless sites.isEmpty do
-          modify fun s => { s with instSites := s.instSites.push (s.owner, call, "call", x, sites) }
-      -- Blocks given to run in an environment, as the function says; of
-      -- them, those given what holds it run in its place (`checkArg`).
-      for (i, inPlace) in ((← get).fnRunsIn.lookup x).getD [] do
-        if let some (id, _) := (args[i]?).bind b.plainBlock then
-          modify fun s =>
-            { s with envBlocks := s.envBlocks.insert id
-                     inPlace := if inPlace then s.inPlace.insert id else s.inPlace }
-      let before := (← get).blockCaps.size
-      let r ← applyTy scope amb s!"`{x}`" t args call
-      -- One of them is certainly called, and the rest let go: what has to be
-      -- used must then be held by every one, and nothing but a block may
-      -- hold such a thing.
-      if (← get).envMust.contains x then
-        for group in ((← get).fnGroups.lookup x).getD [] do
-          let mut caps : List Nat := []
-          for i in group do
-            match args[i]? with
-            | some a =>
-              match b.plainBlock a with
-              | some (id, _) =>
-                let made := ((← get).blockCaps.toList.drop before).filter (·.1 == id)
-                caps := caps ++ made.map (·.2)
-              | none =>
-                if let .fn ps _ _ _ _ ← find t then
-                  if let some p := ps[i]? then
-                    mustDrop p s!"argument {i + 1} of `{x}` may not be the one that is called"
-            | none => pure ()
-          modify fun s => { s with envHeld := s.envHeld.push (s.pos, x, caps) }
-      needBounds call bounds
-      if inGroup then
-        modify fun s => { s with groupUses := s.groupUses.push ⟨call, x, s.owner, s.pos⟩ }
-      pure r
-    | .method sig => do
-      if sig.trait == "Drop" then
-        throw s!"`{x}` is run when what holds a value ends; a program does not call it"
-      -- A trait's function at the type it is used at, which must have the trait.
-      let self ← freshTy
-      -- The trait's own arguments are found from how the function is used,
-      -- and so is what each type it leaves to an implementation is.
-      let targs ← sig.tparams.mapM fun _ => freshTy
-      -- `<Type as Trait<A>>::f(..)`: the type, and the trait's arguments,
-      -- are the ones written.
-      if let some written := (← get).instWith then
-        modify fun s => { s with instWith := none }
-        if written.length > 1 + targs.length then
-          throw s!"`{x}` is a function of `{Syntax.lastSegment sig.trait}`, which takes {targs.length} argument{if targs.length == 1 then "" else "s"}"
-        for (w, t) in written.zip (self :: targs) do
-          unifyAt s!"the type written for `{x}`" t w
-      -- (A row it leaves to an implementation is asked for as the type of a
-      -- callable that performs it.)
-      let mut rm : List (Nat × Nat) := []
-      let mut found : List Ty := []
-      for (name, _) in sig.assocs do
-        match sig.rowAssocs.lookup name with
-        | some k =>
-          let k' ← freshRowVar
-          rm := (k, k') :: rm
-          found := found ++ [.fn [] .unit [] (some k') (← freshCap)]
-        | none => found := found ++ [← freshTy]
-      -- (Its own type parameters anew, and an answer for each place its
-      -- types ask a type the trait leaves at types.)
-      let mut anew : List (Nat × Ty) := []
-      for (g, id) in sig.mparams do
-        let t ← freshTy
-        anew := anew ++ [(id, t)]
-        -- (How often it uses a value of one, as the trait says: at most
-        -- once, where it says nothing.)
-        let (lower, upper) := (sig.uses.find? (·.1 == g)).map (·.2) |>.getD (0, some 1)
-        let pos := (← get).pos
-        if lower == 0 then
-          modify fun s => { s with drops := s.drops.push (t, s!"{pos}`{x}` may leave a `{g}` unused") }
-        if upper.isNone then
-          modify fun s => { s with dups := s.dups.push (t, s!"{pos}`{x}` may use a `{g}` more than once") }
-      for (_, _, id) in sig.gats do
-        anew := anew ++ [(id, ← freshTy)]
-      let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found ++ anew
-      let subject := if targs.isEmpty then self else Ty.tuple (self :: targs)
-      for ((name, _), a) in sig.assocs.zip found do
-        modify fun s =>
-          { s with assocUses := s.assocUses.push (sig.trait, subject, name, a, s.owner, s.pos) }
-      let row : Row :=
-        ⟨sig.row.effs.map fun (e, args) => (e, args.map (subst tm rm [])),
-          sig.row.tail.map fun k => (rm.lookup k).getD k⟩
-      -- (Where a type left at types is asked at a lifetime, that lifetime
-      -- is the one of this use: the function's lifetimes and those asked
-      -- are made new together.)
-      let asking := sig.gats.map fun (_, asked, _) => Ty.tuple (asked.map (subst tm [] []))
-      let both ← freshenCaps (← unproject (.tuple
-        (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap) :: asking)))
-      let (callee, asking) := match both with
-        | .tuple (c :: rest) => (c, rest)
-        | other => (other, asking)
-      for ((name, _, id), asked) in sig.gats.zip asking do
-        let asked := match asked with
-          | .tuple ts => ts
-          | t => [t]
-        let answer := subst tm [] [] (.var id)
-        let use := (sig.trait, Ty.con Syntax.gatMark (self :: asked), name, answer, (← get).owner, (← get).pos)
-        modify fun s => { s with assocUses := s.assocUses.push use }
-        let lives := asked.filterMap fun | .ref (.con "'" []) _ c => some c | _ => none
-        if let .var v := answer then
-          unless lives.isEmpty do modify fun s => { s with gatHolds := s.gatHolds.push (v, lives) }
-      -- (A callable it is given may be called any number of times, or not
-      -- at all, by an implementation, as a function's may: what it holds
-      -- is asked to be one that can be.)
-      if let .fn ps _ _ _ _ ← find callee then
-        let pos := (← get).pos
-        for p in ps do
-          if let .fn .. ← find p then
-            modify fun s =>
-              { s with dups := s.dups.push (p, s!"{pos}`{x}` may call what it is given more than once")
-                       drops := s.drops.push (p, s!"{pos}`{x}` may leave what it is given uncalled") }
-      let r ← applyTy scope amb s!"`{x}`" callee args call
-      needBounds call [(sig.trait, subject)]
-      modify fun s => { s with methodCalls := s.methodCalls.push (call, sig.index) }
-      -- (`a[i]` copies the element out: one that cannot be copied is taken
-      -- out with `pop` or `remove`, or borrowed.)
-      if x == "index" && Syntax.lastSegment sig.trait == "Index" then
-        mustDup r "`a[i]` copies the element (take it out with `pop` or `remove`, or borrow it, `&a[i]`)"
-      pure r
-    | .const e => do
-      let (cb, ce) := Flat.ofExpr e
-      applyTy scope amb s!"`{x}`" (← withBody cb (inferExpr [] amb ce)) args call
+    | .ctor .. | .op _ | .prim | .pack _ | .cast .. | .host _ => inferCallBuiltin scope amb args call x head
+    | .fn .. | .method _ | .const _ => inferCallFn scope amb args call x head
+    | _ => inferCallPlace scope amb args call x head
   | .label l => do
     applyTy scope amb s!"the label `@{l}`" (← inferExpr scope amb f) args call
   | _ => do
@@ -1536,6 +1604,212 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
             if ((← get).fns[own]?).isSome then
               throwThe Elab.Said { msg := s!"the field `{name}` is no callable", decision := some (← receiverDecision call own) }
     applyTy scope amb "this callee" callee args call
+
+/-- `let pattern = value` and the statements after it (`inferStmts`). -/
+partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
+    (want : Option (Ty × Option Elab.Site)) (pat : Pattern) (value : Flat.ExprId) : M Ty := do
+  let b := (← get).body
+  let closure := match pat, b.expr value with
+    | .var x, .closure _ _ => some x
+    | _, _ => none
+  match closure with
+  | some x => do
+  let (at_, pos) := ((← get).at_, (← get).pos)
+  let t ← withLater (b.fvStmts [x] rest) (inferExpr scope amb value)
+  if (← resolveCtor x none).isSome || ((← get).aliases[x]?).isSome then
+    let binds ← inferPat (.var x) t
+    inferStmts (binds ++ scope) amb rest want
+  else
+    -- A callable nothing then uses is let go when the block ends: if it
+    -- holds something to destroy, it is given up there.
+    unless (b.fvStmts [] rest).contains x do
+      modify fun s =>
+        { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
+    -- A callable bound by `let` is a value, so it can be used at several types.
+    -- Everything its surroundings already depend on stays fixed.
+    let s ← get
+    let mut keep : List Ty := [.func [] .unit amb (← freshCap)]
+    for (_, bd) in scope do
+      keep := (match bd with
+        | .val t _ => t
+        | .cell t _ => t
+        | .label t _ => t
+        | .poly p => p.ty) :: keep
+    for (_, t) in s.group do
+      keep := t :: keep
+    for (subject, _, result, _, _) in s.projections do
+      keep := subject :: result :: keep
+    -- Decide the effects of what the callable calls, where nothing outside
+    -- depends on them; calls still undecided keep their effects fixed.
+    let mut fixedRows : List Nat := []
+    for k in keep do
+      fixedRows := fixedRows ++ freeRows (← zonk k)
+    settleRows (some fun ρ => !fixedRows.contains ρ) false
+    for (callee, permitted, _) in (← get).rowIncl do
+      keep := .func [] .unit callee (← freshCap) :: .func [] .unit permitted (← freshCap) :: keep
+    let scheme ← generalize t keep (top := false)
+    -- What it lets go of, or reads a part of, where that is of a type it
+    -- is general in: a callable is given nothing by which it could be
+    -- told how each type is destroyed, so each use is asked that the
+    -- type it is used at has nothing to destroy.
+    let mut quiets : List (Ty × String) := []
+    for held in (← get).dropCands.toList.map (·.2.1) ++ (← get).lateKeeps.toList.map (·.2.1) do
+      let held ← zonk held
+      if (freeTys held).any scheme.tvars.contains then
+        quiets := quiets ++ [(held, s!"`{x}` lets go of what it is given, whatever type that is, and is used here at a type with something to destroy, which it has no way to: say the type where `{x}` takes it, `fn(value: Type) \{ .. }`")]
+    let scheme := { scheme with quiets := quiets }
+    let here := (← get).pos
+    let result ← inferStmts ((x, .poly scheme) :: scope) amb rest want
+    checkUses (← get).body here scope [(x, .poly scheme)] rest
+    pure result
+  | none => do
+  let (at_, pos) := ((← get).at_, (← get).pos)
+  let t ← withLater (b.fvStmts (Elab.patVars pat) rest) (inferExpr scope amb value)
+  -- A value given a name that nothing then uses is owned by the name: if it
+  -- is one to destroy, that happens when the block ends.
+  if let .var x := pat then
+    unless (b.fvStmts [] rest).contains x || (← resolveCtor x none).isSome
+        || ((← get).aliases[x]?).isSome do
+      modify fun s =>
+        { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
+  -- (A type left to an implementation is found now where it can be: what
+  -- the pattern takes, and what is read of it after, is then of a type
+  -- that is known, and what has a `drop` to run is seen to have one.)
+  settleAssocs
+  let binds ← match pat with
+    | .var _ => inferPat pat t
+    | _ => do
+      -- What a pattern takes under a name that nothing then uses, or
+      -- under `_`, is destroyed when the block ends, as a clause's is.
+      modify fun s => { s with wildAt := some at_, wildCount := 0, wildLet := true }
+      let binds ← inferPat pat t
+      modify fun s => { s with wildAt := none, wildLet := false }
+      let mentioned := b.fvStmts [] rest
+      for (x, bd) in binds do
+        if let .val tx bid := bd then
+          modify fun s => { s with bindSites := (bid, at_.1, at_.2) :: s.bindSites, letBinds := bid :: s.letBinds }
+          unless mentioned.contains x || x.startsWith "%" do
+            let site : Elab.DropSite := ⟨(← get).owner, at_.1, at_.2, Syntax.letSite x, false⟩
+            modify fun s => { s with dropCands := s.dropCands.push (site, tx, pos) }
+      pure binds
+  if let .var _ := pat then
+    for (_, bd) in binds do
+      if let .val _ bid := bd then
+        modify fun s => { s with bindSites := (bid, at_.1, at_.2) :: s.bindSites }
+  let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
+  modify fun s => { s with pending := s.pending.push check }
+  let here := (← get).pos
+  -- (What has a `drop` to run where the block ends, and is not given away
+  -- before, holds what it borrows till then.)
+  let held ← binds.filterMapM fun (x, bd) => do
+    match bd with
+    | .val tx _ => pure (if !b.givenAway x rest && (← hasDropOwn tx) then some x else none)
+    | _ => pure none
+  let outerLive := (← get).dropLive
+  modify fun s => { s with dropLive := held ++ s.dropLive }
+  let result ← inferStmts (binds ++ scope) amb rest want
+  modify fun s => { s with dropLive := outerLive }
+  checkUses (← get).body here scope binds rest
+  pure result
+
+/-- `let mut x = value` and the statements after it (`inferStmts`). -/
+partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
+    (want : Option (Ty × Option Elab.Site)) (x : String) (value : Flat.ExprId) : M Ty := do
+  let b := (← get).body
+  let (at_, pos) := ((← get).at_, (← get).pos)
+  let t ← withLater (b.fvStmts [x] rest) (inferExpr scope amb value)
+  -- The variable lives until the end of this block: nothing that can reach
+  -- it may be left over afterwards.
+  let brand ← freshBrand
+  -- A variable that is never assigned, borrowed for writing or bound
+  -- again holds one value for as long as it lasts. Where that value is
+  -- also used as it is, outside any callable, the variable is a name
+  -- that can be borrowed: the value is given away by the use, counted as
+  -- a name's uses are, and is not the variable's to destroy.
+  -- (And is not borrowed again once it has been.)
+  -- (A value made where a dot call is made on it, named to be borrowed for
+  -- the function the resolver took, whose type's own function of the name
+  -- takes it whole: given to that one, `wholeReceiver`.)
+  let given := b.givenAway x rest || (← wholeReceiver x t)
+  modify fun s =>
+    { s with
+      cells := s.cells.push (brand, x, t)
+      movedCells := if given then brand :: s.movedCells else s.movedCells
+      -- A variable owns what it holds. One that gives it away owns it
+      -- where it has not: whether that is anywhere is seen once the
+      -- uses are counted, and its cleanup is put in then.
+      dropCands := if given then s.dropCands
+        else s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
+  -- Nothing says the variable is empty when its block ends: what it holds
+  -- then is let go. Unless the very next statement is a cleanup that takes
+  -- it out, leaving something that holds nothing: that runs last of all
+  -- that the block does to the variable, however the block is left.
+  let finalised ← match rest.head?.map fun s => b.stmt (b.unlocated s) with
+    | some (.defer e) =>
+      match takesOut b x e with
+      | some put => holdsNothing (Flat.treeExpr b put)
+      | none => pure false
+    | _ => pure false
+  unless finalised || given do
+    mustDrop t s!"the mutable variable `{x}` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`)"
+  let here := (← get).pos
+  if given then
+    modify fun s =>
+      { s with
+        flagged := here :: s.flagged
+        givenSites := (here, ⟨s.owner, at_.1, at_.2, Syntax.givenSite x, false⟩, t, pos) :: s.givenSites }
+  -- (What it holds has a `drop` to run where the block ends: what that
+  -- borrows is held till then.)
+  let outerLive := (← get).dropLive
+  if !given && (← hasDropOwn t) then modify fun s => { s with dropLive := x :: s.dropLive }
+  let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
+  modify fun s => { s with dropLive := outerLive }
+  if given then
+    let (lb, less) := Flat.lessPartsStmts (← get).body x rest
+    checkUses lb here scope [(x, .val t brand)] less
+  checkEscape brand s!"`{x}` could be used after its block has ended"
+    (("something that uses it is the block's result", result) :: scopeRoots scope) amb
+  pure result
+
+/-- `target = value` and the statements after it (`inferStmts`). -/
+partial def inferAssignStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
+    (want : Option (Ty × Option Elab.Site)) (target value : Flat.ExprId) : M Ty := do
+  let b := (← get).body
+  withLater (b.fvStmts [] rest) do
+    -- The value is computed first, and then the place is written.
+    let (expected, written) ← match b.expr target with
+      | .name none x =>
+        match scope.lookup x with
+        | some (.cell t brand) => do
+          -- What the variable held is destroyed.
+          modify fun s =>
+            { s with dropCands :=
+                s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, x, true⟩, t, s.pos) }
+          mustDrop t s!"assigning to `{x}` lets go of what it holds (`replace` takes it out instead)"
+          pure (t, UseKind.var brand x .write)
+        | some _ => throw s!"`{x}` is not a mutable variable: write `let mut {x}` where it is bound to change it"
+        | none => throw s!"unknown name `{x}`"
+      | .deref e => do
+        let inner ← freshTy
+        let cap ← freshCap
+        unifyAt "`*` assigns through a reference" (.ref .uniq inner cap)
+          (← inferPlace scope amb e)
+        mustDrop inner "assigning through a reference lets go of what was there"
+        -- What was there is destroyed.
+        modify fun s =>
+          { s with dropCands :=
+              s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, Elab.derefSite, true⟩, inner, s.pos) }
+        pure (inner, UseKind.through cap (placeName b e) true)
+      | _ => throw "only a mutable variable or `*reference` can be assigned"
+    let whole ← match b.expr value with
+      | .int n => literalAt expected n
+      | _ => pure none
+    match whole with
+    | some none => pure ()
+    | some (some why) => throw s!"the assigned value: {why}"
+    | none => unifyAt "the assigned value" expected (← inferExpr scope amb value)
+    use scope written
+  inferStmts scope amb rest want
 
 /-- The type of a block: that of its last expression, or unit. -/
 partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
@@ -1618,200 +1892,9 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
       modify fun s =>
         { s with dropCands := s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, Elab.stmtValue, false⟩, t, s.pos) }
       inferStmts scope amb rest want
-  | .let_ pat value =>
-    let closure := match pat, b.expr value with
-      | .var x, .closure _ _ => some x
-      | _, _ => none
-    match closure with
-    | some x => do
-    let (at_, pos) := ((← get).at_, (← get).pos)
-    let t ← withLater (b.fvStmts [x] rest) (inferExpr scope amb value)
-    if (← resolveCtor x none).isSome || ((← get).aliases[x]?).isSome then
-      let binds ← inferPat (.var x) t
-      inferStmts (binds ++ scope) amb rest want
-    else
-      -- A callable nothing then uses is let go when the block ends: if it
-      -- holds something to destroy, it is given up there.
-      unless (b.fvStmts [] rest).contains x do
-        modify fun s =>
-          { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
-      -- A callable bound by `let` is a value, so it can be used at several types.
-      -- Everything its surroundings already depend on stays fixed.
-      let s ← get
-      let mut keep : List Ty := [.func [] .unit amb (← freshCap)]
-      for (_, bd) in scope do
-        keep := (match bd with
-          | .val t _ => t
-          | .cell t _ => t
-          | .label t _ => t
-          | .poly p => p.ty) :: keep
-      for (_, t) in s.group do
-        keep := t :: keep
-      for (subject, _, result, _, _) in s.projections do
-        keep := subject :: result :: keep
-      -- Decide the effects of what the callable calls, where nothing outside
-      -- depends on them; calls still undecided keep their effects fixed.
-      let mut fixedRows : List Nat := []
-      for k in keep do
-        fixedRows := fixedRows ++ freeRows (← zonk k)
-      settleRows (some fun ρ => !fixedRows.contains ρ) false
-      for (callee, permitted, _) in (← get).rowIncl do
-        keep := .func [] .unit callee (← freshCap) :: .func [] .unit permitted (← freshCap) :: keep
-      let scheme ← generalize t keep (top := false)
-      -- What it lets go of, or reads a part of, where that is of a type it
-      -- is general in: a callable is given nothing by which it could be
-      -- told how each type is destroyed, so each use is asked that the
-      -- type it is used at has nothing to destroy.
-      let mut quiets : List (Ty × String) := []
-      for held in (← get).dropCands.toList.map (·.2.1) ++ (← get).lateKeeps.toList.map (·.2.1) do
-        let held ← zonk held
-        if (freeTys held).any scheme.tvars.contains then
-          quiets := quiets ++ [(held, s!"`{x}` lets go of what it is given, whatever type that is, and is used here at a type with something to destroy, which it has no way to: say the type where `{x}` takes it, `fn(value: Type) \{ .. }`")]
-      let scheme := { scheme with quiets := quiets }
-      let here := (← get).pos
-      let result ← inferStmts ((x, .poly scheme) :: scope) amb rest want
-      checkUses (← get).body here scope [(x, .poly scheme)] rest
-      pure result
-    | none => do
-    let (at_, pos) := ((← get).at_, (← get).pos)
-    let t ← withLater (b.fvStmts (Elab.patVars pat) rest) (inferExpr scope amb value)
-    -- A value given a name that nothing then uses is owned by the name: if it
-    -- is one to destroy, that happens when the block ends.
-    if let .var x := pat then
-      unless (b.fvStmts [] rest).contains x || (← resolveCtor x none).isSome
-          || ((← get).aliases[x]?).isSome do
-        modify fun s =>
-          { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
-    -- (A type left to an implementation is found now where it can be: what
-    -- the pattern takes, and what is read of it after, is then of a type
-    -- that is known, and what has a `drop` to run is seen to have one.)
-    settleAssocs
-    let binds ← match pat with
-      | .var _ => inferPat pat t
-      | _ => do
-        -- What a pattern takes under a name that nothing then uses, or
-        -- under `_`, is destroyed when the block ends, as a clause's is.
-        modify fun s => { s with wildAt := some at_, wildCount := 0, wildLet := true }
-        let binds ← inferPat pat t
-        modify fun s => { s with wildAt := none, wildLet := false }
-        let mentioned := b.fvStmts [] rest
-        for (x, bd) in binds do
-          if let .val tx bid := bd then
-            modify fun s => { s with bindSites := (bid, at_.1, at_.2) :: s.bindSites, letBinds := bid :: s.letBinds }
-            unless mentioned.contains x || x.startsWith "%" do
-              let site : Elab.DropSite := ⟨(← get).owner, at_.1, at_.2, Syntax.letSite x, false⟩
-              modify fun s => { s with dropCands := s.dropCands.push (site, tx, pos) }
-        pure binds
-    if let .var _ := pat then
-      for (_, bd) in binds do
-        if let .val _ bid := bd then
-          modify fun s => { s with bindSites := (bid, at_.1, at_.2) :: s.bindSites }
-    let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
-    modify fun s => { s with pending := s.pending.push check }
-    let here := (← get).pos
-    -- (What has a `drop` to run where the block ends, and is not given away
-    -- before, holds what it borrows till then.)
-    let held ← binds.filterMapM fun (x, bd) => do
-      match bd with
-      | .val tx _ => pure (if !b.givenAway x rest && (← hasDropOwn tx) then some x else none)
-      | _ => pure none
-    let outerLive := (← get).dropLive
-    modify fun s => { s with dropLive := held ++ s.dropLive }
-    let result ← inferStmts (binds ++ scope) amb rest want
-    modify fun s => { s with dropLive := outerLive }
-    checkUses (← get).body here scope binds rest
-    pure result
-  | .letMut x value => do
-    let (at_, pos) := ((← get).at_, (← get).pos)
-    let t ← withLater (b.fvStmts [x] rest) (inferExpr scope amb value)
-    -- The variable lives until the end of this block: nothing that can reach
-    -- it may be left over afterwards.
-    let brand ← freshBrand
-    -- A variable that is never assigned, borrowed for writing or bound
-    -- again holds one value for as long as it lasts. Where that value is
-    -- also used as it is, outside any callable, the variable is a name
-    -- that can be borrowed: the value is given away by the use, counted as
-    -- a name's uses are, and is not the variable's to destroy.
-    -- (And is not borrowed again once it has been.)
-    -- (A value made where a dot call is made on it, named to be borrowed for
-    -- the function the resolver took, whose type's own function of the name
-    -- takes it whole: given to that one, `wholeReceiver`.)
-    let given := b.givenAway x rest || (← wholeReceiver x t)
-    modify fun s =>
-      { s with
-        cells := s.cells.push (brand, x, t)
-        movedCells := if given then brand :: s.movedCells else s.movedCells
-        -- A variable owns what it holds. One that gives it away owns it
-        -- where it has not: whether that is anywhere is seen once the
-        -- uses are counted, and its cleanup is put in then.
-        dropCands := if given then s.dropCands
-          else s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
-    -- Nothing says the variable is empty when its block ends: what it holds
-    -- then is let go. Unless the very next statement is a cleanup that takes
-    -- it out, leaving something that holds nothing: that runs last of all
-    -- that the block does to the variable, however the block is left.
-    let finalised ← match rest.head?.map fun s => b.stmt (b.unlocated s) with
-      | some (.defer e) =>
-        match takesOut b x e with
-        | some put => holdsNothing (Flat.treeExpr b put)
-        | none => pure false
-      | _ => pure false
-    unless finalised || given do
-      mustDrop t s!"the mutable variable `{x}` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`)"
-    let here := (← get).pos
-    if given then
-      modify fun s =>
-        { s with
-          flagged := here :: s.flagged
-          givenSites := (here, ⟨s.owner, at_.1, at_.2, Syntax.givenSite x, false⟩, t, pos) :: s.givenSites }
-    -- (What it holds has a `drop` to run where the block ends: what that
-    -- borrows is held till then.)
-    let outerLive := (← get).dropLive
-    if !given && (← hasDropOwn t) then modify fun s => { s with dropLive := x :: s.dropLive }
-    let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
-    modify fun s => { s with dropLive := outerLive }
-    if given then
-      let (lb, less) := Flat.lessPartsStmts (← get).body x rest
-      checkUses lb here scope [(x, .val t brand)] less
-    checkEscape brand s!"`{x}` could be used after its block has ended"
-      (("something that uses it is the block's result", result) :: scopeRoots scope) amb
-    pure result
-  | .assign target value => do
-    withLater (b.fvStmts [] rest) do
-      -- The value is computed first, and then the place is written.
-      let (expected, written) ← match b.expr target with
-        | .name none x =>
-          match scope.lookup x with
-          | some (.cell t brand) => do
-            -- What the variable held is destroyed.
-            modify fun s =>
-              { s with dropCands :=
-                  s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, x, true⟩, t, s.pos) }
-            mustDrop t s!"assigning to `{x}` lets go of what it holds (`replace` takes it out instead)"
-            pure (t, UseKind.var brand x .write)
-          | some _ => throw s!"`{x}` is not a mutable variable: write `let mut {x}` where it is bound to change it"
-          | none => throw s!"unknown name `{x}`"
-        | .deref e => do
-          let inner ← freshTy
-          let cap ← freshCap
-          unifyAt "`*` assigns through a reference" (.ref .uniq inner cap)
-            (← inferPlace scope amb e)
-          mustDrop inner "assigning through a reference lets go of what was there"
-          -- What was there is destroyed.
-          modify fun s =>
-            { s with dropCands :=
-                s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, Elab.derefSite, true⟩, inner, s.pos) }
-          pure (inner, UseKind.through cap (placeName b e) true)
-        | _ => throw "only a mutable variable or `*reference` can be assigned"
-      let whole ← match b.expr value with
-        | .int n => literalAt expected n
-        | _ => pure none
-      match whole with
-      | some none => pure ()
-      | some (some why) => throw s!"the assigned value: {why}"
-      | none => unifyAt "the assigned value" expected (← inferExpr scope amb value)
-      use scope written
-    inferStmts scope amb rest want
+  | .let_ pat value => inferLetStmt scope amb rest want pat value
+  | .letMut x value => inferLetMutStmt scope amb rest want x value
+  | .assign target value => inferAssignStmt scope amb rest want target value
   | .defer e => do
     -- A cleanup performs no effects: it may run while its surroundings are
     -- being left, when no handler should be asked to do anything.
