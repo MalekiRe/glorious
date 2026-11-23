@@ -217,7 +217,7 @@ inductive Decision where
   | letMut (owner : String) (line col : Nat) (x : String)
   /-- The clauses of the callable `id` match what the reference they are
   given points to (`&Pattern`): as they are written out so
-  (`Syntax.byReference`). -/
+  (`Syntax.Flat.byReference`). -/
   | refPats (id : Nat) (clauses : List Clause)
   /-- The dot call `call` is of `fn` (the type's own function of the name),
   or of the function it is of, its receiver, a name, borrowed: given as the

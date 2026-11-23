@@ -808,12 +808,14 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                 | c => c
               -- (A constant, a constructor's other name too, is a test of a
               -- value read, as the resolver has it.)
+              -- (Written out in a body of their own, as the resolver writes
+              -- them out, `Flat.byReference`.)
               let kindOf := fun (x : String) => (do
                 let s ← getThe St
                 if (s.ctors[x]?).isSome then return 1
                 if (s.aliases[x]?).isSome then return 2
-                return 0 : StateT Nat M Nat)
-              let rn : Syntax.RefNames (StateT Nat M) :=
+                return 0 : StateT Flat.Body (StateT Nat M) Nat)
+              let rn : Syntax.RefNames (StateT Flat.Body (StateT Nat M)) :=
                 { kind := kindOf
                   ctor := fun name qual args => do
                     match ← (resolveCtor name qual : M _) with
@@ -821,8 +823,10 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                     | none => pure (name, args)
                   ctorTest := fun name qual => do
                     pure ((← (resolveCtor name qual : M _)).map fun (global, _) => Expr.name none global)
-                  fresh := modifyGet fun n => (n, n + 1) }
-              let lowered ← (Syntax.byReference rn wrapped).run' (500000000000000000 + id * 10000)
+                  fresh := modifyGetThe Nat fun n => (n, n + 1) }
+              let own := Flat.ofClauses wrapped
+              let (ids, own) ← ((Syntax.Flat.byReference rn own.roots).run own).run' (500000000000000000 + id * 10000)
+              let lowered := ids.toList.map (Flat.treeClause own)
               throwThe Elab.Said { msg := s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)", decision := some (.refPats id lowered) }
       -- (A value made where a dot call is made on it, named and borrowed for
       -- the call (`Flat.receiverExpr`), that is a reference already: the
