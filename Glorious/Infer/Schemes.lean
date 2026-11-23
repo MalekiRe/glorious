@@ -284,13 +284,13 @@ def freezeId (globals start id : Nat) (get : FreezeSt → Std.HashMap Nat Nat)
   if id < start then
     modify fun z => { z with foreign := true }
     return id
-  let z ← StateT.get
-  match (get z)[id]? with
-  | some k => pure k
-  | none =>
-    let k := frozenBase + (get z).size
-    StateT.set (put z ((get z).insert id k))
-    pure k
+  if let some k := (get (← StateT.get))[id]? then return k
+  -- (The map taken out of the state first, so that it is changed in place.)
+  StateT.modifyGet fun z =>
+    let m := get z
+    let z := put z {}
+    let k := frozenBase + m.size
+    (k, put z (m.insert id k))
 
 def freezeRg (sch : Scheme) (id : Nat) : StateT FreezeSt M Nat := do
   let r ← findRg id
@@ -305,8 +305,11 @@ partial def freezeAcc (sch : Scheme) (id : Nat) : StateT FreezeSt M Nat := do
     modify fun z => { z with foreign := true }
     return a
   if let some k := (← StateT.get).acc[a]? then return k
-  let k := frozenBase + (← StateT.get).acc.size
-  modify fun z => { z with acc := z.acc.insert a k }
+  let k ← StateT.modifyGet fun z =>
+    let acc := z.acc
+    let z := { z with acc := {} }
+    let k := frozenBase + acc.size
+    (k, { z with acc := acc.insert a k })
   let x ← accNode a
   let node : IAcc := { x with
     link := none
@@ -315,7 +318,10 @@ partial def freezeAcc (sch : Scheme) (id : Nat) : StateT FreezeSt M Nat := do
     binder := ← x.binder.mapM (freezeRg sch), more := ← x.more.mapM (freezeRg sch)
     insts := ← x.insts.mapM fun (sub, chosen) => do
       pure (← freezeAcc sch sub, ← chosen.mapM fun (p, q) => do pure (← freezeRg sch p, ← freezeRg sch q)) }
-  modify fun z => { z with nodes := z.nodes.push (k, node) }
+  modify fun z =>
+    let nodes := z.nodes
+    let z := { z with nodes := #[] }
+    { z with nodes := nodes.push (k, node) }
   pure k
 
 /-- A group's scheme as kept for a later compile, if it names no variable

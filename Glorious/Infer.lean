@@ -245,7 +245,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       | .fn .. => false
       | .pub _ (.fn ..) => false
       | _ => true),
-    envSizes, st.strict, st.regions, st.loans, st.ranked, st.widen, p.drops)
+    envSizes, st.strict, st.regions, st.loans, st.ranked, st.widen, st.anyUnknown, p.drops)
   let n := st.fns.size
   let members := (List.range n).foldl (fun (m : Std.HashMap Nat (List Nat)) f =>
     let r := (st.scc[f]?).getD f

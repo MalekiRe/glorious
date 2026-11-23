@@ -1006,13 +1006,14 @@ def compileSource (src : String) (check : Bool := true)
     -- (Without a certificate, inference's types alone, for the lowering.
     -- Found anew each time: with what the last compile kept, inference takes
     -- longer than without.)
-    let types : Thunk (Option Typing.Cert) := if cert.isSome || !check then Thunk.pure cert
-      else Thunk.mk fun _ =>
-        match Trace.timed "types" fun _ => Infer.certify declared out.program false out.envSizes (anyUnknown := true) with
-        | .ok types => some types
+    let (types, made) := if cert.isSome || !check then (cert, made)
+      else match Trace.timed "types" fun _ =>
+          Infer.certifyKept declared out.program false out.envSizes (memo := memo) (anyUnknown := true) with
+        | .ok (types, made) => (some types, made)
         -- (`GLORIOUS_TRACE`: why there are none.)
-        | .error e => if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => none else none
-    pure { compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made with types }
+        | .error e => if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => (none, made) else (none, made)
+    pure { compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made with
+      types := Thunk.pure types }
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
