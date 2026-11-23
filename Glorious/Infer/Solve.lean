@@ -72,6 +72,15 @@ where
     | .ref _ _ _ => true
     | _ => false
 
+/-- The type of a callable made of a function of this signature: a class
+and an environment of its own, of what it captured. -/
+def closureTy (sig : ISig) : M (ITy × Option ISig) := do
+  let cls ← freshCls
+  if (← get).strict then modify fun s => { s with onces := s.onces.push (cls, sig.caps) }
+  let env ← freshTy
+  modify fun s => { s with shows := s.shows.push (env, sig.caps) }
+  pure (.func sig.params sig.ret sig.row cls env sig.acc, some sig)
+
 mutual
 
 /-- The key of group `scc`, for what is kept: what its functions are made of,
@@ -498,11 +507,7 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
         if ← sig.params.anyM fun p => do pure (match ← find p with | .var _ => true | _ => false) then
           modify fun s => { s with closureRanks := s.closureRanks.push (sig.params, sig.caps, sig.acc) }
         else rankClosure sig.params sig.caps sig.acc
-    let cls ← freshCls
-    if (← get).strict then modify fun s => { s with onces := s.onces.push (cls, sig.caps) }
-    let env ← freshTy
-    modify fun s => { s with shows := s.shows.push (env, sig.caps) }
-    pure (.func sig.params sig.ret sig.row cls env sig.acc, some sig)
+    closureTy sig
   -- The elaborator gives another function only the environment of a block,
   -- and says how many arguments the block took: none, or the one it did not
   -- name.
@@ -511,11 +516,7 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
     let arity := ((← get).givenUp.lookup fn).getD 0
     unify (← atomTy Γ a)
       (.func (← freshTys arity) (← freshTy) (← freshRow) (← freshCls) (.tuple sig.caps) (← freshAcc))
-    let cls ← freshCls
-    if (← get).strict then modify fun s => { s with onces := s.onces.push (cls, sig.caps) }
-    let env ← freshTy
-    modify fun s => { s with shows := s.shows.push (env, sig.caps) }
-    pure (.func sig.params sig.ret sig.row cls env sig.acc, some sig)
+    closureTy sig
 
 /-- Infer a handler's functions, which with the handled computation touch `Φ`.
 Gives its operations, in the order of `ops`, and the signatures its functions
