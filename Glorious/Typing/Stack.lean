@@ -439,17 +439,13 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} (hp : ProgramOk Δ p) :
         obtain ⟨Cs, hcaps, hok⟩ := hh
         exact (enter_safe hp hok.ret hcaps (.cons hv .nil) hrow hsub hrest hs).weaken
           fun id => by simp only [occStack, occFrame, occs]; omega
-      | label hid hrest =>
-        exact (ihd hrest hv).weaken fun id => by simp only [occStack, occFrame]; omega
       | guard hent hc hrest =>
         exact (enter_safe hp hent hc .nil (Row.nil_le _) (Sub.refl _) (.yield hv hrest) hs).weaken
           fun id => by simp only [occStack, occFrame, occs]; omega
       | @cell a _ _ _ _ _ _ hrest =>
         exact (((ih (hs.release a)).1 hrest hv).release).weaken
           fun id => by simp only [occStack, occFrame]; omega
-      | lend _ _ _ _ _ hrest =>
-        exact (ihd hrest hv).weaken fun id => by simp only [occStack, occFrame]; omega
-      | lendLoose _ _ _ hrest =>
+      | label _ hrest | lend _ _ _ _ _ hrest | lendLoose _ _ _ hrest =>
         exact (ihd hrest hv).weaken fun id => by simp only [occStack, occFrame]; omega
       | yield hw hrest =>
         exact (ihd hrest hw).weaken fun id => by simp only [occStack, occFrame]; omega
@@ -473,33 +469,18 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} (hp : ProgramOk Δ p) :
           · exact absurd hft ht
           · exact ⟨f, hf, hft⟩
         obtain ⟨τ', ε', ϕ', hrest⟩ := hst.tail rfl
-        cases fr with
-        | guard fn captures =>
+        cases fr
+        case guard fn captures =>
           obtain ⟨Cs, σc, τ'', ε'', ϕ'', hent, hc, hrest'⟩ := hst.guard_inv rfl
           rw [leave_guard ht]
           exact (enter_safe hp hent hc .nil (Row.nil_le _) (Sub.refl _)
             (.exit hx hin' hrest') hs).weaken
             fun id => by simp only [occStack, occFrame, occs]; omega
-        | call env body =>
-          simp only [leave, ht]
-          exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
-        | handler id h =>
-          simp only [leave, ht]
-          exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
-        | label id =>
-          simp only [leave, ht]
-          exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
-        | lend uniq a b =>
-          simp only [leave, ht]
-          exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
-        | cell a =>
+        case cell a =>
           simp only [leave, ht]
           exact (((ih (hs.release a)).2 hrest hx hin').release).weaken
             fun id => by simp only [occStack]; omega
-        | yield w =>
-          simp only [leave, ht]
-          exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
-        | exit t a =>
+        all_goals
           simp only [leave, ht]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
 

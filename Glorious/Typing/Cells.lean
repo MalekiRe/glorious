@@ -169,77 +169,31 @@ theorem deliver_leave_owns (p : Program) : ∀ (st : List Frame) {store : Store 
   | cons fr st ih =>
     intro store ho
     refine ⟨@fun v s' h => ?_, @fun target after s' h => ?_⟩
-    · cases fr with
-      | call env body =>
-        simp only [deliver, Step.next.injEq] at h
-        subst h
-        exact ho.drop
-      | handler id hd =>
-        simp only [deliver] at h
-        obtain ⟨h1, h2⟩ := callFn_next h
-        show OwnsAt s'.stack s'.store
-        rw [h1, h2]
-        exact ho.drop
-      | label id =>
-        simp only [deliver] at h
-        exact (ih ho.drop).1 h
-      | guard fn captures =>
-        simp only [deliver] at h
-        obtain ⟨h1, h2⟩ := callFn_next h
-        show OwnsAt s'.stack s'.store
-        rw [h1, h2]
-        exact ho.drop.push (fun _ => rfl)
-      | cell a =>
-        simp only [deliver] at h
-        exact (ih ho.release).1 h
-      | lend uniq a b =>
-        simp only [deliver] at h
-        exact (ih ho.drop).1 h
-      | yield w =>
-        simp only [deliver] at h
-        exact (ih ho.drop).1 h
-      | exit t af =>
-        simp only [deliver] at h
-        exact (ih ho.drop).2 h
+    · cases fr <;> simp only [deliver] at h <;>
+        first
+        | (cases h; exact ho.drop)
+        | exact (fun ⟨h1, h2⟩ => by
+            show OwnsAt s'.stack s'.store
+            rw [h1, h2]
+            first | exact ho.drop | exact ho.drop.push (fun _ => rfl)) (callFn_next h)
+        | exact (ih ho.drop).1 h
+        | exact (ih ho.release).1 h
+        | exact (ih ho.drop).2 h
     · by_cases ht : fr.isTarget target = true
-      · cases after with
-        | yield w =>
-          simp only [leave, ht, ↓reduceIte] at h
-          exact (ih ho.drop).1 h
-        | invoke fn captures args =>
-          simp only [leave, ht, ↓reduceIte] at h
-          obtain ⟨h1, h2⟩ := callFn_next h
+      · cases after <;> simp only [leave, ht, ↓reduceIte] at h
+        · exact (ih ho.drop).1 h
+        · obtain ⟨h1, h2⟩ := callFn_next h
           show OwnsAt s'.stack s'.store
           rw [h1, h2]
           exact ho.drop
-      · cases fr with
-        | guard fn captures =>
-          simp only [leave, ht] at h
-          obtain ⟨h1, h2⟩ := callFn_next h
-          show OwnsAt s'.stack s'.store
-          rw [h1, h2]
-          exact ho.drop.push (fun _ => rfl)
-        | cell a =>
-          simp only [leave, ht] at h
-          exact (ih ho.release).2 h
-        | lend uniq a b =>
-          simp only [leave, ht] at h
-          exact (ih ho.drop).2 h
-        | call env body =>
-          simp only [leave, ht] at h
-          exact (ih ho.drop).2 h
-        | handler id hd =>
-          simp only [leave, ht] at h
-          exact (ih ho.drop).2 h
-        | label id =>
-          simp only [leave, ht] at h
-          exact (ih ho.drop).2 h
-        | yield w =>
-          simp only [leave, ht] at h
-          exact (ih ho.drop).2 h
-        | exit t af =>
-          simp only [leave, ht] at h
-          exact (ih ho.drop).2 h
+      · cases fr <;> simp only [leave, ht] at h <;>
+          first
+          | exact (fun ⟨h1, h2⟩ => by
+              show OwnsAt s'.stack s'.store
+              rw [h1, h2]
+              exact ho.drop.push (fun _ => rfl)) (callFn_next h)
+          | exact (ih ho.release).2 h
+          | exact (ih ho.drop).2 h
 
 theorem takeCont_spec {α : Type} : ∀ {cs : List (Option α)} {id : Nat} {x : α}
     {cs' : List (Option α)}, takeCont cs id = some (x, cs') →

@@ -326,36 +326,15 @@ theorem deliver_leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore sto
       | exit => exact ihl _ _
     · by_cases ht : f.isTarget target = true
       · have ht' : f'.isTarget target = true := by rw [← hf.isTarget_eq]; exact ht
-        cases after with
-        | yield w =>
-          simp only [Core.leave, ht, Bytecode.leave, ht']
-          exact ihd w
-        | invoke fn captures args =>
-          simp only [Core.leave, ht, Bytecode.leave, ht']
-          exact callFn_sim hrest hks
+        cases after <;> simp only [Core.leave, ht, Bytecode.leave, ht']
+        · exact ihd _
+        · exact callFn_sim hrest hks
       · have ht' : ¬ f'.isTarget target = true := by rw [← hf.isTarget_eq]; exact ht
-        cases hf with
-        | @guard fn captures =>
-          simp only [Core.leave, ht, Bytecode.leave, ht']
-          exact callFn_sim (.cons .exit hrest) hks
-        | @call body ρ code pc hc =>
-          simp only [Core.leave, ht, Bytecode.leave, ht']
-          exact ihl _ _
-        | @handler id h =>
-          simp only [Core.leave, ht, Bytecode.leave, ht']
-          exact ihl _ _
-        | @label id =>
-          simp only [Core.leave, ht, Bytecode.leave, ht']
-          exact ihl _ _
-        | @cell a =>
-          simp only [Core.leave, ht, Bytecode.leave, ht']
-          exact (ih (hks.release a)).2 _ _
-        | @yield w =>
-          simp only [Core.leave, ht, Bytecode.leave, ht']
-          exact ihl _ _
-        | @exit t a =>
-          simp only [Core.leave, ht, Bytecode.leave, ht']
-          exact ihl _ _
+        cases hf <;> simp only [Core.leave, ht, Bytecode.leave, ht'] <;>
+          first
+          | exact callFn_sim (.cons .exit hrest) hks
+          | exact ihl _ _
+          | exact (ih (hks.release _)).2 _ _
 
   | @lend uniq a b stack frames hrest ih =>
     obtain ⟨ihd, ihl⟩ := ih hks
