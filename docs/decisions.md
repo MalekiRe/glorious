@@ -7380,6 +7380,13 @@ source in Lean strings 6,021, and the test table 3,928.
   closure's environment, a handler's arms, a label's thunk, a cell, a loan,
   a dictionary), and carry the rest through each rewrite, which is
   certificate inference's work done again earlier.
+- **The checks of programs are a file too** (`tests/checks.cases`): 87 of
+  the 97 checks were a program and what one question of it gives (whether
+  its Core is shown owned, region-safe, how many borrows are scopes, what is
+  said when it goes wrong, the cells and cleanups left), each written as a
+  Lean string. Each is now a case, `#### case N kind`, whose `#### expect` is
+  what `Checks.found` gives; the ten that compare two runs stay in
+  `Checks.lean`. A reclassification, as the test programs'.
 - **The test programs are files** (`tests/cases.cases`, `foreign.cases`,
   `long.cases`: 3,928 lines of `Cases.lean`), each case after `#### case`
   with what it is for, its program, `#### input` and `#### expect`;

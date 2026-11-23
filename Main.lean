@@ -621,7 +621,7 @@ def exampleCases (dir : System.FilePath) :
     if entry.fileName.endsWith ".glorious" then
       let src ← IO.FS.readFile entry.path
       if let some (input, expect) := parseExpectation src then
-        out := out.push (⟨src, input, expect⟩, ← moduleFiles entry.path)
+        out := out.push ({ src, input, expect }, ← moduleFiles entry.path)
   pure out.toList
 
 /-- Does what a program gave match what it should: the same, or, of one
@@ -746,7 +746,7 @@ def selftest (vm : Option String) : IO UInt32 := do
   for ((n, _), i) in Checks.all.zipIdx do
     unless !checksAsked || held[i]?.getD false do
       failures := failures.push (2 * (all.length + foreignCases.length) + n,
-        s!"check {n} of `Glorious/Checks.lean` does not hold\n")
+        s!"check {n} (`Glorious/Checks.lean`, `tests/checks.cases`) does not hold\n")
   for (_, said) in failures.qsort (fun a b => a.1 < b.1) do
     IO.eprintln said
   let ran := all.length + (if vm.isSome then foreignCases.length else 0)
