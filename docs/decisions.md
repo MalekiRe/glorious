@@ -392,8 +392,12 @@ As it is done (`Lower.Typed`, `Lower.Layout`, `Lay`):
   reference into a held value is the address of its id and a path, and
   what is done there is done to the value as it was to a cell's; written to
   memory, such a reference is held too.
-- The suite runs each program it lowers on the Lean machines both ways and
-  asks for the same result, and the Rust VM runs the lowered one.
+- What the machines run is the program lowered, where it can be
+  (`Compiled.lower`, `Compiled.checked` the Core the certificate is of). A
+  program without a certificate has its types found for it on every
+  compile: about a second on `states2` (a leaf edit 0.54 s before, 1.58 s
+  now). Inference with what the last compile kept is slower still, so it
+  is found anew each time, until inference is made to keep more.
 
 Stage 2 so far: `Repr` (the prelude's) writes a value to memory and reads
 it back, `repr_store` and `repr_load`, both `unsafe fn` (a trait's

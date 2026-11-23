@@ -123,9 +123,8 @@ structure Outcome where
   /-- What the typing of its Core shows. -/
   certified : Bool := false
   typed : Bool := false
-  /-- What the Lean machines give the program lowered by its types
-  (`Lower.program`), if it is. -/
-  lowered : Option String := none
+  /-- Whether it is lowered by its types (`Lower.program`). -/
+  lowered : Bool := false
   strict : Bool := false
   regions : Bool := false
   loans : Bool := false
@@ -147,16 +146,11 @@ def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few 
   | .error e => { lean := s!"error: {e}", error := some e }
   | .ok compiled =>
     let has := fun (f : Typing.Cert → Bool) => (compiled.cert.map f).getD false
-    let lowered := compiled.types.get.bind (Lower.program · compiled.core)
     -- (An example, a program as long as it needs, is given more steps on
     -- bytecode.)
     { lean := if run then evalCompiled compiled c.input (vmScale := if few then 200 else 20) else ""
-      lowered := if run then lowered.map fun core =>
-        evalCompiled { compiled with core } c.input (vmScale := if few then 200 else 20) else none
-      -- (The Rust VM runs the program lowered, where it is.)
-      bytes := some (bytecodeBytes (match lowered with
-        | some core => { compiled with core }
-        | none => compiled))
+      lowered := compiled.lowered
+      bytes := some (bytecodeBytes compiled)
       certified := compiled.cert.isSome, typed := compiled.types.get.isSome
       strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
       lent := compiled.lent, plain := compiled.plain.length
@@ -506,7 +500,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if (← IO.getEnv "GLORIOUS_LOWER").isSome then
       match c.types.get with
       | none => IO.eprintln "not lowered: no types"
-      | some C => match Lower.lowered C c.core with
+      | some C => match Lower.lowered C c.checked with
         | .ok _ => IO.eprintln "lowered"
         | .error e => IO.eprintln s!"not lowered: {e}"
   pure result
@@ -740,9 +734,6 @@ def selftest (vm : Option String) : IO UInt32 := do
         failures := failures.push (2 * i, s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n")
     else if let some e := found[i]?.bind (·.error) then
       failures := failures.push (2 * i, s!"does not compile: {e}\nfor\n{c.src}\n")
-    if let some low := found[i]?.bind (·.lowered) then
-      if low != got then
-        failures := failures.push (2 * i, s!"lowered: gives\n{low}\nnot\n{got}\nfor\n{c.src}\n")
   for (c, i) in foreignCases.zipIdx do
     match foreign[i]? with
     | some o =>
@@ -800,7 +791,7 @@ def selftest (vm : Option String) : IO UInt32 := do
   let count := fun (f : Outcome → Bool) => (found.filter f).size
   let scopes := found.foldl (fun n o => n + o.lent) 0
   let plain := found.foldl (fun n o => n + o.plain) 0
-  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.typed)} typed; {count (·.lowered.isSome)} lowered; {count (·.certified)} with a certificate; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
+  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.typed)} typed; {count (·.lowered)} lowered; {count (·.certified)} with a certificate; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
   IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {count (·.plain > 0)} programs"
   let installs := count fun o => match o.cleanups with
     | some (n, _, _) => decide (n > 0)
@@ -1077,15 +1068,6 @@ where
       | .error e =>
         IO.eprintln s!"{path}: {e}"
         return 1
-    -- (`GLORIOUS_LOWER`: the program lowered by its types is what is run.)
-    let c := if (← IO.getEnv "GLORIOUS_LOWER").isSome then
-        match c.types.get.bind (Lower.program · c.core) with
-        | some core => { c with core }
-        | none => c
-      else c
-    if (← IO.getEnv "GLORIOUS_LOWER").isSome && (← IO.getEnv "GLORIOUS_CORE").isSome then
-      IO.eprintln "lowered:"
-      IO.eprintln (showCore c.fnNames c.core)
     let bytecode := compile c.core
     if command == "check" then
       let (onCore, coreSteps) := runToEnd (Core.stepIO c.core) (Core.initIO c.core input)

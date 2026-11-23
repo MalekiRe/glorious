@@ -11,6 +11,7 @@ public import Glorious.Elab.Lower
 public import Glorious.Comptime
 public import Glorious.Check
 public import Glorious.Infer
+public import Glorious.Lower.Typed
 public import Glorious.Prelude
 public import Glorious.Std
 public import Glorious.Compile
@@ -40,12 +41,18 @@ abbrev Texts := Std.HashMap UInt64 TextRead
 def textKey (path : List String) (text : String) : UInt64 := mixHash (hash text) (hash path)
 
 structure Compiled where
+  /-- What the machines run: `checked` lowered by its types (`Lower.program`),
+  where it can be; otherwise `checked` itself. -/
   core : Core.Program
+  /-- The Core the checker and the certificate are about. -/
+  checked : Core.Program := core
+  /-- Whether `core` is `checked` lowered. -/
+  lowered : Bool := false
   ctorNames : Array String
   fnNames : Array String
   opNames : Array String
-  /-- The typing of `core` that `Typing.checkProgram` accepted, when the program
-  was checked. With it, `Typing.checked_safety` applies to `core`; if the
+  /-- The typing of `checked` that `Typing.checkProgram` accepted, when the program
+  was checked. With it, `Typing.checked_safety` applies to `checked`; if the
   certificate is `strict`, so does `Typing.checked_owned_safety`; and if it has
   `regions`, so does `Typing.checked_borrow_safety`; and if it has `loans`,
   so does `Typing.checked_exclusive_safety`. -/
@@ -756,9 +763,16 @@ def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
     Except String Elab.Output := do
   Comptime.evaluate (← Elab.elabProgram items blocks lends root kept)
 
+/-- The program lowered by its types, where it can be: what the machines run. -/
+def Compiled.lower (c : Compiled) : Compiled :=
+  match c.types.get.bind (Lower.program · c.core) with
+  | some core => { c with core, checked := c.core, lowered := true }
+  | none => { c with checked := c.core }
+
 /-- Parse, check and elaborate a program together with the prelude, and have the
-proved Core type checker accept the result. With `check := false` both checks
-are skipped, so that programs which go wrong can still be run. -/
+proved Core type checker accept the result, and lower it by its types. With
+`check := false` both checks are skipped, so that programs which go wrong can
+still be run, and it is not lowered. -/
 def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
@@ -771,7 +785,7 @@ def compileSource (src : String) (check : Bool := true)
     (frontKept : Option (Std.HashMap UInt64 (List Syntax.Item)) := none)
     (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
     (lowerKept : Option Elab.LowerMemo := none) :
-    Except String Compiled := do
+    Except String Compiled := Compiled.lower <$> do
   -- (Each text lexed, once: each that an earlier compile read as it is,
   -- `texts`, not.)
   let lexed ← Trace.timed "lex" fun _ =>
@@ -987,6 +1001,9 @@ def compileSource (src : String) (check : Bool := true)
     let way := match way with
       | some k => [(("%way", 0), k)]
       | none => []
+    -- (Without a certificate, inference's types alone, for the lowering.
+    -- Found anew each time: with what the last compile kept, inference takes
+    -- longer than without.)
     let types : Thunk (Option Typing.Cert) := if cert.isSome || !check then Thunk.pure cert
       else Thunk.mk fun _ => (Trace.timed "types" fun _ => Infer.certify declared out.program false out.envSizes (anyUnknown := true)).toOption
     pure { compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made with types }
@@ -1472,9 +1489,9 @@ def runBytecode {α β : Type} (src : String) (input : List Int) (fuel : Nat) (i
 def peakStack (src : String) (input : List Int := []) (fuel : Nat := 4000000) : Option Nat :=
   runBytecode src input fuel 0 (fun peak cfg => max peak cfg.state.frames.length) fun peak _ => peak
 
-/-- How many memory cells are still live when a program finishes. The step that
-ends the program also leaves the scopes still on the stack, so their cells do
-not count. -/
+/-- How many memory cells are still live when a program finishes, cells and
+blocks of memory alike. The step that ends the program also leaves the scopes
+still on the stack, so their cells do not count. -/
 def liveCells (src : String) (input : List Int := []) (fuel : Nat := 4000000) : Option Nat :=
   runBytecode src input fuel () (fun _ _ => ()) fun _ cfg =>
     let leaving := cfg.state.frames.filterMap fun
@@ -1482,6 +1499,7 @@ def liveCells (src : String) (input : List Int := []) (fuel : Nat := 4000000) : 
       | _ => none
     let cells := cfg.state.store.cells
     ((List.range cells.size).filter fun a => (cells[a]?.getD none).isSome && !leaving.contains a).length
+      + (cfg.state.store.mem.blocks.keys.filter (!leaving.contains ·)).length
 
 /-- The cleanups of a finished program: how many guards it installed, how many
 cleanups it started, and how many guards were left in resumptions never taken.
