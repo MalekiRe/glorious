@@ -75,7 +75,7 @@ partial def toCorePat : Pattern → M (Core.Pat × List String)
       else throw s!"constructor `{x}` takes {info.arity} arguments"
     | none =>
       match (← read).aliases[x]? with
-      | some e => do toCorePat (← exprToPat e)
+      | some e => do toCorePat (← Syntax.exprToPat e)
       | none => pure (.bind, [x])
   | .ctor x q args => do
     -- A scalar is the integer it is held as.

@@ -28,7 +28,7 @@ partial def normPat : Pattern → M NPat
     | some (name, _) => pure (.ctor name [])
     | none =>
       match (← get).aliases[x]? with
-      | some e => do normPat (← exprToPat e)
+      | some e => do normPat (← match Syntax.exprToPat e with | .ok p => pure p | .error m => throw m)
       | none => pure .any
   | .ctor x q ps => do
     if let some (_, n) := Syntax.scalarPattern (.ctor x q ps) then return .int n

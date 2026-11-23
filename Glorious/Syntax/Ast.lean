@@ -1048,6 +1048,19 @@ def selfRewrite (self : String) (trait : Option (String × Expr)) : Rewrite wher
 
 def selfClause (self : String) (trait : Option (String × Expr)) : Clause → Clause := (selfRewrite self trait).clause
 
+/-- A constant expression read as a pattern. -/
+partial def exprToPat : Expr → Except String Pattern
+  | .int n => pure (.int n)
+  | .name q x => pure (if q.isSome then .ctor x q [] else .var x)
+  | .call _ (.name q x) args => do
+    -- A constant written with its type is its value.
+    if q.isNone && x == ascribeMark then
+      if let value :: _ := args then return ← exprToPat value
+    pure (.ctor x q (← args.mapM exprToPat))
+  | .tuple args => do
+    pure (.tuple (← args.mapM exprToPat))
+  | _ => throw "this constant cannot be used as a pattern"
+
 /-- The name and the place such a name is of. -/
 def partOf (name : String) : Option (String × Nat) :=
   match name.splitOn ".%" with

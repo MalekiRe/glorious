@@ -1972,7 +1972,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
       pure []
     | none =>
       match (← get).aliases[x]? with
-      | some e => do inferPat (← exprToPat e) t
+      | some e => do inferPat (← match Syntax.exprToPat e with | .ok p => pure p | .error m => throw m) t
       | none => do
         let id ← freshBrand
         modify fun s => { s with bindLoans := s.bindLoans.insert id s.loans.size }

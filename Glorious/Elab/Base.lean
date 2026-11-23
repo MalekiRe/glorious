@@ -1046,17 +1046,4 @@ partial def irrefutable : Pattern → M Bool
   | .var x => isBinder x
   | .ctor _ _ _ => pure false
 
-/-- Read a constant expression as a pattern. -/
-partial def exprToPat : Expr → M Pattern
-  | .int n => pure (.int n)
-  | .name q x => pure (if q.isSome then .ctor x q [] else .var x)
-  | .call _ (.name q x) args => do
-    -- A constant written with its type is its value.
-    if q.isNone && x == Syntax.ascribeMark then
-      if let value :: _ := args then return ← exprToPat value
-    pure (.ctor x q (← args.mapM exprToPat))
-  | .tuple args => do
-    pure (.tuple (← args.mapM exprToPat))
-  | _ => throw "this constant cannot be used as a pattern"
-
 end Glorious.Elab
