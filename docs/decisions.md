@@ -7366,6 +7366,18 @@ source in Lean strings 6,021, and the test table 3,928.
   and the tree-bodied `Item` with `FItem`, `ofItems`, the tree `Rewrite` and
   its passes are gone (see "A flat representation of each declaration's
   body").
+- **Proofs that say each case once** (about −1,500 lines of `Typing/`,
+  `Proof/`, `Core/Cleanup.lean`): a lemma about a step splits what the step
+  matched on (`split at h`, `repeat' split`) and closes the leaves from a
+  short list of what can end one (`first | ..`), instead of an arm per form
+  chasing the same `cases`; a step is rewritten in the goal (`simp only`)
+  where it was stated as an equation first; arms with one proof are one
+  arm (`| a x | b x =>`); a typing form's facts are used where they are
+  (`hform.callee`), not named first; each form is instantiated once
+  (`CallOk.inst` and the rest) and a frame skipped once (`FindsOk.skip`).
+  A leaf tactic whose failure Lean recovers from (`obtain`, `have`) is
+  written with `exact` or put last, so that `first` moves on. The axioms
+  of every theorem are as they were.
 - **Not done: a typed Core**, the checker's types carried onto Core so
   that certificate inference would only find regions. Read against the code,
   it does not make the compiler smaller. Infer's types carry regions, effect
