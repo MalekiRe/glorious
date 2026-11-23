@@ -689,11 +689,13 @@ partial def parsePack : P (List TypeExpr) := do
   let mut comma := false
   repeat
     if (← peek) == .punct ")" then break
-    -- `Fn<(..P)>`: as many as the tuple `P` has.
+    -- `Fn<(..P)>`: as many as the tuple `P` has; `Fn<(H, ..R)>`, as the
+    -- tuple of `H` first and the rest `R`.
     if (← peek) == .punct "." && (← peek 1) == .punct "." then
       advance
       advance
-      out := out.push (.name spreadParams [← parseType])
+      let whole := out.foldr (fun h rest => TypeExpr.name consHead [h, rest]) (← parseType)
+      out := #[.name spreadParams [whole]]
       comma := true
       let _ ← acceptPunct ","
       break

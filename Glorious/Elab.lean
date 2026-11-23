@@ -157,6 +157,10 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
     if let some q := qual then
       unless q == info.owner do throw s!"`{x}` is not an operation of `{q}`"
     return .op info
+  -- (A spread whose length the specializer did not find: its function in
+  -- the prelude only stands for the one written out for a length.)
+  if (spreadOf x).isNone && ["spread_split", "spread_cons", "spread_snoc", "spread_call"].any (fun p => x.startsWith p) then
+    throw s!"a list of values is spread here (`{x}`) whose length is not known when the program is compiled"
   if let some idx ← fnAt x then return .fn idx
   if let some (p, n) := prims.lookup x then return .prim p n
   if (Syntax.scalarCast x).isSome then return .cast
@@ -170,8 +174,6 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if x == "transmute" then return .transmute
   if let some e := g.aliases[x]? then return .const e
   if let some (kind, n) := spreadOf x then return .fn (← spreadFn kind n)
-  if ["spread_split", "spread_cons", "spread_snoc", "spread_call"].any (fun p => x.startsWith p) then
-    throw s!"a list of values is spread here (`{x}`) whose length is not known when the program is compiled"
   throw s!"unknown name `{x}`"
 
 /-! ## Expressions -/

@@ -193,7 +193,7 @@ impl Ord for Int {
 // written in it is: what it spreads is as long as that).
 trait Spread { fn spread_length() -> Int }
 impl Spread for () { fn spread_length() -> Int { 0 } }
-impl<H, ..R> Spread for (H, ..R) where (..R): Spread { fn spread_length() -> Int { 1 + <(..R) as Spread>::spread_length() } }
+impl<H, ..R> Spread for (H, ..R) where R: Spread { fn spread_length() -> Int { 1 + <R as Spread>::spread_length() } }
 fn spread_split<A, B>(t: (A, ..B)) -> (A, B) where B: Spread { spread_split(t) }
 fn spread_cons<A, B>(first: A, rest: B) -> (A, ..B) where B: Spread { spread_cons(first, rest) }
 fn spread_snoc<B, X>(rest: B, last: X) -> (..B, X) where B: Spread { spread_snoc(rest, last) }
@@ -201,8 +201,8 @@ fn spread_split_as<L, A, B>(t: (A, ..B)) -> (A, B) where L: Spread { spread_spli
 fn spread_cons_as<L, A, B>(first: A, rest: B) -> (A, ..B) where L: Spread { spread_cons_as<L>(first, rest) }
 fn spread_snoc_as<L, B, X>(rest: B, last: X) -> (..B, X) where L: Spread { spread_snoc_as<L>(rest, last) }
 // A callable called with a tuple's parts, `f(..t)`.
-fn spread_call<B, O>(f: fn(..B) -> O, args: B) -> O where B: Spread { spread_call(f, args) }
-fn spread_call_as<L, B, O>(f: fn(..B) -> O, args: B) -> O where L: Spread { spread_call_as<L>(f, args) }
+fn spread_call<F, B, O, e: EffectRow>(f: F, args: B) -> O / {| e} where F: Fn<(..B), Output = O, Effects = {| e}>, B: Spread { spread_call(f, args) }
+fn spread_call_as<L, F, B, O, e: EffectRow>(f: F, args: B) -> O / {| e} where F: Fn<(..B), Output = O, Effects = {| e}>, L: Spread { spread_call_as<L>(f, args) }
 
 "#
 

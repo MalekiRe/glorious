@@ -7345,6 +7345,20 @@ source in Lean strings 6,021, and the test table 3,928.
     `liveCells` over one run; `fieldOfDeref` as `fieldOfName`.
   - `conditionUses`, the same as `equalUses`, gone: each use was asked
     twice.
+- **`std::tuple` written once, tried (not kept).** `Tuple`, `Callable`,
+  `Push`, `Prepend`, `SplitFirst`, `Apply`, `ApplyWaiting` by first and
+  rest, with the prelude's spreads (a test program of all of them ran):
+  66 test programs then ran out of steps or went wrong, as covey's bundles
+  never finished. A spread whose `Spread` dictionary is not known where it
+  is specialized, a function given it at run time, was the prelude's
+  function, which only stands for one written out: it called itself for
+  ever. That is now refused when the program is compiled ("a list of values
+  is spread here whose length is not known"). Kept from the try: `Fn<(H,
+  ..R)>` is the callable of a tuple's first and the rest (`parsePack`);
+  `spread_call` takes any callable, `F: Fn<(..B), Output = O, Effects = {|
+  e}>`; `Spread` of `(H, ..R)` asks `R: Spread`. What it would need: a
+  spread whose length is found when the program runs, which Core has no
+  operation for.
 - **The library's texts are files** (`library/`, 5,013 lines of `Std.lean`
   that were Glorious in Lean strings): not a cut, the same text counted as
   covey's is. `Std.lean` keeps the table of modules and what it writes out
