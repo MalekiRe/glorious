@@ -18,6 +18,17 @@ def inferredTy : M Ty := do
   | _ => pure ()
   pure t
 
+/-- What `tr` leaves as `name` to the implementation for `subject`: kept as
+written where `self` mentions a type parameter of an implementation whose
+types are being read, to be answered at each use; else a fresh type found
+when the implementation is. -/
+def assocOf (tr name : String) (self subject : Ty) : M Ty := do
+  if (freeTys self).any (← get).projecting.contains then
+    return .con Syntax.projMark [subject, .con tr [], .con name []]
+  let a ← freshTy
+  modify fun s => { s with assocUses := s.assocUses.push (tr, subject, name, a, s.owner, s.pos) }
+  return a
+
 mutual
 
 /-- Read a type as written. In a declaration, a bare unknown name is a field
@@ -45,11 +56,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
           let self := if targs.isEmpty then self else Ty.tuple (self :: targs)
           -- (Of a type parameter of an implementation whose types are being
           -- read: kept as written, to be answered at each use.)
-          if (freeTys self).any (← get).projecting.contains then
-            return .con Syntax.projMark [self, .con tr [], .con name []]
-          let a ← freshTy
-          modify fun s => { s with assocUses := s.assocUses.push (tr, self, name, a, s.owner, s.pos) }
-          return a
+          return ← assocOf tr name self self
         | none => throw s!"unknown trait `{tr}`"
       | _ => throw "`<Type as Trait>::Name` names a trait and what it leaves to an implementation"
     -- `T::Item`: the type a trait of `T` leaves to its implementation.
@@ -81,11 +88,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
             | .name "'_" [], some c => pure (Ty.life c)
             | _, _ => resolveType params decl a
           let subject := if asked.isEmpty then base else Ty.con Syntax.gatMark (base :: asked)
-          if (freeTys self).any (← get).projecting.contains then
-            return .con Syntax.projMark [subject, .con tr [], .con name []]
-          let a ← freshTy
-          modify fun s => { s with assocUses := s.assocUses.push (tr, subject, name, a, s.owner, s.pos) }
-          return a
+          return ← assocOf tr name self subject
         let traits := (← get).traitShape.toList.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
         -- (Several: the one written of the parameter, if one is.)
         let written := (← get).paramTraits.filterMap fun (q, tr, _) => if q == p then some tr else none
@@ -99,11 +102,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
             | none => pure none
           if let [(tr, targs)] := withArgs then
             let subject := Ty.tuple (self :: (← targs.mapM (resolveType params decl)))
-            if (freeTys self).any (← get).projecting.contains then
-              return .con Syntax.projMark [subject, .con tr [], .con name []]
-            let a ← freshTy
-            modify fun s => { s with assocUses := s.assocUses.push (tr, subject, name, a, s.owner, s.pos) }
-            return a
+            return ← assocOf tr name self subject
         let traits := if traits.length > 1 && !written.isEmpty then
             traits.filter fun (tr, _, _) => written.any fun w => w == tr || Syntax.lastSegment tr == Syntax.lastSegment w
           else traits
@@ -117,11 +116,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
             | .name "'_" [], some c => pure (Ty.life c)
             | _, _ => resolveType params decl a
           let subject := if asked.isEmpty then self else Ty.con Syntax.gatMark (self :: asked)
-          if (freeTys self).any (← get).projecting.contains then
-            return .con Syntax.projMark [subject, .con tr [], .con name []]
-          let a ← freshTy
-          modify fun s => { s with assocUses := s.assocUses.push (tr, subject, name, a, s.owner, s.pos) }
-          return a
+          return ← assocOf tr name self subject
         | [] => throw s!"`{x}`: no trait leaves a type `{name}` to its implementations"
         | _ => throw s!"`{x}`: more than one trait leaves a type `{name}` to its implementations"
     -- `Of<T>` in a trait's own functions: the type the trait leaves to an
