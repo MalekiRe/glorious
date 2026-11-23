@@ -382,8 +382,10 @@ As it is done (`Lower.Typed`, `Lower.Layout`, `Lay`):
   type the reference is to. On both Lean machines and the Rust VM.
 - `Lower.lowered` walks each function at each of its signatures, finding
   each local's type as the checker does, and lays out each cell and memory
-  operation. Until a function is copied for each signature whose layouts
-  differ, a program where they differ is not lowered.
+  operation. A function whose signatures are laid out otherwise is copied
+  for each kind (`Lower.targetsOf`), and each use of it, a closure made, one
+  rebound, a handler's functions, how a closure is destroyed, made of the
+  copy for its signature: the kinds split until the copies settle.
 - What is not bytes yet is held: a callable, an array, a type that holds
   itself (wherever it is, so that a reference to one means the same bytes
   however it was reached), and what nothing decided the type of (a type

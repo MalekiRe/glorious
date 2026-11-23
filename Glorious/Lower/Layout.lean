@@ -2,6 +2,7 @@ module
 
 public import Glorious.Lay
 public import Glorious.Typing.Checker
+public import Glorious.Typing.Certify
 
 /-!
 # The layout of a Core type

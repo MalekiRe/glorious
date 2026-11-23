@@ -15654,3 +15654,12 @@ fn main() -> Int {
 16
 8
 24
+#### case
+#### A cell in a generic function, used at two types laid out otherwise: the
+#### function is copied for each.
+fn twice<T>(x: T, f: fn(&T) -> Int) -> Int { let mut c = x; f(&c) + f(&c) }
+fn first(r: &Int) -> Int { *r }
+fn both(r: &(Int, Int)) -> Int { match(r) { &(a, b) => *a * 10 + *b } }
+fn main() -> Int { twice(3, first) * 1000 + twice((1, 2), both) }
+#### expect
+6024

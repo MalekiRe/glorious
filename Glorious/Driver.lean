@@ -766,7 +766,9 @@ def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
 /-- The program lowered by its types, where it can be: what the machines run. -/
 def Compiled.lower (c : Compiled) : Compiled :=
   match c.types.get.bind (Lower.program · c.core) with
-  | some core => { c with core, checked := c.core, lowered := true }
+  | some (core, copies) =>
+    { c with core, checked := c.core, lowered := true
+             fnNames := c.fnNames ++ (copies.map fun fn => (c.fnNames[fn]?).getD "").toArray }
   | none => { c with checked := c.core }
 
 /-- Parse, check and elaborate a program together with the prelude, and have the
