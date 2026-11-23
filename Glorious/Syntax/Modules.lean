@@ -781,6 +781,24 @@ partial def patternShape : Pattern → String
   | .ctor name qual args =>
     s!"{qual.getD ""}::{name}(" ++ ",".intercalate (args.map patternShape) ++ ")"
 
+/-- A constructor's patterns given by its fields' names, `C { a, b: p, .. }`,
+in the declared order; none where they are not given so. (`hint`: said
+after a field left out.) -/
+def orderedFieldPats (name : String) (entry : Option Entry) (args : List Pattern) (hint : String := "") :
+    R (Option (List Pattern)) := do
+  let .var mark :: gave := args | return none
+  if mark != recordMark then return none
+  let names ← fieldNamesOf name entry
+  let rest := gave.any fun
+    | .var r => r == restMark
+    | _ => false
+  let gave := gave.filterMap fun
+    | .ctor mark none [p] => (fieldOfMark mark).map fun field => (field, p)
+    | _ => none
+  match orderFields name names gave (if rest then some Pattern.wild else none) with
+  | .ok ps => pure (some ps)
+  | .error e => throw (e ++ (if rest then "" else hint))
+
 /-- What the resolver knows of the names in a pattern it writes out by
 reference, before they are resolved. -/
 def refNamesOf (ctx : Ctx) : RefNames R where
@@ -790,21 +808,9 @@ def refNamesOf (ctx : Ctx) : RefNames R where
   ctor name qual args := do
     let (_, global, entry) ← resolveValue ctx [] qual name
     -- Fields given by name are put in the declared order first.
-    let args ← match args with
-      | .var mark :: gave =>
-        if mark == recordMark then
-          let names ← fieldNamesOf name entry
-          let rest := gave.any fun
-            | .var r => r == restMark
-            | _ => false
-          let gave := gave.filterMap fun
-            | .ctor mark none [p] => (fieldOfMark mark).map fun field => (field, p)
-            | _ => none
-          match orderFields name names gave (if rest then some Pattern.wild else none) with
-          | .ok ps => pure ps
-          | .error e => throw e
-        else restWritten name entry args
-      | _ => restWritten name entry args
+    let args ← match ← orderedFieldPats name entry args with
+      | some ps => pure ps
+      | none => restWritten name entry args
     -- A name declared for a constructor, `let Some = Ok;`, is that one.
     let global ← match entry with
       | some e =>
@@ -845,23 +851,9 @@ partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
     if (byRef? (.ctor name qual args)).isSome then
       throw "a pattern that binds by reference, `&mut Pattern`, is written as a parameter of a clause"
     let (qual', name', entry) ← resolveValue ctx [] qual name
-    match args with
-    | .var mark :: gave =>
-      if mark == recordMark then
-        let names ← fieldNamesOf name entry
-        let rest := gave.any fun
-          | .var r => r == restMark
-          | _ => false
-        let gave := gave.filterMap fun
-          | .ctor mark none [p] => (fieldOfMark mark).map fun field => (field, p)
-          | _ => none
-        let ordered ← match orderFields name names gave (if rest then some Pattern.wild else none) with
-          | .ok ps => pure ps
-          | .error e => throw (e ++ (if rest then "" else " (`..` lets the rest go)"))
-        let args ← ordered.mapM (resolvePattern ctx)
-        return (.ctor name' qual' (args.map (·.1)), args.flatMap (·.2))
-    | _ => pure ()
-    let args ← restWritten name entry args
+    let args ← match ← orderedFieldPats name entry args " (`..` lets the rest go)" with
+      | some ps => pure ps
+      | none => restWritten name entry args
     let args ← args.mapM (resolvePattern ctx)
     pure (.ctor name' qual' (args.map (·.1)), args.flatMap (·.2))
 
