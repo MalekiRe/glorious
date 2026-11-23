@@ -160,8 +160,9 @@ checked, the library's texts read and checked once) is then found once, and
 what the server keeps of each program stays in memory. It listens on the
 loopback address at a port the system gives, and writes the port and which
 compiler it is to `~/.cache/glorious/server`. `run`, `certify` and `build`
-send it the program's path and get back what was built (as the build
-directory keeps it), and run or report on it as they would themselves; where
+send it the program's path; it builds it into the program's build directory
+and says when it is there, and they read it from there as they would their
+own build and run or report on it as they would themselves; where
 no server runs, the file names another compiler, or it cannot be reached, they
 build the program themselves. `GLORIOUS_FRESH` or `GLORIOUS_TARGET` set: the
 server is not asked. It is started by hand: nothing starts a process that
@@ -7378,6 +7379,13 @@ source in Lean strings 6,021, and the test table 3,928.
   A leaf tactic whose failure Lean recovers from (`obtain`, `have`) is
   written with `exact` or put last, so that `first` moves on. The axioms
   of every theorem are as they were.
+- **The build directory's program and certificate are kept as the other
+  kept values are** (`Store`, a compacted region): the hand-written byte
+  format for `Target.Built` and for certificates (about 200 lines of
+  encoders and decoders) is gone, and the compile server, which sent the
+  built program in that format, now says it is written and the asker reads
+  it from the build directory. Reading a built `covey/states2` takes 0.4 ms
+  against 7.3, writing it 31 ms against 40 (on a thread of its own).
 - **Not done: a typed Core**, the checker's types carried onto Core so
   that certificate inference would only find regions. Read against the code,
   it does not make the compiler smaller. Infer's types carry regions, effect

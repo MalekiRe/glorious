@@ -315,6 +315,15 @@ def shardOf (k : UInt64) : Nat := (k % inferShards.toUInt64).toNat
 /-- What compiles are writing to keep, waited for before the process ends. -/
 initialize keeping : IO.Ref (Array (Task (Except IO.Error Unit))) ← IO.mkRef #[]
 
+/-- Wait for what is being kept to be written: until none is left, as one
+may start others. -/
+def waitKept : IO Unit := do
+  let mut waited := 0
+  while waited < (← keeping.get).size do
+    let _ ← IO.wait (← keeping.get)[waited]!
+    waited := waited + 1
+  keeping.set #[]
+
 /-- Write what is kept on a thread of its own: what was compiled is used, and
 run, while it is written. -/
 def keep (act : IO Unit) : IO Unit := do
@@ -570,7 +579,8 @@ partial def serve : IO UInt32 := do
         | none => pure (frame (bytesOf [1] ++ "an unreadable request".toUTF8))
         | some path =>
           match ← buildFile path (some kept) with
-          | .ok b => pure (frame (bytesOf ([0] ++ Target.encode "" b)))
+          -- (Written where the asker reads it.)
+          | .ok _ => do waitKept; pure (frame (bytesOf [0]))
           | .error e => pure (frame (bytesOf [1] ++ e.toUTF8))
       (client.send reply).block
       client.shutdown.block
@@ -594,7 +604,10 @@ def buildByServer (path : String) : IO (Option (Except String Target.Built)) := 
     let some reply ← receive client | return none
     let bytes := reply.toList.map (·.toNat)
     match bytes with
-    | 0 :: rest => pure ((Target.decode "" rest).map Except.ok)
+    | [0] => do
+      let built ← Target.read (← Target.dirOf whole.toString)
+        (← Target.keyOf (← IO.FS.readFile whole) (← moduleFiles whole))
+      pure (built.map Except.ok)
     | 1 :: rest => pure (some (.error ((String.fromUTF8? (bytesOf rest)).getD "the server's error is unreadable")))
     | _ => pure none
   catch _ => pure none
@@ -925,12 +938,7 @@ def vmDir : IO System.FilePath := do
 def main (args : List String) : IO UInt32 := do
   let code ← Trace.timedIO "glorious" (command args)
   -- (What a compile keeps is written while the program it made runs.)
-  -- (Until none is left: one may start others.)
-  let mut waited := 0
-  while waited < (← keeping.get).size do
-    let t := (← keeping.get)[waited]!
-    let _ ← IO.wait t
-    waited := waited + 1
+  waitKept
   Trace.report
   -- (Ended here, not by returning: the ways of finding a certificate not
   -- taken, each on a thread of its own, would be waited for to the end.)
