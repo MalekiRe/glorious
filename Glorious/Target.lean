@@ -36,15 +36,12 @@ structure Built where
   /-- How many function signatures the certificate has, and which of Core's
   sets of rules it shows: none if the program has no certificate. -/
   sigs : Nat
-  certified : Bool
   strict : Bool
   regions : Bool
   loans : Bool
   /-- How many borrows are scopes of their own, and the others, as written. -/
   lent : Nat
   plain : List String
-  /-- How each place was made, for a later compile (`Compiled.places`). -/
-  places : List ((String × Nat) × Nat)
   /-- Whether the places where a borrow can be a scope of its own were looked
   for one by one (`certify` asks for it; `run` does not need it). -/
   searched : Bool := true
@@ -53,9 +50,9 @@ structure Built where
 def Built.of (c : Compiled) (startLocals : List Nat) (searched : Bool := true) : Built :=
   let has := fun (f : Typing.Cert → Bool) => (c.cert.map f).getD false
   { bytecode := compile c.core, ctorNames := c.ctorNames, startLocals
-    sigs := (c.cert.map (·.sigs.size)).getD 0, certified := c.cert.isSome
+    sigs := (c.cert.map (·.sigs.size)).getD 0
     strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
-    lent := c.lent, plain := c.plain.map (·.show), places := c.places, searched }
+    lent := c.lent, plain := c.plain.map (·.show), searched }
 
 /-! ## Where it is kept -/
 

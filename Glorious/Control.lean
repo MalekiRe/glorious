@@ -26,7 +26,6 @@ is named by a number given to it when it was put on the stack. -/
 inductive Target where
   | label (id : Nat)
   | handler (id : Nat)
-  deriving DecidableEq
 
 /-- What an exit does once it has arrived and removed its target. -/
 inductive After where

@@ -128,16 +128,6 @@ def Known (S : StoreTy) : Rgn → Prop
   | .var _ => False
   | .bound _ => False
 
-theorem Known.mono {S S' : StoreTy} (hle : S.Le S') {r : Rgn} (h : Known S r) : Known S' r := by
-  induction r with
-  | var i => exact h
-  | bound k => exact h
-  | cell a => exact h.imp fun τ h => hle.cells _ _ h
-  | lab id => exact h.imp fun τ h => hle.labels _ _ h
-  | loan b => exact h.imp fun a h => hle.loans _ _ h
-  | wr r ih => exact ih h
-  | or a b iha ihb => exact ⟨iha h.1, ihb h.2⟩
-
 mutual
 
 /-- A value has a type. A label can be used at any result type and among any

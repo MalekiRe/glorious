@@ -16,7 +16,6 @@ inductive NPat where
   | int (n : Int)
   | ctor (name : String) (args : List NPat)
   | tuple (args : List NPat)
-  deriving Inhabited
 
 partial def normPat : Pattern → M NPat
   | .wild => pure .any

@@ -385,7 +385,6 @@ whose name the library's texts write, or brings an operator into one of the
 library's modules: then they are read again for that program. -/
 structure StdRead where
   said : List Syntax.TextSyntax
-  records : List String
   names : Std.HashSet String
   tables : List (List String × Syntax.Fixities)
   parsed : Array (List Syntax.Item)
@@ -402,7 +401,7 @@ def readStd : Thunk (Except String StdRead) := Thunk.mk fun _ => do
     | .ok (items, _) => parsed := parsed.push items
     | .error e => throw s!"module `{"::".intercalate path}`: {e}"
   let names := syn.foldl (fun set s => s.names.foldl (fun set n => set.insert n) set) {}
-  pure { said := syn, records := records, names := names, tables := tables, parsed := parsed }
+  pure { said := syn, names := names, tables := tables, parsed := parsed }
 
 /-- Does a text write a length in brackets, `[T; N]` or `[x; n]`: a `;`
 with only a name or a number between it and the `]`? -/
@@ -744,19 +743,6 @@ partial def hasDrop : List Syntax.Item → Bool
   | .module _ (some body) :: rest => hasDrop body || hasDrop rest
   | .impl _ tr _ _ _ _ :: rest => (tr.splitOn "::").getLast! == "Drop" || hasDrop rest
   | _ :: rest => hasDrop rest
-
-/-- A checked program without what only the checker knows of: its traits (the
-checker said how each bound is met, and each is a value passed where it is
-needed); its borrows of fields (each the variable's reference, narrowed);
-its families of effects (each instance used an effect of its own); and, where
-an implementation given to a function is known, the function written out for
-it with its trait's functions called by name. `written` has the declarations
-with their lifetimes, `all` is without them. -/
-def lowered (b : Elab.Blocks) (written : List Syntax.Item) (all : List Syntax.Item) :
-    Except String (List Syntax.Item × Elab.Blocks) := do
-  let L ← Elab.lowering b written all
-  let roots := "main" :: L.blocks.coercions.toList.map (·.2)
-  pure (Elab.reachable roots (L.items (L.reach L.start roots)), L.blocks)
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/
 def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
@@ -1334,9 +1320,8 @@ Compile a program and run it on both machines with the given input. The result
 is what it wrote followed by its value, or a description of what went wrong; if
 the machines disagree, both are shown.
 -/
-def evalSource (src : String) (input : List Int := []) (fuel : Nat := 200000)
-    (files : List (List String × String) := []) : String :=
-  match compileSource src true files with
+def evalSource (src : String) (input : List Int := []) (fuel : Nat := 200000) : String :=
+  match compileSource src with
   | .error e => s!"error: {e}"
   | .ok c => evalCompiled c input fuel
 

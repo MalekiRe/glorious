@@ -32,7 +32,6 @@ structure ComponentsSt where
   onStack : Std.HashSet String := {}
   info : Std.HashMap String (Nat × Nat) := {}
   out : Array (List String) := #[]
-  deriving Inhabited
 
 /-- Strongly connected components of the call graph, callees first. -/
 partial def components (names : List String) (deps : String → List String) : List (List String) :=

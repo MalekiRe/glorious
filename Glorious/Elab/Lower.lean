@@ -63,7 +63,6 @@ structure LowerKept where
   pool : Array (String × List Nat)
   asked : Array ((String × List Nat × Bool) × String)
   made : Nat
-  deriving Inhabited
 
 /-- Each function's `LowerKept`, by its name once lowered. -/
 abbrev LowerMemo := Std.HashMap String LowerKept

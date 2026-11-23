@@ -34,13 +34,11 @@ inductive Ty where
   and the borrow it comes from. `how` is `Ty.uniq` for `&mut`, `Ty.shared` for
   `&`, or a variable where a function works with either. -/
   | ref (how : Ty) (t : Ty) (cap : Nat)
-  deriving Inhabited
 
 /-- A set of effects, possibly open. -/
 structure Row where
   effs : List (String × List Ty)
   tail : Option Nat
-  deriving Inhabited
 
 def Ty.int : Ty := .con "Int" []
 
@@ -150,7 +148,7 @@ inductive Variance where
   | contra
   /-- Neither: the arguments must be the same. -/
   | inv
-  deriving BEq, Inhabited
+  deriving BEq
 
 def Variance.flip : Variance → Variance
   | .co => .contra
@@ -459,9 +457,6 @@ def set! (s : Store α) (i : Nat) (x : α) : Store α := s.modify i fun _ => x
 
 /-- Every segment, the last too, in order. -/
 def segs (s : Store α) : Array (Seg α) := s.older.push s.last
-
-def toArray (s : Store α) : Array α :=
-  s.segs.foldl (fun acc seg => seg.pieces.foldl (· ++ ·) acc) (Array.mkEmpty s.size)
 
 /-- Each entry with its number. -/
 def entries (s : Store α) : List (Nat × α) :=

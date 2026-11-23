@@ -214,7 +214,6 @@ inductive AVal where
   /-- A callable that runs in an environment it is lent, or a value one may be
   in: calling it may be the call whose place on the path is asked about. -/
   | probe
-  deriving Inhabited
 
 structure ACtx where
   fns : Std.HashMap String Flat.Body

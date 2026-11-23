@@ -3312,8 +3312,7 @@ the order it is being built:
   Where the checker meets such a pattern and knows the type, it says how
   many, and the program is read again with that many `_` written; where it
   does not know the type, it asks for it. Each pattern costs a reading of
-  the program up to it. The tools that show a program's stages (`why`,
-  `stages`) do not do this.
+  the program up to it.
 - **Destructors, swept.** Every way of binding two values with a `drop`
   (a name, a tuple, a struct or array pattern, in `let`, a clause, a
   callable's parameters) was run against every way of using one (not at
@@ -7412,6 +7411,23 @@ source in Lean strings 6,021, and the test table 3,928.
   an array of them (6 ms more of elaborating). The free variables of a type
   (`freeTys` and the like) keep their own arms for the same reason: through
   `Ty.parts` they took 10 ms more.
+- **Dead code, found by what is reached.** A scan of the compiled
+  environment follows every constant from `main` and from every theorem the
+  audit prints (`Proof/Audit.lean`) and the safety theorems; what it does
+  not reach went: the unused part of `PMap`'s interface, `Store.toArray`,
+  `Store.loadLater`, `Made.isEmpty`, an `EStateM.Backtrackable` instance,
+  `Body.list`, the fields `StdRead.records`, `Built.certified` and
+  `Built.places` (written, never read), derived instances nothing asks for
+  (`Inhabited`, `BEq`, `Hashable`, `Repr`, `DecidableEq` of 23 types), and
+  the lone lemmas `Linear.nil`, `Known.mono`, `Grants.part` and
+  `PathStep.fits_none`. The `why` command went too: it ran the stages by
+  hand, apart from a compile's, and no longer as a compile does (`lowered`
+  was its alone). What the scan cannot see stays: a sibling in a `mutual`
+  block of a theorem that is reached, a `simp` lemma used by `rfl`, a
+  coercion (`Coe String Said`, unfolded where it is used), and the
+  instances a `partial def` needs to be compiled. A decision's check of
+  whether a rewrite changed anything hashes the flat bodies
+  (`hashClosure`) rather than making trees of them to hash.
 - **Not done: one layer for every kept value.** Each is kept by a key and
   kept again by a test of its own (by group, by function and its key, by
   text, sharded or not, the program's own unit not kept), so what they

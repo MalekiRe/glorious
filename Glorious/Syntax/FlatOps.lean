@@ -21,9 +21,6 @@ namespace Body
 /-- The label `@l` as a name in scope (`Elab.labelName`). -/
 def labelName (l : String) : String := "@" ++ l
 
-/-- A body's statements as a list of places. -/
-@[inline] def list (ss : Array StmtId) : List StmtId := ss.toList
-
 mutual
 
 /-- The names free in an expression, added in front of `acc`: the same names,

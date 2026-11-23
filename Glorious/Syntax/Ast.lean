@@ -835,7 +835,7 @@ structure Body where
   stmts : Array FStmt := #[]
   clauses : Array FClause := #[]
   roots : Array ClauseId := #[]
-  deriving Inhabited, Hashable, BEq
+  deriving Hashable, BEq
 
 end Flat
 

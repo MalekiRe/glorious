@@ -227,7 +227,6 @@ inductive Decision where
   value shows, and the value's type implements `Deref`: it is of what
   `Deref::deref` (`DerefMut::deref_mut`) gives (`Mut<T>` as its `T`). -/
   | derefField (id : Nat) (uniq : Bool)
-  deriving Inhabited
 
 /-- What the checker says where it stops: why, and what it found to decide,
 where it stops for that; `result`
@@ -236,7 +235,6 @@ structure Said where
   msg : String
   decision : Option Decision := none
   result : Bool := false
-  deriving Inhabited
 
 instance : Coe String Said := ⟨fun msg => { msg }⟩
 
@@ -320,7 +318,7 @@ structure Borrow where
   col : Nat
   name : String
   uniq : Bool
-  deriving BEq, Repr
+  deriving BEq
 
 def Borrow.show (b : Borrow) : String :=
   s!"{b.line}:{b.col}: in `{b.owner}`: `{if b.uniq then "&mut " else "&"}{b.name}`"
@@ -403,7 +401,6 @@ inductive ElabRead where
   | pack (id : Nat) (v : Option (List String))
   | fn (name : String) (v : Option Nat)
   | layout (owner : Nat) (v : UInt64)
-  deriving Inhabited
 
 structure St where
   fns : Array Core.Fn
@@ -487,7 +484,6 @@ structure ElabKept where
   sites : Nat
   foreign : Bool
   pos : Nat × Nat
-  deriving Inhabited
 
 /-- Each top-level function's `ElabKept`, by its name. -/
 abbrev ElabMemo := Std.HashMap String ElabKept

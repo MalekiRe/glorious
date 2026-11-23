@@ -34,14 +34,13 @@ open Glorious.Typing (Ty FnSig Hint Cert SigEntry DataInst OpInst)
 inductive ICls where
   | var (id : Nat)
   | lit (once : Bool)
-  deriving Inhabited, BEq, Hashable
+  deriving BEq, Hashable
 
 /-- A region while it is being inferred: the same as another, or the cell of one
 scope. A region nothing is known about has neither. -/
 inductive IRg where
   | link (id : Nat)
   | atom
-  deriving Inhabited, BEq, Hashable
 
 /-- What a callable may touch, while that is being inferred: some regions, and
 whatever some other callables may touch. -/
@@ -65,7 +64,7 @@ structure IAcc where
   are settled, and what it includes has been worked out and written here in
   its own `rgns` and `wrs`. A copy of it copies those and nothing further. -/
   final : Bool := false
-  deriving Inhabited, BEq, Hashable
+  deriving BEq, Hashable
 
 /-- A type while it is being inferred. -/
 inductive ITy where
@@ -85,14 +84,14 @@ inductive ITy where
   | ref (ρ : Nat) (t : ITy)
   /-- The result of a call that does not return. -/
   | never
-  deriving Inhabited, BEq, Hashable
+  deriving BEq, Hashable
 
 abbrev IOps := List (Nat × List ITy)
 
 structure IRow where
   ops : IOps
   tail : Option Nat
-  deriving Inhabited, BEq, Hashable
+  deriving BEq, Hashable
 
 def ITy.unit : ITy := .tuple []
 
@@ -126,7 +125,7 @@ structure ISig where
   ret : ITy
   row : IRow
   acc : Nat
-  deriving Inhabited, Hashable
+  deriving Hashable
 
 inductive IHint where
   | ty (t : ITy)
@@ -290,8 +289,6 @@ structure Made where
   schemes : Array (UInt64 × Frozen) := #[]
   faces : Array (UInt64 × UInt64) := #[]
 
-def Made.isEmpty (m : Made) : Bool := m.inst.isEmpty && m.schemes.isEmpty && m.faces.isEmpty
-
 structure St where
   fns : Array Core.Fn
   /-- Counts the changes to what callables touch and to which regions are
@@ -446,8 +443,6 @@ structure St where
 inference is small steps. What fails goes back to the state it began
 with, `try` as over `Except`: the whole state is what is saved.) -/
 abbrev M := EStateM String St
-
-instance : EStateM.Backtrackable St St := ⟨id, fun _ saved => saved⟩
 
 instance {α : Type} : Inhabited (M α) := ⟨throw "certificate: unreachable"⟩
 

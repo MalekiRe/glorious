@@ -809,58 +809,6 @@ def certify (path : String) (strict : Bool) : IO UInt32 := do
     IO.eprintln s!"{path}: {e}"
     pure 1
 
-/-! A Core program written out, for reading what the elaborator made. -/
-
-/-- Why a program's Core is not shown to follow every rule: what stops the
-certificate with all of them asked for. -/
-def why (path : String) : IO UInt32 := do
-  let src ← IO.FS.readFile path
-  let files ← moduleFiles path
-  let .ok (prelude, items, _, _, _) := parseProgram src files | IO.println "parse failed"; return 1
-  let .ok resolved := Syntax.Modules.resolve (Syntax.Flat.promoteItems (prelude)).1 (Syntax.Flat.promoteItems (items)).1 | IO.println "resolve failed"; return 1
-  let .ok (all, _) := Syntax.Flat.expandAliases resolved.items | IO.println "aliases failed"; return 1
-  let all := (Syntax.Flat.fillDefaults all).1
-  -- (With what destroys values written, where the program has something to
-  -- destroy, as a compile has it.)
-  let drops := hasDrop items || hasText src "defer"
-  let blocks ← match Check.checkProgram all resolved.info drops with
-    | .ok blocks => pure blocks
-    | .error e => IO.println s!"check failed: {e}"; return 1
-  let written := Elab.declaredOf all
-  let all := Elab.eraseLifetimes all
-  let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
-  let declared := Elab.withDeclared written (Elab.declaredOf all)
-  -- (`GLORIOUS_LENDS=2,0,1`: how each place is tried, in place of all at once.)
-  let asked := ((← IO.getEnv "GLORIOUS_LENDS").map fun s => (s.splitOn ",").map String.toNat!)
-  for lends in [1, 0] do
-    let sites := fun (i : Nat) => match asked with
-      | some ms => if lends == 0 then 0 else ms[i]?.getD 0
-      | none => lends
-    let out ← match Elab.elabProgram all (some blocks) sites with
-      | .ok out => pure out
-      | .error e => IO.println s!"elab failed: {e}"; return 1
-    if lends == 1 && (← IO.getEnv "GLORIOUS_CORE").isSome then
-      IO.println (showCore out.fnNames out.program)
-      IO.println s!"places: {out.siteOwners.toList.zipIdx.map fun (o, i) => s!"{i}:{o}"}"
-    match Infer.certify declared out.program true out.envSizes true true true with
-    | .ok cert =>
-      if Typing.checkProgram cert out.program then IO.println s!"lends={lends}: accepted"
-      else
-        IO.println s!"lends={lends}: rejected: {Infer.rejected cert out.program}"
-        for e in cert.sigs do
-          if let some F := out.program.fns[e.fn]? then
-            unless Typing.checkFn cert e F do
-              IO.println s!"  {out.fnNames[e.fn]?.getD ""} (function {e.fn}): {Infer.showSig e.sig}"
-              for hs in e.hints do
-                for h in hs do
-                  IO.println (match h with
-                    | .ty σ => s!"    : {Infer.showCoreTy σ}"
-                    | .clo σ θ => s!"    closure {Infer.showCoreTy σ} at [{", ".intercalate (θ.map Infer.showRgn)}]"
-                    | .handler _ _ _ _ => "    handler"
-                    | .rgns rs => s!"    call at [{", ".intercalate (rs.map Infer.showRgn)}]")
-    | .error e => IO.println s!"lends={lends}: no certificate: {e}"
-  pure 0
-
 /-- The signature of each function a program writes, as the checker found it
 (name, type parameters, parameters, result, effects, asks), and each trait's
 functions as declared; with `library`, the prelude's and library's too. -/
@@ -952,7 +900,6 @@ where
   match args with
   | ["certify", path] => certify path false
   | ["certify", "--strict", path] => certify path true
-  | ["why", path] => why path
   -- (How many cleanups the Core machine installed, started, and left in a
   -- resumption never taken, running the program: `Core.cleanup_accounting`.)
   | ["cleanups", path] => do

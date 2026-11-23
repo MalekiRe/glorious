@@ -223,9 +223,6 @@ def putPart : Value → List PathStep → Value → Option Value
   | .label _, _ :: _, _ => none
   | .ref _ _ _, _ :: _, _ => none
 
-/-- A step with no constructor in mind fits any. -/
-@[simp] theorem _root_.Glorious.PathStep.fits_none (i built : Nat) : (PathStep.mk none i).fits built = true := rfl
-
 /-- A step with a constructor in mind fits that one. -/
 theorem _root_.Glorious.PathStep.fits_some {tag i built : Nat} :
     (PathStep.mk (some tag) i).fits built = true ↔ tag = built := by

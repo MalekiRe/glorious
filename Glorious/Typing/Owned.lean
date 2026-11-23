@@ -669,9 +669,6 @@ theorem Unique.fresh {s s' : State} {seg : List Frame} (hu : Unique s)
 
 theorem occ_unit (id : Nat) : occ id Value.unit = 0 := by simp [Value.unit, occ, occs]
 
-theorem Linear.nil {Δ : Ctx} {Γ : TEnv} {rest : List Nat} : Linear Δ Γ [] rest :=
-  fun _ _ _ _ => ⟨Nat.zero_le _, fun h => by cases h⟩
-
 /-- One local moved once, with nothing after it. -/
 theorem Linear.single {Δ : Ctx} {Γ : TEnv} (a : Atom) : Linear Δ Γ (atomVars [a]) [] := by
   intro i τ _ _

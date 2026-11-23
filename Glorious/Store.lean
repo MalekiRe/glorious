@@ -139,14 +139,4 @@ def load {α : Type} [Nonempty α] (file : System.FilePath) (key : String) : IO 
     pure (some kept.value)
   catch _ => pure none
 
-unsafe def loadLaterUnsafe {α : Type} [Nonempty α] (file : System.FilePath) (key : String) : Thunk (Option α) :=
-  Thunk.mk fun _ => match unsafeBaseIO ((load (α := α) file key).toBaseIO) with
-    | .ok v => v
-    | .error _ => none
-
-/-- What was kept in `file`, read when it is first asked: of many kept, a
-compile reads only those it asks. -/
-@[implemented_by loadLaterUnsafe]
-opaque loadLater {α : Type} [Nonempty α] (file : System.FilePath) (key : String) : Thunk (Option α)
-
 end Glorious.Store

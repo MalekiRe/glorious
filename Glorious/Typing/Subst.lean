@@ -128,14 +128,6 @@ theorem Grants.inst {ϕ : List Rgn} {r : Rgn} (h : Grants ϕ r) (θ : List Rgn) 
   obtain ⟨y, hy, hxy⟩ := Rgn.mem_parts_inst.mp hx
   exact Rgn.mem_flat_inst.mpr ⟨y, h y hy, hxy⟩
 
-/-- A part of what is granted is granted. -/
-theorem Grants.part {ϕ : List Rgn} {x : Rgn} (h : x ∈ Rgn.flat ϕ) : Grants ϕ x := by
-  intro y hy
-  obtain ⟨r, hr, hx⟩ := Rgn.mem_flat.mp h
-  rw [Rgn.parts_of_mem hx] at hy
-  rw [List.mem_singleton.mp hy]
-  exact Rgn.mem_flat.mpr ⟨r, hr, hx⟩
-
 theorem Widen.inst {τ τ' : Ty} (h : Widen τ τ') (θ : List Rgn) : Widen (τ.inst θ) (τ'.inst θ) := by
   cases h with
   | refl => exact .refl

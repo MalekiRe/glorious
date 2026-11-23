@@ -40,7 +40,7 @@ inductive Vis where
   | priv
   | parent
   | pub
-  deriving BEq, Inhabited
+  deriving BEq
 
 /-- What a name is the name of. -/
 inductive Kind where
@@ -53,7 +53,7 @@ inductive Kind where
   | effect
   | trait
   | module
-  deriving BEq, Inhabited
+  deriving BEq
 
 /-- Names of values, of types, of effects, of traits and of modules are told
 apart by where they are written. -/
@@ -63,7 +63,7 @@ inductive Space where
   | effect
   | trait
   | module
-  deriving BEq, Inhabited
+  deriving BEq
 
 def Kind.space : Kind → Space
   | .type => .type
@@ -79,7 +79,6 @@ structure Entry where
   global : String
   vis : Vis
   kind : Kind
-  deriving Inhabited
 
 /-- A name a module can write. `shown` is who can name it as a name of this
 module: a declaration as it says, a name brought in by `use` nobody else,
@@ -91,7 +90,6 @@ structure Bound where
   entry : Entry
   shown : Vis
   rank : Nat
-  deriving Inhabited
 
 structure Module where
   path : List String
