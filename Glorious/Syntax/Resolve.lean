@@ -511,15 +511,9 @@ partial def borrowReceivers (items : List FItem) (memo : FrontMemo := {}) : List
       let (roots, b) := (b.roots.mapM fun c => (do
         let b ← get
         let ⟨pats, body⟩ := b.clause c
-        let values := (pats.zip annots).filterMap fun
-          | (.var _, some (.ref _ _ _)) => none
-          | (.var x, some _) => some x
-          | _ => none
         -- (Those written with a reference's type: a field of what one points
         -- to is borrowed through it.)
-        let refs : List String := (pats.zip annots).filterMap fun
-          | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
-          | _ => none
+        let (values, refs) := paramsOf pats annots
         let borrows := b.borrowsReceiver taken body
         let c' ← nameBorrowsClause (← receiverClause taken (refs.map (·, 3)) values c)
         if promote && borrows then promoteFnClause annots c' else pure c' : Build ClauseId)).run b

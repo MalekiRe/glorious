@@ -909,20 +909,22 @@ def promoteClause (values : List String) (c : ClauseId) : Build ClauseId := do
   let body ← promoteRewrite.stmtList body.toList
   promoteHeld values (← pushClause ⟨pats, body.toArray⟩)
 
-/-- A clause of a function whose parameters are written with `annots`
-(`Syntax.promoteFnClause`). -/
-def promoteFnClause (annots : List (Option TypeExpr)) (c : ClauseId) : Build ClauseId := do
-  let ⟨pats, _⟩ := (← get).clause c
-  -- A parameter written with a type that is no reference's is a value.
-  let values := (pats.zip annots).filterMap fun
+/-- The parameters of a clause written with `annots` that are values (written
+with a type that is no reference's) and those that are references. -/
+def paramsOf (pats : List Pattern) (annots : List (Option TypeExpr)) : List String × List String :=
+  ((pats.zip annots).filterMap fun
     | (.var _, some (.ref _ _ _)) => none
     | (.var x, some _) => some x
-    | _ => none
-  -- (One written with a reference's type, `list: &[T]`: `&list[0]` is the
-  -- element through that reference, not through one to it.)
-  let refs := (pats.zip annots).filterMap fun
-    | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
-    | _ => none
+    | _ => none,
+   (pats.zip annots).filterMap fun
+    | (.var x, some (.ref _ _ _)) => some x
+    | _ => none)
+
+/-- A clause of a function whose parameters are written with `annots`, made
+so (`promoteClause`). (One written with a reference's type, `list: &[T]`:
+`&list[0]` is the element through that reference, not through one to it.) -/
+def promoteFnClause (annots : List (Option TypeExpr)) (c : ClauseId) : Build ClauseId := do
+  let (values, refs) := paramsOf ((← get).clause c).pats annots
   let c ← if refs.isEmpty then pure c else (throughParamsRewrite refs).clause c
   promoteClause values (← nameBorrowsClause c)
 

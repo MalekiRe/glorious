@@ -659,16 +659,6 @@ def refPatsBody (id : Nat) (clauses : List Clause) (b : Flat.Body) : Flat.Body :
           Flat.pushExpr (.closure i (← clauses.toArray.mapM Flat.flatClause))) else none
       | _ => none } : Flat.FRewrite).body b
 
-/-- The values and references a clause's parameters are written as. -/
-def paramsOf (pats : List Pattern) (annots : List (Option TypeExpr)) : List String × List String :=
-  ((pats.zip annots).filterMap fun
-    | (.var _, some (.ref _ _ _)) => none
-    | (.var x, some _) => some x
-    | _ => none,
-   (pats.zip annots).filterMap fun
-    | (.var x, some (.ref _ _ _)) => some x
-    | _ => none)
-
 /-- A clause borrowed again as `receiverClause` borrows, named and kept as
 anything borrowed is. -/
 def reborrowed (taken : Std.HashMap String Bool) (values refs : List String) (c : Flat.ClauseId) :
@@ -726,7 +716,7 @@ def receiverBody (call : Nat) (fn : Option String) (borrow : Option Bool) (annot
     let b ← get
     let ⟨pats, body⟩ := b.clause c
     if !body.any (b.anyStmt calls) then return c
-    let (values, refs) := paramsOf pats annots
+    let (values, refs) := Flat.paramsOf pats annots
     reborrowed taken values refs (← marked.clause c) : Flat.Build Flat.ClauseId)).run b
   { b with roots }
 
@@ -805,7 +795,7 @@ def derefBody (id : Nat) (uniq : Bool) (annots : List (Option TypeExpr)) (b : Fl
     let b ← get
     let ⟨pats, body⟩ := b.clause c
     if !body.any (b.anyStmt found) then return c
-    let (values, refs) := paramsOf pats annots
+    let (values, refs) := Flat.paramsOf pats annots
     reborrowed taken values refs (← marked.clause c) : Flat.Build Flat.ClauseId)).run b
   { b with roots }
 
