@@ -7298,24 +7298,28 @@ source in Lean strings 6,021, and the test table 3,928.
   takes away is a second way, not lines. Measured after: the chain 1.52 s
   cold, 0.28 s an edit in the middle; covey/states2 2.3 s cold, 0.53 s a
   leaf's edit, 1.18 s `main`'s; covey/sixteen 2.35 s cold (4.5 s before).
-- **Signatures first to a fixpoint, tried (not kept).** The callees-first
-  levels in `checkItems` taken out: every body checked side by side from
-  the signatures, then again from the types the bodies have, until each
-  group's callees are what it was checked from (two times at most over
-  the test programs); a refusal said callees first. The test programs
-  passed, but only with the runs of a time numbering from one place, which
-  then could not be put together and were checked again one after another
-  (105 runs in covey/states2 against 3; cold 3.85 s -> 4.6 s, the suite
-  58 s -> 68 s). With each run numbering from a place of its own, groups
-  were refused side by side that callees first accepts, settled or not
-  (`std::thread::waiting_count`'s `take_cell<Waiting>`, `ecs::Commands::
-  set_state`'s `resource_mut<Next<T>>()`): what decides them comes from a
-  group checked before them that their types do not carry. Checked one
-  after another from the signatures, `waiting_count` was refused
-  otherwise (a value holding a resumption read twice); callees first one
-  after another, not a level at a time, covey/tasks named a copy the
-  elaborator did not make. Level by level callees first decides those
-  programs, so it stays, as the way taken where signatures are not enough.
+- **Signatures first to a fixpoint.** The callees-first levels in
+  `checkItems` are gone. Every body is checked side by side from the
+  signatures, then again from the types the bodies have, until each
+  group's callees are what it was checked from: each time settles a level
+  of calls more, so as many times as there are levels at most (two over
+  the test programs, four for the library's largest unit). What a caller
+  reads of a function beside its type is taken with it each time: how
+  many dictionaries it is given (`fnBounds`), which of its variables a
+  type written at a call is (`typeParams`, without which
+  `take_cell<Waiting>(queue)` found nothing), and the environments its
+  callables run in. A group not kept (`deltas`: the library, the test
+  programs) is checked from the bodies' types one after another, seeing
+  what those before it found; side by side, covey/tasks named a copy the
+  elaborator did not make, for a reason not found. A refusal where all
+  before it settled is looked at once more one after another (the
+  library's `UndoLog::rollback_take` needs it), then said callees first.
+  The body types found are kept with the signatures, so the next compile
+  starts from them. Measured: the chain 1.52 s fresh, 0.27 s an edit;
+  covey/states2 2.3 s fresh, 0.54 s a leaf's edit, 1.17 s `main`'s;
+  covey/sixteen 2.38 s; all as before. The suite 58 s -> 64 s (its
+  library units, checked one after another the second time). Program.lean
+  +14 lines.
 
 Against Zig 0.14 on the same chain of 2,000 functions (`gen.zig`, Debug,
 Zig's global cache warm as the library's kept check is; an edit of the

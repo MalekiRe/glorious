@@ -15,10 +15,6 @@ checker's state after the declarations and after each group of functions,
 each under a key of everything it was made from, in order. -/
 abbrev Kept := List (UInt64 × St)
 
-/-- How often a state is kept among a unit's groups (or implementations'
-functions), so that a unit keeps some 48 at most: each is the whole state. -/
-def keptEvery (n : Nat) : Nat := max 1 ((n + 47) / 48)
-
 /-- A state as it is kept: without what a group's bounds found, which the
 next group's start anew (`settleBounds`). -/
 def forKeeping (st : St) : St :=
@@ -123,6 +119,13 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
         | _ => first
       checkDeciding decls' fuel first
     | _, _ => throwThe Elab.Said said
+
+/-- `x`, or its refusal: what it did kept, the state not put
+back (which would hold it twice, and copy what it changes). -/
+def attempt {α : Type} (x : M α) : M (Except Elab.Said α) := fun s =>
+  match x s with
+  | .ok a s => .ok (.ok a) s
+  | .error e s => .ok (.error e) s
 
 /-- A group checked; where only what can be found of a program is asked
 (`St.lenient`), one that is refused is let be. -/
@@ -589,7 +592,6 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
         | none => false).eraseDups).toArray
     let localFns : Std.HashSet String := names.foldl (·.insert ·) {}
     let groups := sorted.map (·.2.2)
-    let levels := (sorted.map (·.1)).toArray
     -- The functions of the copies of an implementation for every type
     -- (`impl<T> Requires for T`, one for each type the unit declares) that
     -- name none of the unit's functions, where no coercion is: checked
@@ -619,15 +621,11 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       { s with pendingCopies := (s.pendingCopies.filter fun (_, d) => !earlySet.contains d.name) ++ earlyCopies }
     refreshCopies
     -- The state after the last group whose key, and so every key before
-    -- it, is kept is taken; the groups after it are checked. A state is
-    -- kept after a group only now and then, in a unit of many (`keptEvery`):
-    -- each kept is the whole state, and the next change to it copies what
-    -- it holds, so one after every group grew with the square of their
-    -- number, in time and in what is saved.
+    -- it, is kept is taken; the groups after it are checked. (One is kept
+    -- after the last group alone.)
     let keys := (groups.foldl (fun (acc : List UInt64 × UInt64) g =>
       let k := groupKey acc.2 g
       (k :: acc.1, k)) ([], key)).1.reverse
-    let every := keptEvery groups.length
     let start := if deltas.isSome then 0 else
       ((keys.zipIdx.reverse.find? fun (k, _) => (look k).isSome).map (·.2 + 1)).getD 0
     if start > 0 then
@@ -637,97 +635,135 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
           refreshCopies
           made := (k, st) :: made
     let rest := (groups.zipIdx.drop start).toArray
-    -- Each function's type as its signature says, first; then every body
-    -- checked from that, side by side, none waiting for another's. Where a
-    -- body's type is not what its signature said, the groups are checked
-    -- as before, callees first.
+    -- Each function's type as its signature says, first.
     let pre ← get
     -- (Where each group numbers from is part of what it is checked from.)
     let from_ := hash [pre.tys.size, pre.rows.size, pre.caps.size, pre.capEdges.size, pre.loans.size,
       pre.rigidKeys.size, pre.brands, pre.dropAsked]
     -- (What the signatures added is kept too, under a key of them all and
-    -- of the declarations, their bodies not in it: put on where it fits.)
+    -- of the declarations, their bodies not in it: put on where it fits;
+    -- with the types the bodies were found to have, from which the next
+    -- compile's are checked first.)
     let sigKey := mixHash 2 (rest.foldl (fun h (g, _) => g.foldl (fun h d =>
       mixHash h (hash (d.name, d.params, d.annots, d.ret, d.bounds))) h) (mixHash declKey from_))
-    let mut sigsKept := false
-    if Trace.universesAsked then
-      if let some kept := deltas then
-        if let some (d, _) := (kept[sigKey]?).bind (·.get) then
-          let cur ← get
-          if fitsDelta none cur d then
-            if let some st' := applyDelta none cur d then
-              set st'
-              sigsKept := true
-              groupDeltas := groupDeltas.push (sigKey, (d, #[]))
-    let signed ← if !Trace.universesAsked then pure false else if sigsKept then pure true else do
-      let done ← tryCatchThe Elab.Said (do
-          for (g, _) in rest do
-            for d in g do checkGroup [d] (signature := true)
-          pure true)
-        fun _ => do set pre; pure false
-      if done && deltas.isSome then
-        if let some d := diffStates pre (← get) then
-          groupDeltas := groupDeltas.push (sigKey, (d, #[]))
-      pure done
-    let mut universes := false
-    if signed && rest.size > 0 then
-      let sigPre ← get
-      let sigs := sigPre.fns
-      -- (Each group kept as on the other path, `checkGroupKept`, from the
-      -- state with every signature: keyed apart from those, which were
-      -- checked from the one before.)
-      let sigFrom := mixHash 1 (hash [sigPre.tys.size, sigPre.rows.size, sigPre.caps.size, sigPre.capEdges.size,
-        sigPre.loans.size, sigPre.rigidKeys.size, sigPre.brands, sigPre.dropAsked])
-      let checked ← tryCatchThe Elab.Said (do
-          match deltas with
-          | some kept =>
-            let keyOf := fun (k : Nat) => mixHash ((ownKeyAt[k]?).getD 0) (mixHash sigFrom (hash k))
-            let one := fun ((g, k) : List FnDecl × Nat) =>
-              checkGroupKept kept sigPre (keyOf k) k g ((calleesAt[k]?).getD []) localFns
-            pure (some (← checkSideBySideWith rest.toList (jump := false) one))
-          | none => do
-            checkSideBySide (rest.toList.map (·.1))
-            pure (some #[]))
-        fun _ => pure none
-      let now := (← get).fns
-      let same := checked.isSome && rest.all fun (g, _) => g.all fun d =>
-        match sigs[d.name]?, now[d.name]? with
+    let mut sigsKept : Option StDelta := none
+    if let some kept := deltas then
+      if let some (d, _) := (kept[sigKey]?).bind (·.get) then
+        let cur ← get
+        if fitsDelta none cur d then
+          if let some st' := applyDelta none cur d then
+            set st'
+            sigsKept := some d
+    -- (A function whose signature says too little to be checked from has
+    -- none: its callers wait for its body's type, below.)
+    if sigsKept.isNone then
+      for (g, _) in rest do
+        for d in g do tryCatchThe Elab.Said (checkGroup [d] (signature := true)) fun _ => pure ()
+    -- Then every body checked from those, side by side, none waiting for
+    -- another's; and again from the types the bodies have, while one is
+    -- not what it was checked from: each time, those whose callees are each
+    -- what was checked from are settled, a level of calls more at least.
+    -- A group refused where all before it were settled: one after another,
+    -- then callees first.
+    -- (Each group kept as the signatures are, `checkGroupKept`: what it
+    -- read of the others, held or not, says whether it is checked again.)
+    let failMark := "%refused "
+    let depth := (sorted.map (·.1)).foldl max 0
+    let mut from' ← get
+    let mut settled := rest.isEmpty
+    let mut passes := 0
+    let mut together := false
+    while !settled do
+      passes := passes + 1
+      set from'
+      let fromSt := from'
+      let sigFrom := mixHash 1 (hash [fromSt.tys.size, fromSt.rows.size, fromSt.caps.size, fromSt.capEdges.size,
+        fromSt.loans.size, fromSt.rigidKeys.size, fromSt.brands, fromSt.dropAsked])
+      -- (A group refused leaves what it did, the state not put back, which
+      -- would hold it twice: what comes after it is checked again.)
+      let one := fun ((g, k) : List FnDecl × Nat) => do
+        let got : Except Elab.Said (Array (UInt64 × KeptGroup)) ← attempt (match deltas with
+            | some kept => checkGroupKept kept fromSt (mixHash ((ownKeyAt[k]?).getD 0) (mixHash sigFrom (hash k)))
+                k g ((calleesAt[k]?).getD []) localFns
+            | none => do checkMaybe g; pure #[])
+        match got with
+        | .ok made => pure made
+        | .error e =>
+          modify fun s => { s with refusals := s.refusals.push s!"{failMark}{k} {e.msg}" }
+          pure #[]
+      -- (Each group kept numbers from a place of its own, `checkGroupKept`;
+      -- otherwise each run does. A group not kept is checked from the
+      -- bodies' types one after another, seeing what those before it found:
+      -- side by side, from them, covey/tasks named a copy the elaborator
+      -- did not make.)
+      let oneByOne := together || (deltas.isNone && passes > 1)
+      let checked ← if oneByOne then rest.toList.foldlM (fun acc x => do pure (acc ++ (← one x))) #[]
+        else checkSideBySideWith rest.toList (jump := deltas.isNone) one
+      let now ← get
+      let refused : Std.HashSet Nat := (now.refusals.extract fromSt.refusals.size now.refusals.size).foldl
+        (fun s m => if m.startsWith failMark then
+          match ((m.drop failMark.length).takeWhile Char.isDigit).toString.toNat? with
+          | some k => s.insert k
+          | none => s
+          else s) {}
+      let isSettled := fun (g : List FnDecl) => g.all fun d =>
+        match fromSt.fns[d.name]?, now.fns[d.name]? with
         | some a, some b => schemeShape a == schemeShape b
         | _, _ => false
-      if same then
-        universes := true
-        groupDeltas := groupDeltas ++ checked.getD #[]
+      let firstRefused := rest.toList.find? fun (_, k) => refused.contains k
+      let before := rest.toList.takeWhile fun (_, k) => !refused.contains k
+      -- (The types the bodies before the first refused have.)
+      let bodies := before.foldl (fun m (g, _) => g.foldl (fun m d =>
+          match now.fns[d.name]? with
+          | some s => m.insert d.name s
+          | none => m) m) fromSt.fns
+      -- (Each time settles a level of calls more: as many as there are, and
+      -- one to see it.)
+      if passes > depth + 2 then
+        throw "the types of a unit's functions did not settle, checked again from their bodies' once for each level of calls; this is a compiler defect"
+      if before.all (isSettled ·.1) then
+        settled := true
+        if firstRefused.isSome then
+          -- A refusal where all before it are settled: from a group checked
+          -- before it that is not its callee (a field's type its body
+          -- found), so once more one after another; or the program's,
+          -- said as callees first say it, from before the signatures.
+          if !together then
+            together := true
+            settled := false
+            continue
+          set pre
+          for (g, _) in rest do checkMaybe g
+          let said := (now.refusals.find? (·.startsWith failMark)).getD ""
+          throw s!"a group was refused checked one after another from signatures, and not callees first ({said}); this is a compiler defect"
+        if deltas.isSome then
+          match sigsKept, passes with
+          | some d, 1 => groupDeltas := groupDeltas.push (sigKey, (d, #[]))
+          | _, _ => if let some d := diffStates pre fromSt then groupDeltas := groupDeltas.push (sigKey, (d, #[]))
+        set now
+        groupDeltas := groupDeltas ++ checked
         if let some (_, last) := rest.back? then
           made := (keys[last]!, forKeeping (← get)) :: made
       else
         if Trace.groupsTraced then
-          for (g, _) in rest do
-            for d in g do
-              match sigs[d.name]?, now[d.name]? with
-              | some a, some b =>
-                unless schemeShape a == schemeShape b do
-                  (dbgTrace s!"signature differs: {d.name}: {schemeShape a} / {schemeShape b}\n  sig {schemeDetail a}\n  body {schemeDetail b}" fun _ => (pure () : M Unit))
-              | _, _ => pure ()
-        set pre
-    let mut i := if universes then rest.size else 0
-    while i < rest.size do
-      let level := (levels[(rest[i]?.map (·.2)).getD 0]?).getD 0
-      let mut j := i
-      while j < rest.size && (levels[(rest[j]?.map (·.2)).getD 0]?).getD 0 == level do j := j + 1
-      let run := (rest.extract i j).toList
-      match deltas with
-      | some kept =>
-        let keyOf := fun (k : Nat) => mixHash ((ownKeyAt[k]?).getD 0) (mixHash from_ (hash k))
-        groupDeltas := groupDeltas ++ (← checkSideBySideWith run (jump := false) fun (g, k) =>
-          checkGroupKept kept pre (keyOf k) k g ((calleesAt[k]?).getD []) localFns)
-      | none => checkSideBySide (run.map (·.1))
-      let last := (run.getLast?.map (·.2)).getD 0
-      -- (Of a unit whose groups are each kept, `deltas`, only the state
-      -- after the last: one held now and then would be copied by the next
-      -- change, and is never looked for.)
-      if (deltas.isNone && run.any (fun (_, k) => (k + 1) % every == 0)) || last + 1 == groups.length then
-        made := (keys[last]!, forKeeping (← get)) :: made
-      i := j
+          for (g, _) in before do
+            unless isSettled g do
+              for d in g do
+                if let (some a, some b) := (fromSt.fns[d.name]?, now.fns[d.name]?) then
+                  unless schemeShape a == schemeShape b do
+                    (dbgTrace s!"signature differs: {d.name}: {schemeShape a} / {schemeShape b}\n  sig {schemeDetail a}\n  body {schemeDetail b}" fun _ => (pure () : M Unit))
+        -- (The next time from the types the bodies have: those that were
+        -- not refused; with what a caller reads beside each type, kept by
+        -- the function's name: how many dictionaries it is given, which of
+        -- its variables a type written at a call is, `f<T>(..)`, and the
+        -- environments its callables run in.)
+        let next : St := { fromSt with
+          fns := bodies, fnBounds := now.fnBounds, typeParams := now.typeParams, writtenArgs := now.writtenArgs
+          fnRunsIn := now.fnRunsIn, fnGroups := now.fnGroups, envMust := now.envMust }
+        -- (Numbered past what every run of this time numbered, which the
+        -- bodies' types may name: none of it is taken, as what one group
+        -- found of a type the declarations share is not another's.)
+        from' := jumpedFor next (sideThreads + 1) runGap
     if let some k := keys.getLast? then key := k
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.
