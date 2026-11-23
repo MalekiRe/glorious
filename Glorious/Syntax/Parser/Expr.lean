@@ -536,7 +536,7 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
       -- one at those types.)
       let wanted := bounds.filter (types.contains ·.subject)
       modifyThe (Array Item) fun made =>
-        (made.push (.fn fn types [] none clauses)) ++ (if wanted.isEmpty then #[] else #[.bounds fn wanted])
+        (made.push (Item.fnOf fn types [] none clauses)) ++ (if wanted.isEmpty then #[] else #[.bounds fn wanted])
       -- (Known by the place of `const`: what it needs is given there.)
       let call := Expr.call id (.name none fn) []
       if types.isEmpty then pure call
@@ -823,10 +823,7 @@ partial def parseStmts : P (List Stmt) := do
     made.mapIdx fun k item =>
       if k < madeBefore then item
       else match item with
-        | .fn f ps annots ret clauses =>
-          .fn f ps annots ret (clauses.map fun
-            | .mk pats body => .mk pats (local_.foldl (fun body (name, own) =>
-                renameStmts name own (pats.flatMap patternNames) body) body))
+        | .fn f ps annots ret b => .fn f ps annots ret (Flat.renameInBody local_.toList b)
         | other => other
   pure (named out.toList)
 
@@ -904,7 +901,7 @@ partial def parseFn : P (Item × List Bound) := do
       | some (.performs .never effects) =>
         (params ++ [neverParam], some (TypeExpr.performs (.name neverParam []) effects))
       | other => (params, other)
-    pure (.fn name (allParams ++ lifetimes) annots.toList ret [.mk pats.toList body], bounds ++ more)
+    pure (Item.fnOf name (allParams ++ lifetimes) annots.toList ret [.mk pats.toList body], bounds ++ more)
   else
     failAt s!"`{name}` is written as clauses, which say no types: write `fn {name}(x: T) -> R \{ match(x) \{ .. } }`"
 

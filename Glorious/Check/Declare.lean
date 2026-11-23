@@ -950,7 +950,8 @@ def declare (items : List Item) : M Unit := do
       let params := genericParams params
       modify fun s =>
         { s with types := s.types.insert name ⟨params.length, [name], params.map isLifetime, []⟩ }
-    | .alias name value => modify fun s =>
+    | .alias name b e => modify fun s =>
+      let value := Flat.treeExpr b e
       { s with aliases := s.aliases.insert name value, runAliases := s.runAliases.insert name value }
     | .coerce name => modify fun s => { s with coercing := s.coercing ++ [name] }
     | .unsafeFn name => modify fun s => { s with unsafeFns := name :: s.unsafeFns }

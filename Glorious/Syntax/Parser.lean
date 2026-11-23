@@ -78,7 +78,7 @@ private partial def parseItem : P Item := do
     expectPunct "="
     let value ← parseBinary 0 false
     expectPunct ";"
-    pure (.alias name (match ty with
+    pure (Item.aliasOf name (match ty with
       | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
       | none => value))
   | .ident "const" =>
@@ -91,7 +91,7 @@ private partial def parseItem : P Item := do
     expectPunct "="
     let value ← parseBinary 0 false
     expectPunct ";"
-    pure (.alias name (Expr.call 0 (.name none comptimeMark) [Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]]))
+    pure (Item.aliasOf name (Expr.call 0 (.name none comptimeMark) [Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]]))
   | .ident "impl" =>
     advance
     -- (`impl<T: Show> ..`: what is asked of a parameter, as `where T: Show`.)
@@ -172,7 +172,7 @@ private partial def parseItem : P Item := do
           expectPunct "="
           let value ← parseBinary 0 false
           expectPunct ";"
-          let c := Item.alias s!"{tr}::{name}"
+          let c := Item.aliasOf s!"{tr}::{name}"
             (Expr.call 0 (.name none comptimeMark) [Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]])
           items := items.push (match vis with
             | some parent => .pub parent c
@@ -182,7 +182,7 @@ private partial def parseItem : P Item := do
         let (item, bounds) ← withReader (fun c =>
           if c.records.contains tr then { c with records := "Self" :: c.records } else c) parseFn
         match item with
-        | .fn name ps annots ret clauses =>
+        | .fn name ps annots ret body =>
           -- (Its own type parameters first: `app.on<E, P>(..)` gives those,
           -- as `.on::<E, P>()` does in Rust; the type's are known from what
           -- the function is given.)
@@ -190,7 +190,7 @@ private partial def parseItem : P Item := do
           let ps := if (mine.filter (!·.startsWith "'")).isEmpty then params ++ mine else mine ++ params
           let own := s!"{tr}::{name}"
           let f := Item.fn own ps (annots.map (·.map (TypeExpr.withSelf self)))
-            (ret.map (TypeExpr.withSelf self)) (clauses.map (selfClause tr none))
+            (ret.map (TypeExpr.withSelf self)) ((Flat.selfRewrite tr none).body body)
           items := items.push (match vis with
             | some parent => .pub parent f
             | none => f)
@@ -366,7 +366,7 @@ private partial def parseItem : P Item := do
         expectPunct "="
         let value ← parseBinary 0 false
         let _ ← acceptPunct ";"
-        methods := methods.push (.fn name [] [] (some ty) [.mk [] [.expr value]])
+        methods := methods.push (Item.fnOf name [] [] (some ty) [.mk [] [.expr value]])
       | _ => failAt "expected `fn`: an implementation gives the trait's functions"
     expectPunct "}"
     -- `Self` is the type the implementation is for.
@@ -374,11 +374,11 @@ private partial def parseItem : P Item := do
     -- (A type parameter said to be a callable is that callable in the
     -- functions too: `<L as Fetch<F>>::fetch(..)`.)
     let called := fun (t : TypeExpr) => substTypeExpr callable t
-    let calledClause := fun (c : Clause) =>
-      if callable.isEmpty then c else
-      match mapTypesClause (fun t => pure (called t)) c with
-      | .ok c => c
-      | .error _ => c
+    let calledBody := fun (b : Flat.Body) =>
+      if callable.isEmpty then b else
+      match Flat.mapTypes (fun t => pure (called t)) b with
+      | .ok b => b
+      | .error _ => b
     -- (A lifetime of the implementation, `impl<'a, A> .. for &'a A`, is in
     -- its functions' types the one the type it is for has at each use, which
     -- is not named there: as `Self`'s is.)
@@ -394,10 +394,10 @@ private partial def parseItem : P Item := do
       | .never => .never
       | .hole => .hole
     let written := methods.toList.map fun
-      | .fn name ps annots ret clauses =>
+      | .fn name ps annots ret body =>
         let fix := unnamed ps ∘ TypeExpr.withSelf self ∘ called
         Item.fn name ps (annots.map (·.map fix)) (ret.map fix)
-          (clauses.map (selfClause head (some (tr, (TypeExpr.tuple [self]).asExpr)) ∘ calledClause))
+          ((Flat.selfRewrite head (some (tr, (TypeExpr.tuple [self]).asExpr))).body (calledBody body))
       | other => other
     pure (.impl params tr head args context.toList written)
   | .ident "coerce" =>
@@ -532,7 +532,7 @@ private partial def parseTrait : P (List Item) := do
       if ← acceptPunct "=" then
         -- What an implementation has if it does not say.
         let value ← parseBinary 0 false
-        defaults := defaults.push (.fn c [] [] none [.mk [] [.expr value]])
+        defaults := defaults.push (Item.fnOf c [] [] none [.mk [] [.expr value]])
       let _ ← acceptPunct ";"
       continue
     match ← peek with
@@ -583,7 +583,7 @@ private partial def parseTrait : P (List Item) := do
       advance
       let body ← parseStmts
       expectPunct "}"
-      defaults := defaults.push (.fn m [] [] none [.mk pats body])
+      defaults := defaults.push (Item.fnOf m [] [] none [.mk pats body])
     let _ ← acceptPunct ";"
   expectPunct "}"
   let info : List Item :=
@@ -714,11 +714,11 @@ private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
         let self := TypeExpr.name n []
         let usize := TypeExpr.name "usize" []
         made := [
-          .fn s!"{n}::c_size" [] [] (some usize) [.mk [] [.expr (call1 "usize_of" (.int size))]],
-          .fn s!"{n}::c_write" [] [some self, some usize] (some (.tuple []))
+          Item.fnOf s!"{n}::c_size" [] [] (some usize) [.mk [] [.expr (call1 "usize_of" (.int size))]],
+          Item.fnOf s!"{n}::c_write" [] [some self, some usize] (some (.tuple []))
             [.mk [taken, .var "%at"] (writes ++ [.expr (.tuple [])])],
           .unsafeFn s!"{n}::c_write",
-          .fn s!"{n}::c_read" [] [some usize] (some self) [.mk [.var "%at"] [.expr built]],
+          Item.fnOf s!"{n}::c_read" [] [some usize] (some self) [.mk [.var "%at"] [.expr built]],
           .unsafeFn s!"{n}::c_read"]
   match subject with
   | some n => pure (items ++ made ++ [.fieldNames (attrMark name) [n, arg] []])
@@ -793,7 +793,7 @@ private partial def parseExtern : P (List Item) := do
       | .tuple [] => [.expr call, .expr (.tuple [])]
       | _ => [.expr (back call)]
     let pats := (List.range params.length).map fun i => Pattern.var s!"%a{i}"
-    items := items.push (.fn name [] (declared.toList.map some) (some retTy) [.mk pats body])
+    items := items.push (Item.fnOf name [] (declared.toList.map some) (some retTy) [.mk pats body])
     items := items.push (.unsafeFn name)
   expectPunct "}"
   pure items.toList
@@ -813,21 +813,20 @@ private partial def writtenOut : Expr → Bool
 value out (`NAME$const`, run at compile time), and the name, which reads
 what that function gave. -/
 private def constItems (items : List Item) : List Item :=
-  items.flatMap fun
-    | .alias name (.call _ (.name none mark) [value]) =>
+  let one := fun (name : String) (b : Flat.Body) (e : Flat.ExprId) (item : Item) (wrap : Item → Item) =>
+    match Flat.treeExpr b e with
+    | .call _ (.name none mark) [value] =>
       -- (A value written out, `3`, `Some(4)`, `"text"`, is one already: it
       -- stays a name for it, which a pattern can be.)
-      if mark == comptimeMark && writtenOut value then [.alias name value]
+      if mark == comptimeMark && writtenOut value then [wrap (Item.aliasOf name value)]
       else if mark == comptimeMark then
         let fn := constFnName name
-        [.alias name (.call 0 (.name none fn) []), .fn fn [] [] none [.mk [] [.expr value]]]
-      else [.alias name (.call 0 (.name none mark) [value])]
-    | .pub parent (.alias name (.call _ (.name none mark) [value])) =>
-      if mark == comptimeMark && writtenOut value then [.pub parent (.alias name value)]
-      else if mark == comptimeMark then
-        let fn := constFnName name
-        [.pub parent (.alias name (.call 0 (.name none fn) [])), .pub parent (.fn fn [] [] none [.mk [] [.expr value]])]
-      else [.pub parent (.alias name (.call 0 (.name none mark) [value]))]
+        [wrap (Item.aliasOf name (.call 0 (.name none fn) [])), wrap (Item.fnOf fn [] [] none [.mk [] [.expr value]])]
+      else [item]
+    | _ => [item]
+  items.flatMap fun
+    | item@(.alias name b e) => one name b e item id
+    | item@(.pub parent (.alias name b e)) => one name b e item (.pub parent)
     | item => [item]
 
 /-- A declaration, and with it what was written beside it. -/

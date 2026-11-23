@@ -182,7 +182,7 @@ def specRewrite (tr : TraitInfo) (known : List (String × String)) : Flat.FRewri
     | _ => none
 
 /-- A function given no implementation, with the calls in it sent to copies. -/
-def specRoot (tr : TraitInfo) (item : Flat.FItem) : StateM Copies Flat.FItem :=
+def specRoot (tr : TraitInfo) (item : Syntax.Item) : StateM Copies Syntax.Item :=
   match item with
   | .fn name ps annots ret b =>
     if (tr.boundedAt[name]?).getD 0 == 0 then do
@@ -225,7 +225,7 @@ def specCopyClause (tr : TraitInfo) (known : List (String × String)) (n : Nat) 
 /-- The copy of a function (`item`, without traits) for the implementations
 `dicts`, named `name`, their places dropped if `drop`. -/
 def specCopy (tr : TraitInfo) (name : String) (dicts : List Nat) (drop : Bool) :
-    Flat.FItem → StateM Copies (Option Flat.FItem)
+    Syntax.Item → StateM Copies (Option Syntax.Item)
   | .fn fn ps annots ret b => do
     let n := dicts.length
     let known : List (String × String) :=
@@ -326,7 +326,7 @@ def foldRewrite (known : Std.HashMap String Int) : Flat.FRewrite where
 
 /-- A program with every call of a function that takes nothing and works out
 to a number written as that number. -/
-def foldConstants (items : List Flat.FItem) : List Flat.FItem :=
+def foldConstants (items : List Syntax.Item) : List Syntax.Item :=
   let fns : Std.HashMap String Flat.Body := items.foldl (init := {}) fun m item => match item with
     | .fn name _ _ _ b => m.insertIfNew name b
     | _ => m
@@ -520,15 +520,15 @@ def splitFieldsRewrite (structs : Structs) : Flat.FRewrite where
 /-- A program's items with its variables whose fields are borrowed apart made
 one variable per field (`splitFieldVars`); `all` are every item of the
 program, for the structs and what has `Drop`. -/
-def splitFieldItems (all items : List Flat.FItem) : List Flat.FItem :=
-  let unwrap := fun (item : Flat.FItem) => match item with
+def splitFieldItems (all items : List Syntax.Item) : List Syntax.Item :=
+  let unwrap := fun (item : Syntax.Item) => match item with
     | .pub _ inner => inner
     | other => other
   let dropped := all.filterMap fun item => match unwrap item with
     | .impl _ tr head _ _ _ => if tr == "Drop" then some head else none
     | _ => none
   let structs : Structs := all.filterMap fun item => match unwrap item with
-    | .other (.fieldNames ctor names _) => if dropped.contains ctor then none else some (ctor, names)
+    | (.fieldNames ctor names _) => if dropped.contains ctor then none else some (ctor, names)
     | _ => none
   -- (Only a body with a field borrowed, `fieldBorrowed`, has one to split.)
   let borrowed := fun (n : Flat.FExpr) => match n with
@@ -813,16 +813,16 @@ def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) 
 
 /-- Every function of an item with what the checker decided written in, each
 under the name it is checked by. -/
-partial def FItem.decide (f : String → List (Option TypeExpr) → Flat.Body → Flat.Body) : Flat.FItem → Flat.FItem
+partial def Item.decide (f : String → List (Option TypeExpr) → Flat.Body → Flat.Body) : Syntax.Item → Syntax.Item
   | .fn name ps annots ret b => .fn name ps annots ret (f name annots b)
   | .impl ps tr head args ctx methods => .impl ps tr head args ctx (methods.map fun
     | .fn m mps annots ret b => .fn m mps annots ret (f (implFnName tr head m) annots b)
-    | item => FItem.decide f item)
+    | item => Item.decide f item)
   | .traitInfo n supers defaults ps assocs => .traitInfo n supers (defaults.map fun
     | .fn m mps annots ret b => .fn m mps annots ret (f "" annots b)
     | item => item) ps assocs
-  | .module name (some body) => .module name (some (body.map (FItem.decide f)))
-  | .pub parent item => .pub parent (FItem.decide f item)
+  | .module name (some body) => .module name (some (body.map (Item.decide f)))
+  | .pub parent item => .pub parent (Item.decide f item)
   | item => item
 
 /-- What the checker decided is of: the identities of the calls, callables,
@@ -891,7 +891,7 @@ def Decided.body (d : Decided) (b : Flat.Body) : Bool :=
     || b.stmts.any fun | .let_ p _ => d.pat p | _ => false))
 
 /-- Does an item have something in it the checker decided of? -/
-partial def Decided.item (d : Decided) : Flat.FItem → Bool
+partial def Decided.item (d : Decided) : Syntax.Item → Bool
   | .fn name _ _ _ b => d.owners.contains name || d.body b
   | .impl _ tr head _ _ methods => methods.any fun
     | .fn m _ _ _ b => d.owners.contains (implFnName tr head m) || d.body b
@@ -938,7 +938,7 @@ first (`decideBody`), then the dot calls and arguments it chose, where they
 are (`chosenRewrite`). Only the items it
 decided something in are written again: what is decided of an item changes
 that item alone. -/
-def decidedProgram (b : Blocks) (items : List Flat.FItem) : List Flat.FItem := Id.run do
+def decidedProgram (b : Blocks) (items : List Syntax.Item) : List Syntax.Item := Id.run do
   let d := Decided.of b
   if d.calls.isEmpty && d.closures.isEmpty && d.fields.isEmpty && d.rests.isEmpty && d.owners.isEmpty then
     return items
@@ -949,7 +949,7 @@ def decidedProgram (b : Blocks) (items : List Flat.FItem) : List Flat.FItem := I
   items.map fun item =>
     if !d.item item then item else
     let item := if decisions.item item then
-        b.decided.foldl (fun item dec => FItem.decide (decideBody dec) item) item
+        b.decided.foldl (fun item dec => Item.decide (decideBody dec) item) item
       else item
     if chosen then item.mapBodies rw.body else item
 

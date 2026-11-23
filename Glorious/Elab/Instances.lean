@@ -119,9 +119,9 @@ structure Instances where
   calls). -/
   names : String → List String
   /-- A function written as those. -/
-  fn : Flat.FItem → List Flat.FItem
+  fn : Syntax.Item → List Syntax.Item
   /-- Any other item: an effect with several instances, one for each. -/
-  other : Flat.FItem → List Flat.FItem
+  other : Syntax.Item → List Syntax.Item
 
 /-- Each instance of an effect a program uses made an effect of its own, and
 each function that is about an instance of its caller's choosing written out
@@ -170,12 +170,12 @@ partial def instancesOf (b : Blocks) (written : List Item) : Except String Insta
     | .effect name ps ops => some (name, ps, ops)
     | _ => none
   let opOf := effects.flatMap fun (name, _, ops) => ops.map fun o => (o.name, name)
-  let copyOf := fun (f name : String) (types : List TypeExpr) (item : Flat.FItem) =>
+  let copyOf := fun (f name : String) (types : List TypeExpr) (item : Syntax.Item) =>
     let c : Copy := ⟨tableOf f, types, several, copied, opOf, (f, name)⟩
     match item with
-    | .fn _ ps annots ret body => Flat.FItem.fn name ps annots ret ((copyRewrite c).body body)
+    | .fn _ ps annots ret body => Syntax.Item.fn name ps annots ret ((copyRewrite c).body body)
     | other => other
-  let rec bareF : Flat.FItem → Flat.FItem
+  let rec bareF : Syntax.Item → Syntax.Item
     | .pub _ i => bareF i
     | i => i
   let mineOf := fun (name : String) => all.filter (·.1 == name)
@@ -195,7 +195,7 @@ partial def instancesOf (b : Blocks) (written : List Item) : Except String Insta
         | _ => [item]
       other := fun item =>
         match bareF item with
-        | .other (.effect name ps ops) =>
+        | (.effect name ps ops) =>
           if several.contains name then
             -- One effect for each instance, with the family's types written in.
             let typed := (effects.find? (·.1 == name)).map fun (_, ps, ops) => (ps, ops)
@@ -203,7 +203,7 @@ partial def instancesOf (b : Blocks) (written : List Item) : Except String Insta
             let places := ps.filter (!·.startsWith "'")
             ((found.lookup name).getD []).map fun (key, types) =>
               let σ := places.zip types
-              .other (.effect (instName name key) (ps.filter (·.startsWith "'")) (ops.map fun o =>
+              (.effect (instName name key) (ps.filter (·.startsWith "'")) (ops.map fun o =>
                 { o with name := instName o.name key, payload := o.payload.map (substType σ)
                          result := o.result.map (substType σ) }))
           else [item]

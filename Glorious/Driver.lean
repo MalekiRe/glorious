@@ -78,10 +78,10 @@ structure Compiled where
   groupsMade : Array (UInt64 × Check.KeptGroup) := #[]
   /-- Each module's items as name resolution made them, where `unitsKept`
   was given: for the next compile (`Syntax.Modules.UnitsKept`). -/
-  unitsMade : List (UInt64 × List Syntax.Flat.FItem × Syntax.Modules.UnitMade) := []
+  unitsMade : List (UInt64 × List Syntax.Item × Syntax.Modules.UnitMade) := []
   /-- What the front end's passes made of each item, where `frontKept` was
   given: for the next compile (`Syntax.Flat.FrontMemo`). -/
-  frontMade : Array (UInt64 × List Syntax.Flat.FItem) := #[]
+  frontMade : Array (UInt64 × List Syntax.Item) := #[]
   /-- Each module's items as this compile parsed them or took them, under
   what they were parsed from: kept for the next. -/
   parsedMade : List (UInt64 × List Syntax.Item) := []
@@ -112,7 +112,7 @@ the coercions that apply in it, the dot calls among its calls the resolver
 found more than one function for, and which fields of the constructors of it
 and of the units before it are `pub`. -/
 def unitInfoKey (info : Syntax.ModuleInfo) (before : List String) (unit : String)
-    (items : List Syntax.Flat.FItem) : UInt64 :=
+    (items : List Syntax.Item) : UInt64 :=
   -- (The calls of its bodies, where they are kept.)
   let ids : Std.HashSet Nat := items.foldl (fun set i =>
     i.allBodies.foldl (fun set b => b.exprs.foldl (fun set n => match n with
@@ -134,12 +134,12 @@ def namesInBody (acc : List String) (b : Syntax.Flat.Body) : List String :=
     | _ => acc) acc
 
 /-- The names written in an item that is not one of the library's functions. -/
-partial def namesInItem (acc : List String) : Syntax.Flat.FItem → List String
+partial def namesInItem (acc : List String) : Syntax.Item → List String
   | .fn _ _ _ _ b => namesInBody acc b
   | .impl _ _ _ _ _ methods => methods.foldl namesInItem acc
   | .traitInfo _ _ defaults _ _ => defaults.foldl namesInItem acc
   | .alias _ b _ => namesInBody acc b
-  | .other (.coerce name) => name :: acc
+  | (.coerce name) => name :: acc
   | .pub _ item => namesInItem acc item
   | .module _ (some body) => body.foldl namesInItem acc
   | _ => acc
@@ -149,10 +149,10 @@ the program's text can reach: each is kept if its name, without its module, is
 written in what is kept. (They are known to be well typed: the library is
 checked whole by the tests. A function its text names but nothing calls is
 kept, and so checked, as it was.) -/
-partial def withoutUnreached (items : List Syntax.Flat.FItem) : List Syntax.Flat.FItem := Id.run do
+partial def withoutUnreached (items : List Syntax.Item) : List Syntax.Item := Id.run do
   let library := fun (name : String) =>
     name.startsWith "std::" || name.startsWith "core::" || name.startsWith "alloc::"
-  let isLibraryFn : Syntax.Flat.FItem → Option String
+  let isLibraryFn : Syntax.Item → Option String
     | .fn name _ _ _ _ => if library name then some (Syntax.lastSegment name) else none
     | _ => none
   let mut wanted : Std.HashSet String := {}
@@ -697,14 +697,14 @@ def unitMarkOf : Syntax.Item → Option String
   | .fieldNames m [k] [] => if m == Syntax.unitMark then some k else none
   | _ => none
 
-def unitsOfFlat (items : List Syntax.Flat.FItem) (uses : List (String × List String)) :
-    List Syntax.Flat.FItem × List (String × List Syntax.Flat.FItem) :=
-  unitsOfBy (fun | .other i => unitMarkOf i | _ => none) items uses
+def unitsOfFlat (items : List Syntax.Item) (uses : List (String × List String)) :
+    List Syntax.Item × List (String × List Syntax.Item) :=
+  unitsOfBy unitMarkOf items uses
 
 /-- The items without the marks of units. -/
-def withoutUnitMarksFlat (items : List Syntax.Flat.FItem) : List Syntax.Flat.FItem :=
+def withoutUnitMarksFlat (items : List Syntax.Item) : List Syntax.Item :=
   items.filter fun
-    | .other (.fieldNames m [_] []) => m != Syntax.unitMark
+    | (.fieldNames m [_] []) => m != Syntax.unitMark
     | _ => true
 
 /-- The prelude, with the standard library if `std`, checked: how many items
@@ -715,19 +715,19 @@ function is given how to destroy the types it is generic in. -/
 def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   if !std then
     let (prelude, _) ← readPrelude.get
-    let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (Syntax.Flat.ofItems prelude)).1 []
+    let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (prelude)).1 []
     let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases resolved.items).1).1
     return (all.length, ← Check.checkFirst all resolved.info drop)
   let (prelude, items, _, _, _) ← parseProgram "// std" []
-  let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (Syntax.Flat.ofItems prelude)).1 (Syntax.Flat.promoteItems (Syntax.Flat.ofItems items)).1
+  let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (prelude)).1 (Syntax.Flat.promoteItems (items)).1
   -- (Its modules in the order a program has them, marks and all, so that
   -- what a program has first is these, item for item.)
   let (first, units) := unitsOfFlat resolved.items resolved.info.unitUses
-  let items := first ++ units.flatMap (fun (k, is) => Syntax.Flat.FItem.other (Syntax.Item.fieldNames Syntax.unitMark [k] []) :: is)
+  let items := first ++ units.flatMap (fun (k, is) => (Syntax.Item.fieldNames Syntax.unitMark [k] []) :: is)
   let all := (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases items).1).1
   -- (Without the first module's mark, at the end: it has nothing.)
   let all := match all.getLast? with
-    | some (.other (.fieldNames m [""] [])) => if m == Syntax.unitMark then all.dropLast else all
+    | some ((.fieldNames m [""] [])) => if m == Syntax.unitMark then all.dropLast else all
     | _ => all
   pure (all.length, ← Check.checkFirst (withoutUnitMarksFlat all) resolved.info drop)
 
@@ -752,14 +752,14 @@ its families of effects (each instance used an effect of its own); and, where
 an implementation given to a function is known, the function written out for
 it with its trait's functions called by name. `written` has the declarations
 with their lifetimes, `all` is without them. -/
-def lowered (b : Elab.Blocks) (written : List Syntax.Item) (all : List Syntax.Flat.FItem) :
-    Except String (List Syntax.Flat.FItem × Elab.Blocks) := do
+def lowered (b : Elab.Blocks) (written : List Syntax.Item) (all : List Syntax.Item) :
+    Except String (List Syntax.Item × Elab.Blocks) := do
   let L ← Elab.lowering b written all
   let roots := "main" :: L.blocks.coercions.toList.map (·.2)
   pure (Elab.reachable roots (L.items (L.reach L.start roots)), L.blocks)
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/
-def elaborate (items : List Syntax.Flat.FItem) (blocks : Option Elab.Blocks)
+def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
     (lends : Nat → Nat := fun _ => 0) (root : String := "main") (kept : Option Elab.ElabMemo := none) :
     Except String Elab.Output := do
   Comptime.evaluate (← Elab.elabProgram items blocks lends root kept)
@@ -776,7 +776,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
-    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none)
+    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Item)) := none)
     (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
     (lowerKept : Option Elab.LowerMemo := none) :
     Except String Compiled := do
@@ -789,13 +789,13 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- the same: `Syntax.Flat.FrontMemo`.)
   let front : Syntax.Flat.FrontMemo := { kept := frontKept.getD {}, keep := frontKept.isSome }
   let (flatPrelude, flatItems, front) := Trace.timed "flat bodies" fun _ =>
-    let (p, front) := Syntax.Flat.promoteItems (Syntax.Flat.ofItems prelude) front
-    let (i, front) := Syntax.Flat.promoteItems (Syntax.Flat.ofItems items) front
+    let (p, front) := Syntax.Flat.promoteItems (prelude) front
+    let (i, front) := Syntax.Flat.promoteItems (items) front
     (p, i, front)
   let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve flatPrelude flatItems unitsKept
   let (firstItems, unitItems) := unitsOfFlat resolved.items resolved.info.unitUses
   let resolved := { resolved with items :=
-    firstItems ++ unitItems.flatMap (fun (k, is) => Syntax.Flat.FItem.other (Syntax.Item.fieldNames Syntax.unitMark [k] []) :: is) }
+    firstItems ++ unitItems.flatMap (fun (k, is) => (Syntax.Item.fieldNames Syntax.unitMark [k] []) :: is) }
   -- How a constructor is named where a value is shown: without its module,
   -- and the two of the prelude's text under names that mark them.
   let shownName := fun (name : String) =>
@@ -846,7 +846,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     | .error _ => Elab.splitFieldItems all all
   -- (What nothing reaches of the bodies left out: what is checked, kept and
   -- hashed from here on is what is written.)
-  let all := Trace.timed "compact" fun _ => all.map Syntax.Flat.FItem.compact
+  let all := Trace.timed "compact" fun _ => all.map Syntax.Item.compact
   -- (`kept`: what an earlier check of the same program kept, in the same
   -- process: the steps whose inputs did not change are not checked again.)
   let seed := mixHash (hash withStd) (mixHash (hash drops) (hash few))
@@ -854,7 +854,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   let unitList := match first with
     | .ok (count, _) => (unitsOfFlat (all.drop count) resolved.info.unitUses).2
     | .error _ => []
-  let units := unitList.map (fun (u : String × List Syntax.Flat.FItem) => u.2)
+  let units := unitList.map (fun (u : String × List Syntax.Item) => u.2)
   -- (For each, the units before it that it uses.)
   let unitDeps := unitList.zipIdx.map fun ((k, _), i) =>
     let uses := (resolved.info.unitUses.lookup k).getD []
@@ -871,12 +871,12 @@ def compileSourceAt (src : String) (check : Bool := true)
   let all := withoutUnitMarksFlat all
   -- (Each unit's items as the items now are: read again after the checker
   -- asked for something to be written otherwise, each has as many items.)
-  let cut := fun (rest : List Syntax.Flat.FItem) =>
+  let cut := fun (rest : List Syntax.Item) =>
     if (units.map List.length).sum == rest.length then
-      ((units.foldl (fun (acc : List (List Syntax.Flat.FItem) × List Syntax.Flat.FItem) (u : List Syntax.Flat.FItem) =>
+      ((units.foldl (fun (acc : List (List Syntax.Item) × List Syntax.Item) (u : List Syntax.Item) =>
         (acc.1 ++ [acc.2.take u.length], acc.2.drop u.length)) ([], rest)).1).zip infoKeys
     else [(rest, hash resolved.info)]
-  let checkOnce := fun (all : List Syntax.Flat.FItem) =>
+  let checkOnce := fun (all : List Syntax.Item) =>
     match check, resolved.info.shadowed, first with
     | true, false, .ok (count, first) =>
       Check.checkUnitsKept { first with lenient } (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
@@ -892,7 +892,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- (What the checker decides of how the program is read once it knows
   -- types, `..` in a tuple pattern, a function named as a value, a value
   -- kept in a variable, it decides where it finds it: `Check.checkDeciding`.)
-  let checkWith := fun (all : List Syntax.Flat.FItem) => (all, checkOnce all)
+  let checkWith := fun (all : List Syntax.Item) => (all, checkOnce all)
   let (all, checked) := Trace.timed "check" fun _ => checkWith all
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
@@ -942,7 +942,7 @@ def compileSourceAt (src : String) (check : Bool := true)
         | .ok (count, _) => named (written.drop count)
         | .error _ => []
       let reached : Std.HashSet String := all.foldl (init := {}) fun s item => match item with
-        | Syntax.Flat.FItem.fn name _ _ _ _ => s.insert name
+        | Syntax.Item.fn name _ _ _ _ => s.insert name
         | _ => s
       -- (Those still there once traits are lowered: one made into copies is
       -- elaborated as each copy is.)
@@ -1226,7 +1226,7 @@ def compileSource (src : String) (check : Bool := true)
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
-    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none)
+    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Item)) := none)
     (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
     (lowerKept : Option Elab.LowerMemo := none) :
     Except String Compiled := do

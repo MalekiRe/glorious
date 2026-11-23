@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Syntax.Ast
+public import Glorious.Syntax.FlatOps
 public import Glorious.Syntax.Lexer
 public import Glorious.Value
 

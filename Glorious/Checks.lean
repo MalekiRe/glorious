@@ -48,8 +48,9 @@ def keptProgram (body : String) : String :=
   }
   fn main() -> Int { m::go() }"
 
-/-- A module's items made flat and made trees again are the items. -/
-def sameFlat (items : List Syntax.Item) : Bool := Syntax.Flat.itemsRoundTrip items
+/-- A module's bodies made trees and made flat again are those trees. -/
+def sameFlat (items : List Syntax.Item) : Bool :=
+  items.all fun item => item.allBodies.all fun b => Syntax.Flat.roundTrips (Syntax.Flat.toClauses b)
 
 /-- Of the prelude and every module of the library. (Asked as it is run:
 a constant would be worked out whenever the compiler starts.) -/

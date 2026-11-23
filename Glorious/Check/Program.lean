@@ -27,7 +27,7 @@ def noBodies (st : St) : St := { st with body := {}, fnBodies := {} }
 
 /-- An item as its declarations have it: its functions without their bodies. -/
 partial def withoutBodies : Item → Item
-  | .fn name params annots ret _ => .fn name params annots ret []
+  | .fn name params annots ret _ => .fn name params annots ret {}
   | .impl params tr head args ctx methods => .impl params tr head args ctx (methods.map withoutBodies)
   | .pub parent item => .pub parent (withoutBodies item)
   | other => other
@@ -80,7 +80,7 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
         let name := Syntax.implFnName im.trait im.head m
         -- (Its body, where the declaration has none: by its name.)
         let kept := (← get).fnBodies[name]?
-        let body := if clauses.isEmpty then kept.getD {} else Flat.ofClauses clauses
+        let body := if clauses.roots.isEmpty then kept.getD {} else clauses
         out := out ++ [{ name,
                          params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
                          ret, body, impl := some (im, sig), bounds := uses }]
@@ -412,11 +412,11 @@ it. What the functions of later groups are is put back as this program has
 them. Gives what this check kept, the state after all of it first, under a
 key of every item whole: where that is kept, nothing else is looked at, and
 nothing else is kept. -/
-def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := []) (deltas : Option Deltas := none) :
+def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := []) (deltas : Option Deltas := none) :
     M (Kept × Array (UInt64 × KeptGroup)) := do
   -- The items as they declare, and their functions' bodies by name.
-  let items := fitems.map Flat.FItem.declared
-  let bodies := fitems.flatMap Flat.FItem.bodies
+  let items := fitems.map Syntax.Item.declared
+  let bodies := fitems.flatMap Syntax.Item.bodies
   let ownBodies := fun (_ : Unit) => (modify fun s =>
     { s with fnBodies := bodies.foldl (fun m (n, b) => m.insert n b) s.fnBodies } : M Unit)
   ownBodies ()
@@ -443,10 +443,9 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
   let names := decls.map (·.name)
   -- (A name that stands for an expression, a constant's, mentions what that
   -- does: the function that works the constant out.)
-  let freeIn := fun (value : Expr) => let (b, e) := Flat.ofExpr value; b.fvExpr [] e
   let aliasOf : Std.HashMap String (List String) := Elab.firstOf (items.filterMap fun
-    | .alias name value => some (name, freeIn value)
-    | .pub _ (.alias name value) => some (name, freeIn value)
+    | .alias name b e => some (name, b.fvExpr [] e)
+    | .pub _ (.alias name b e) => some (name, b.fvExpr [] e)
     | _ => none)
   let nameSet : Std.HashSet String := names.foldl (·.insert ·) {}
   -- (And the functions a dot call in it may turn out to be of, the types'
@@ -964,7 +963,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
 blocks: which take an argument they do not name, and for each that is handed a
 block which was not run, the identity of that block if it can only be one. The
 elaborator then lets those two share what they capture. -/
-def checkProgram (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
+def checkProgram (items : List Syntax.Item) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
     Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
     modify fun s => { s with modules }
@@ -975,7 +974,7 @@ def checkProgram (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) (
 
 /-- What is known once some items are checked: for a program that is checked
 after them, against what they declare. -/
-def checkFirst (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
+def checkFirst (items : List Syntax.Item) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
     Except String St := do
   let action : M Unit := do
     modify fun s => { s with modules }
@@ -984,7 +983,7 @@ def checkFirst (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) (dr
   pure st
 
 /-- Check a program whose first items are already checked. -/
-def checkAfter (first : St) (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) :
+def checkAfter (first : St) (items : List Syntax.Item) (modules : Syntax.ModuleInfo := {}) :
     Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
     modify fun s => { s with modules, ownItems := true }
@@ -1005,7 +1004,7 @@ whose units used are all checked, are checked side by side, each on a
 thread of its own, and what each added is put together (`mergeStates`);
 where it cannot be, or one of them is refused, they are checked one after
 another, as all were. -/
-def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modules : Syntax.ModuleInfo)
+def checkUnitsKept (first : St) (units : List (List Syntax.Item × UInt64)) (modules : Syntax.ModuleInfo)
     (seed : UInt64) (kept : Kept) (own : Bool := true) (library : Nat := 0)
     (deps : List (List Nat) := []) (groupsKept : Option Deltas := none) :
     Except Elab.Said (Elab.Blocks × Kept × Kept × Array (UInt64 × KeptGroup)) := do

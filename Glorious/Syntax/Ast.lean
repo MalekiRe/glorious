@@ -781,6 +781,61 @@ def useMarked (name : String) : Option (String × Nat × Option Nat) :=
 those named, is the type `%for<'a, 'b, fn(&'a T) -> &'a T>`. -/
 def rankedMark : String := "%for"
 
+namespace Flat
+
+/-- Where a node is in its body's arrays. -/
+abbrev ExprId := Nat
+abbrev StmtId := Nat
+abbrev ClauseId := Nat
+
+deriving instance BEq for Pattern
+
+/-- An expression, its parts by place (`Syntax.Expr`). -/
+inductive FExpr where
+  | int (n : Int)
+  | name (qual : Option String) (name : String)
+  | label (name : String)
+  | call (id : Nat) (f : ExprId) (args : Array ExprId)
+  | tailCall (id : Nat) (f : ExprId) (args : Array ExprId)
+  | tuple (args : Array ExprId)
+  | proj (e : ExprId) (idx : Nat)
+  | closure (id : Nat) (clauses : Array ClauseId)
+  | handle (subject : ExprId) (arms : Array ClauseId)
+  | labelScope (name : String) (body : Array StmtId)
+  | ref (uniq : Bool) (name : String)
+  | deref (e : ExprId)
+  | reborrow (uniq : Bool) (e : ExprId)
+  | refField (id : Nat) (uniq : Bool) (name : String) (path : List String) (star : Bool)
+  | fieldOf (id : Nat) (e : ExprId) (name : String)
+  deriving Inhabited, Hashable, BEq
+
+/-- A statement, its parts by place (`Syntax.Stmt`). -/
+inductive FStmt where
+  | let_ (pat : Pattern) (value : ExprId)
+  | expr (e : ExprId)
+  | defer (e : ExprId)
+  | letMut (name : String) (value : ExprId)
+  | assign (target : ExprId) (value : ExprId)
+  | located (line col : Nat) (s : StmtId)
+  deriving Inhabited, Hashable, BEq
+
+/-- A clause: its patterns, and its body's statements by place. -/
+structure FClause where
+  pats : List Pattern
+  body : Array StmtId
+  deriving Inhabited, Hashable, BEq
+
+/-- A declaration's body: its nodes, each kind in an array of its own, and
+its own clauses (`roots`). -/
+structure Body where
+  exprs : Array FExpr := #[]
+  stmts : Array FStmt := #[]
+  clauses : Array FClause := #[]
+  roots : Array ClauseId := #[]
+  deriving Inhabited, Hashable, BEq
+
+end Flat
+
 inductive Item where
   /-- An enum: its type parameters and its constructors with their fields. -/
   | enum (name : String) (params : List String) (ctors : List (String × List TypeExpr))
@@ -788,11 +843,12 @@ inductive Item where
   | struct (name : String) (params : List String) (fields : List TypeExpr)
   | effect (name : String) (params : List String) (ops : List OpDecl)
   /-- A function: its type parameters, the annotation on each parameter and on
-  the result where written, and its clauses. -/
+  the result where written, and its clauses, a flat body (`Flat.Body`). -/
   | fn (name : String) (params : List String) (annots : List (Option TypeExpr))
-      (ret : Option TypeExpr) (clauses : List Clause)
-  /-- `let Name = expr;`: a constructor alias or a constant. -/
-  | alias (name : String) (value : Expr)
+      (ret : Option TypeExpr) (body : Flat.Body)
+  /-- `let Name = expr;`: a constructor alias or a constant, its value in a
+  body of its own. -/
+  | alias (name : String) (body : Flat.Body) (value : Flat.ExprId)
   /-- A fixity declaration; already collected before parsing. -/
   | fixity
   /-- `coerce name`: the function `name` is applied without being written, where
@@ -837,86 +893,6 @@ inductive Item where
 
 deriving instance Hashable for OpDecl, Bound, Item
 
-/-! ## Rewriting a program
-
-Most passes over a program change one kind of expression, statement or
-pattern and rebuild everything else as it was. `Rewrite` is that rebuilding,
-once: each hook says what a node is written as, given the rewrite to use
-inside it (`Go`), or none to have it rebuilt from its parts. -/
-
-/-- The rewrite, inside a node a hook writes. -/
-structure Go where
-  ex : Expr → Expr
-  st : Stmt → Stmt
-  stmts : List Stmt → List Stmt
-  clause : Clause → Clause
-
-instance : Inhabited Go := ⟨⟨id, id, id, id⟩⟩
-
-/-- What a rewrite changes. -/
-structure Rewrite where
-  onExpr : Go → Expr → Option Expr := fun _ _ => none
-  /-- A block's statements from the first on. -/
-  onStmts : Go → List Stmt → Option (List Stmt) := fun _ _ => none
-  onStmt : Go → Stmt → Option Stmt := fun _ _ => none
-  onClause : Go → Clause → Option Clause := fun _ _ => none
-  onPat : Pattern → Pattern := id
-
-mutual
-
-/-- An expression rewritten. -/
-partial def Rewrite.ex (r : Rewrite) (e : Expr) : Expr :=
-  match r.onExpr r.go e with
-  | some e => e
-  | none =>
-    match e with
-    | .call i f args => .call i (r.ex f) (args.map r.ex)
-    | .tailCall i f args => .tailCall i (r.ex f) (args.map r.ex)
-    | .tuple args => .tuple (args.map r.ex)
-    | .proj e n => .proj (r.ex e) n
-    | .closure i clauses => .closure i (clauses.map r.clause)
-    | .handle subject arms => .handle (r.ex subject) (arms.map r.clause)
-    | .labelScope l body => .labelScope l (r.stmts body)
-    | .deref e => .deref (r.ex e)
-    | .reborrow uniq e => .reborrow uniq (r.ex e)
-    | .fieldOf i e name => .fieldOf i (r.ex e) name
-    | e => e
-
-/-- A clause rewritten. -/
-partial def Rewrite.clause (r : Rewrite) (c : Clause) : Clause :=
-  match r.onClause r.go c with
-  | some c => c
-  | none =>
-    match c with
-    | .mk pats body => .mk (pats.map r.onPat) (r.stmts body)
-
-/-- Statements rewritten. -/
-partial def Rewrite.stmts (r : Rewrite) (ss : List Stmt) : List Stmt :=
-  match r.onStmts r.go ss with
-  | some ss => ss
-  | none =>
-    match ss with
-    | [] => []
-    | s :: rest => r.st s :: r.stmts rest
-
-/-- A statement rewritten. -/
-partial def Rewrite.st (r : Rewrite) (s : Stmt) : Stmt :=
-  match r.onStmt r.go s with
-  | some s => s
-  | none =>
-    match s with
-    | .let_ pat value => .let_ (r.onPat pat) (r.ex value)
-    | .expr e => .expr (r.ex e)
-    | .defer e => .defer (r.ex e)
-    | .letMut x value => .letMut x (r.ex value)
-    | .assign target value => .assign (r.ex target) (r.ex value)
-    | .located line col s => .located line col (r.st s)
-
-/-- What a hook rewrites inside a node with. -/
-partial def Rewrite.go (r : Rewrite) : Go := ⟨r.ex, r.st, r.stmts, r.clause⟩
-
-end
-
 /-- An expression with each expression directly inside it made by `fe`, and
 each block inside it (with the patterns of its clause) by `fb`. -/
 def Expr.traverse {m : Type → Type} [Monad m] (fe : Expr → m Expr)
@@ -941,20 +917,6 @@ def Stmt.traverse {m : Type → Type} [Monad m] (fe : Expr → m Expr) : Stmt �
   | .letMut x v => .letMut x <$> fe v
   | .assign t v => do pure (.assign (← fe t) (← fe v))
   | .located l c s => .located l c <$> s.traverse fe
-
-/-- Every function of a program with its clauses made by `f`: in
-implementations, traits' defaults and modules too. -/
-partial def Item.mapClauses (f : Clause → Clause) : Item → Item
-  | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map f)
-  | .impl ps tr head args context methods => .impl ps tr head args context (methods.map (·.mapClauses f))
-  | .traitInfo n supers defaults params assocs => .traitInfo n supers (defaults.map (·.mapClauses f)) params assocs
-  | .module name (some body) => .module name (some (body.map (·.mapClauses f)))
-  | .pub parent item => .pub parent (item.mapClauses f)
-  | item => item
-
-/-- A program rewritten. -/
-def Rewrite.items (r : Rewrite) (items : List Item) : List Item :=
-  items.map (·.mapClauses r.clause)
 
 /-- Every name a pattern could bind. -/
 partial def patternNames : Pattern → List String
@@ -1033,21 +995,6 @@ def labelShort (name : String) : String :=
   | p :: _ :: _ => if p.isEmpty then s else p
   | _ => s
 
-/-- `Self` written out as the type an implementation is for: `Self::f`,
-`Self { .. }` and `Self(..)`. In an implementation of a trait `Self::f(..)`
-is the trait's function for that type, `<Self as Trait>::f(..)`. -/
-def selfRewrite (self : String) (trait : Option (String × Expr)) : Rewrite where
-  onExpr go
-    | .name qual z =>
-      some (.name (if qual == some "Self" then some ((trait.map (·.1)).getD self) else qual)
-        (if z == "Self" then self else z))
-    | .call id (.name (some "Self") z) args =>
-      trait.map fun (tr, at_) => .call 0 (.name none instMark) [.call id (.name (some tr) z) (args.map go.ex), at_]
-    | _ => none
-  onPat := selfPattern self
-
-def selfClause (self : String) (trait : Option (String × Expr)) : Clause → Clause := (selfRewrite self trait).clause
-
 /-- A constant expression read as a pattern. -/
 partial def exprToPat : Expr → Except String Pattern
   | .int n => pure (.int n)
@@ -1096,29 +1043,5 @@ partial def unmutPat : Pattern → Pattern × List String
     let parts := args.map unmutPat
     (.tuple (parts.map (·.1)), parts.flatMap (·.2))
   | p => (p, [])
-
-/-- Each name a pattern binds with `mut` a variable of the same name where
-what the pattern is of starts: `Some(mut n) => n = n + 1` as `Some(n) => let
-mut n = n; n = n + 1`; in a `let`, after it. -/
-def unmutRewrite : Rewrite where
-  onClause go
-    | .mk pats body =>
-      let parts := pats.map unmutPat
-      let names := parts.flatMap (·.2)
-      if names.isEmpty then none
-      else some (.mk (parts.map (·.1)) (names.map (fun x => Stmt.letMut x (.name none x)) ++ go.stmts body))
-  onStmts go
-    | s :: rest =>
-      let rec here : Stmt → Option (List Stmt)
-        | .located l c s => (here s).map (·.map (.located l c))
-        | .let_ pat value =>
-          let (pat, names) := unmutPat pat
-          if names.isEmpty then none
-          else some (.let_ pat (go.ex value) :: names.map fun x => Stmt.letMut x (.name none x))
-        | _ => none
-      (here s).map (· ++ go.stmts rest)
-    | [] => none
-
-def unmutItems (items : List Item) : List Item := unmutRewrite.items items
 
 end Glorious.Syntax

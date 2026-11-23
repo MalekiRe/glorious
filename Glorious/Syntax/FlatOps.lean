@@ -592,9 +592,8 @@ type written. Only those reached from the body's own clauses. -/
 def Body.ascriptions (b : Body) : List ExprId :=
   if !b.anyAscription then [] else b.roots.foldr (fun c acc => b.ascriptionsClause c acc) []
 
-/-- A body with each type written in it, `let x: Type = ..`, changed
-(`Syntax.mapTypesClause`): the types are worked out first, which may fail,
-and then written in. -/
+/-- A body with each type written in it, `let x: Type = ..`, changed: the
+types are worked out first, which may fail, and then written in. -/
 def mapTypes (f : TypeExpr → Except String TypeExpr) (b : Body) : Except String Body := do
   let places := b.ascriptions
   if places.isEmpty then return b
@@ -607,7 +606,7 @@ where
       made := made.insert ty (← f (TypeExpr.ofExpr (treeExpr b ty))).asExpr
     pure { onExpr := fun _ _ e => (made[e]?).map fun t => flatExpr t }
 
-/-- An expression with each type written in it changed (`Syntax.mapTypesExpr`). -/
+/-- An expression with each type written in it changed (`mapTypes`). -/
 def mapTypesOf (f : TypeExpr → Except String TypeExpr) (b : Body) (e : ExprId) : Except String (Body × ExprId) := do
   let places := if b.anyAscription then b.ascriptionsExpr e [] else []
   if places.isEmpty then return (b, e)
@@ -754,6 +753,15 @@ partial def renameStmts (x y : String) (bound : List String) : List StmtId → B
       pure ((← pushStmt (.assign t v)) :: (← renameStmts x y bound rest))
 
 end
+
+/-- A body with each of `pairs`' first names written as its second in its
+clauses, where no pattern of the clause binds it (`renameStmts`). -/
+def renameInBody (pairs : List (String × String)) (b : Body) : Body :=
+  let (roots, b) := (b.roots.mapM fun (c : ClauseId) => (do
+    let cl := (← get).clause c
+    let body ← pairs.foldlM (fun body (x, y) => renameStmts x y (cl.pats.flatMap patternNames) body) cl.body.toList
+    pushClause ⟨cl.pats, body.toArray⟩ : Build ClauseId)).run b
+  { b with roots }
 
 /-- `&list[i]` of a parameter `list` written with a reference's type
 (`Syntax.throughParamsRewrite`). -/
@@ -928,4 +936,46 @@ def promoteFnClause (annots : List (Option TypeExpr)) (c : ClauseId) : Build Cla
   let c ← if refs.isEmpty then pure c else (throughParamsRewrite refs).clause c
   promoteClause values (← nameBorrowsClause c)
 
+/-- Each name a pattern binds with `mut` a variable of the same name where
+what the pattern is of starts: `Some(mut n) => n = n + 1` as `Some(n) => let
+mut n = n; n = n + 1`; in a `let`, after it. -/
+def unmutRewrite : FRewrite where
+  onClause go b c :=
+    let cl := b.clause c
+    let parts := cl.pats.map unmutPat
+    let names := parts.flatMap (·.2)
+    if names.isEmpty then none else some do
+      let lets ← names.mapM fun x => do pushStmt (.letMut x (← pushExpr (.name none x)))
+      let rest ← go.stmts cl.body.toList
+      pushClause ⟨parts.map (·.1), (lets ++ rest).toArray⟩
+  onStmts go b ss :=
+    match ss with
+    | [] => none
+    | s :: rest =>
+      -- (Through the places it is written at, to a `let`.)
+      let rec find (s : StmtId) (fuel : Nat) (locs : List (Nat × Nat)) :
+          Option (List (Nat × Nat) × Pattern × ExprId × List String) :=
+        match fuel, b.stmt s with
+        | fuel + 1, .located l c inner => find inner fuel (locs ++ [(l, c)])
+        | _, .let_ pat value =>
+          let (pat, names) := unmutPat pat
+          if names.isEmpty then none else some (locs, pat, value, names)
+        | _, _ => none
+      (find s 64 []).map fun (locs, pat, value, names) => do
+        let placed := fun (st : FStmt) => do
+          let mut id ← pushStmt st
+          for (l, c) in locs.reverse do id ← pushStmt (.located l c id)
+          pure id
+        let first ← placed (.let_ pat (← go.ex value))
+        let more ← names.mapM fun x => do placed (.letMut x (← pushExpr (.name none x)))
+        pure (first :: more ++ (← go.stmts rest))
+
 end Glorious.Syntax.Flat
+
+namespace Glorious.Syntax
+
+/-- Every function of these items with its `mut` patterns made variables
+(`Flat.unmutRewrite`). -/
+def unmutItems (items : List Item) : List Item := items.map (·.mapBodies Flat.unmutRewrite.body)
+
+end Glorious.Syntax

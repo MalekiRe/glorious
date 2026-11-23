@@ -208,22 +208,6 @@ def qualifyShared (items : List Item) : List Item := Id.run do
     | _ => out := out.push item
   out.toList
 
-/-- The same, of flat items: only declarations are renamed. -/
-def qualifySharedF (items : List Flat.FItem) : List Flat.FItem :=
-  let decls := items.filterMap fun
-    | .other i => some i
-    | .pub p (.other i) => some (Item.pub p i)
-    | _ => none
-  let renamed := qualifyShared decls
-  if hash renamed == hash decls then items else
-  -- (Put back in place, one for one.)
-  let (out, _) := items.foldl (fun (acc : Array Flat.FItem × List Item) item =>
-    match item, acc.2 with
-    | .other _, r :: rest => (acc.1.push (.other r), rest)
-    | .pub _ (.other _), .pub p r :: rest => (acc.1.push (.pub p (.other r)), rest)
-    | item, rest => (acc.1.push item, rest)) (#[], renamed)
-  out.toList
-
 /-- What a module declares. `taken` are the names the first module has: it
 may declare a name the prelude has, and the prelude's is then `prelude::name`
 in the whole program. -/
@@ -253,7 +237,7 @@ def declared (path : List String) (items : List Item) (taken : List String := []
     | .effect name _ ops =>
       out := add out name .effect
       for op in ops do out := add out op.name .op
-    | .alias name _ => out := add out name .const
+    | .alias name _ _ => out := add out name .const
     | .trait name methods =>
       out := add out name .trait
       for (m, _, _) in methods do out := add out m .method
@@ -700,9 +684,9 @@ partial def aliased (fuel : Nat) (e : Entry) : R (Option String) := do
       | .pub _ i => i
       | i => i
     match item with
-    | .alias name value =>
+    | .alias name b v =>
       -- (A name given with a type stands for the same constructor.)
-      match aliasValue value with
+      match aliasValue (Flat.treeExpr b v) with
       | .name none target =>
         if mangle e.home name == e.global || s!"prelude::{name}" == e.global then some target else none
       | _ => none
@@ -1297,7 +1281,7 @@ def resolveItem (ctx : Ctx) : Item → R (List Item)
 /-- A function with its names resolved, under the name it has in the
 program, its body flat. -/
 def resolveFnF (ctx : Ctx) (global : String) (generics : List String) (name : String) (ps : List String)
-    (annots : List (Option TypeExpr)) (ret : Option TypeExpr) (body : Flat.Body) : R Flat.FItem := do
+    (annots : List (Option TypeExpr)) (ret : Option TypeExpr) (body : Flat.Body) : R Syntax.Item := do
   let generics := genericParams ps ++ generics
   let ctx := { ctx with generics }
   let annots ← annots.mapM fun a => a.mapM (resolveType ctx generics)
@@ -1314,7 +1298,7 @@ def resolveFnF (ctx : Ctx) (global : String) (generics : List String) (name : St
 
 /-- An item with its names resolved, its bodies flat: none for what only this
 pass reads. What has no code is resolved as it is (`resolveItem`). -/
-partial def resolveItemF (ctx : Ctx) : Flat.FItem → R (List Flat.FItem)
+partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
   | .pub _ item => resolveItemF ctx item
   | .module _ _ => pure []
   | .fn name ps annots ret b => do
@@ -1359,17 +1343,17 @@ partial def resolveItemF (ctx : Ctx) : Flat.FItem → R (List Flat.FItem)
         pure item
       -- A type the implementation says: an argument of its trait, or a type
       -- the trait leaves to it.
-      | .other (.typeAlias name aps body) => do
-        pure (.other (.typeAlias name aps (← resolveType ctx (genericParams ps) body)))
+      | (.typeAlias name aps body) => do
+        pure ((.typeAlias name aps (← resolveType ctx (genericParams ps) body)))
       | item => pure item
     pure [.impl ps tr' head' args context methods]
-  | .other item => do pure ((← resolveItem ctx item).map .other)
+  | item => resolveItem ctx item
 
 /-- The modules of a program, each with its items: `root` is the first, and a
 module written inside another is taken out of it. -/
-partial def gatherF (path : List String) (items : List Flat.FItem) :
-    Except String (List (List String × List Flat.FItem)) := do
-  let mut out : List (List String × List Flat.FItem) := [(path, items)]
+partial def gatherF (path : List String) (items : List Syntax.Item) :
+    Except String (List (List String × List Syntax.Item)) := do
+  let mut out : List (List String × List Syntax.Item) := [(path, items)]
   for item in items do
     let inner := match item with
       | .pub _ i => i
@@ -1408,31 +1392,31 @@ structure UnitMade where
 /-- Each module's items as resolution made them, with what it added, under
 a key of what they were made from (`resolve`): kept by one compile for the
 next. -/
-abbrev UnitsKept := Std.HashMap UInt64 (List Flat.FItem × UnitMade)
+abbrev UnitsKept := Std.HashMap UInt64 (List Syntax.Item × UnitMade)
 
 /-- What the checker is told of the modules of a program. -/
 structure Resolved where
-  items : List Flat.FItem
+  items : List Syntax.Item
   info : ModuleInfo
   /-- Each module's items resolved, under its key, where `resolve` was given
   modules to keep. -/
-  unitsMade : List (UInt64 × List Flat.FItem × UnitMade) := []
+  unitsMade : List (UInt64 × List Syntax.Item × UnitMade) := []
 
 /-- A program of modules as one list of items, each name meaning one thing:
 see above. `prelude` is a module every other can name without `use`. -/
-def resolve (prelude root : List Flat.FItem) (kept : Option UnitsKept := none) : Except String Resolved := do
+def resolve (prelude root : List Syntax.Item) (kept : Option UnitsKept := none) : Except String Resolved := do
   let mods ← gatherF [] root
   -- The library's modules come straight after the prelude's, whatever the
   -- program is: what is checked first is then the same for every program.
-  let library := fun (m : List String × List Flat.FItem) =>
+  let library := fun (m : List String × List Syntax.Item) =>
     m.1.head? == some "std" || m.1.head? == some "core" || m.1.head? == some "alloc"
   let mods := (← gatherF preludePath prelude) ++ mods.filter library ++ mods.filter (!library ·)
   let mut units : List Module := []
   let mut fields : List (String × List String × List String × List Bool) := []
-  let taken := (declared [] (root.map Flat.FItem.declared)).1.map (·.name)
-  let mods := mods.map fun (path, items) => (path, qualifySharedF items)
+  let taken := (declared [] (root.map Syntax.Item.declared)).1.map (·.name)
+  let mods := mods.map fun (path, items) => (path, qualifyShared items)
   for (path, fitems) in mods do
-    let items := fitems.map Flat.FItem.declared
+    let items := fitems.map Syntax.Item.declared
     let (own, fs) := declared path items taken
     -- A constructor has one name in its module: a `struct` is its own, and
     -- an `enum`'s are written without the type's name.
@@ -1449,13 +1433,13 @@ def resolve (prelude root : List Flat.FItem) (kept : Option UnitsKept := none) :
   -- their own: with both as they were, and the counters where they were,
   -- what an earlier compile made of them is taken.)
   let declaredKey := hash (units.map fun u => (u.path, u.items))
-  let run : R (List Flat.FItem × List (String × List String) × List (UInt64 × List Flat.FItem × UnitMade)) := do
-    let mut out : Array Flat.FItem := #[]
-    let mut unitsMade : List (UInt64 × List Flat.FItem × UnitMade) := []
+  let run : R (List Syntax.Item × List (String × List String) × List (UInt64 × List Syntax.Item × UnitMade)) := do
+    let mut out : Array Syntax.Item := #[]
+    let mut unitsMade : List (UInt64 × List Syntax.Item × UnitMade) := []
     for (u, (_, fitems)) in units.zip mods do
       let scope ← scopeOf u.path
       let ctx : Ctx := { here := u.path, scope := scope, named := byName scope, ctorsByLast := ctorsByLastName scope }
-      unless u.path.head? == preludePath.head? do out := out.push (.other (.fieldNames unitMark [key u.path] []))
+      unless u.path.head? == preludePath.head? do out := out.push ((.fieldNames unitMark [key u.path] []))
       let before ← get
       let unitKey := mixHash declaredKey (hash (u.path, fitems, before.fresh, before.made))
       match kept.bind (·[unitKey]?) with
@@ -1485,7 +1469,7 @@ def resolve (prelude root : List Flat.FItem) (kept : Option UnitsKept := none) :
           -- With it, the function that adds an element and the trait of
           -- `a[i]`, so that changing an array a variable holds can be done
           -- where the array is.
-          out := out.push (.other (.fieldNames arrayMark
+          out := out.push ((.fieldNames arrayMark
             (array :: (named "push" .fn).toList ++ (named "Index" .trait).toList) []))
     -- Where each coercion applies: in the module that declares it, and in
     -- one that brings its function in with `use`.
@@ -1500,7 +1484,7 @@ def resolve (prelude root : List Flat.FItem) (kept : Option UnitsKept := none) :
       applies := applies ++ [(key u.path, here)]
     pure (out.toList, applies, unitsMade)
   let bare := root.any fun
-    | .other (.fieldNames mark _ _) => mark == attrMark "no_std" || mark == attrMark "no_implicit_prelude"
+    | (.fieldNames mark _ _) => mark == attrMark "no_std" || mark == attrMark "no_implicit_prelude"
     | _ => false
   -- (For dot calls: see `St.typeFns`.)
   let typeFns := units.foldl (init := {}) fun (m : Std.HashMap String (Array (List String × Bound × String))) u =>
@@ -1533,7 +1517,7 @@ def resolve (prelude root : List Flat.FItem) (kept : Option UnitsKept := none) :
   let text := match ctor "StrEnd", ctor "StrChar" with
     | some e, some c => some (e, c)
     | _, _ => none
-  let preludeNames := (declared preludePath (prelude.map Flat.FItem.declared)).1.map (·.name)
+  let preludeNames := (declared preludePath (prelude.map Syntax.Item.declared)).1.map (·.name)
   let mine := units.filter (·.path != preludePath)
   let pubFns := mine.flatMap fun u => u.own.filterMap fun b =>
     if b.entry.kind == .fn && !(b.entry.vis matches .priv) then some b.entry.global else none

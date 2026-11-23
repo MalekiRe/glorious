@@ -97,24 +97,6 @@ partial def expandNamed (aliases : Std.HashMap String (List String × TypeExpr))
 
 end
 
-mutual
-
-/-- An expression with each type written in it, `let x: Type = ..`, changed. -/
-partial def mapTypesExpr (f : TypeExpr → Except String TypeExpr) : Expr → Except String Expr
-  | .call id (.name none mark) [value, ty] => do
-    if mark == ascribeMark || mark == instMark then
-      pure (.call id (.name none mark) [← mapTypesExpr f value, (← f (TypeExpr.ofExpr ty)).asExpr])
-    else pure (.call id (.name none mark) [← mapTypesExpr f value, ← mapTypesExpr f ty])
-  | e => e.traverse (mapTypesExpr f) fun _ b => b.mapM (mapTypesStmt f)
-
-partial def mapTypesClause (f : TypeExpr → Except String TypeExpr) : Clause → Except String Clause
-  | .mk pats body => .mk pats <$> body.mapM (mapTypesStmt f)
-
-partial def mapTypesStmt (f : TypeExpr → Except String TypeExpr) (s : Stmt) : Except String Stmt :=
-  s.traverse (mapTypesExpr f)
-
-end
-
 /-- How `givesReference`'s functions are kept among `takesReference`'s. -/
 def givesKey (name : String) : String := "%gives:" ++ name
 
@@ -447,8 +429,8 @@ they make now (`made`, where `keep`): each pass's result for one item, under
 a key of the pass, what it reads of the program besides the item, and the
 item. A compile that changed one function's body makes that one anew. -/
 structure FrontMemo where
-  kept : Std.HashMap UInt64 (List FItem) := {}
-  made : Array (UInt64 × List FItem) := #[]
+  kept : Std.HashMap UInt64 (List Item) := {}
+  made : Array (UInt64 × List Item) := #[]
   keep : Bool := false
 
 /-- A hash of a map's entries, whatever their order. -/
@@ -456,7 +438,7 @@ def unorderedHash {κ ν : Type} [BEq κ] [Hashable κ] [Hashable ν] (m : Std.H
   m.fold (init := 7) fun h k v => h + hash (k, v)
 
 /-- What `make` gives, or what was made under `key` before. -/
-def FrontMemo.take (m : FrontMemo) (key : UInt64) (make : Unit → List FItem) : List FItem × FrontMemo :=
+def FrontMemo.take (m : FrontMemo) (key : UInt64) (make : Unit → List Item) : List Item × FrontMemo :=
   let v := match m.kept[key]? with
     | some v => v
     | none => make ()
@@ -465,7 +447,7 @@ def FrontMemo.take (m : FrontMemo) (key : UInt64) (make : Unit → List FItem) :
 /-- An item's functions made so (`promoteFnClause`), as it is read, before
 its names are resolved: not a trait's defaults, made so where they are
 written out (`borrowReceivers`). -/
-partial def promoteItem : FItem → FItem
+partial def promoteItem : Item → Item
   | .fn name ps annots ret b =>
     let (roots, b) := (b.roots.mapM (promoteFnClause annots)).run b
     .fn name ps annots ret { b with roots }
@@ -476,8 +458,8 @@ partial def promoteItem : FItem → FItem
 
 /-- Every item made so (`promoteItem`), each as an earlier compile made it
 where it is the same. -/
-def promoteItems (items : List FItem) (memo : FrontMemo := {}) : List FItem × FrontMemo :=
-  let (out, memo) := items.foldl (fun ((acc : Array FItem), m) item =>
+def promoteItems (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
+  let (out, memo) := items.foldl (fun ((acc : Array Item), m) item =>
     let (made, m) := m.take (hash ("promote", item)) fun _ => [promoteItem item]
     (acc ++ made.toArray, m)) (#[], memo)
   (out.toList, memo)
@@ -498,13 +480,13 @@ borrowed and was not a variable is kept where a reference can point, as one
 borrowed with `&` in the text is (`promoteFnClause`): in each function's
 clause where a borrow may be made, the rest as the text's were made so
 (`promoteItems`). -/
-partial def borrowReceivers (items : List FItem) (memo : FrontMemo := {}) : List FItem × FrontMemo :=
-  let decls := items.map FItem.declared
+partial def borrowReceivers (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
+  let decls := items.map Item.declared
   let taken : Std.HashMap String Bool :=
     (takesReference decls ++ (givesReference decls).map (givesKey ·, false)).foldl (fun m (k, v) => m.insertIfNew k v) {}
   -- (`promote`: not of a trait's defaults, which are made so where they are
   -- written out.)
-  let rec go (promote : Bool) : FItem → FItem
+  let rec go (promote : Bool) : Item → Item
     | .pub parent item => .pub parent (go promote item)
     | .module name (some body) => .module name (some (body.map (go promote)))
     | .fn name ps annots ret b =>
@@ -532,9 +514,9 @@ partial def borrowReceivers (items : List FItem) (memo : FrontMemo := {}) : List
   (out.toList, memo)
 
 /-- A program without its type aliases: each use is what the alias stands for. -/
-partial def expandAliases (items : List FItem) (memo : FrontMemo := {}) : Except String (List FItem × FrontMemo) := do
+partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except String (List Item × FrontMemo) := do
   let aliases := items.filterMap fun
-    | .other (.typeAlias name params body) => some (name, params, body)
+    | (.typeAlias name params body) => some (name, params, body)
     | _ => none
   let mut seen : Std.HashSet String := {}
   for (name, _, _) in aliases do
@@ -543,8 +525,8 @@ partial def expandAliases (items : List FItem) (memo : FrontMemo := {}) : Except
   -- A type the program declares is that type, whatever an alias of the same
   -- name would have stood for.
   let declared : Std.HashSet String := .ofList (items.filterMap fun
-    | .other (.enum name _ _) => some name
-    | .other (.struct name _ _) => some name
+    | (.enum name _ _) => some name
+    | (.struct name _ _) => some name
     | _ => none)
   let aliases := aliases.filter fun (name, _, _) => !declared.contains name
   if aliases.isEmpty then return (items, memo)
@@ -559,34 +541,34 @@ partial def expandAliases (items : List FItem) (memo : FrontMemo := {}) : Except
   -- parameters is a type: `impl T for Option<Int>`. It is fixed, as an
   -- argument another name of the type fixes is.
   let concrete := fun (ps : List String) (tr head : String) (args : List String)
-      (context : List (String × String)) (methods : List FItem) => do
+      (context : List (String × String)) (methods : List Item) => do
     let mut newArgs : Array String := #[]
     let mut fresh : Array String := #[]
-    let mut fixed : Array FItem := #[]
+    let mut fixed : Array Item := #[]
     for (a, j) in args.zipIdx do
       if ps.contains a || head.startsWith "(tuple" then newArgs := newArgs.push a
       else
         let name := s!"%fixed{j}"
         newArgs := newArgs.push name
         fresh := fresh.push name
-        fixed := fixed.push (.other (.typeAlias (fixedArgName j) [] (← ty (.name a []))))
-    pure (FItem.impl (ps ++ fresh.toList) tr head newArgs.toList context (methods ++ fixed.toList))
-  let rec item : FItem → Except String FItem
-    | .other (.enum name ps ctors) => do
-      pure (.other (.enum name ps (← ctors.mapM fun (c, fields) => do pure (c, ← fields.mapM ty))))
-    | .other (.struct name ps fields) => do pure (.other (.struct name ps (← fields.mapM ty)))
-    | .other (.effect name ps ops) => do
+        fixed := fixed.push ((.typeAlias (fixedArgName j) [] (← ty (.name a []))))
+    pure (Item.impl (ps ++ fresh.toList) tr head newArgs.toList context (methods ++ fixed.toList))
+  let rec item : Item → Except String Item
+    | (.enum name ps ctors) => do
+      pure ((.enum name ps (← ctors.mapM fun (c, fields) => do pure (c, ← fields.mapM ty))))
+    | (.struct name ps fields) => do pure ((.struct name ps (← fields.mapM ty)))
+    | (.effect name ps ops) => do
       let ops ← ops.mapM fun op => do
         pure { op with payload := ← op.payload.mapM ty, result := ← op.result.mapM ty }
-      pure (.other (.effect name ps ops))
+      pure ((.effect name ps ops))
     | .fn name ps annots ret b => do
       pure (.fn name ps (← annots.mapM fun a => a.mapM ty) (← ret.mapM ty) (← mapTypes ty b))
-    | .other (.trait name methods) => do
-      pure (.other (.trait name (← methods.mapM fun (m, ps, r) => do
+    | (.trait name methods) => do
+      pure ((.trait name (← methods.mapM fun (m, ps, r) => do
         pure (m, ← ps.mapM ty, ← r.mapM ty))))
     | .impl ps tr head args context methods => do
       let methods ← methods.mapM fun
-        | .other (.typeAlias name aps body) => do pure (.other (.typeAlias name aps (← ty body)))
+        | (.typeAlias name aps body) => do pure ((.typeAlias name aps (← ty body)))
         | m => item m
       -- For a type whose last parameter is `..T`: the arguments written from
       -- there on are one tuple, an argument the implementation fixes.
@@ -595,16 +577,16 @@ partial def expandAliases (items : List FItem) (memo : FrontMemo := {}) : Except
           match kk.toNat? with
           | some k =>
             let fixedOf := fun (j : Nat) => methods.findSome? fun
-              | .other (.typeAlias n [] body) => if n == fixedArgName j then some body else none
+              | (.typeAlias n [] body) => if n == fixedArgName j then some body else none
               | _ => none
             let parts := (args.drop k).zipIdx.map fun (a, i) =>
               if ps.contains a then TypeExpr.name a [] else (fixedOf (k + i)).getD (.name a [])
             let rest := methods.filter fun
-              | .other (.typeAlias n [] _) => !((List.range args.length).drop k |>.any (fixedArgName · == n))
+              | (.typeAlias n [] _) => !((List.range args.length).drop k |>.any (fixedArgName · == n))
               | _ => true
             let name := s!"%fixed{k}"
             (ps.filter (fun p => !((List.range args.length).drop k |>.any (s!"%fixed{·}" == p))) ++ [name],
-              args.take k ++ [name], rest ++ [.other (.typeAlias (fixedArgName k) [] (.tuple parts))])
+              args.take k ++ [name], rest ++ [(.typeAlias (fixedArgName k) [] (.tuple parts))])
           | none => (ps, args, methods)
         | _ => (ps, args, methods)
       -- An implementation for another name of a type, `impl T for
@@ -615,7 +597,7 @@ partial def expandAliases (items : List FItem) (memo : FrontMemo := {}) : Except
         let given := aps.zip args
         let mut newArgs : Array String := #[]
         let mut fresh : Array String := #[]
-        let mut fixed : Array FItem := #[]
+        let mut fixed : Array Item := #[]
         for (targ, j) in targs.zipIdx do
           let named := match targ with
             | .name p [] => given.lookup p
@@ -626,7 +608,7 @@ partial def expandAliases (items : List FItem) (memo : FrontMemo := {}) : Except
             let name := s!"%fixed{j}"
             newArgs := newArgs.push name
             fresh := fresh.push name
-            fixed := fixed.push (.other (.typeAlias (fixedArgName j) [] (← ty targ)))
+            fixed := fixed.push ((.typeAlias (fixedArgName j) [] (← ty targ)))
         concrete (ps ++ fresh.toList) tr target newArgs.toList context (methods ++ fixed.toList)
       | _ => concrete ps tr head args context methods
     -- A name given a value with its type written, `let Just: fn(Int) ->
@@ -636,11 +618,11 @@ partial def expandAliases (items : List FItem) (memo : FrontMemo := {}) : Except
       pure (.alias name b value)
     | i => pure i
   let rest := items.filter fun
-    | .other (.typeAlias _ _ _) => false
+    | (.typeAlias _ _ _) => false
     | _ => true
   -- (Each item made from it, the aliases and the types declared.)
   let ctx := mixHash (hash "aliases") (mixHash (hash aliases) (unorderedHash (declared.fold (init := ({} : Std.HashMap String Unit)) fun m n => m.insert n ())))
-  let mut out : Array FItem := #[]
+  let mut out : Array Item := #[]
   let mut memo := memo
   for i in rest do
     let key := mixHash ctx (hash i)
@@ -660,24 +642,24 @@ scalar, tuples, callables, references) right after the trait's; each from the
 type's structure (`layoutOf`), asking `Layout` of each of its type
 parameters. In place, so that the prelude's are the same, item for item, in
 a program as where the prelude is checked alone. -/
-def writeLayouts (items : List FItem) (memo : FrontMemo := {}) : List FItem × FrontMemo := Id.run do
-  let rec flatAll : List FItem → List FItem
+def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo := Id.run do
+  let rec flatAll : List Item → List Item
     | [] => []
     | .module _ (some body) :: rest => flatAll body ++ flatAll rest
     | .pub _ inner :: rest => flatAll [inner] ++ flatAll rest
     | item :: rest => item :: flatAll rest
   let all := flatAll items
-  unless all.any (fun | .other (.trait n _) => n == layoutTrait | _ => false) do return (items, memo)
-  let hasNil := all.any (fun | .other (.trait n _) => n == nilTrait | _ => false)
+  unless all.any (fun | (.trait n _) => n == layoutTrait | _ => false) do return (items, memo)
+  let hasNil := all.any (fun | (.trait n _) => n == nilTrait | _ => false)
   let fieldsOf : Std.HashMap String (List String × List (List TypeExpr)) := all.foldl (init := {}) fun m item =>
     match item with
-    | .other (.struct n ps fs) => m.insert n (ps, [fs])
-    | .other (.enum n ps cs) => m.insert n (ps, cs.map (·.2))
+    | (.struct n ps fs) => m.insert n (ps, [fs])
+    | (.enum n ps cs) => m.insert n (ps, cs.map (·.2))
     | _ => m
   let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
   let count := 0
   -- (The trait's functions, by the names the program has for them.)
-  let (sizeName, alignName) := match all.findSome? (fun | .other (.trait n ms) => if n == layoutTrait then some ms else none | _ => none) with
+  let (sizeName, alignName) := match all.findSome? (fun | (.trait n ms) => if n == layoutTrait then some ms else none | _ => none) with
     | some [(s, _, _), (a, _, _)] => (s, a)
     | _ => ("SIZE", "ALIGN")
   -- (The types a field may be of: those declared, and those with none.)
@@ -715,14 +697,14 @@ def writeLayouts (items : List FItem) (memo : FrontMemo := {}) : List FItem × F
       | _ => []
     (nils ++ [Item.impl fresh layoutTrait head fresh ((fresh.filter (!·.startsWith "'")).map (·, layoutTrait))
       -- (Checked only where something asks it: `askedOnlyName`.)
-      [.fn sizeName [] [] (some int) [.mk [] [.expr sizeE]], .fn alignName [] [] (some int) [.mk [] [.expr alignE]],
-       .typeAlias askedOnlyName [] (.tuple [])]]).map ofItem
+      [Item.fnOf sizeName [] [] (some int) [.mk [] [.expr sizeE]], Item.fnOf alignName [] [] (some int) [.mk [] [.expr alignE]],
+       .typeAlias askedOnlyName [] (.tuple [])]])
   -- (After what is written out beside a declaration, `fieldNames`.)
-  let rec beside : List FItem → List FItem × List FItem
-    | (.other (.fieldNames m ns ps)) :: rest =>
-      if m.startsWith "%" then ([], .other (.fieldNames m ns ps) :: rest) else
+  let rec beside : List Item → List Item × List Item
+    | ((.fieldNames m ns ps)) :: rest =>
+      if m.startsWith "%" then ([], (.fieldNames m ns ps) :: rest) else
       let (mine, after) := beside rest
-      (.other (.fieldNames m ns ps) :: mine, after)
+      ((.fieldNames m ns ps) :: mine, after)
     | rest => ([], rest)
   -- (Each type's made from where it is among them, the type, and what the
   -- types declared are.)
@@ -733,15 +715,15 @@ def writeLayouts (items : List FItem) (memo : FrontMemo := {}) : List FItem × F
   let implKept := fun (memo : FrontMemo) (count : Nat) (h : String) (ps : List String) =>
     memo.take (mixHash ctx (hash (count, h, ps))) fun _ => implFor count h ps
   -- (`fuel`: one for each item.)
-  let rec go (fuel count : Nat) (memo : FrontMemo) : List FItem → (List FItem × Nat × FrontMemo)
+  let rec go (fuel count : Nat) (memo : FrontMemo) : List Item → (List Item × Nat × FrontMemo)
     | [] => ([], count, memo)
     | item :: rest =>
       match fuel with
       | 0 => (item :: rest, count, memo)
       | fuel + 1 =>
         let declared : Option (String × List String) := match item with
-          | .other (.struct n ps _) | .other (.enum n ps _) | .pub _ (.other (.struct n ps _))
-          | .pub _ (.other (.enum n ps _)) => some (n, ps)
+          | (.struct n ps _) | (.enum n ps _) | .pub _ ((.struct n ps _))
+          | .pub _ ((.enum n ps _)) => some (n, ps)
           | _ => none
         match declared with
         | some (n, ps) =>
@@ -750,14 +732,14 @@ def writeLayouts (items : List FItem) (memo : FrontMemo := {}) : List FItem × F
           let (more, count', memo) := go fuel (count + 1) memo rest
           (item :: names ++ mine ++ more, count', memo)
         | none =>
-          let (mine, count, memo) : List FItem × Nat × FrontMemo := match item with
-            | .other (.trait n _) =>
+          let (mine, count, memo) : List Item × Nat × FrontMemo := match item with
+            | (.trait n _) =>
               if n == layoutTrait then
                 let heads := [("Int", [])] ++ scalars.map (fun (n, _) => (n, []))
                   ++ (List.range 9).map (fun n => (s!"(tuple{n})", params n))
                   ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
                   ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
-                let (out, c, memo) := heads.foldl (fun (acc : List FItem × Nat × FrontMemo) (h, ps) =>
+                let (out, c, memo) := heads.foldl (fun (acc : List Item × Nat × FrontMemo) (h, ps) =>
                   let (made, m) := implKept acc.2.2 acc.2.1 h ps
                   (acc.1 ++ made, acc.2.1 + 1, m)) ([], count, memo)
                 (item :: out, c, memo)
@@ -781,7 +763,7 @@ of its arguments (`impl Print for Option<Int>`) has both, and the one that
 asks more of the type is the one for those (as for any two). In each copy
 `T` is the type it is for, and its calls are told apart from the other
 copies'. The copies come after everything else. -/
-def expandBlankets (items : List FItem) : List FItem := Id.run do
+def expandBlankets (items : List Item) : List Item := Id.run do
   let blankets := items.filterMap fun
     | .impl ps tr head [t] ctx ms => if head == blanketHead then some (ps, tr, t, ctx, ms) else none
     | _ => none
@@ -790,8 +772,8 @@ def expandBlankets (items : List FItem) : List FItem := Id.run do
     | .impl _ _ head _ _ _ => head != blanketHead
     | _ => true
   let declared : List (String × List String) := rest.filterMap fun
-    | .other (.struct n ps _) | .pub _ (.other (.struct n ps _)) | .other (.enum n ps _)
-    | .pub _ (.other (.enum n ps _)) => some (n, ps)
+    | (.struct n ps _) | .pub _ ((.struct n ps _)) | (.enum n ps _)
+    | .pub _ ((.enum n ps _)) => some (n, ps)
     | _ => none
   let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
   let heads : List (String × List String) :=
@@ -800,10 +782,10 @@ def expandBlankets (items : List FItem) : List FItem := Id.run do
       ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
       ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
   -- (The arguments an implementation gives its trait, as written.)
-  let givenArgs := fun (ms : List FItem) => (givenTraitArgs (ms.map FItem.declared)).map (·.spell)
+  let givenArgs := fun (ms : List Item) => (givenTraitArgs (ms.map Item.declared)).map (·.spell)
   -- (Which trait each implementation is of, at which arguments, for which
   -- head.)
-  let implOf : FItem → Option (String × String × List String) := fun
+  let implOf : Item → Option (String × String × List String) := fun
     | .impl _ tr head _ _ ms => some (traitBase tr, head, givenArgs ms)
     | _ => none
   let mut known : Std.HashSet (String × String × List String) := .ofList (rest.filterMap implOf)
@@ -814,11 +796,11 @@ def expandBlankets (items : List FItem) : List FItem := Id.run do
   -- (`impl !Print for Secret {}`: not written out for that type.)
   let last := fun (s : String) => (s.splitOn "::").getLast!
   let denied := rest.filterMap fun
-    | .other (.fieldNames mark [tr, head] _) => if mark == attrMark "negative_impl" then some (last tr, last head) else none
+    | (.fieldNames mark [tr, head] _) => if mark == attrMark "negative_impl" then some (last tr, last head) else none
     | _ => none
   -- (What a function generic in `T` may take a trait of `T` to be met by.)
-  let mut out : Array FItem := (blankets.map fun (_, tr, t, ctx, _) =>
-    FItem.other (.fieldNames (attrMark "blanket_impl")
+  let mut out : Array Item := (blankets.map fun (_, tr, t, ctx, _) =>
+    (.fieldNames (attrMark "blanket_impl")
       (traitBase tr :: ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none) [])).toArray
   let mut copies := 0
   -- (How many traits of its type each asks: tried first.)
@@ -832,7 +814,7 @@ def expandBlankets (items : List FItem) : List FItem := Id.run do
     let mut more := false
     for ((ps, tr, t, ctx, ms), b) in blankets.zipIdx do
       let asked := ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none
-      let bodies := givenTraitArgs (ms.map FItem.declared)
+      let bodies := givenTraitArgs (ms.map Item.declared)
       for (h, hps) in heads do
         let fresh := hps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%b{j}" else s!"%b{j}"
         let self := selfTypeOf h (fresh.map (TypeExpr.name · []))
@@ -853,7 +835,7 @@ def expandBlankets (items : List FItem) : List FItem := Id.run do
         unless asked.all (fun c => has.contains (c, h)) do continue
         let ctx' := ctx.zipIdx.map fun ((p, c), k) => if p == t then (s!"%subject{k}", c) else (p, c)
         let subjects := (ctx.zipIdx.filter fun ((p, _), _) => p == t).map fun (_, k) =>
-          FItem.other (.typeAlias (ctxSubjectName k) [] self)
+          (.typeAlias (ctxSubjectName k) [] self)
         copies := copies + 1
         let shift := 100000000000000 * copies
         -- (`self_name()` in it: this type's name.)
@@ -866,13 +848,13 @@ def expandBlankets (items : List FItem) : List FItem := Id.run do
             else none
           | _ => none }
         let ms' := ms.map fun
-          | .other (.typeAlias n takes body) => .other (.typeAlias n takes (substTypeExpr [(t, self)] body))
+          | (.typeAlias n takes body) => (.typeAlias n takes (substTypeExpr [(t, self)] body))
           | .fn m fps annots ret b =>
             .fn m fps (annots.map (·.map (substTypeExpr [(t, self)]))) (ret.map (substTypeExpr [(t, self)]))
               (named.body ((shiftRewrite shift).body b))
           | item => item
         out := out.push (.impl (fresh ++ ps.filter (· != t)) tr h fresh ctx'
-          (ms' ++ subjects ++ [.other (.typeAlias (blanketName t) [] self)]))
+          (ms' ++ subjects ++ [(.typeAlias (blanketName t) [] self)]))
         known := known.insert (traitBase tr, h, mine)
         has := has.insert (traitBase tr, h)
         byBlanket := byBlanket.insert (traitBase tr, h, mine) (givers ++ [b])
@@ -884,7 +866,7 @@ def expandBlankets (items : List FItem) : List FItem := Id.run do
 does not write itself; and, where it gives its trait arguments, `impl
 From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
 the name of what it implements from here on. -/
-def fillDefaults (items : List FItem) (memo : FrontMemo := {}) : List FItem × FrontMemo :=
+def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
   -- (Implementations for every type written out for each.)
   let (items, memo) := Trace.timed "fill: layouts" fun _ => writeLayouts items memo
   let items := Trace.timed "fill: blankets" fun _ => expandBlankets items
@@ -902,7 +884,7 @@ def fillDefaults (items : List FItem) (memo : FrontMemo := {}) : List FItem × F
   let (_, out, memo) := Trace.timed "fill: defaults" fun _ => items.zipIdx.foldl (init := (({} : Std.HashMap (String × String × List String) Nat), #[], memo))
     fun (seen, out, memo) (item, index) => match item with
     | .impl ps tr head args context methods =>
-      let targs := givenTraitArgs (methods.map FItem.declared)
+      let targs := givenTraitArgs (methods.map Item.declared)
       let given := targs.map (·.spell)
       let before := seen.getD (tr, head, given) 0
       let key := mixHash (hash "defaults") (hash (defaultKeys.getD tr 0, index, before, item))
@@ -911,11 +893,11 @@ def fillDefaults (items : List FItem) (memo : FrontMemo := {}) : List FItem × F
           | .fn m _ _ _ _ => some m
           | _ => none
         let said := methods.filterMap fun
-          | .other (.typeAlias n _ _) => some n
+          | (.typeAlias n _ _) => some n
           | _ => none
         let missing := ((defaults.lookup tr).getD []).filter fun
           | .fn m _ _ _ _ => !written.contains m
-          | .other (.typeAlias n _ _) => !said.contains n
+          | (.typeAlias n _ _) => !said.contains n
           | _ => false
         -- A default is written against `Self`; in the implementation its types
         -- are the trait's at the implementing type. Each implementation has its
@@ -925,18 +907,18 @@ def fillDefaults (items : List FItem) (memo : FrontMemo := {}) : List FItem × F
         let self := selfTypeOf head (args.map (TypeExpr.name · []))
         let missing := missing.map fun
           | .fn m fps annots _ b =>
-            FItem.fn m fps (annots.map fun _ => none) none
+            Item.fn m fps (annots.map fun _ => none) none
               ((shiftRewrite (10000000000 * (index + 1))).body
                 ((selfRewrite head (some (tr, (TypeExpr.tuple [self]).asExpr))).body b))
           -- (A type's default is written against `Self` too.)
-          | .other (.typeAlias n takes body) => .other (.typeAlias n takes (TypeExpr.withSelf self body))
+          | (.typeAlias n takes body) => (.typeAlias n takes (TypeExpr.withSelf self body))
           | item => item
         -- (`Self::Components` in its functions: what this implementation's
         -- trait leaves, at this type.)
         let ofSelf := selfAssocs self tr targs
         let all := (methods ++ missing).map fun
           | .fn m fps annots ret b =>
-            FItem.fn m fps (annots.map (·.map ofSelf)) (ret.map ofSelf)
+            Item.fn m fps (annots.map (·.map ofSelf)) (ret.map ofSelf)
               (match mapTypes (fun t => pure (ofSelf t)) b with
                 | .ok b => b
                 | .error _ => b)

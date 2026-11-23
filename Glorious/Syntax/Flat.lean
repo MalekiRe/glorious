@@ -25,57 +25,6 @@ public section
 
 namespace Glorious.Syntax.Flat
 
-/-- Where a node is in its body's arrays. -/
-abbrev ExprId := Nat
-abbrev StmtId := Nat
-abbrev ClauseId := Nat
-
-deriving instance BEq for Pattern
-
-/-- An expression, its parts by place (`Syntax.Expr`). -/
-inductive FExpr where
-  | int (n : Int)
-  | name (qual : Option String) (name : String)
-  | label (name : String)
-  | call (id : Nat) (f : ExprId) (args : Array ExprId)
-  | tailCall (id : Nat) (f : ExprId) (args : Array ExprId)
-  | tuple (args : Array ExprId)
-  | proj (e : ExprId) (idx : Nat)
-  | closure (id : Nat) (clauses : Array ClauseId)
-  | handle (subject : ExprId) (arms : Array ClauseId)
-  | labelScope (name : String) (body : Array StmtId)
-  | ref (uniq : Bool) (name : String)
-  | deref (e : ExprId)
-  | reborrow (uniq : Bool) (e : ExprId)
-  | refField (id : Nat) (uniq : Bool) (name : String) (path : List String) (star : Bool)
-  | fieldOf (id : Nat) (e : ExprId) (name : String)
-  deriving Inhabited, Hashable, BEq
-
-/-- A statement, its parts by place (`Syntax.Stmt`). -/
-inductive FStmt where
-  | let_ (pat : Pattern) (value : ExprId)
-  | expr (e : ExprId)
-  | defer (e : ExprId)
-  | letMut (name : String) (value : ExprId)
-  | assign (target : ExprId) (value : ExprId)
-  | located (line col : Nat) (s : StmtId)
-  deriving Inhabited, Hashable, BEq
-
-/-- A clause: its patterns, and its body's statements by place. -/
-structure FClause where
-  pats : List Pattern
-  body : Array StmtId
-  deriving Inhabited, Hashable, BEq
-
-/-- A declaration's body: its nodes, each kind in an array of its own, and
-its own clauses (`roots`). -/
-structure Body where
-  exprs : Array FExpr := #[]
-  stmts : Array FStmt := #[]
-  clauses : Array FClause := #[]
-  roots : Array ClauseId := #[]
-  deriving Inhabited, Hashable, BEq
-
 namespace Body
 
 @[inline] def expr (b : Body) (e : ExprId) : FExpr := b.exprs[e]!
@@ -307,69 +256,51 @@ def Body.compact (b : Body) : Body :=
   let (roots, nb) := (b.roots.mapM (compactClause b)).run {}
   { nb with roots }
 
-/-! ## Items with flat bodies -/
+/-- Do clauses come back as they were from their body? -/
+def roundTrips (clauses : List Clause) : Bool :=
+  hash (toClauses (ofClauses clauses)) == hash clauses
 
-/-- An item whose functions' clauses, and whose constant's value, are flat
-bodies of their own; an item with no code is as it was (`other`). -/
-inductive FItem where
-  | fn (name : String) (params : List String) (annots : List (Option TypeExpr))
-      (ret : Option TypeExpr) (body : Body)
-  | alias (name : String) (body : Body) (value : ExprId)
-  | impl (params : List String) (trait : String) (head : String) (args : List String)
-      (context : List (String × String)) (methods : List FItem)
-  | traitInfo (name : String) (supers : List String) (defaults : List FItem)
-      (params : List String) (assocs : List String)
-  | module (name : String) (body : Option (List FItem))
-  | pub (parent : Bool) (item : FItem)
-  | other (item : Item)
-  deriving Inhabited, Hashable
+end Glorious.Syntax.Flat
 
-/-- An item with its code flat. -/
-partial def ofItem : Item → FItem
-  | .fn n ps annots ret clauses => .fn n ps annots ret (ofClauses clauses)
-  | .alias n v => let (b, e) := ofExpr v; .alias n b e
-  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map ofItem)
-  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map ofItem) ps assocs
-  | .module n body => .module n (body.map (·.map ofItem))
-  | .pub parent item => .pub parent (ofItem item)
-  | item => .other item
+/-! ## Items -/
 
-/-- The item as a tree again. -/
-partial def FItem.toItem : FItem → Item
-  | .fn n ps annots ret b => .fn n ps annots ret (toClauses b)
-  | .alias n b e => .alias n (treeExpr b e)
-  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map FItem.toItem)
-  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map FItem.toItem) ps assocs
-  | .module n body => .module n (body.map (·.map FItem.toItem))
-  | .pub parent item => .pub parent item.toItem
-  | .other item => item
+namespace Glorious.Syntax
 
-def ofItems (items : List Item) : List FItem := items.map ofItem
+open Flat
+
+/-- A function written as clauses, its body flat. -/
+def Item.fnOf (name : String) (params : List String) (annots : List (Option TypeExpr))
+    (ret : Option TypeExpr) (clauses : List Clause) : Item :=
+  .fn name params annots ret (ofClauses clauses)
+
+/-- A constant or another name of a constructor, its value flat. -/
+def Item.aliasOf (name : String) (value : Expr) : Item :=
+  let (b, e) := ofExpr value
+  .alias name b e
 
 /-- The item as what it declares: every function in it, at any depth,
-without its clauses (whose bodies `FItem.bodies` gives). -/
-partial def FItem.declared : FItem → Item
-  | .fn n ps annots ret _ => .fn n ps annots ret []
-  | .alias n b e => .alias n (treeExpr b e)
-  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map FItem.declared)
-  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map FItem.declared) ps assocs
-  | .module n body => .module n (body.map (·.map FItem.declared))
+without its clauses (whose bodies `Item.bodies` gives). -/
+partial def Item.declared : Item → Item
+  | .fn n ps annots ret _ => .fn n ps annots ret {}
+  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map Item.declared)
+  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map Item.declared) ps assocs
+  | .module n body => .module n (body.map (·.map Item.declared))
   | .pub parent item => .pub parent item.declared
-  | .other item => item
+  | item => item
 
 /-- Every body in an item: its functions' at any depth, and a constant's. -/
-partial def FItem.allBodies : FItem → List Body
+partial def Item.allBodies : Item → List Body
   | .fn _ _ _ _ b => [b]
   | .alias _ b _ => [b]
-  | .impl _ _ _ _ _ ms => ms.flatMap FItem.allBodies
-  | .traitInfo _ _ ds _ _ => ds.flatMap FItem.allBodies
-  | .module _ (some body) => body.flatMap FItem.allBodies
+  | .impl _ _ _ _ _ ms => ms.flatMap Item.allBodies
+  | .traitInfo _ _ ds _ _ => ds.flatMap Item.allBodies
+  | .module _ (some body) => body.flatMap Item.allBodies
   | .pub _ item => item.allBodies
   | _ => []
 
 /-- The bodies of an item's functions, each under the name the function is
 checked by: its own, or an implementation's (`implFnName`). -/
-partial def FItem.bodies : FItem → List (String × Body)
+partial def Item.bodies : Item → List (String × Body)
   | .fn n _ _ _ b => [(n, b)]
   | .impl _ tr head _ _ ms => ms.filterMap fun
     | .fn m _ _ _ b => some (implFnName tr head m, b)
@@ -378,8 +309,8 @@ partial def FItem.bodies : FItem → List (String × Body)
   | _ => []
 
 /-- Every function of these items with its body made by `f`: in
-implementations, traits' defaults and modules too (`Item.mapClauses`). -/
-partial def FItem.mapBodies (f : Body → Body) : FItem → FItem
+implementations, traits' defaults and modules too. -/
+partial def Item.mapBodies (f : Body → Body) : Item → Item
   | .fn n ps annots ret b => .fn n ps annots ret (f b)
   | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map (·.mapBodies f))
   | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map (·.mapBodies f)) ps assocs
@@ -389,28 +320,13 @@ partial def FItem.mapBodies (f : Body → Body) : FItem → FItem
 
 /-- Every body of these items with only what its roots reach; a constant's
 too. -/
-partial def FItem.compact : FItem → FItem
+partial def Item.compact : Item → Item
   | .alias n b e => let (e, nb) := (compactExpr b e).run {}; .alias n nb e
-  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map FItem.compact)
-  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map FItem.compact) ps assocs
-  | .module n (some body) => .module n (some (body.map FItem.compact))
+  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map Item.compact)
+  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map Item.compact) ps assocs
+  | .module n (some body) => .module n (some (body.map Item.compact))
   | .pub parent item => .pub parent item.compact
   | .fn n ps annots ret b => .fn n ps annots ret b.compact
   | item => item
 
-/-- Do clauses come back as they were from their body? -/
-def roundTrips (clauses : List Clause) : Bool :=
-  hash (toClauses (ofClauses clauses)) == hash clauses
-
-/-- Does every function of these items come back as it was from its body? -/
-partial def itemsRoundTrip (items : List Item) : Bool :=
-  items.all fun
-    | .fn _ _ _ _ clauses => roundTrips clauses
-    | .impl _ _ _ _ _ methods => itemsRoundTrip methods
-    | .traitInfo _ _ defaults _ _ => itemsRoundTrip defaults
-    | .module _ (some body) => itemsRoundTrip body
-    | .pub _ item => itemsRoundTrip [item]
-    | .alias _ value => let (b, e) := ofExpr value; hash (treeExpr b e) == hash value
-    | _ => true
-
-end Glorious.Syntax.Flat
+end Glorious.Syntax

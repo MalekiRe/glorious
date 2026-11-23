@@ -35,13 +35,13 @@ structure Lowering where
   once traits are values. -/
   blocks : Blocks
   /-- The items that are not functions, lowered, in their order. -/
-  others : Array Flat.FItem
+  others : Array Syntax.Item
   /-- Each function without traits, with its fields written out and for the
   instances of its effects: made the first time it is asked, and once. -/
-  fns : Std.HashMap String (Unit → Option Flat.FItem)
+  fns : Std.HashMap String (Unit → Option Syntax.Item)
   /-- The functions declared again after the first, which the elaborator
   refuses if one is reached. -/
-  twice : List (String × (Unit → Option Flat.FItem))
+  twice : List (String × (Unit → Option Syntax.Item))
   /-- What each constant names. -/
   aliasUses : Std.HashMap String (List String)
   /-- What each function is lowered from: the item it is written in, and its
@@ -59,7 +59,7 @@ numbered and the copies asked by it, in order, and whether it was a copy
 made. Taken where the key is the same. -/
 structure LowerKept where
   key : UInt64
-  item : Option Flat.FItem
+  item : Option Syntax.Item
   pool : Array (String × List Nat)
   asked : Array ((String × List Nat × Bool) × String)
   made : Nat
@@ -80,7 +80,7 @@ structure Lowered where
   roots : List String := []
   seen : Std.HashSet String := {}
   /-- The functions lowered, in the order they were reached. -/
-  done : Array Flat.FItem := #[]
+  done : Array Syntax.Item := #[]
   made : Nat := 0
   /-- The copies asked so far and the implementations numbered, in order,
   as a hash (`LowerKept`). -/
@@ -114,13 +114,13 @@ shared, and hashed as trees they took half a second on covey/states2). -/
 
 /-- A checked program to lower, with `written` its declarations (the
 effects with the types they declare). -/
-def lowering (b : Blocks) (written : List Item) (items : List Flat.FItem) : Except String Lowering := do
+def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Except String Lowering := do
   let tr := b.traits
   let inst ← instancesOf b written
   let info := fieldInfo b
-  let mut others : Array Flat.FItem := #[]
-  let mut fns : Std.HashMap String (Unit → Option Flat.FItem) := {}
-  let mut twice : List (String × (Unit → Option Flat.FItem)) := []
+  let mut others : Array Syntax.Item := #[]
+  let mut fns : Std.HashMap String (Unit → Option Syntax.Item) := {}
+  let mut twice : List (String × (Unit → Option Syntax.Item)) := []
   let mut aliasUses : Std.HashMap String (List String) := {}
   -- (Each function by the item it is written in; an implementation's by the
   -- implementation and its name.)
@@ -148,7 +148,7 @@ def lowering (b : Blocks) (written : List Item) (items : List Flat.FItem) : Exce
         if let .alias n ab e := o then aliasUses := aliasUses.insert n (ab.fvExpr [] e)
     | .fn name make =>
       -- (A function and every copy made of it for effects, made together.)
-      let outs : Thunk (List Flat.FItem) := Thunk.mk fun _ => inst.fn (unfieldItem info (make ()))
+      let outs : Thunk (List Syntax.Item) := Thunk.mk fun _ => inst.fn (unfieldItem info (make ()))
       for n in inst.names name do
         let get := fun (_ : Unit) => outs.get.find? fun
           | .fn m .. => m == n
@@ -226,7 +226,7 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
     st := { st with copies, made, chain }
     let lowered := match item with
       -- (What is left of the implementations, as values: written out.)
-      | some (.fn name ps annots ret b) => some (Flat.FItem.fn name ps annots ret (unrefBody copies.byId b))
+      | some (.fn name ps annots ret b) => some (Syntax.Item.fn name ps annots ret (unrefBody copies.byId b))
       | _ => none
     if key != 0 then
       st := { st with keptMade := st.keptMade.insert x { key, item := lowered, pool, asked, made := madeHere } }
@@ -246,7 +246,7 @@ def Lowering.reach (L : Lowering) (st : Lowered) (roots : List String) : Lowered
 
 /-- What is lowered, as a program: its constants worked out, and each
 function declared again where one is reached. -/
-def Lowering.items (L : Lowering) (st : Lowered) : List Flat.FItem :=
+def Lowering.items (L : Lowering) (st : Lowered) : List Syntax.Item :=
   let again := L.twice.filterMap fun (n, get) => if st.seen.contains n then get () else none
   let items := foldConstants (L.others.toList ++ st.done.toList ++ again)
   if Glorious.Trace.groupsTraced then

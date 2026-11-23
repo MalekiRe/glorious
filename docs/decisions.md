@@ -6823,17 +6823,18 @@ compile found.
 **Decision: from the parser's items on, every function's code is a flat body
 of its own (`Syntax.Flat.Body`): its expressions, statements and clauses each
 one array, a node naming its parts by place, the function's clauses its
-roots. Patterns and types stay trees. Items are `Flat.FItem`: functions and
-constants with flat bodies, everything without code as it was.** As Zig's
-ZIR is to its AST: the parser's trees are made flat once (`Flat.ofItems`,
-Zig's AstGen), and every pass from name resolution to Core reads and writes
-flat bodies.
+roots. Patterns and types stay trees. There is one form of item, `Item`:
+a function's and a constant's code is a flat body in it.** As Zig's ZIR is
+to its AST: the parser makes each function's clauses flat as it finishes
+the function (`Item.fnOf`, `Item.aliasOf`; Zig's AstGen), and every pass
+from then to Core reads and writes flat bodies.
 
 What is where:
-- `Syntax/Flat.lean`: the body, `FItem`, between trees and bodies
-  (`ofClauses`, `toClauses`, `ofItem`, `FItem.declared`, `FItem.bodies`);
-  check 97 says the prelude's and the library's functions come back as they
-  were.
+- `Syntax/Ast.lean`: the body's nodes (`namespace Flat`), as items hold it.
+- `Syntax/Flat.lean`: between trees and bodies (`ofClauses`, `toClauses`,
+  `ofExpr`, `treeExpr`) and what is asked of an item's bodies
+  (`Item.declared`, `Item.bodies`, `Item.mapBodies`); check 97 says the
+  trees of the prelude's and the library's bodies come back as they were.
 - `Syntax/FlatOps.lean`: what is asked of a body (free names, how a name is
   used, given away, call ids, a structural hash) and `FRewrite`, a rewrite
   that copies only what changes, with hooks on expressions, statements,
@@ -6880,17 +6881,18 @@ something to do in them; `FRewrite` keeps the place of every node that does
 not change.
 
 **What stays trees, and why.**
-- The parser builds trees and its own desugarings over them (`promoteItems`,
-  `unmutItems`, `selfClause`, `mapTypesClause`, `renameStmts`), which are
-  made flat once after parsing; the parsed modules are kept as trees, which
-  a compacted region shares. Both other ways were measured on an edited
-  `covey/states2`: keeping the parsed modules flat made the kept file 7.7 MB
-  against 4.4, and slower to read back; keeping them undesugared and
-  desugaring flat after each read (`unmut` and promotion over flat bodies,
-  only where something is borrowed) cost 43 ms a compile, as every
-  library function is desugared again where it was kept desugared. So the
-  desugarings are the parser's, on its trees, done once per text; Zig's
-  split, where an AST is not its IR.
+- The parser builds a function's clauses as trees and makes them flat when
+  the function is parsed; its desugarings run on the flat bodies (`mut`
+  patterns, `Flat.unmutRewrite`; `Self` in implementations, `selfRewrite`;
+  callables written in, `mapTypes`; the functions a block writes named as
+  the module's, `renameInBody`), and the parsed modules are kept flat.
+  There were two forms of item before, the parser's trees and `FItem`, with
+  the parser's desugarings written over trees and every compile making all
+  the items flat: one form is 112 lines fewer. Measured against that, each
+  alone on the same machine: a fresh `covey/states2` 2.45 s against 2.44, an
+  edit of a leaf 0.57 against 0.55, `covey/sixteen` 2.54 against 2.48; the
+  kept parsed modules of `states2` are 2.8 MB against 1.9 (the build
+  directory 61 MB against 56).
 - What is made rather than written stays a tree until it is put in a body:
   constants (`aliases`), what the checker chose to give as an argument
   (`argsChosen`), the clauses of a `refPats` decision, implementations as
@@ -7359,6 +7361,11 @@ source in Lean strings 6,021, and the test table 3,928.
   e}>`; `Spread` of `(H, ..R)` asks `R: Spread`. What it would need: a
   spread whose length is found when the program runs, which Core has no
   operation for.
+- **One form of item, its bodies flat** (−112): the parser makes each
+  function's body flat as it parses it, its desugarings are flat rewrites,
+  and the tree-bodied `Item` with `FItem`, `ofItems`, the tree `Rewrite` and
+  its passes are gone (see "A flat representation of each declaration's
+  body").
 - **The test programs are files** (`tests/cases.cases`, `foreign.cases`,
   `long.cases`: 3,928 lines of `Cases.lean`), each case after `#### case`
   with what it is for, its program, `#### input` and `#### expect`;

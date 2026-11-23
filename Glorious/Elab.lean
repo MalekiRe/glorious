@@ -1332,7 +1332,7 @@ def destroyers (tr : TraitInfo) : List Item :=
     let method := Syntax.implFnName Syntax.destroyTrait D.head Syntax.destroyFn
     let blank := List.replicate (D.given + 1) (none : Option TypeExpr)
     -- As a value: the function, given the value.
-    let asValue := Item.fn (implDictName Syntax.destroyTrait D.head) [] (blank.drop 1) none
+    let asValue := Item.fnOf (implDictName Syntax.destroyTrait D.head) [] (blank.drop 1) none
       [.mk given [.expr (.tuple [.closure 0 [.mk [.var "%arg0"]
         [.expr (.call dropCallId (name method) (passed ++ [name "%arg0"]))]]])]]
     -- An array: its elements one by one, from the last.
@@ -1340,11 +1340,11 @@ def destroyers (tr : TraitInfo) : List Item :=
       let from_ := "%destroy from " ++ D.head
       let before := Expr.call dropCallId (name "int_sub") [name "%n", .int 1]
       [asValue,
-        Item.fn method [] blank none
+        Item.fnOf method [] blank none
           [.mk (given ++ [.var "%value"])
             [.expr (.call dropCallId (name from_)
               (passed ++ [name "%value", .call dropCallId (name "arr_len") [name "%value", .int 0]]))]],
-        Item.fn from_ [] (blank ++ [none]) none
+        Item.fnOf from_ [] (blank ++ [none]) none
           [.mk (given ++ [.wild, .int 0]) [.expr unit],
             .mk (given ++ [.var "%value", .var "%n"])
               [.expr (destroyCall tr element (.call dropCallId (name "arr_get") [name "%value", before])),
@@ -1374,13 +1374,13 @@ def destroyers (tr : TraitInfo) : List Item :=
         | none => fun args => Expr.call dropCallId (.proj ((dictExpr tr) d) 0) args
       let fields := s!"%fields {D.head}"
       [asValue,
-        Item.fn method [] blank none
+        Item.fnOf method [] blank none
           [.mk (given ++ [.var "%value"])
             ([.letMut "%held" (name "%value"), .expr (hook [.ref true "%held"])]
               ++ (if inner then [.expr (.call dropCallId (name fields) (passed ++ [name "%held"]))]
                   else [.expr unit]))]]
-        ++ (if inner then [Item.fn fields [] blank none clauses] else [])
-    | none => [asValue, Item.fn method [] blank none clauses]
+        ++ (if inner then [Item.fnOf fields [] blank none clauses] else [])
+    | none => [asValue, Item.fnOf method [] blank none clauses]
 
 /-- The names given to the `_` of a `let`'s pattern, as that statement's. -/
 partial def letWilds (pos : Nat × Nat) : Pattern → Pattern
@@ -1614,16 +1614,16 @@ private def withDicts (n : Nat) (b : Flat.Body) : Flat.Body := Id.run do
 /-- A function without traits: given the bounds it needs first, and each
 call of a trait's function a call of a value. -/
 def untraitFn (tr : TraitInfo) (name : String) (params : List String) (annots : List (Option TypeExpr))
-    (ret : Option TypeExpr) (b : Flat.Body) : Flat.FItem :=
+    (ret : Option TypeExpr) (b : Flat.Body) : Syntax.Item :=
   let n := (tr.boundedAt[name]?).getD 0
   let (roots, b) := (b.roots.mapM (untraitClause tr name)).run b
   -- (Every node is made anew: what was there is reached by nothing.)
-  Flat.FItem.fn name params ((List.replicate n none) ++ annots) ret (withDicts n { b with roots }).compact
+  Syntax.Item.fn name params ((List.replicate n none) ++ annots) ret (withDicts n { b with roots }).compact
 
 /-- The function that makes an implementation's value: given what its
 conditions are met by (`written` of them, if the checker says nothing), a
 closure for each of the trait's functions. -/
-def implDictItem (tr : TraitInfo) (trait head : String) (written : Nat) : Flat.FItem :=
+def implDictItem (tr : TraitInfo) (trait head : String) (written : Nat) : Syntax.Item :=
   let dictFn := implDictName trait head
   -- (as many as the checker says: how each type parameter is destroyed
   -- is among them, written or not)
@@ -1634,19 +1634,19 @@ def implDictItem (tr : TraitInfo) (trait head : String) (written : Nat) : Flat.F
     let argNames := (List.range arity).map fun k => s!"%arg{k}"
     Expr.closure 0 [.mk (argNames.map Pattern.var)
       [.expr (.call 0 (.name none fn) ((dicts ++ argNames).map (Expr.name none)))]]
-  Flat.ofItem (Item.fn dictFn [] [] none [.mk (dicts.map Pattern.var) [.expr (.tuple closures)]])
+  Item.fnOf dictFn [] [] none [.mk (dicts.map Pattern.var) [.expr (.tuple closures)]]
 
 /-- What an item is without traits: the functions it is made into, each by
 its name and made only when asked (`fn`), or an item kept as it is (`item`).
 A trait is nothing; an implementation its functions and the function that
 makes its value. -/
 inductive Untraited where
-  | fn (name : String) (make : Unit → Flat.FItem)
-  | item (item : Flat.FItem)
+  | fn (name : String) (make : Unit → Syntax.Item)
+  | item (item : Syntax.Item)
 
 /-- An item without traits (`Untraited`). -/
-def untraitItem (tr : TraitInfo) : Flat.FItem → List Untraited
-  | .other (.trait _ _) => []
+def untraitItem (tr : TraitInfo) : Syntax.Item → List Untraited
+  | (.trait _ _) => []
   | .impl params trait head _ context methods =>
     let own := methods.filterMap fun
       | .fn m _ annots ret b =>
@@ -1660,10 +1660,10 @@ def untraitItem (tr : TraitInfo) : Flat.FItem → List Untraited
 /-- The functions a program without traits has besides its items': each
 destroyer, and the value a marker trait is met by. -/
 def untraitExtra (tr : TraitInfo) : List Untraited :=
-  ((destroyers tr) ++ [Item.fn Syntax.markerDict [] [] none [.mk [] [.expr (.tuple [])]]]).map fun item =>
+  ((destroyers tr) ++ [Item.fnOf Syntax.markerDict [] [] none [.mk [] [.expr (.tuple [])]]]).map fun item =>
     match item with
-    | .fn name .. => .fn name fun _ => Flat.ofItem item
-    | _ => .item (Flat.ofItem item)
+    | .fn name .. => .fn name fun _ => item
+    | _ => .item item
 
 /-- What the checker said of a program, with the places of arguments moved to
 where they are once its traits are values. -/
@@ -1707,20 +1707,20 @@ private partial def eraseLifetimesTy : TypeExpr → TypeExpr
   | .ref uniq t _ => .ref uniq (eraseLifetimesTy t) none
   | t => t
 
-partial def eraseLifetimes (items : List Flat.FItem) : List Flat.FItem :=
+partial def eraseLifetimes (items : List Syntax.Item) : List Syntax.Item :=
   let params := fun (ps : List String) => ps.filter fun p => !p.startsWith "'"
   items.map fun
-    | .other (.enum name ps ctors) =>
-      .other (.enum name (params ps) (ctors.map fun (c, fields) => (c, fields.map eraseLifetimesTy)))
-    | .other (.struct name ps fields) => .other (.struct name (params ps) (fields.map eraseLifetimesTy))
-    | .other (.effect name ps ops) =>
-      .other (.effect name (params ps) (ops.map fun op =>
+    | (.enum name ps ctors) =>
+      (.enum name (params ps) (ctors.map fun (c, fields) => (c, fields.map eraseLifetimesTy)))
+    | (.struct name ps fields) => (.struct name (params ps) (fields.map eraseLifetimesTy))
+    | (.effect name ps ops) =>
+      (.effect name (params ps) (ops.map fun op =>
         { op with payload := op.payload.map eraseLifetimesTy,
                   result := op.result.map eraseLifetimesTy }))
     | .fn name ps annots ret b =>
       .fn name (params ps) (annots.map (·.map eraseLifetimesTy)) (ret.map eraseLifetimesTy) b
-    | .other (.trait name methods) =>
-      .other (.trait name (methods.map fun (m, ps, r) =>
+    | (.trait name methods) =>
+      (.trait name (methods.map fun (m, ps, r) =>
         (m, ps.map eraseLifetimesTy, r.map eraseLifetimesTy)))
     | .impl ps tr head args context methods =>
       .impl (params ps) tr head (params args) context (eraseLifetimes methods)
@@ -1851,7 +1851,7 @@ def fieldInfo (b : Blocks) : Option FieldInfo :=
 
 /-- A function with every borrow of a field, and every field read by name,
 written out: see above. What the checker found says how. -/
-def unfieldItem (info : Option FieldInfo) (item : Flat.FItem) : Flat.FItem :=
+def unfieldItem (info : Option FieldInfo) (item : Syntax.Item) : Syntax.Item :=
   match info, item with
   | some info, .fn name params annots ret body =>
     -- (Only a function with something in it the checker found of.)
@@ -1865,7 +1865,7 @@ def unfieldItem (info : Option FieldInfo) (item : Flat.FItem) : Flat.FItem :=
   | _, item => item
 
 /-- Collect the global declarations. -/
-def collect (items : List Flat.FItem) :
+def collect (items : List Syntax.Item) :
     Except String (Globals × List (String × Flat.Body) × Array String) := do
   let mut g : Globals := {}
   let mut fns : Array (String × Flat.Body) := #[]
@@ -1881,7 +1881,7 @@ def collect (items : List Flat.FItem) :
     | .pub _ _ | .traitInfo .. | .module .. => pure ()
     | .impl _ tr _ _ _ _ =>
       throw s!"an implementation of `{tr}`: a program with traits is elaborated only after it is checked"
-    | .other item =>
+    | item =>
     match item with
     | .enum owner _ ctors =>
       for (c, fields) in ctors do
@@ -1900,9 +1900,7 @@ def collect (items : List Flat.FItem) :
         g := { g with
           ops := (op.name, ⟨owner, nextOp, op.payload.length, op.terminal⟩) :: g.ops }
         nextOp := nextOp + 1
-    | .fn name _ _ _ _ => throw s!"function `{name}`: its body is written flat"
-    | .alias name value => g := { g with aliases := g.aliases.insert name value }
-    | .fixity => pure ()
+    | .fixity | .fn .. | .alias .. => pure ()
     | .coerce _ => pure ()
     -- How often a value is to be used is the checker's business.
     | .use _ _ _ => pure ()
@@ -1926,17 +1924,17 @@ def collect (items : List Flat.FItem) :
 
 /-- Flat items as what they declare, for what reads declarations alone (the
 certificate): each function without its body. -/
-def declaredOf (items : List Flat.FItem) : List Item :=
+def declaredOf (items : List Syntax.Item) : List Item :=
   items.map fun
-    | .fn n ps annots ret _ => .fn n ps annots ret []
-    | item => item.toItem
+    | .fn n ps annots ret _ => .fn n ps annots ret {}
+    | item => item
 
 /-- What tree items declare, for what reads declarations alone (the
 certificate): their functions' bodies are not asked. -/
 def collectDeclared (items : List Item) : Except String Globals := do
   let (g, _, _) ← collect (items.map fun
-    | .fn n ps annots ret _ => Flat.FItem.fn n ps annots ret {}
-    | item => Flat.ofItem item)
+    | .fn n ps annots ret _ => Syntax.Item.fn n ps annots ret {}
+    | item => item)
   pure g
 
 /-- A function whose body mentions its own label `@name` runs inside that label's
@@ -1959,7 +1957,7 @@ private def withSelfLabel (name : String) (b : Flat.Body) : Flat.Body := Id.run 
 
 /-- The program without the functions nothing reaches from `main` or from a
 coercion, which a call may be given without its being written. -/
-def reachable (roots : List String) (items : List Flat.FItem) : List Flat.FItem := Id.run do
+def reachable (roots : List String) (items : List Syntax.Item) : List Syntax.Item := Id.run do
   -- The function for a case that cannot be, if something is written with it
   -- and it is not yet there.
   let defined := items.any fun
@@ -1969,7 +1967,7 @@ def reachable (roots : List String) (items : List Flat.FItem) : List Flat.FItem 
     | .fn _ _ _ _ b => (b.fvClauses b.roots).contains neverName
     | _ => false
   let items := if wanted && !defined then
-      Flat.FItem.fn neverName [] [] none (Flat.ofClauses [.mk [] [.expr (.tailCall 0 (.name none neverName) [])]]) :: items
+      Syntax.Item.fn neverName [] [] none (Flat.ofClauses [.mk [] [.expr (.tailCall 0 (.name none neverName) [])]]) :: items
     else items
   let bodies : Std.HashMap String (List String) := items.foldl (init := {}) fun acc item =>
     match item with
@@ -1996,7 +1994,7 @@ def reachable (roots : List String) (items : List Flat.FItem) : List Flat.FItem 
 
 /-- Elaborate a program. `blocks` is what the checker learnt about its blocks;
 without it, every block captures what it mentions for itself. -/
-def elabProgram (items : List Flat.FItem) (blocks : Option Blocks := none)
+def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
     (lends : Nat → Nat := fun _ => 0) (root : String := "main") (kept : Option ElabMemo := none) :
     Except String Output := do
   let (g, fns, names) ← collect items
