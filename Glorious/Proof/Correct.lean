@@ -414,47 +414,41 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
   obtain @⟨tm, ρ, stack, store, code, pc, frames, store', hcode, hfr, hstore⟩ := hm
   obtain @⟨conts, conts', labels, cells, hcs⟩ := hstore
   have hks : MatchStore ⟨conts, labels, cells⟩ ⟨conts', labels, cells⟩ := .mk hcs
-  cases tm with
-  | ret a =>
-    have hc : CodeAt code pc [Instr.ret a] := hcode
+  cases tm <;> simp only [compileTm] at hcode
+  case ret a =>
     cases ha : a.eval ρ with
     | none => simp only [Core.step, ha]; exact .stuck
     | some v =>
-      simp only [Core.step, ha, Bytecode.step, hc.head]
+      simp only [Core.step, ha, Bytecode.step, hcode.head]
       exact deliver_sim hfr hks
-  | let_ rhs body =>
-    have hc : CodeAt code pc (Instr.op rhs :: compileTm body) := hcode
+  case let_ rhs body =>
     cases hr : rhs.eval ρ with
     | none => simp only [Core.step, hr]; exact .stuck
     | some v =>
-      simp only [Core.step, hr, Bytecode.step, hc.head]
-      exact .next (RunsThrough.refl rfl) (.mk hc.tail hfr hks)
-  | call f args body =>
-    have hc : CodeAt code pc (Instr.call f args :: compileTm body) := hcode
+      simp only [Core.step, hr, Bytecode.step, hcode.head]
+      exact .next (RunsThrough.refl rfl) (.mk hcode.tail hfr hks)
+  case call f args body =>
     cases he : evalCall ρ f args with
     | none => simp only [Core.step, he]; exact .stuck
     | some c =>
-      simp only [Core.step, he, Bytecode.step, hc.head]
-      exact apply_sim (.cons (.call hc.tail) hfr) hks
-  | tail f args =>
-    have hc : CodeAt code pc [Instr.tail f args] := hcode
+      simp only [Core.step, he, Bytecode.step, hcode.head]
+      exact apply_sim (.cons (.call hcode.tail) hfr) hks
+  case tail f args =>
     cases he : evalCall ρ f args with
     | none => simp only [Core.step, he]; exact .stuck
     | some c =>
-      simp only [Core.step, he, Bytecode.step, hc.head]
+      simp only [Core.step, he, Bytecode.step, hcode.head]
       exact apply_sim hfr hks
-  | handle ret ops captures thunk body =>
-    have hc : CodeAt code pc (Instr.handle ret ops captures thunk :: compileTm body) := hcode
+  case handle ret ops captures thunk body =>
     cases hcap : evalAtoms ρ captures with
     | none => simp only [Core.step, hcap]; exact .stuck
     | some caps =>
       cases he : evalCall ρ thunk [] with
       | none => simp only [Core.step, hcap, he]; exact .stuck
       | some c =>
-        simp only [Core.step, hcap, he, Bytecode.step, hc.head]
-        exact apply_sim (.cons .handler (.cons (.call hc.tail) hfr)) (.mk hcs)
-  | raise op args =>
-    have hc : CodeAt code pc [Instr.raise op args] := hcode
+        simp only [Core.step, hcap, he, Bytecode.step, hcode.head]
+        exact apply_sim (.cons .handler (.cons (.call hcode.tail) hfr)) (.mk hcs)
+  case raise op args =>
     cases hv : evalAtoms ρ args with
     | none => simp only [Core.step, hv]; exact .stuck
     | some vs =>
@@ -462,10 +456,9 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       | none => simp only [Core.step, hv, hf]; exact .stuck
       | some d =>
         obtain ⟨above', below', hf', habove, hbelow⟩ := find_sim hfr hf
-        simp only [Core.step, hv, hf, Bytecode.step, hc.head, hf']
+        simp only [Core.step, hv, hf, Bytecode.step, hcode.head, hf']
         exact leave_sim hfr hks
-  | perform op args body =>
-    have hc : CodeAt code pc (Instr.perform op args :: compileTm body) := hcode
+  case perform op args body =>
     cases hv : evalAtoms ρ args with
     | none => simp only [Core.step, hv]; exact .stuck
     | some vs =>
@@ -473,63 +466,56 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       | none => simp only [Core.step, hv, hf]; exact .stuck
       | some d =>
         obtain ⟨above', below', hf', habove, hbelow⟩ := find_sim hfr hf
-        simp only [Core.step, hv, hf, Bytecode.step, hc.head, hf', hcs.length_eq]
+        simp only [Core.step, hv, hf, Bytecode.step, hcode.head, hf', hcs.length_eq]
         exact callFn_sim hbelow
-          (.mk (hcs.snoc (.full (.cons (.call hc.tail) (habove.append (.cons .handler .nil))))))
-  | label thunk body =>
-    have hc : CodeAt code pc (Instr.label thunk :: compileTm body) := hcode
+          (.mk (hcs.snoc (.full (.cons (.call hcode.tail) (habove.append (.cons .handler .nil))))))
+  case label thunk body =>
     cases he : evalScope ρ thunk (.label labels) with
     | none => simp only [Core.step, he]; exact .stuck
     | some c =>
-      simp only [Core.step, he, Bytecode.step, hc.head]
-      exact apply_sim (.cons .label (.cons (.call hc.tail) hfr)) (.mk hcs)
-  | lend uniq r thunk pre post body =>
-    have hc : CodeAt code pc (Instr.lend uniq r thunk pre post :: compileTm body) := hcode
+      simp only [Core.step, he, Bytecode.step, hcode.head]
+      exact apply_sim (.cons .label (.cons (.call hcode.tail) hfr)) (.mk hcs)
+  case lend uniq r thunk pre post body =>
     cases he : evalLend ρ r thunk pre post (labels + 1) with
     | none => simp only [Core.step, he]; exact .stuck
     | some x =>
       obtain ⟨a, c⟩ := x
-      simp only [Core.step, he, Bytecode.step, hc.head]
-      exact apply_sim (.lend (.cons (.call hc.tail) hfr)) (.mk hcs)
-  | handleTail ret ops captures thunk =>
-    have hc : CodeAt code pc [Instr.handleTail ret ops captures thunk] := hcode
+      simp only [Core.step, he, Bytecode.step, hcode.head]
+      exact apply_sim (.lend (.cons (.call hcode.tail) hfr)) (.mk hcs)
+  case handleTail ret ops captures thunk =>
     cases hcap : evalAtoms ρ captures with
     | none => simp only [Core.step, hcap]; exact .stuck
     | some caps =>
       cases he : evalCall ρ thunk [] with
       | none => simp only [Core.step, hcap, he]; exact .stuck
       | some c =>
-        simp only [Core.step, hcap, he, Bytecode.step, hc.head]
+        simp only [Core.step, hcap, he, Bytecode.step, hcode.head]
         exact apply_sim (.cons .handler hfr) (.mk hcs)
-  | labelTail thunk =>
-    have hc : CodeAt code pc [Instr.labelTail thunk] := hcode
+  case labelTail thunk =>
     cases he : evalScope ρ thunk (.label labels) with
     | none => simp only [Core.step, he]; exact .stuck
     | some c =>
-      simp only [Core.step, he, Bytecode.step, hc.head]
+      simp only [Core.step, he, Bytecode.step, hcode.head]
       exact apply_sim (.cons .label hfr) (.mk hcs)
-  | cell init thunk body =>
-    have hc : CodeAt code pc (Instr.cell init thunk :: compileTm body) := hcode
+  case cell init thunk body =>
     cases hv : init.eval ρ with
     | none => simp only [Core.step, hv]; exact .stuck
     | some v =>
       cases he : evalScope ρ thunk (.ref cells.size 0 []) with
       | none => simp only [Core.step, hv, he]; exact .stuck
       | some c =>
-        simp only [Core.step, hv, he, Bytecode.step, hc.head]
-        exact apply_sim (.cons .cell (.cons (.call hc.tail) hfr)) (hks.alloc v)
-  | cellTail init thunk =>
-    have hc : CodeAt code pc [Instr.cellTail init thunk] := hcode
+        simp only [Core.step, hv, he, Bytecode.step, hcode.head]
+        exact apply_sim (.cons .cell (.cons (.call hcode.tail) hfr)) (hks.alloc v)
+  case cellTail init thunk =>
     cases hv : init.eval ρ with
     | none => simp only [Core.step, hv]; exact .stuck
     | some v =>
       cases he : evalScope ρ thunk (.ref cells.size 0 []) with
       | none => simp only [Core.step, hv, he]; exact .stuck
       | some c =>
-        simp only [Core.step, hv, he, Bytecode.step, hc.head]
+        simp only [Core.step, hv, he, Bytecode.step, hcode.head]
         exact apply_sim (.cons .cell hfr) (hks.alloc v)
-  | guard cleanup thunk body =>
-    have hc : CodeAt code pc (Instr.guard cleanup thunk :: compileTm body) := hcode
+  case guard cleanup thunk body =>
     cases hcl : evalClosure ρ cleanup with
     | none => simp only [Core.step, hcl]; exact .stuck
     | some r =>
@@ -537,10 +523,9 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       cases he : evalCall ρ thunk [] with
       | none => simp only [Core.step, hcl, he]; exact .stuck
       | some c =>
-        simp only [Core.step, hcl, he, Bytecode.step, hc.head]
-        exact apply_sim (.cons .guard (.cons (.call hc.tail) hfr)) hks
-  | guardTail cleanup thunk =>
-    have hc : CodeAt code pc [Instr.guardTail cleanup thunk] := hcode
+        simp only [Core.step, hcl, he, Bytecode.step, hcode.head]
+        exact apply_sim (.cons .guard (.cons (.call hcode.tail) hfr)) hks
+  case guardTail cleanup thunk =>
     cases hcl : evalClosure ρ cleanup with
     | none => simp only [Core.step, hcl]; exact .stuck
     | some r =>
@@ -548,10 +533,9 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       cases he : evalCall ρ thunk [] with
       | none => simp only [Core.step, hcl, he]; exact .stuck
       | some c =>
-        simp only [Core.step, hcl, he, Bytecode.step, hc.head]
+        simp only [Core.step, hcl, he, Bytecode.step, hcode.head]
         exact apply_sim (.cons .guard hfr) hks
-  | cancel k body =>
-    have hc : CodeAt code pc (Instr.cancel k :: compileTm body) := hcode
+  case cancel k body =>
     -- A closure that says how it is destroyed: both machines call its
     -- destructor as a call.
     cases hd : dropOf p.drops ρ k with
@@ -563,28 +547,27 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
           = Bytecode.apply (compile p) (.fn d [] captures) (.ret code (pc + 1) ρ :: frames)
               ⟨conts', labels, cells⟩ := by
-        simp [Bytecode.step, hc.head, compile, hd, Bytecode.apply]
+        simp [Bytecode.step, hcode.head, compile, hd, Bytecode.apply]
       rw [h1, h2]
-      exact apply_sim (.cons (.call hc.tail) hfr) hks
+      exact apply_sim (.cons (.call hcode.tail) hfr) hks
     | none =>
     cases hk : evalCont ρ k with
     | none => simp only [Core.step, hd, hk]; exact .stuck
     | some o =>
       cases o with
       | none =>
-        simp only [Core.step, hd, hk, Bytecode.step, hc.head, compile]
-        exact .next (RunsThrough.refl rfl) (.mk hc.tail hfr (.mk hcs))
+        simp only [Core.step, hd, hk, Bytecode.step, hcode.head, compile]
+        exact .next (RunsThrough.refl rfl) (.mk hcode.tail hfr (.mk hcs))
       | some id =>
         cases ht : takeCont conts id with
         | none => simp only [Core.step, hd, hk, ht]; exact .stuck
         | some r =>
           obtain ⟨seg, conts₁⟩ := r
           obtain ⟨seg', conts₁', ht', hseg, hcs₁⟩ := hcs.take ht
-          simp only [Core.step, hd, hk, ht, Bytecode.step, hc.head, compile, ht']
+          simp only [Core.step, hd, hk, ht, Bytecode.step, hcode.head, compile, ht']
           exact leave_sim
-            (hseg.append (.cons .yield (.cons .label (.cons (.call hc.tail) hfr)))) (.mk hcs₁)
-  | mem op args body =>
-    have hc : CodeAt code pc (Instr.mem op args :: compileTm body) := hcode
+            (hseg.append (.cons .yield (.cons .label (.cons (.call hcode.tail) hfr)))) (.mk hcs₁)
+  case mem op args body =>
     cases hv : evalAtoms ρ args with
     | none => simp only [Core.step, hv]; exact .stuck
     | some vs =>
@@ -592,9 +575,9 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       | none => simp only [Core.step, hv, hm]; exact .stuck
       | some r =>
         obtain ⟨res, cells'⟩ := r
-        simp only [Core.step, hv, hm, Bytecode.step, hc.head]
-        exact .next (RunsThrough.refl rfl) (.mk hc.tail hfr (.mk hcs))
-  | host id args body =>
+        simp only [Core.step, hv, hm, Bytecode.step, hcode.head]
+        exact .next (RunsThrough.refl rfl) (.mk hcode.tail hfr (.mk hcs))
+  case host id args body =>
     -- Host operations are not steps of the machine state alone.
     have h1 : Core.step p ⟨.host id args body, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := rfl
     rw [h1]
