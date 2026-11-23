@@ -929,6 +929,23 @@ where
       (args.zip (List.range args.length)).flatMap fun (arg, i) =>
         occurrences s (pos.through (variances.getD i .bi)) arg
 
+/-- These capture variables and those reachable from them through what they
+hold. -/
+def reachFrom (start : List Nat) : M (List Nat) := do
+  let mut reach := start
+  let mut todo := start
+  while !todo.isEmpty do
+    let mut next : List Nat := []
+    for from_ in todo do
+      for (_, what) in ← edgesFrom (← findCap from_) do
+        if let .ty held := what then
+          for c in freeCaps (← zonk held) do
+            let root ← findCap c
+            unless reach.contains root || next.contains root do next := root :: next
+    reach := reach ++ next
+    todo := next
+  pure reach
+
 /-- A function is held to the lifetimes it writes: what lasts for one of them
 may come to depend on what lasts for another only where a bound says the
 other lasts at least as long. -/
@@ -937,18 +954,7 @@ def checkLifetimes : M Unit := do
   for (a, x) in s.rigidCaps do
     if x == "'static" then continue
     -- The capture variables reachable from `a` through what it holds.
-    let mut reach : List Nat := [a]
-    let mut todo : List Nat := [a]
-    while !todo.isEmpty do
-      let mut next : List Nat := []
-      for from_ in todo do
-        for (_, what) in ← edgesFrom (← findCap from_) do
-          if let .ty held := what then
-            for c in freeCaps (← zonk held) do
-              let root ← findCap c
-              unless reach.contains root || next.contains root do next := root :: next
-      reach := reach ++ next
-      todo := next
+    let reach ← reachFrom [a]
     for (b, y) in s.rigidCaps do
       if b != a && reach.contains b then
         unless ← outlasts b a do
@@ -1023,18 +1029,7 @@ def capsReached (t : Ty) : M (List Nat) := do
   for c in freeCaps t ++ asked do
     let root ← findCap c
     unless reach.contains root do reach := root :: reach
-  let mut todo := reach
-  while !todo.isEmpty do
-    let mut next : List Nat := []
-    for from_ in todo do
-      for (_, what) in ← edgesFrom (← findCap from_) do
-        if let .ty held := what then
-          for c in freeCaps (← zonk held) do
-            let root ← findCap c
-            unless reach.contains root || next.contains root do next := root :: next
-    reach := reach ++ next
-    todo := next
-  pure reach
+  reachFrom reach
 
 /-- Make what was found the type expected, by a declared coercion at `site` if
 the two differ. Gives the mismatch if neither works. -/
