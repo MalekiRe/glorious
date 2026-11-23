@@ -42,6 +42,9 @@ structure Row where
 
 def Ty.int : Ty := .con "Int" []
 
+/-- How a trait's `unsafe fn` is known among the unsafe functions. -/
+def unsafeMethodKey (tr m : String) : String := s!"%method {Syntax.lastSegment tr}::{m}"
+
 def Ty.unit : Ty := .tuple []
 
 /-- How a reference borrows: for writing too, with nothing else using the

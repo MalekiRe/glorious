@@ -98,6 +98,14 @@ def direct (b : Body) (e : ExprId) : Array ExprId :=
   | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ | .handle x _ => f x init
   | _ => init
 
+/-- The body with each of its own clauses begun by `%unsafe`: what follows
+may name what is unsafe (`unsafe fn`). -/
+def unsafeBody (b : Body) : Body :=
+  let e := b.exprs.size
+  let s := b.stmts.size
+  { b with exprs := b.exprs.push (.name none unsafeMark), stmts := b.stmts.push (.expr e),
+           clauses := b.roots.foldl (fun cs c => cs.modify c fun ⟨pats, body⟩ => ⟨pats, #[s] ++ body⟩) b.clauses }
+
 /-- The name an expression is, if it is one. -/
 @[inline] def name? (b : Body) (e : ExprId) : Option (Option String × String) :=
   match b.expr e with

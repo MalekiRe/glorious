@@ -941,7 +941,11 @@ def declare (items : List Item) : M Unit := do
     | .coerce name => modify fun s => { s with coercing := s.coercing ++ [name] }
     | .unsafeFn name => modify fun s => { s with unsafeFns := name :: s.unsafeFns }
     | .fieldNames ctor names _ =>
-      if ctor == Syntax.arrayMark then
+      if ctor == Syntax.attrMark "unsafe_method" then
+        -- (A trait's `unsafe fn`, by the trait's last name and its own.)
+        if let [tr, m] := names then
+          modify fun s => { s with unsafeFns := unsafeMethodKey tr m :: s.unsafeFns }
+      else if ctor == Syntax.arrayMark then
         modify fun s => { s with arrayType := names.head? }
       else unless names.isEmpty do
         modify fun s => { s with fieldNames := s.fieldNames.insert ctor names }

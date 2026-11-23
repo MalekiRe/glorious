@@ -352,6 +352,14 @@ private partial def parseItem : P Item := do
         methods := methods.push (← withReader (fun c =>
           if c.records.contains head then { c with records := "Self" :: c.records } else c)
           parseItem)
+      | .ident "unsafe" =>
+        -- `unsafe fn`: its body may name what is unsafe, as an `unsafe { .. }`
+        -- block's may.
+        advance
+        match ← withReader (fun c =>
+            if c.records.contains head then { c with records := "Self" :: c.records } else c) parseItem with
+        | .fn name ps annots ret b => methods := methods.push (.fn name ps annots ret b.unsafeBody)
+        | _ => failAt "`unsafe` in an implementation is written before `fn`"
       | .ident "type" =>
         -- `type Item = Int;`: a type the trait leaves to the implementation.
         advance
@@ -505,6 +513,7 @@ private partial def parseTrait : P (List Item) := do
       if ← isOp "+" then advance else break
   expectPunct "{"
   let mut methods : Array (String × List TypeExpr × Option TypeExpr) := #[]
+  let mut unsafeMethods : Array String := #[]
   let mut defaults : Array Item := #[]
   let mut assocs : Array String := #[]
   repeat
@@ -539,6 +548,8 @@ private partial def parseTrait : P (List Item) := do
         defaults := defaults.push (Item.fn c [] [] none (← valueFn))
       let _ ← acceptPunct ";"
       continue
+    -- `unsafe fn`: one that can be called only where `unsafe` is written.
+    let isUnsafe ← if (← peek) == .ident "unsafe" then do advance; pure true else pure false
     match ← peek with
     | .ident "fn" => advance
     | _ => failAt "expected `fn`: a trait lists the functions a type must have"
@@ -579,6 +590,7 @@ private partial def parseTrait : P (List Item) := do
           | _, _ => failAt "a trait's function says here only how often it uses a type parameter of its own: `T: Use<[0, *]>`"
         if !(← acceptPunct ",") then break
     methods := methods.push (m, types.toList, withMethodGenerics ret (genericParams own ++ uses.toList))
+    if isUnsafe then unsafeMethods := unsafeMethods.push m
     if (← peek) == .punct "{" then
       -- A body: what an implementation gets if it does not write its own.
       let pats ← names.toList.mapM fun
@@ -593,7 +605,7 @@ private partial def parseTrait : P (List Item) := do
   let info : List Item :=
     if supers.isEmpty && defaults.isEmpty && params.isEmpty && assocs.isEmpty then []
     else [.traitInfo name supers.toList defaults.toList params assocs.toList]
-  pure (.trait name methods.toList :: info)
+  pure (.trait name methods.toList :: info ++ unsafeMethods.toList.map fun m => .fieldNames (attrMark "unsafe_method") [name, m] [])
 
 /-- What is written before a declaration in `#[..]`, and the declaration:
 `next` reads the declaration. A function of its own, as the one below is,

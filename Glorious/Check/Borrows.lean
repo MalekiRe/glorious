@@ -533,6 +533,8 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if let some sig := s.methods[x]? then
     if let some q := qual then
       unless q == sig.trait do throw s!"`{x}` is not a function of `{q}`"
+    if s.unsafeFns.contains (unsafeMethodKey sig.trait x) && !(s.unsafeBlock || s.unsafeFns.contains s.owner) then
+      throw s!"`{Syntax.lastSegment x}` is unsafe: it can be called only in `unsafe \{ .. }` or in an `unsafe fn`"
     return .method sig
   if let some t := s.group.lookup x then
     -- (`f<A>(..)` of the function being checked, or one checked with it:

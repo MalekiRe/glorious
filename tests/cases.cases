@@ -15557,3 +15557,27 @@ fn main() -> Int {
 fn main() -> Int { unsafe { let p = mem_alloc(8usize, 8usize); mem_free(p); ptr_read(p, 64) } }
 #### expect
 went wrong
+#### case
+#### A trait's `unsafe fn`: an implementation's body may name what is unsafe,
+#### and a call of it is written in `unsafe { .. }`.
+trait W { unsafe fn put(at: usize, v: Self); }
+impl W for u8 { unsafe fn put(at: usize, v: u8) { ptr_write(at, 8, u8_bits(v)) } }
+fn main() -> Int {
+    unsafe {
+        let p = mem_alloc(8usize, 8usize);
+        <u8 as W>::put(p, 7u8);
+        ptr_read(p, -8)
+    }
+}
+#### expect
+7
+#### case
+trait W { unsafe fn put(at: usize, v: Self); }
+impl W for u8 { unsafe fn put(at: usize, v: u8) { ptr_write(at, 8, u8_bits(v)) } }
+fn main() -> Int {
+    let p = unsafe { mem_alloc(8usize, 8usize) };
+    <u8 as W>::put(p, 7u8);
+    0
+}
+#### expect
+error: 5:5: in `main`: `put` is unsafe: it can be called only in `unsafe { .. }` or in an `unsafe fn`
