@@ -363,118 +363,131 @@ end Body
 
 /-! ## Rewrites: copies of what changes, the rest left where it is -/
 
-/-- A rewrite of a body: an expression made otherwise (`some`, whose parts are
-not looked at again), or a statement. What does not change keeps its place;
-what has a part that changed is a node made anew. -/
-structure FGo where
-  ex : ExprId → Build ExprId
-  st : StmtId → Build StmtId
-  stmts : List StmtId → Build (List StmtId)
-  clause : ClauseId → Build ClauseId
+/-- A rewrite of a body, in `StateT Body m`: an expression made otherwise
+(`some`, whose parts are not looked at again), or a statement. What does not
+change keeps its place; what has a part that changed is a node made anew.
+(`FRewrite`: in `Build`, which is `m` nothing more.) -/
+structure FGoM (m : Type → Type) where
+  ex : ExprId → StateT Body m ExprId
+  st : StmtId → StateT Body m StmtId
+  stmts : List StmtId → StateT Body m (List StmtId)
+  clause : ClauseId → StateT Body m ClauseId
 
-instance : Inhabited FGo := ⟨⟨pure, pure, pure, pure⟩⟩
+instance {m : Type → Type} [Monad m] : Inhabited (FGoM m) := ⟨⟨pure, pure, pure, pure⟩⟩
 
-structure FRewrite where
+structure FRewriteM (m : Type → Type) where
   /-- (Given how the rest is rewritten.) -/
-  onExpr : FGo → Body → ExprId → Option (Build ExprId) := fun _ _ _ => none
-  onStmt : FGo → Body → StmtId → Option (Build StmtId) := fun _ _ _ => none
+  onExpr : FGoM m → Body → ExprId → Option (StateT Body m ExprId) := fun _ _ _ => none
+  onStmt : FGoM m → Body → StmtId → Option (StateT Body m StmtId) := fun _ _ _ => none
   /-- A block's statements from one on (`Rewrite.onStmts`). -/
-  onStmts : FGo → Body → List StmtId → Option (Build (List StmtId)) := fun _ _ _ => none
-  onClause : FGo → Body → ClauseId → Option (Build ClauseId) := fun _ _ _ => none
+  onStmts : FGoM m → Body → List StmtId → Option (StateT Body m (List StmtId)) := fun _ _ _ => none
+  onClause : FGoM m → Body → ClauseId → Option (StateT Body m ClauseId) := fun _ _ _ => none
   /-- Each pattern: a clause's and a `let`'s. -/
   onPat : Pattern → Pattern := id
 
+abbrev FGo := FGoM Id
+abbrev FRewrite := FRewriteM Id
+
+section
+variable {m : Type → Type} [Monad m]
+
+private def pushE (e : FExpr) : StateT Body m ExprId := modifyGet fun b => (b.exprs.size, { b with exprs := b.exprs.push e })
+private def pushS (s : FStmt) : StateT Body m StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push s })
+private def pushC (c : FClause) : StateT Body m ClauseId := modifyGet fun b => (b.clauses.size, { b with clauses := b.clauses.push c })
+
 mutual
 
-partial def FRewrite.ex (r : FRewrite) (e : ExprId) : Build ExprId := do
+partial def FRewriteM.ex (r : FRewriteM m) (e : ExprId) : StateT Body m ExprId := do
   let b ← get
   if let some made := r.onExpr r.go b e then return ← made
   match b.expr e with
   | .call id f args => do
     let f' ← r.ex f
     let args' ← args.mapM r.ex
-    if f' == f && args' == args then pure e else pushExpr (.call id f' args')
+    if f' == f && args' == args then pure e else pushE (.call id f' args')
   | .tailCall id f args => do
     let f' ← r.ex f
     let args' ← args.mapM r.ex
-    if f' == f && args' == args then pure e else pushExpr (.tailCall id f' args')
+    if f' == f && args' == args then pure e else pushE (.tailCall id f' args')
   | .tuple args => do
     let args' ← args.mapM r.ex
-    if args' == args then pure e else pushExpr (.tuple args')
+    if args' == args then pure e else pushE (.tuple args')
   | .proj x i => do
     let x' ← r.ex x
-    if x' == x then pure e else pushExpr (.proj x' i)
+    if x' == x then pure e else pushE (.proj x' i)
   | .closure id cs => do
     let cs' ← cs.mapM r.clause
-    if cs' == cs then pure e else pushExpr (.closure id cs')
+    if cs' == cs then pure e else pushE (.closure id cs')
   | .handle s cs => do
     let s' ← r.ex s
     let cs' ← cs.mapM r.clause
-    if s' == s && cs' == cs then pure e else pushExpr (.handle s' cs')
+    if s' == s && cs' == cs then pure e else pushE (.handle s' cs')
   | .labelScope l body => do
     let body' := (← r.stmtList body.toList).toArray
-    if body' == body then pure e else pushExpr (.labelScope l body')
+    if body' == body then pure e else pushE (.labelScope l body')
   | .deref x => do
     let x' ← r.ex x
-    if x' == x then pure e else pushExpr (.deref x')
+    if x' == x then pure e else pushE (.deref x')
   | .reborrow u x => do
     let x' ← r.ex x
-    if x' == x then pure e else pushExpr (.reborrow u x')
+    if x' == x then pure e else pushE (.reborrow u x')
   | .fieldOf id x n => do
     let x' ← r.ex x
-    if x' == x then pure e else pushExpr (.fieldOf id x' n)
+    if x' == x then pure e else pushE (.fieldOf id x' n)
   | _ => pure e
 
-partial def FRewrite.clause (r : FRewrite) (c : ClauseId) : Build ClauseId := do
+partial def FRewriteM.clause (r : FRewriteM m) (c : ClauseId) : StateT Body m ClauseId := do
   if let some made := r.onClause r.go (← get) c then return ← made
   let ⟨pats, body⟩ := (← get).clause c
   let pats' := pats.map r.onPat
   let body' := (← r.stmtList body.toList).toArray
-  if body' == body && pats' == pats then pure c else pushClause ⟨pats', body'⟩
+  if body' == body && pats' == pats then pure c else pushC ⟨pats', body'⟩
 
-partial def FRewrite.stmtList (r : FRewrite) (ss : List StmtId) : Build (List StmtId) := do
+partial def FRewriteM.stmtList (r : FRewriteM m) (ss : List StmtId) : StateT Body m (List StmtId) := do
   if let some made := r.onStmts r.go (← get) ss then return ← made
   match ss with
   | [] => pure []
   | s :: rest => pure ((← r.st s) :: (← r.stmtList rest))
 
 /-- How the rest is rewritten, for a hook. -/
-partial def FRewrite.go (r : FRewrite) : FGo := ⟨r.ex, r.st, r.stmtList, r.clause⟩
+partial def FRewriteM.go (r : FRewriteM m) : FGoM m := ⟨r.ex, r.st, r.stmtList, r.clause⟩
 
-partial def FRewrite.st (r : FRewrite) (s : StmtId) : Build StmtId := do
+partial def FRewriteM.st (r : FRewriteM m) (s : StmtId) : StateT Body m StmtId := do
   let b ← get
   if let some made := r.onStmt r.go b s then return ← made
   match b.stmt s with
   | .let_ p v => do
     let p' := r.onPat p
     let v' ← r.ex v
-    if v' == v && p' == p then pure s else pushStmt (.let_ p' v')
+    if v' == v && p' == p then pure s else pushS (.let_ p' v')
   | .expr v => do
     let v' ← r.ex v
-    if v' == v then pure s else pushStmt (.expr v')
+    if v' == v then pure s else pushS (.expr v')
   | .defer v => do
     let v' ← r.ex v
-    if v' == v then pure s else pushStmt (.defer v')
+    if v' == v then pure s else pushS (.defer v')
   | .letMut x v => do
     let v' ← r.ex v
-    if v' == v then pure s else pushStmt (.letMut x v')
+    if v' == v then pure s else pushS (.letMut x v')
   | .assign t v => do
     let t' ← r.ex t
     let v' ← r.ex v
-    if t' == t && v' == v then pure s else pushStmt (.assign t' v')
+    if t' == t && v' == v then pure s else pushS (.assign t' v')
   | .located l c inner => do
     let inner' ← r.st inner
-    if inner' == inner then pure s else pushStmt (.located l c inner')
+    if inner' == inner then pure s else pushS (.located l c inner')
+
+end
 
 end
 
 /-- A body's own clauses rewritten, in the body grown by what is made. -/
-def FRewrite.body (r : FRewrite) (b : Body) : Body :=
+def FRewriteM.body (r : FRewrite) (b : Body) : Body :=
   let (roots, b) := (b.roots.mapM r.clause).run b
   { b with roots }
 
 /-- Statements rewritten, in a body that grows by what is made. -/
-def FRewrite.stmts (r : FRewrite) (b : Body) (ss : List StmtId) : Body × List StmtId :=
+def FRewriteM.stmts (r : FRewrite) (b : Body) (ss : List StmtId) : Body × List StmtId :=
   let (out, b) := (r.stmtList ss).run b
   (b, out)
 

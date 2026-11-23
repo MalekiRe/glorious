@@ -121,59 +121,15 @@ def spreadLength (byId : Array (String × List Nat)) (i : Nat) : Nat → Option 
       if f.startsWith (implDictName "Spread" "") then (spreadLength byId j fuel).map (· + 1) else none
     | _ => none
 
-mutual
-
-/-- An expression of a function written out for the implementations `known`
-(by the names its parameters for them had, each the name it stands as). -/
-partial def specExpr (tr : TraitInfo) (known : List (String × String)) (e : Flat.ExprId) : SpecM Flat.ExprId := do
-  let b ← get
-  match b.expr e with
-  | .name none x =>
-    match known.lookup x with
-    | some y => specPush (.name none y)
-    | none => pure e
-  | .call id f args => do
-    let (f', args') ← specCall tr known f args
-    if f' == f && args' == args then pure e else specPush (.call id f' args')
-  | .tailCall id f args => do
-    let (f', args') ← specCall tr known f args
-    if f' == f && args' == args then pure e else specPush (.tailCall id f' args')
-  | .tuple args => do
-    let args' ← args.mapM (specExpr tr known)
-    if args' == args then pure e else specPush (.tuple args')
-  | .proj x i => do
-    let x' ← specExpr tr known x
-    if x' == x then pure e else specPush (.proj x' i)
-  | .closure id cs => do
-    let cs' ← cs.mapM (specClause tr known)
-    if cs' == cs then pure e else specPush (.closure id cs')
-  | .handle s cs => do
-    let s' ← specExpr tr known s
-    let cs' ← cs.mapM (specClause tr known)
-    if s' == s && cs' == cs then pure e else specPush (.handle s' cs')
-  | .labelScope l body => do
-    let body' ← body.mapM (specStmt tr known)
-    if body' == body then pure e else specPush (.labelScope l body')
-  | .deref x => do
-    let x' ← specExpr tr known x
-    if x' == x then pure e else specPush (.deref x')
-  | .reborrow u x => do
-    let x' ← specExpr tr known x
-    if x' == x then pure e else specPush (.reborrow u x')
-  | .fieldOf id x n => do
-    let x' ← specExpr tr known x
-    if x' == x then pure e else specPush (.fieldOf id x' n)
-  | _ => pure e
-
 /-- What is called and what it is given, at a call. -/
-partial def specCall (tr : TraitInfo) (known : List (String × String)) (f : Flat.ExprId) (args : Array Flat.ExprId) :
+def specCall (tr : TraitInfo) (go : Flat.FGoM (StateM Copies)) (f : Flat.ExprId) (args : Array Flat.ExprId) :
     SpecM (Flat.ExprId × Array Flat.ExprId) := do
-  let args ← args.mapM (specExpr tr known)
+  let args ← args.mapM go.ex
   match (← get).expr f with
   | .proj d idx =>
     -- A trait's function taken out of an implementation that is known: the
     -- implementation's function, for what its own conditions are met by.
-    let d ← specExpr tr known d
+    let d ← go.ex d
     let kept := fun (_ : Unit) => (do
       if d == (match (← get).expr f with | .proj d0 _ => d0 | _ => d) then pure (f, args)
       else pure (← specPush (.proj d idx), args) : SpecM (Flat.ExprId × Array Flat.ExprId))
@@ -209,43 +165,28 @@ partial def specCall (tr : TraitInfo) (known : List (String × String)) (f : Fla
         let unit ← (List.range n).mapM fun _ => specPush (.tuple #[])
         return (← specPush (.name none copy), unit.toArray ++ args.extract n args.size)
     pure (f, args)
-  | _ => do pure (← specExpr tr known f, args)
+  | _ => do pure (← go.ex f, args)
 
-partial def specClause (tr : TraitInfo) (known : List (String × String)) (c : Flat.ClauseId) : SpecM Flat.ClauseId := do
-  let ⟨pats, body⟩ := (← get).clause c
-  let body' ← body.mapM (specStmt tr known)
-  if body' == body then pure c else specPushC ⟨pats, body'⟩
-
-partial def specStmt (tr : TraitInfo) (known : List (String × String)) (s : Flat.StmtId) : SpecM Flat.StmtId := do
-  match (← get).stmt s with
-  | .let_ p v => do
-    let v' ← specExpr tr known v
-    if v' == v then pure s else specPushS (.let_ p v')
-  | .expr v => do
-    let v' ← specExpr tr known v
-    if v' == v then pure s else specPushS (.expr v')
-  | .defer v => do
-    let v' ← specExpr tr known v
-    if v' == v then pure s else specPushS (.defer v')
-  | .letMut x v => do
-    let v' ← specExpr tr known v
-    if v' == v then pure s else specPushS (.letMut x v')
-  | .assign t v => do
-    let t' ← specExpr tr known t
-    let v' ← specExpr tr known v
-    if t' == t && v' == v then pure s else specPushS (.assign t' v')
-  | .located l c inner => do
-    let inner' ← specStmt tr known inner
-    if inner' == inner then pure s else specPushS (.located l c inner')
-
-end
+/-- A function written out for the implementations `known` (by the names its
+parameters for them had, each the name it stands as): each call sent where
+`specCall` says. -/
+def specRewrite (tr : TraitInfo) (known : List (String × String)) : Flat.FRewriteM (StateM Copies) where
+  onExpr go b e := match b.expr e with
+    | .name none x => (known.lookup x).map fun y => specPush (.name none y)
+    | .call id f args => some do
+      let (f', args') ← specCall tr go f args
+      if f' == f && args' == args then pure e else specPush (.call id f' args')
+    | .tailCall id f args => some do
+      let (f', args') ← specCall tr go f args
+      if f' == f && args' == args then pure e else specPush (.tailCall id f' args')
+    | _ => none
 
 /-- A function given no implementation, with the calls in it sent to copies. -/
 def specRoot (tr : TraitInfo) (item : Flat.FItem) : StateM Copies Flat.FItem :=
   match item with
   | .fn name ps annots ret b =>
     if (tr.boundedAt[name]?).getD 0 == 0 then do
-      let (roots, b) ← (b.roots.mapM (specClause tr [])).run b
+      let (roots, b) ← (b.roots.mapM (specRewrite tr []).clause).run b
       pure (.fn name ps annots ret { b with roots })
     else pure item
   | other => pure other
@@ -271,7 +212,7 @@ def specCopyClause (tr : TraitInfo) (known : List (String × String)) (n : Nat) 
     (fn : String) (clause : Flat.ClauseId) : SpecM Flat.ClauseId := do
   let ⟨pats, body⟩ := (← get).clause clause
   let pats := if drop then pats.drop n else List.replicate n Pattern.wild ++ pats.drop n
-  let body ← body.mapM (specStmt tr known)
+  let body ← body.mapM (specRewrite tr known).st
   -- (A function's name is the label its body leaves by, `@find(..)`: the
   -- copy has another name, so its body is given that label.)
   let b ← get
