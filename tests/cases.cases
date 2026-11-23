@@ -15634,3 +15634,23 @@ fn main() -> Int {
 #### expect
 16
 56
+#### case
+#### `[T; N]` in memory as Rust lays it out: its elements one after another.
+fn main() -> Int {
+    let a: [u16; 3] = [7u16, 8u16, 9u16];
+    print(size_of<[u16; 3]>());
+    print(size_of<([u8; 5], Int)>());
+    unsafe {
+        let p = mem_alloc(16usize, 8usize);
+        <[u16; 3] as Repr>::repr_store(p, a);
+        let b: [u16; 3] = <[u16; 3] as Repr>::repr_load(p);
+        print(ptr_read(repr_at(p, 2), -16));
+        mem_free(p);
+        int(b[0]) + int(b[1]) + int(b[2])
+    }
+}
+#### expect
+6
+16
+8
+24

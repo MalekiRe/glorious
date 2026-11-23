@@ -703,6 +703,11 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
   unless all.any (fun | (.trait n _) => n == layoutTrait | _ => false) do return (items, memo)
   let hasNil := all.any (fun | (.trait n _) => n == nilTrait | _ => false)
   let hasRepr := all.any (fun | (.trait n _) => n == reprTrait | _ => false)
+  -- (A type whose `Layout` is written out by hand has that one: `[T; N]`'s.)
+  let ownLayout : Std.HashSet String := all.foldl (init := {}) fun s item =>
+    match item with
+    | .impl _ tr h _ _ _ => if tr == layoutTrait then s.insert h else s
+    | _ => s
   -- (Each declared type's constructors, by name, with their fields.)
   let ctorsOf : Std.HashMap String (List String × List (Option String × List TypeExpr)) := all.foldl (init := {}) fun m item =>
     match item with
@@ -766,6 +771,7 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
         [Item.impl fresh reprTrait head fresh ((fresh.filter (!·.startsWith "'")).flatMap fun p => [(p, reprTrait), (p, layoutTrait)])
           [store, load, .typeAlias askedOnlyName [] (.tuple [])]]
       | none => []
+    if ownLayout.contains head then nils ++ reprs else
     (nils ++ reprs ++ [Item.impl fresh layoutTrait head fresh ((fresh.filter (!·.startsWith "'")).map (·, layoutTrait))
       -- (Checked only where something asks it: `askedOnlyName`.)
       [Item.fnOf sizeName [] [] (some int) [.mk [] [.expr sizeE]], Item.fnOf alignName [] [] (some int) [.mk [] [.expr alignE]],

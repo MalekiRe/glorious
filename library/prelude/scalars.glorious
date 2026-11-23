@@ -278,6 +278,33 @@ impl<T, N> Index for Fixed<T, N> {
 impl<T, N> Len for Fixed<T, N> where N: Known { fn len(a: Fixed<T, N>) -> Int { N::VALUE } }
 // Its elements as an array that can grow.
 fn to_array<T, N>(a: Fixed<T, N>) -> Array<T> { a.0 }
+// In memory, its elements one after another, as Rust lays out `[T; N]`.
+impl<T, N> Layout for Fixed<T, N> where T: Layout, N: Known {
+    const SIZE: Int = int_mul(N::VALUE, size_of<T>());
+    const ALIGN: Int = align_of<T>();
+}
+impl<T, N> Repr for Fixed<T, N> where T: Repr, T: Layout, N: Known {
+    unsafe fn repr_store(at: usize, value: Fixed<T, N>) { fixed_store(at, value.0, N::VALUE) }
+    unsafe fn repr_load(at: usize) -> Fixed<T, N> { Fixed(fixed_load(at, 0, N::VALUE, arr_new())) }
+}
+// (The last of so many elements written after the others, and the rest.)
+unsafe fn fixed_store<T>(at: usize, items: [T], n: Int) where T: Repr, T: Layout {
+    match(int_lt(0, n)) {
+        0 => (),
+        _ => fixed_store_last(at, arr_pop(items, 0), n)
+    }
+}
+unsafe fn fixed_store_last<T>(at: usize, popped: ([T], T), n: Int) where T: Repr, T: Layout {
+    let (rest, last) = popped;
+    <T as Repr>::repr_store(repr_at(at, int_mul(int_sub(n, 1), size_of<T>())), last);
+    tail fixed_store(at, rest, int_sub(n, 1))
+}
+unsafe fn fixed_load<T>(at: usize, i: Int, n: Int, out: [T]) -> [T] where T: Repr, T: Layout {
+    match(int_lt(i, n)) {
+        0 => out,
+        _ => tail fixed_load(at, int_add(i, 1), n, arr_push(out, <T as Repr>::repr_load(repr_at(at, int_mul(i, size_of<T>())))))
+    }
+}
 // `N` of one value.
 fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { Fixed(array_repeat(x, N::VALUE)) }
 
