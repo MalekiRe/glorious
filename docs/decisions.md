@@ -286,10 +286,24 @@ language, in `Glorious/Prelude.lean`, and so are `true`, `false`, `Some`,
 
 The only words the parser treats specially are `fn`, `let`, `mut`, `enum`,
 `struct`, `effect`, `handle`, `tail`, `defer`, `coerce`, `_`, and the fixity
-words `infixl`, `infixr`, `infix`, `prefix`. The elaborator and checker additionally
-know `cancel`, `replace`, `Int`, the machine intrinsics (`int_add` and so on)
-and the two host operations. A word operator such as `else` or `and` is declared with a
-fixity like any other operator.
+words `infixl`, `infixr`, `infix`, `prefix`. A word operator such as `else` or
+`and` is declared with a fixity like any other operator.
+
+**Decision (user): the machine's operations are declared in the library.**
+Each intrinsic is a declaration with its type, `#[intrinsic] fn int_add(a:
+Int, b: Int) -> Int;`, in `library/prelude/intrinsics.glorious` (and each
+scalar type's `_of` and `_bits`, written out with the scalars). The checker
+types a call of one from its declaration, as it does any function's (the
+declaration is checked by its signature alone, `checkGroup (signature :=
+true)`); the compiler knows only which operation of the machine the name is
+(`Elab.prims`, `hosts`, `casts`), gives it no implementations, and leaves the
+declaration out of what is elaborated (`Item.withoutIntrinsics`). What it
+still knows by name: `Int` and the scalar types, the operations on a place
+(`cancel`, `replace`, `swap`, `overwrite`, `transmute`), whose borrows are
+their own; a foreign function's call and `c_callback`, of however many whole
+numbers; and the arrays' operations, which are to leave the compiler with
+the arrays (a systems language's `Vec`, slices and `[T; N]`, written over
+memory).
 
 Do not add a parser rule, a checker rule or an error message that names a
 prelude function. If a prelude construct is awkward to type or to use, fix it

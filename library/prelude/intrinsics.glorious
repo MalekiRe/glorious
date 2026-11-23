@@ -1,0 +1,65 @@
+// The machine's own operations, each with its type. A call of one is the
+// operation: nothing is called. Whole numbers and the bits of floats are
+// `Int`; a test gives 1 for yes and 0 for no.
+
+#[intrinsic] fn int_add(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_sub(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_mul(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_div(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_rem(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_lt(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_eq(a: Int, b: Int) -> Int;
+// `a` if it fits in so many bits (with a sign if `width` is positive).
+#[intrinsic] fn int_fit(a: Int, width: Int) -> Int;
+#[intrinsic] fn int_below(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_and(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_or(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_xor(a: Int, b: Int) -> Int;
+#[intrinsic] fn int_shl(a: Int, n: Int) -> Int;
+#[intrinsic] fn int_shr(a: Int, n: Int) -> Int;
+// Within 128 bits, for the types of 64 bits and more.
+#[intrinsic] fn wide_add(a: Int, b: Int) -> Int;
+#[intrinsic] fn wide_sub(a: Int, b: Int) -> Int;
+#[intrinsic] fn wide_mul(a: Int, b: Int) -> Int;
+// 128 bits read without a sign.
+#[intrinsic] fn uw_add(a: Int, b: Int) -> Int;
+#[intrinsic] fn uw_sub(a: Int, b: Int) -> Int;
+#[intrinsic] fn uw_mul(a: Int, b: Int) -> Int;
+#[intrinsic] fn uw_div(a: Int, b: Int) -> Int;
+#[intrinsic] fn uw_rem(a: Int, b: Int) -> Int;
+#[intrinsic] fn uw_lt(a: Int, b: Int) -> Int;
+#[intrinsic] fn uw_shl(a: Int, n: Int) -> Int;
+#[intrinsic] fn uw_shr(a: Int, n: Int) -> Int;
+// Floats, by their bits; the second argument of those of one is not read.
+#[intrinsic] fn f64_add(a: Int, b: Int) -> Int;
+#[intrinsic] fn f64_sub(a: Int, b: Int) -> Int;
+#[intrinsic] fn f64_mul(a: Int, b: Int) -> Int;
+#[intrinsic] fn f64_div(a: Int, b: Int) -> Int;
+#[intrinsic] fn f64_lt(a: Int, b: Int) -> Int;
+#[intrinsic] fn f64_eq(a: Int, b: Int) -> Int;
+#[intrinsic] fn f64_of_int(a: Int, unused: Int) -> Int;
+#[intrinsic] fn f64_to_int(a: Int, unused: Int) -> Int;
+#[intrinsic] fn f64_narrow(a: Int, unused: Int) -> Int;
+#[intrinsic] fn f64_widen(a: Int, unused: Int) -> Int;
+#[intrinsic] fn f64_of_decimal(digits: Int, exp10: Int) -> Int;
+#[intrinsic] fn f64_digits(a: Int, unused: Int) -> Int;
+#[intrinsic] fn f64_exp10(a: Int, unused: Int) -> Int;
+#[intrinsic] fn f64_sqrt(a: Int, unused: Int) -> Int;
+#[intrinsic] fn f64_round(a: Int, mode: Int) -> Int;
+
+// The host: a value written out, and a whole number read in (`(1, n)`, or
+// `(0, 0)` when there are no more).
+#[intrinsic] fn host_write<T>(value: T) where T: Use<[1, 1]>;
+#[intrinsic] fn host_read() -> (Int, Int);
+// The bits at an address, so many of them (without a sign if negative), read
+// and written.
+#[intrinsic] unsafe fn ptr_read(at: usize, bits: Int) -> Int;
+#[intrinsic] unsafe fn ptr_write(at: usize, bits: Int, value: Int);
+// Cells more than one holder reaches, by number: a new one holding a value,
+// the value taken out of one, and one put in. The checker does not see what
+// a cell holds: the library's shared values and threads are made of them.
+#[intrinsic] unsafe fn heap_new<T>(value: T) -> Int where T: Use<[1, 1]>;
+#[intrinsic] unsafe fn heap_take<T>(cell: Int) -> T;
+#[intrinsic] unsafe fn heap_put<T>(cell: Int, value: T) where T: Use<[1, 1]>;
+// A machine is to start for a thread of the system's that C is about to start.
+#[intrinsic] unsafe fn heap_machine_coming() -> (Int, Int);

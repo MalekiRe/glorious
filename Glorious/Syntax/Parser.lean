@@ -626,6 +626,11 @@ private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
     return [.fieldNames (attrMark name) [] []]
   -- `#[fallback] impl ..`: the implementation a type nothing decides is
   -- taken to have, where the trait is asked of it.
+  if name == "intrinsic" then
+    let items ← withReader (fun ctx => { ctx with intrinsic := true }) next
+    return items ++ items.filterMap fun
+      | .fn n .. | .pub _ (.fn n ..) => some (.fieldNames (attrMark "intrinsic") [n] [])
+      | _ => none
   if name == "fallback" then
     let items ← next
     return items.map fun

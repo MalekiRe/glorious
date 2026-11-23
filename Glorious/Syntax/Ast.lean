@@ -514,7 +514,7 @@ type's, as it is given any trait's functions. -/
 def destroyTrait : String := "%Destroy"
 
 /-- The value a scalar's name makes of an integer. -/
-def scalarValue (name : String) (n : Int) : Expr := .call 0 (.name none name) [.int n]
+def scalarValue (name : String) (n : Int) : Expr := .call 0 (.name (some "%prelude") name) [.int n]
 
 /-- A text as a value: its characters, one after another. -/
 def textValue (codes : List Nat) : Expr :=
@@ -895,6 +895,16 @@ inductive Item where
   | import (path : List String) (rename : Option String) (glob : Bool)
 
 deriving instance Hashable for OpDecl, Bound, Item
+
+/-- The items without the functions declared `#[intrinsic]`: a call of one is
+the machine's operation, and its declaration is the checker's alone. -/
+def Item.withoutIntrinsics (items : List Item) : List Item :=
+  let own := items.filterMap fun
+    | .fieldNames mark [n] _ => if mark == attrMark "intrinsic" then some n else none
+    | _ => none
+  if own.isEmpty then items else items.filter fun
+    | .fn n .. => !own.contains n
+    | _ => true
 
 /-- Every name a pattern could bind. -/
 partial def patternNames : Pattern → List String

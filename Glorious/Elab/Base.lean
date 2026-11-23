@@ -375,6 +375,11 @@ def hosts : List (String × Nat × Nat) :=
    -- The name of the function a callable is of, and the callable back.
    ("host_fn_name", 9, 1)]
 
+/-- Is this the name of one of the machine's operations (declared
+`#[intrinsic]` in the prelude)? -/
+def isIntrinsic (x : String) : Bool :=
+  (prims.lookup x).isSome || (hosts.lookup x).isSome || (Syntax.scalarCast x).isSome
+
 /-- The Core computation under construction: binding forms awaiting their
 continuation, the number of locals so far, and the terminator once one is known. -/
 structure Builder where

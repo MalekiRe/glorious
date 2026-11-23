@@ -897,6 +897,10 @@ def compileSource (src : String) (check : Bool := true)
   -- (Where only what the checker found is asked, that is all.)
   if lenient then
     return { core := ⟨#[], .ret (.int 0), [], #[]⟩, ctorNames := #[], fnNames := #[], opNames := #[], checkKept := checkMade }
+  -- (A call of an intrinsic is the machine's operation: its declaration was
+  -- the checker's alone.)
+  let first := first.map fun (count, st) => ((Syntax.Item.withoutIntrinsics (all.take count)).length, st)
+  let all := Syntax.Item.withoutIntrinsics all
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := Elab.declaredOf all

@@ -498,8 +498,6 @@ inductive Head where
   | ctor (sig : CtorSig) (written : Option Expr := none)
   | op (sig : OpSig)
   | prim
-  /-- A scalar as the integer it is held as, or, if `into`, back. -/
-  | cast (scalar : String) (into : Bool)
   /-- What an `is` found: the values, under the names in `name`. -/
   | pack (name : String)
   | host (id : Nat)
@@ -557,10 +555,11 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
           | (none, _) => none)
     let t ← instantiate scheme (some x) fixed
     return .fn t (← get).lastBounds false
+  -- (The machine's operations are declared in the prelude, but for those of
+  -- arrays and these two of the host's.)
   if (Elab.prims.lookup x).isSome then return .prim
-  if let some (scalar, into) := Syntax.scalarCast x then return .cast scalar into
   if (Syntax.packNames x).isSome then return .pack x
-  if let some (id, _) := Elab.hosts.lookup x then return .host id
+  if x == "c_callback" then return .host 5
   if x == Syntax.foreignCall then return .host 2
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace

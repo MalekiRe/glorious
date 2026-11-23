@@ -196,6 +196,10 @@ impl Show for Result<(), ()> {
 // is a value: changing one makes another.
 struct Array<T>(T)
 
+// (An intrinsic, declared with the arrays it gives one of.) The name of the function a callable is of, as its characters' codes, and
+// the callable back.
+#[intrinsic] unsafe fn host_fn_name<T>(value: T) -> ([Int], T) where T: Use<[1, 1]>;
+
 // An address, with what is said to be there: `*const T` and `*mut T`. To
 // have one says nothing of what is at the address; reading and writing
 // there is unsafe, and the library's to give.

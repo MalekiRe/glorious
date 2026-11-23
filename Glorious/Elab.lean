@@ -1470,7 +1470,10 @@ private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f 
     match staticMethod tr d idx with
     | some (fn, subs) => mk (← pushExpr (.name none fn)) ((← dicts subs) ++ args)
     | none => mk (← pushExpr (.proj (← flatExpr (dictExpr tr d)) idx)) args
-  | some ds, none => mk (← untraitExpr tr owner f) ((← dicts ds) ++ args)
+  -- (A machine operation is given no implementation: it is no function.)
+  | some ds, none =>
+    if ((← get).bare? f).any isIntrinsic then mk f args
+    else mk (← untraitExpr tr owner f) ((← dicts ds) ++ args)
   | _, _ => mk (← untraitExpr tr owner f) args
 
 private partial def untraitClause (tr : TraitInfo) (owner : String) (c : ClauseId) : Build ClauseId := do

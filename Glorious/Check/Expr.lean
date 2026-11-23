@@ -156,6 +156,7 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
     | .local (.label t brand) => labelType t brand
     | .local (.poly s) => instantiate s (some x)
     | .fn t bounds inGroup => do
+      if Elab.isIntrinsic x then throw s!"intrinsic `{x}` must be called"
       unless bounds.isEmpty do
         -- (Read again with the naming a block that calls it, whose type the
         -- use decides, and so what the function needs.)
@@ -187,7 +188,6 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
       pure result
     | .op _ => throw s!"operation `{x}` must be called"
     | .prim => throw s!"intrinsic `{x}` must be called"
-    | .cast _ _ => throw s!"intrinsic `{x}` must be called"
     | .pack _ => throw "what an `is` found is built where it is found"
     | .host _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
@@ -1060,35 +1060,23 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
     | "arr_pop" =>
       checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
       pure (.tuple [array t, t])
-    | _ =>
-      checkArgs scope amb s!"intrinsic `{x}`" [.int, .int] args call
-      pure .int
+    | _ => throw s!"`{x}`: an intrinsic not declared; this is a compiler defect"
   | .pack name => do
     let ts ← args.toList.mapM fun _ => freshTy
     checkArgs scope amb "what an `is` found" ts args call
     pure (.con name ts)
-  | .cast scalar into => do
-    checkArgs scope amb s!"intrinsic `{x}`" [if into then .int else .con scalar []] args call
-    pure (if into then .con scalar [] else .int)
   | .host id => do
-    if id ≥ 2 then
-      let s ← get
-      unless s.unsafeBlock || s.unsafeFns.contains s.owner do
-        throw s!"`{x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
-    if id == 0 then
-      checkArgs scope amb s!"`{x}`" [← freshTy] args call
-      pure .unit
-    else if id == 2 then
+    -- (The host's operations are declared in the prelude, each with its
+    -- type, but for these two: a foreign function's call, of however many
+    -- whole numbers, and a callable given to C.)
+    let s ← get
+    unless s.unsafeBlock || s.unsafeFns.contains s.owner do
+      throw s!"`{x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
+    if id == 2 then
       -- A foreign function's name, how many bits it gives, and what it is given.
       checkArgs scope amb s!"`{x}`" (args.toList.map fun _ => Ty.int) args call
       pure .int
-    else if id == 3 then
-      checkArgs scope amb s!"`{x}`" [.con "usize" [], .int] args call
-      pure .int
-    else if id == 4 then
-      checkArgs scope amb s!"`{x}`" [.con "usize" [], .int, .int] args call
-      pure .unit
-    else if id == 5 then
+    else
       -- The callable is given to C for as long as the program runs. What
       -- it takes and gives is C's to get right: whole numbers and
       -- addresses, as `usize`.
@@ -1100,23 +1088,6 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
       let given := Ty.func (List.replicate arity (.con "usize" [])) .int ⟨[], none⟩ (← freshCap)
       checkArgs scope amb s!"`{x}`" [given, .int] args call
       pure (.con "usize" [])
-    else if id == 6 then
-      checkArgs scope amb s!"`{x}`" [← freshTy] args call
-      pure .int
-    else if id == 7 then
-      checkArgs scope amb s!"`{x}`" [.int] args call
-      freshTy
-    else if id == 8 then
-      checkArgs scope amb s!"`{x}`" [.int, ← freshTy] args call
-      pure .unit
-    else if id == 9 then
-      -- (A value, given back with the codes of its function's name.)
-      let v ← freshTy
-      checkArgs scope amb s!"`{x}`" [v] args call
-      pure (.tuple [.con ((← get).arrayType.getD "Array") [.int], v])
-    else
-      checkArgs scope amb s!"`{x}`" [] args call
-      pure (.tuple [.int, .int])
   | _ => throw "a call's callee was taken for one of another kind; this is a compiler defect"
 
 /-- A call of what works on a place (`cancel`, `replace`, `swap`,
@@ -1538,7 +1509,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
           if alt != x then throwThe Elab.Said { e with decision := some (← receiverDecision call alt) }
       throwThe Elab.Said e
     match head with
-    | .ctor .. | .op _ | .prim | .pack _ | .cast .. | .host _ => inferCallBuiltin scope amb args call x head
+    | .ctor .. | .op _ | .prim | .pack _ | .host _ => inferCallBuiltin scope amb args call x head
     | .fn .. | .method _ | .const _ => inferCallFn scope amb args call x head
     | _ => inferCallPlace scope amb args call x head
   | .label l => do

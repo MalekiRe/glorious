@@ -888,13 +888,24 @@ partial def parseFn : P (Item × List Bound) := do
       match c.subject.splitOn "::" with
       | [p, name] => { c with subject := s!"{name}Of{p}" }
       | _ => c
-    expectPunct "{"
     let consts := (bounds.filter (·.trait == knownTrait)).map (·.subject)
     let types := params.filter (!·.startsWith "'")
-    let body ← bodyOf do
-      let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts, enclosing := (types, bounds ++ more) }) parseStmts
-      pure #[← mkC pats.toList body]
-    expectPunct "}"
+    -- (`#[intrinsic] fn int_add(a: Int, b: Int) -> Int;`: a machine
+    -- operation, its type written here. It stands for itself: a call of it
+    -- is the operation.)
+    let body ← if (← read).intrinsic && (← acceptPunct ";") then
+        bodyOf do
+          let args ← pats.mapM fun
+            | .var x => mk (.name none x)
+            | _ => failAt "an intrinsic's parameters are names"
+          pure #[← mkC pats.toList #[← mkS (.expr (← callOf 0 none name args))]]
+      else do
+        expectPunct "{"
+        let body ← bodyOf do
+          let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts, enclosing := (types, bounds ++ more) }) parseStmts
+          pure #[← mkC pats.toList body]
+        expectPunct "}"
+        pure body
     -- `-> !`: a function that does not come back gives whatever is wanted
     -- of it, which only a body that does not come back can.
     let (allParams, ret) := match ret with

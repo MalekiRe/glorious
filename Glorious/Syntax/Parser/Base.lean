@@ -47,6 +47,9 @@ structure PCtx where
   them: a `const { .. }` block in it is a function of the module generic in
   them, worked out at compile time at the types each copy is made at. -/
   enclosing : List String × List Bound := ([], [])
+  /-- Whether the function being read is a machine intrinsic (`#[intrinsic]`),
+  declared with `;` for a body. -/
+  intrinsic : Bool := false
 
 /-- What the parser holds as it reads: where it is, the functions written
 inside blocks so far (on their way to the module the block is in), and the

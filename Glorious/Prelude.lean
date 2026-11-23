@@ -23,6 +23,9 @@ namespace Glorious.Prelude
 
 private def core : String := include_str "../library/prelude/core.glorious"
 
+/-- The machine's operations, each with its type. -/
+private def intrinsics : String := include_str "../library/prelude/intrinsics.glorious"
+
 /-- The operators as traits, with what `Int` has of them. -/
 private def operators : String := include_str "../library/prelude/operators.glorious"
 
@@ -98,6 +101,11 @@ impl Show for {t} \{ fn show(x: {t}) -> Str {test s!"unsigned_digits({t}_bits(x)
 fn {t}(n: Int) -> {t} {test s!"{t}_of(int_fit(n, -63))"}
 "
 
+/-- Each scalar type's way in from the `Int` it is held as, and out. -/
+private def casts : String :=
+  String.join (Syntax.scalars.map fun (t, _) =>
+    s!"#[intrinsic] fn {t}_of(n: Int) -> {t};\n#[intrinsic] fn {t}_bits(x: {t}) -> Int;\n")
+
 /-- The scalar types: what each has. -/
 private def scalars : String :=
   (include_str "../library/prelude/scalars.glorious") ++ String.join ((Syntax.scalars.filterMap fun (t, width) => width.map fun w =>
@@ -136,10 +144,10 @@ trait Elements { type Each; fn elements(Self) -> Each }
 
 private def layouts : String := include_str "../library/prelude/layouts.glorious"
 
-def source : String := core ++ operators ++ scalars ++ world ++ fixedElements ++ layouts
+def source : String := intrinsics ++ casts ++ core ++ operators ++ scalars ++ world ++ fixedElements ++ layouts
 
 /-- The prelude of a program run without the checker. -/
-def unchecked : String := core ++ intOperators ++ world
+def unchecked : String := intrinsics ++ casts ++ core ++ intOperators ++ world
 
 
 end Glorious.Prelude

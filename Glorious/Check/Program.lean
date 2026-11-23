@@ -420,6 +420,12 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
     | .fn name params annots ret _ =>
       some { name, params, annots, ret, body := (bodyOf[name]?).getD {}, bounds := (written.lookup name).getD [] }
     | _ => none
+  -- (The machine's operations, `#[intrinsic]`: each has the type its
+  -- signature says, which is declared with the rest; it has no body.)
+  let intrinsic := items.filterMap fun
+    | .fieldNames mark [n] _ => if mark == Syntax.attrMark "intrinsic" then some n else none
+    | _ => none
+  let (machine, decls) := decls.partition (intrinsic.contains ·.name)
   -- What is asked of a declared type's parameters: a trait without arguments
   -- of its own, of the parameter at a place.
   let asked := items.filterMap fun
@@ -487,7 +493,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
     -- before it.)
     let fnNames : Std.HashSet String := decls.foldl (fun s d => s.insert d.name) {}
     let declared := items.filter fun
-      | .fn .. => false
+      | .fn n .. => intrinsic.contains n
       | .pub _ (.fn ..) => false
       | .bounds f _ => !fnNames.contains f
       | _ => true
@@ -528,6 +534,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           computeVariances
           declareTraits items
           checkUseDecls
+          for d in machine do checkGroup [d] (signature := true)
         if deltas.isSome then
           if let some d := diffStates here (← get) then groupDeltas := groupDeltas.push (declFrom, (d, #[]))
     made := (key, noBodies (← get)) :: made
