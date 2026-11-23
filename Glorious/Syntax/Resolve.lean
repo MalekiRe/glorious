@@ -636,6 +636,16 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
       if memo.keep then memo := { memo with made := memo.made.push (key, [v]) }
   pure (out.toList, memo)
 
+/-- The heads a type can have without being declared, with type parameters
+for their parts: `Int` and the scalars, then `declared`, then tuples,
+callables and references. -/
+def builtinHeads (declared : List (String × List String) := []) : List (String × List String) :=
+  let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
+  [("Int", [])] ++ scalars.map (fun (n, _) => (n, [])) ++ declared
+    ++ (List.range 9).map (fun n => (s!"(tuple{n})", params n))
+    ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
+    ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
+
 /-- `Layout` (the prelude's) for each type: each declared type's right after
 its declaration, and those of the types with no declaration (`Int`, each
 scalar, tuples, callables, references) right after the trait's; each from the
@@ -656,7 +666,6 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
     | (.struct n ps fs) => m.insert n (ps, [fs])
     | (.enum n ps cs) => m.insert n (ps, cs.map (·.2))
     | _ => m
-  let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
   let count := 0
   -- (The trait's functions, by the names the program has for them.)
   let (sizeName, alignName) := match all.findSome? (fun | (.trait n ms) => if n == layoutTrait then some ms else none | _ => none) with
@@ -735,11 +744,7 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
           let (mine, count, memo) : List Item × Nat × FrontMemo := match item with
             | (.trait n _) =>
               if n == layoutTrait then
-                let heads := [("Int", [])] ++ scalars.map (fun (n, _) => (n, []))
-                  ++ (List.range 9).map (fun n => (s!"(tuple{n})", params n))
-                  ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
-                  ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
-                let (out, c, memo) := heads.foldl (fun (acc : List Item × Nat × FrontMemo) (h, ps) =>
+                let (out, c, memo) := (builtinHeads).foldl (fun (acc : List Item × Nat × FrontMemo) (h, ps) =>
                   let (made, m) := implKept acc.2.2 acc.2.1 h ps
                   (acc.1 ++ made, acc.2.1 + 1, m)) ([], count, memo)
                 (item :: out, c, memo)
@@ -775,12 +780,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
     | (.struct n ps _) | .pub _ ((.struct n ps _)) | (.enum n ps _)
     | .pub _ ((.enum n ps _)) => some (n, ps)
     | _ => none
-  let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
-  let heads : List (String × List String) :=
-    [("Int", [])] ++ scalars.map (fun (n, _) => (n, [])) ++ declared
-      ++ (List.range 9).map (fun n => (s!"(tuple{n})", params n))
-      ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
-      ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
+  let heads := builtinHeads declared
   -- (The arguments an implementation gives its trait, as written.)
   let givenArgs := fun (ms : List Item) => (givenTraitArgs (ms.map Item.declared)).map (·.spell)
   -- (Which trait each implementation is of, at which arguments, for which
