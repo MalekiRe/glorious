@@ -451,9 +451,9 @@ theorem matchVal_wild {p : Pat} {v : Value} {bs : List Value} (hw : isWild p = t
   | wild =>
     simp only [Pat.matchVal, Option.some.injEq] at h
     exact h.symm
-  | bind => simp [isWild] at hw
-  | int n => simp [isWild] at hw
-  | ctor t ps => simp [isWild] at hw
+  | bind
+  | int _
+  | ctor _ _ => simp [isWild] at hw
 
 /-- What the arguments at wildcard positions hold. -/
 def wildOcc (id : Nat) (ps : List Pat) (vs : List Value) (i : Nat) : Nat :=
@@ -703,12 +703,12 @@ theorem occ_atom_le (id : Nat) {env : Env} {a : Atom} {v : Value} {live : List N
 
 theorem rhsMoves_sub {rhs : Rhs} {i : Nat} (h : i ∈ rhsMoves rhs) : i ∈ rhsVars rhs := by
   cases rhs with
-  | atom a => exact h
-  | prim p args => cases h
-  | construct tag args => exact h
-  | place pl => cases h
-  | closure fn captures => exact h
-  | rebind a fn => exact h
+  | atom _
+  | construct _ _
+  | closure _ _
+  | rebind _ _ => exact h
+  | prim _ _
+  | place _ => cases h
 
 theorem atomVars_tail_sub {a : Atom} {as : List Atom} {i : Nat} (h : i ∈ atomVars as) :
     i ∈ atomVars (a :: as) := by
@@ -760,18 +760,12 @@ theorem occConts_take (id : Nat) {conts : Conts Frame} {k : Nat} {seg : List Fra
 
 theorem calleeAtom_fv {tm : Tm} {i : Nat} (h : calleeAtom tm = some (.var i)) : i ∈ fv tm := by
   cases tm with
-  | cell init thunk body =>
+  | cell init _ _
+  | cellTail init _
+  | lend _ init _ _ _ _ =>
     simp only [calleeAtom, Option.some.injEq] at h
     subst h
     cases init <;> simp [fv, atomVars]
-  | cellTail init thunk =>
-    simp only [calleeAtom, Option.some.injEq] at h
-    subst h
-    cases init <;> simp [fv, atomVars]
-  | lend uniq r thunk pre post body =>
-    simp only [calleeAtom, Option.some.injEq] at h
-    subst h
-    cases r <;> simp [fv, atomVars]
   | _ => simp [calleeAtom] at h <;> subst h <;> simp [fv, atomVars]
 
 /-- A resumption that some part of the computation is about to use is held, so it is unused. -/

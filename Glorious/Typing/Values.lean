@@ -600,7 +600,8 @@ theorem rhs_occ {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {σ : Ty} {v :
     simp [Rhs.eval, evalAtoms, hva, hvb] at hv
     obtain ⟨k, rfl⟩ := prim_int hv
     simp [occ]
-  | construct hc hargs =>
+  | construct _ hargs
+  | closure _ _ hargs _ _ =>
     obtain ⟨vs, hvs, _⟩ := atoms_ok (S := S) henv hargs
     simp [Rhs.eval, hvs] at hv
     subst hv
@@ -611,11 +612,6 @@ theorem rhs_occ {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {σ : Ty} {v :
     simp [Rhs.eval, Place.eval, hx', hw] at hv
     subst hv
     simp [hD _ _ _ hwt hdup id]
-  | closure hsig hθ hcaps hq he =>
-    obtain ⟨vs, hvs, _⟩ := atoms_ok (S := S) henv hcaps
-    simp [Rhs.eval, hvs] at hv
-    subst hv
-    exact Nat.le_of_eq (by simpa [occ, rhsMoves] using occs_evalAtoms id env _ hvs)
   | rebind ha hsig hθ hq he =>
     obtain ⟨w, hw, hwt⟩ := atom_ok henv ha
     obtain ⟨fn', captured, rfl, _⟩ := hwt.env_inv

@@ -159,7 +159,10 @@ theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
     intro _
     exact ⟨fun _ _ _ h => (by cases h), fun _ _ _ h => (by cases h), fun _ _ _ h => (by cases h),
       fun _ _ _ => rfl⟩
-  | call _ _ _ _ _ ih =>
+  | call _ _ _ _ _ ih
+  | guard _ _ _ ih
+  | yield _ _ ih
+  | exit _ _ _ ih =>
     intro hown
     exact (ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)).skip _
       (fun _ _ _ => rfl) (fun _ => rfl)
@@ -172,10 +175,6 @@ theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
     exact ((ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)).skip _
       (fun _ _ _ => rfl) (fun _ => rfl)).inert rfl (fun _ hc => OnCell.not_lab hc)
       (fun y h => by cases h)
-  | guard _ _ _ ih =>
-    intro hown
-    exact (ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)).skip _
-      (fun _ _ _ => rfl) (fun _ => rfl)
   | @cell c st σ τ ε ϕ _ hst ih =>
     intro hown
     have E := ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)
@@ -312,14 +311,6 @@ theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
         simp only [ownStack, ownFrame] at hz
         omega
   | lendLoose hn _ _ _ _ => exact absurd ⟨hR, hL⟩ hn
-  | yield _ _ ih =>
-    intro hown
-    exact (ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)).skip _
-      (fun _ _ _ => rfl) (fun _ => rfl)
-  | exit _ _ _ ih =>
-    intro hown
-    exact (ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)).skip _
-      (fun _ _ _ => rfl) (fun _ => rfl)
   | never _ ih => exact ih
 
 /-- Under the region rules and the rules for borrows, a typed state in which

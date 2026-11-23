@@ -290,47 +290,21 @@ section Machine
 variable {P : Bytecode.Program} {code : Code} {fr : List Bytecode.Frame}
   {ks : Store Bytecode.Frame}
 
-theorem step_test_pass {ρ : Env} {pc : Nat} {t : Test} {fail : Nat}
-    (hi : code[pc]? = some (Test.instr fail t)) (hb : t.check ρ = some true) :
-    Bytecode.step P ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, pc + 1, ρ, fr, ks⟩ := by
+/-- A test that holds goes on to the next instruction, and one that fails
+to its `fail`. -/
+theorem step_test {ρ : Env} {pc : Nat} {t : Test} {fail : Nat} {b : Bool}
+    (hi : code[pc]? = some (Test.instr fail t)) (hb : t.check ρ = some b) :
+    Bytecode.step P ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, if b then pc + 1 else fail, ρ, fr, ks⟩ := by
   cases t with
-  | ctor pl tag arity =>
+  | ctor pl _ _
+  | int pl _ =>
     simp only [Test.instr] at hi
     simp only [Test.check] at hb
     cases hv : pl.eval ρ with
     | none => simp [hv] at hb
     | some v =>
       simp [hv] at hb
-      simp [Bytecode.step, hi, hv, hb]
-  | int pl n =>
-    simp only [Test.instr] at hi
-    simp only [Test.check] at hb
-    cases hv : pl.eval ρ with
-    | none => simp [hv] at hb
-    | some v =>
-      simp [hv] at hb
-      simp [Bytecode.step, hi, hv, hb]
-
-theorem step_test_fail {ρ : Env} {pc : Nat} {t : Test} {fail : Nat}
-    (hi : code[pc]? = some (Test.instr fail t)) (hb : t.check ρ = some false) :
-    Bytecode.step P ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, fail, ρ, fr, ks⟩ := by
-  cases t with
-  | ctor pl tag arity =>
-    simp only [Test.instr] at hi
-    simp only [Test.check] at hb
-    cases hv : pl.eval ρ with
-    | none => simp [hv] at hb
-    | some v =>
-      simp [hv] at hb
-      simp [Bytecode.step, hi, hv, hb]
-  | int pl n =>
-    simp only [Test.instr] at hi
-    simp only [Test.check] at hb
-    cases hv : pl.eval ρ with
-    | none => simp [hv] at hb
-    | some v =>
-      simp [hv] at hb
-      simp [Bytecode.step, hi, hv, hb]
+      cases b <;> simp [Bytecode.step, hi, hv, hb]
 
 /-- Tests that all hold fall through, one instruction each, leaving the frames alone. -/
 theorem tests_pass {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) (pc : Nat),
@@ -353,7 +327,7 @@ theorem tests_pass {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) 
         have e : pc + (t :: ts).length = pc + 1 + ts.length := by
           simp only [List.length_cons]; omega
         rw [e]
-        exact RunsThrough.cons (step_test_pass hc'.head hb) rfl (ih (pc + 1) h hc'.tail)
+        exact RunsThrough.cons (step_test hc'.head hb) rfl (ih (pc + 1) h hc'.tail)
 
 /-- Tests of which one fails jump to the failure target, leaving the locals and
 the frames alone. -/
@@ -372,11 +346,11 @@ theorem tests_fail {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) 
     | some r =>
       cases r with
       | false =>
-        exact ⟨0, RunsThrough.cons (step_test_fail hc'.head hb) rfl (RunsThrough.refl rfl)⟩
+        exact ⟨0, RunsThrough.cons (step_test hc'.head hb) rfl (RunsThrough.refl rfl)⟩
       | true =>
         simp [checkAll, hb] at h
         obtain ⟨k, hk⟩ := ih (pc + 1) h hc'.tail
-        exact ⟨k + 1, RunsThrough.cons (step_test_pass hc'.head hb) rfl hk⟩
+        exact ⟨k + 1, RunsThrough.cons (step_test hc'.head hb) rfl hk⟩
 
 /-- Loading the bound places appends exactly the bound values. -/
 theorem binds_run {ρ : Env} {rest : Code} :

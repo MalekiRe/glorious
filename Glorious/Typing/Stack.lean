@@ -96,15 +96,8 @@ theorem ArmsOk.lookup_none {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
     H.lookup op = none → ops.lookup op = none := by
   induction h with
   | nil => intro _; rfl
-  | @terminal op' arm targs Ps ops H _ _ _ ih =>
-    intro hl
-    by_cases he : op = op'
-    · subst he
-      rw [lookup_cons_eq] at hl
-      cases hl
-    · rw [lookup_cons_ne he] at hl ⊢
-      exact ih hl
-  | @resumptive op' arm targs Ps o ops H _ _ _ ih =>
+  | @terminal op' _ _ _ _ _ _ _ _ ih
+  | @resumptive op' _ _ _ _ _ _ _ _ _ ih =>
     intro hl
     by_cases he : op = op'
     · subst he
@@ -192,7 +185,9 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
     ∀ {op : Nat} {targs : List Ty}, ε.lookup op = some targs →
     FindsOk Δ S st τ ε ϕ op targs := by
   induction hst with
-  | nil => intro op targs hl; simp [List.lookup] at hl
+  | nil
+  | lend _ _ _ _ _ _ _
+  | exit _ _ _ _ => intro op targs hl; simp [List.lookup] at hl
   | @call env body st Γ σ τ εb ε ϕb ϕ henv hbody hrow hsub _ ih =>
     intro op targs hl
     exact (ih hl).skip (by simp [handles, Frame.asHandler]) (by simp) fun S' hle _ h =>
@@ -243,7 +238,6 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
     intro op targs hl
     exact (ih hl).skip (by simp [handles, Frame.asHandler]) (by simp) fun S' hle _ h =>
       .cell (hle.cells _ _ hc) h
-  | lend _ _ _ _ _ _ _ => intro op targs hl; simp [List.lookup] at hl
   | @lendLoose uniq a b st τ ε ϕ hn hlo hon _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
@@ -261,7 +255,6 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
     intro op targs hl
     exact (ih hl).skip (by simp [handles, Frame.asHandler]) (by simp) fun S' hle _ h =>
       .yield (hw.mono hle) h
-  | exit _ _ _ _ => intro op targs hl; simp [List.lookup] at hl
   | never _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
@@ -344,7 +337,11 @@ theorem StackOk.known {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ :
     (h : StackOk Δ S st τ ε ϕ) : ∀ x, x ∈ Rgn.flat ϕ → Known S x := by
   induction h with
   | nil => intro x hx; cases hx
-  | call _ _ _ _ _ ih => exact ih
+  | call _ _ _ _ _ ih
+  | guard _ _ _ ih
+  | yield _ _ ih
+  | exit _ _ _ ih
+  | never _ ih => exact ih
   | handler _ _ _ hΦ _ ih => exact fun x hx => ih x (hΦ x hx)
   | label hl _ ih =>
     intro x hx
@@ -352,7 +349,6 @@ theorem StackOk.known {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ :
     rcases List.mem_cons.mp hx with rfl | hx
     · exact ⟨_, hl⟩
     · exact ih x hx
-  | guard _ _ _ ih => exact ih
   | cell hc _ ih =>
     intro x hx
     rw [Rgn.flat_cons_atom rfl, Rgn.flat_cons_atom rfl] at hx
@@ -381,9 +377,6 @@ theorem StackOk.known {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ :
     · rcases List.mem_cons.mp hx with rfl | hx
       · exact ⟨_, hl⟩
       · exact ih x hx
-  | yield _ _ ih => exact ih
-  | exit _ _ _ ih => exact ih
-  | never _ ih => exact ih
 
 /-- Releasing a cell keeps the store typed: a released cell keeps its type. -/
 theorem StoreOk.release {S : StoreTy} {store : Store Frame} (hs : StoreOk Δ S store) (a : Nat) :

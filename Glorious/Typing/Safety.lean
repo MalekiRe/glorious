@@ -1317,13 +1317,11 @@ theorem stepIO_ok {p : Program} {c : Config} (hp : ProgramOk Δ p) (ht : Typed �
     have hstep := step_ok (s := ⟨tm, env, stack, store⟩) hp ht hnh
     rw [stepIO_eq_lift hnh]
     cases hr : step p ⟨tm, env, stack, store⟩ with
-    | next s' =>
-      rw [hr] at hstep
-      exact hstep
-    | halt v => exact True.intro
+    | next _
     | stuck =>
       rw [hr] at hstep
       exact hstep
+    | halt v => exact True.intro
 
 /-! ## Whole runs -/
 
