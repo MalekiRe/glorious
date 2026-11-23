@@ -672,63 +672,10 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
     rw [hu] at hnone
     cases hnone
   cases hty with
-  | @load _ x _ r σ _ _ ha hr _ _ =>
-    cases hx : Atom.eval env x with
-    | none => simp [evalAtoms, hx] at hev
-    | some w =>
-      simp [evalAtoms, hx] at hev
-      exact key ha (hr hR) hx hev.1
-  | @tag _ x path _ r σ _ _ _ ha hr _ _ =>
-    cases hx : Atom.eval env x with
-    | none => simp [evalAtoms, hx] at hev
-    | some w =>
-      cases hp : evalAtoms env path with
-      | none => simp [evalAtoms, hx, hp] at hev
-      | some ws =>
-        simp [evalAtoms, hx, hp] at hev
-        exact key ha (hr hR) hx hev.1
-  | @focus _ x i _ r σ _ _ _ ha hr _ _ =>
-    cases hx : Atom.eval env x with
-    | none => simp [evalAtoms, hx] at hev
-    | some w =>
-      have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
-      simp [evalAtoms, hx, hi] at hev
-      exact key ha (hr hR) hx hev.1
-  | @focusIn _ x i built _ r σ _ _ _ _ ha hr _ _ _ =>
-    cases hx : Atom.eval env x with
-    | none => simp [evalAtoms, hx] at hev
-    | some w =>
-      have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
-      have hb : (Atom.int (built : Int)).eval env = some (.int built) := rfl
-      simp [evalAtoms, hx, hi, hb] at hev
-      exact key ha (hr hR) hx hev.1
-  | @focusAt _ x ix _ r σ _ _ _ ha _ hr _ _ =>
-    cases hx : Atom.eval env x with
-    | none => simp [evalAtoms, hx] at hev
-    | some w =>
-      cases hi : Atom.eval env ix with
-      | none => simp [evalAtoms, hx, hi] at hev
-      | some w' =>
-        simp [evalAtoms, hx, hi] at hev
-        exact key ha (hr hR) hx hev.1
-  | @store _ x y _ r σ _ _ hform _ _ =>
-    cases hx : Atom.eval env x with
-    | none => simp [evalAtoms, hx] at hev
-    | some w =>
-      cases hy : Atom.eval env y with
-      | none => simp [evalAtoms, hx, hy] at hev
-      | some w' =>
-        simp [evalAtoms, hx, hy] at hev
-        exact key hform.ref (hform.region hR) hx hev.1
-  | @swap _ x y _ r σ _ _ hform _ _ =>
-    cases hx : Atom.eval env x with
-    | none => simp [evalAtoms, hx] at hev
-    | some w =>
-      cases hy : Atom.eval env y with
-      | none => simp [evalAtoms, hx, hy] at hev
-      | some w' =>
-        simp [evalAtoms, hx, hy] at hev
-        exact key hform.ref (hform.region hR) hx hev.1
+  | @load _ x _ r σ _ _ ha hr _ _ | @tag _ x _ _ r σ _ _ _ ha hr _ _ | @focus _ x _ _ r σ _ _ _ ha hr _ _
+  | @focusIn _ x _ _ _ r σ _ _ _ _ ha hr _ _ _ | @focusAt _ x _ _ r σ _ _ _ ha _ hr _ _ =>
+    exact key ha (hr hR) (evalAtoms_head hev) rfl
+  | store hform _ _ | swap hform _ _ => exact key hform.ref (hform.region hR) (evalAtoms_head hev) rfl
 
 /-! ## A label is applied only inside its scope -/
 

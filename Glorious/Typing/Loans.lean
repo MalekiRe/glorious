@@ -357,77 +357,13 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
   · simp only at htm hev hno
     subst htm
     cases hty with
-    | @load _ x _ r σ _ _ ha hr _ _ =>
-      cases hx : Atom.eval env x with
-      | none => simp [evalAtoms, hx] at hev
-      | some w =>
-        simp [evalAtoms, hx] at hev
-        rw [hev.1] at hx
-        have := rd (hr hR) (key ha hx)
-        simp [writes, this] at hno
-    | @tag _ x path _ r σ _ _ _ ha hr _ _ =>
-      cases hx : Atom.eval env x with
-      | none => simp [evalAtoms, hx] at hev
-      | some w =>
-        cases hp : evalAtoms env path with
-        | none => simp [evalAtoms, hx, hp] at hev
-        | some ws =>
-          simp [evalAtoms, hx, hp] at hev
-          rw [hev.1] at hx
-          have := rd (hr hR) (key ha hx)
-          simp [writes, this] at hno
-    | @focus _ x i _ r σ _ _ _ ha hr _ _ =>
-      cases hx : Atom.eval env x with
-      | none => simp [evalAtoms, hx] at hev
-      | some w =>
-        have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
-        simp [evalAtoms, hx, hi] at hev
-        rw [hev.1] at hx
-        have := rd (hr hR) (key ha hx)
-        simp [writes, this] at hno
-    | @focusIn _ x i built _ r σ _ _ _ _ ha hr _ _ _ =>
-      cases hx : Atom.eval env x with
-      | none => simp [evalAtoms, hx] at hev
-      | some w =>
-        have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
-        have hb : (Atom.int (built : Int)).eval env = some (.int built) := rfl
-        simp [evalAtoms, hx, hi, hb] at hev
-        rw [hev.1] at hx
-        have := rd (hr hR) (key ha hx)
-        simp [writes, this] at hno
-    | @focusAt _ x ix _ r σ _ _ _ ha _ hr _ _ =>
-      cases hx : Atom.eval env x with
-      | none => simp [evalAtoms, hx] at hev
-      | some w =>
-        cases hi : Atom.eval env ix with
-        | none => simp [evalAtoms, hx, hi] at hev
-        | some w' =>
-          simp [evalAtoms, hx, hi] at hev
-          rw [hev.1] at hx
-          have := rd (hr hR) (key ha hx)
-          simp [writes, this] at hno
-    | @store _ x y _ r σ _ _ hform _ _ =>
-      cases hx : Atom.eval env x with
-      | none => simp [evalAtoms, hx] at hev
-      | some w =>
-        cases hy : Atom.eval env y with
-        | none => simp [evalAtoms, hx, hy] at hev
-        | some w' =>
-          simp [evalAtoms, hx, hy] at hev
-          rw [hev.1] at hx
-          have := wrt (hform.write hL) (key hform.ref hx)
-          simp [writes, this] at hno
-    | @swap _ x y _ r σ _ _ hform _ _ =>
-      cases hx : Atom.eval env x with
-      | none => simp [evalAtoms, hx] at hev
-      | some w =>
-        cases hy : Atom.eval env y with
-        | none => simp [evalAtoms, hx, hy] at hev
-        | some w' =>
-          simp [evalAtoms, hx, hy] at hev
-          rw [hev.1] at hx
-          have := wrt (hform.write hL) (key hform.ref hx)
-          simp [writes, this] at hno
+    | @load _ x _ r σ _ _ ha hr _ _ | @tag _ x _ _ r σ _ _ _ ha hr _ _ | @focus _ x _ _ r σ _ _ _ ha hr _ _
+    | @focusIn _ x _ _ _ r σ _ _ _ _ ha hr _ _ _ | @focusAt _ x _ _ r σ _ _ _ ha _ hr _ _ =>
+      have := rd (hr hR) (key ha (evalAtoms_head hev))
+      simp [writes, this] at hno
+    | store hform _ _ | swap hform _ _ =>
+      have := wrt (hform.write hL) (key hform.ref (evalAtoms_head hev))
+      simp [writes, this] at hno
   · simp only at htm hev hno
     subst htm
     cases hty with

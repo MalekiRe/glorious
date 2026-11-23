@@ -439,6 +439,15 @@ def evalAtoms (ρ : Env) : List Atom → Option (List Value)
     | some v, some vs => some (v :: vs)
     | _, _ => none
 
+/-- Of atoms that evaluate, the first gives the first value. -/
+theorem evalAtoms_head {ρ : Env} {a : Atom} {as : List Atom} {v : Value} {vs : List Value}
+    (h : evalAtoms ρ (a :: as) = some (v :: vs)) : a.eval ρ = some v := by
+  simp only [evalAtoms] at h
+  split at h
+  · cases h
+    assumption
+  · cases h
+
 def Rhs.eval (ρ : Env) : Rhs → Option Value
   | .atom a => a.eval ρ
   | .prim p args =>
