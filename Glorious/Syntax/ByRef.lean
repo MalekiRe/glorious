@@ -84,16 +84,14 @@ partial def shapeTests (rn : RefNames m) (path : List Nat) :
     | 0 => pure (some [])
     | 1 => pure ((← rn.ctorTest x none).map fun e => [(path, e)])
     | _ => pure none
-  | .tuple args => do
-    let mut out : List (List Nat × Expr) := []
-    for (p, i) in args.zipIdx do
-      match ← shapeTests rn (path ++ [i]) p with
-      | some more => out := out ++ more
-      | none => return none
-    pure (some out)
+  | .tuple args => parts [] args
   | .ctor name qual args => do
     let some named ← rn.ctorTest name qual | return none
-    let mut out : List (List Nat × Expr) := [(path, named)]
+    parts [(path, named)] args
+where
+  /-- Each part's tests after `out`, none where one has none. -/
+  parts (out : List (List Nat × Expr)) (args : List Pattern) : m (Option (List (List Nat × Expr))) := do
+    let mut out := out
     for (p, i) in args.zipIdx do
       match ← shapeTests rn (path ++ [i]) p with
       | some more => out := out ++ more
