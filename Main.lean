@@ -770,7 +770,7 @@ def selftest (vm : Option String) : IO UInt32 := do
   let count := fun (f : Outcome → Bool) => (found.filter f).size
   let scopes := found.foldl (fun n o => n + o.lent) 0
   let plain := found.foldl (fun n o => n + o.plain) 0
-  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
+  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.certified)} with a certificate; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
   IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {count (·.plain > 0)} programs"
   let installs := count fun o => match o.cleanups with
     | some (n, _, _) => decide (n > 0)

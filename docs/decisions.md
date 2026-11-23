@@ -336,6 +336,41 @@ In stages, each ending with every test program running on the machines:
    `arr_*` leave the compiler and `[T]` is a slice.
 5. The machines' values only scalars and addresses, with a C-like ABI.
 
+**The order, as it now stands.** A variable that is borrowed can hold any
+value, so references cannot be addresses before every type has bytes; and
+`Vec::get` gives a reference. So, after stages 1 and 2 (and `[T; N]` laid
+out inline, `Fixed`'s `Layout` written by hand): references as addresses,
+through a typed lowering; then `Vec<T>`, slices and text over memory, and
+the compiler's array gone; callables as bytes once it is decided how a
+capturing closure is stored where its type cannot be named (boxing, trait
+objects, or generics only: not decided).
+
+**The typed lowering.** Core is untyped, but every program the checker
+accepts that is not foreign gets a certificate (`Infer`): each function's
+signature and the hints from which every local's type follows
+(`Typing.checkFn`). That is the typed Core lowering needs:
+
+1. Types for every program: `Infer` gives the host's operations their
+   types (memory, the shared cells, foreign calls) and `transmute` one of
+   its own, so that a program with them has types too, though the proved
+   checker does not accept it.
+2. Each function's locals' types, from the certificate (the checker's
+   reconstruction, kept).
+3. A shape for each type (`Typing.Ty` and the declarations in the
+   certificate): an integer's width, a tuple's or a constructor's fields at
+   their offsets, an enum's tag, a reference an address, a resumption or a
+   label an id, a callable whose captures are known its function and them.
+4. Cells in the world's memory: `cell` allocates its type's bytes and
+   writes the value there; `load`, `store`, `swap` and `tag` read and write
+   by the shape; `focus` adds an offset; a reference is an address. On the
+   Core machine, the Lean bytecode machine and the Rust VM alike.
+5. Then `Vec<T>`, `&[T]`, `&mut [T]`, `String` and `&str` in the library,
+   with references into memory.
+
+A callable whose captures are not known where it is stored (a `fn(..)`
+value that captured something) is held by the machine and named by an id
+in memory meanwhile: what replaces that waits on the decision above.
+
 Stage 2 so far: `Repr` (the prelude's) writes a value to memory and reads
 it back, `repr_store` and `repr_load`, both `unsafe fn` (a trait's
 `unsafe fn` is called only in `unsafe`). `Int`'s and each scalar's are its
