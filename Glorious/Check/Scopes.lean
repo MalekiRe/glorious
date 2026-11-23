@@ -452,25 +452,25 @@ def settleAssocs : M Unit := do
   modify fun s => { s with assocUses := #[] }
   let mut left : Array (String × Ty × String × Ty × String × String) := #[]
   for (tr, subject, name, a, owner, pos) in uses do
+    let fit := fun (what : String) (found : Ty) => do
+      try unifyAt what found a catch e => throw (pos ++ e)
+    -- (Asked before of the same type, all known: the same answer.)
+    let zsubject ← zonk subject
+    let spelled ← spellTy zsubject
+    let memoKey := if (freeTys zsubject).isEmpty then some s!"{tr}|{name}|{spelled}" else none
+    if let some found := memoKey.bind ((← get).assocMemo[·]?) then
+      fit s!"`{name}` of `{Syntax.lastSegment tr}`" found
+      continue
+    let remember := do
+      if let some k := memoKey then modify fun s => { s with assocMemo := s.assocMemo.insert k a }
     -- (Asked at types, `F::Of<Int>`: found as any other is, once the type
     -- asked is known.)
     if let .con mark (_ :: _) ← find subject then
       if mark == Syntax.gatMark then
-        -- (Asked before of the same type, all known: the same answer.)
-        let zsubject ← zonk subject
-        let spelledG ← spellTy zsubject
-        let memoKey := if (freeTys zsubject).isEmpty then some s!"{tr}|{name}|{spelledG}" else none
-        if let some k := memoKey then
-          if let some found := (← get).assocMemo[k]? then
-            try unifyAt s!"`{name}` of `{Syntax.lastSegment tr}`" found a
-            catch e => throw (pos ++ e)
-            continue
         match ← assocAt tr subject name with
         | some found =>
-          try unifyAt s!"`{name}` of `{Syntax.lastSegment tr}`" found a
-          catch e => throw (pos ++ e)
-          if let some k := memoKey then
-            modify fun s => { s with assocMemo := s.assocMemo.insert k a }
+          fit s!"`{name}` of `{Syntax.lastSegment tr}`" found
+          remember
         | none => left := left.push (tr, subject, name, a, owner, pos)
         continue
     let (self, args) ← subjectOf tr subject
@@ -479,15 +479,6 @@ def settleAssocs : M Unit := do
       | other => headFor tr other
     let ground ← args.allM fun x => do pure (freeTys (← zonk x)).isEmpty
     let ground := ground || (← hasGenericImpl tr self)
-    -- (Asked before of the same type, all known: the same answer.)
-    let zsubject ← zonk subject
-    let spelled ← spellTy zsubject
-    let memoKey := if (freeTys zsubject).isEmpty then some s!"{tr}|{name}|{spelled}" else none
-    if let some k := memoKey then
-      if let some found := (← get).assocMemo[k]? then
-        try unifyAt s!"`{name}` of `{Syntax.lastSegment tr}`" found a
-        catch e => throw (pos ++ e)
-        continue
     match known, ground with
     | some (head, hargs), true =>
       -- (Which of several it is, where the type is not all known yet: once
@@ -515,10 +506,8 @@ def settleAssocs : M Unit := do
             | some at_ => pure at_
             | none => implAt im hargs
           equalUses im at_ hargs owner pos
-          try unifyAt s!"`{name}` of `{key}` for `{bareName head}`" (← unproject (subst at_ [] [] said)) a
-          catch e => throw (pos ++ e)
-          if let some k := memoKey then
-            modify fun s => { s with assocMemo := s.assocMemo.insert k a }
+          fit s!"`{name}` of `{key}` for `{bareName head}`" (← unproject (subst at_ [] [] said))
+          remember
         | none => left := left.push (tr, subject, name, a, owner, pos)
       | none => left := left.push (tr, subject, name, a, owner, pos)
     | _, _ => left := left.push (tr, subject, name, a, owner, pos)
