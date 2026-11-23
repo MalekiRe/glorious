@@ -315,6 +315,19 @@ theorem StoreOk.push_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
       simp only [Array.getElem?_push, show a ≠ cells.size from Nat.ne_of_lt hlt, ite_false] at hg
       exact (hval w hg).mono hle
 
+/-- The cell a typed reference points to is in the store: freed, or live with
+a value of its type. -/
+theorem StoreOk.cell_at {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
+    (hs : StoreOk Δ S ⟨conts, labels, cells⟩) {addr : Nat} {σ₀ : Ty} (hcell : S.cells addr = some σ₀) :
+    cells[addr]? = some none ∨ ∃ w₀, cells[addr]? = some (some w₀) ∧ HasVal Δ S w₀ σ₀ := by
+  obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
+  cases hget : cells[addr]? with
+  | none => exact absurd hlt (by simpa using Array.getElem?_eq_none_iff.mp hget)
+  | some x =>
+    cases x with
+    | none => exact .inl rfl
+    | some w₀ => exact .inr ⟨w₀, rfl, hval w₀ hget⟩
+
 /-- Overwriting or freeing a cell keeps the store typed. -/
 theorem StoreOk.set_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     {a : Nat} {τ : Ty} {x : Option Value} (hs : StoreOk Δ S ⟨conts, labels, cells⟩)
@@ -1096,127 +1109,103 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
   | @load _ a body r σ _ _ ha _ hdup hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨addr, tag, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
-    obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
-    cases hget : cells[addr]? with
-    | none => exact absurd hlt (by simpa using Array.getElem?_eq_none_iff.mp hget)
-    | some x =>
-      cases x with
-      | none =>
-        simp only [step, evalAtoms, hv, MemOp.eval, hget]
-        exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := []) (by simp [evalAtoms, hv]) hget
-      | some w₀ =>
-        rcases hfw : w₀.part pth with _ | w
-        · simp only [step, evalAtoms, hv, MemOp.eval, hget, hfw]
-          exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [])
-            (by simp [evalAtoms, hv]) hget hfw
-        have hwt := part_ok hpl (hval w₀ hget) hfw
-        simp only [step, evalAtoms, hv, MemOp.eval, hget, hfw]
-        refine .next (.mk (henv.snoc hwt) hbody hle hsub hst hs)
-          (fun hD hu => hu.mono rfl fun id => ?_)
-        have h2 := occEnv_push id env w (fv body)
-        have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
-          (b := fv (.mem .load [a] body)) (fun i hi => List.mem_append_right _ hi)
-        have h4 := hD _ _ _ hwt hdup id
-        simp only [occState]
-        omega
+    rcases hs.cell_at hcell with hget | ⟨w₀, hget, hw₀⟩
+    · simp only [step, evalAtoms, hv, MemOp.eval, hget]
+      exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := []) (by simp [evalAtoms, hv]) hget
+    rcases hfw : w₀.part pth with _ | w
+    · simp only [step, evalAtoms, hv, MemOp.eval, hget, hfw]
+      exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [])
+        (by simp [evalAtoms, hv]) hget hfw
+    have hwt := part_ok hpl hw₀ hfw
+    simp only [step, evalAtoms, hv, MemOp.eval, hget, hfw]
+    refine .next (.mk (henv.snoc hwt) hbody hle hsub hst hs)
+      (fun hD hu => hu.mono rfl fun id => ?_)
+    have h2 := occEnv_push id env w (fv body)
+    have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
+      (b := fv (.mem .load [a] body)) (fun i hi => List.mem_append_right _ hi)
+    have h4 := hD _ _ _ hwt hdup id
+    simp only [occState]
+    omega
   | @tag _ a path body r σ _ _ Ps ha _ hpath hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨vs, hvs, _⟩ := atoms_ok henv hpath
     obtain ⟨addr, tg, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
-    obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
-    cases hget : cells[addr]? with
-    | none => exact absurd hlt (by simpa using Array.getElem?_eq_none_iff.mp hget)
-    | some x =>
-      cases x with
-      | none =>
-        simp only [step, evalAtoms, hv, hvs, MemOp.eval, hget]
-        exact Fault.freed (a := addr) (b := tg) (path := pth) (vs := vs) (by simp [evalAtoms, hv, hvs]) hget
-      | some w₀ =>
-        rcases hfw : w₀.part pth with _ | w
-        · simp only [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
-          exact Fault.absent (a := addr) (b := tg) (path := pth) (vs := vs)
-            (by simp [evalAtoms, hv, hvs]) hget hfw
-        simp only [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
-        refine .next (.mk (henv.snoc .int) hbody hle hsub hst hs)
-          (fun hD hu => hu.mono rfl fun id => ?_)
-        have h2 := occEnv_push id env (.int (tagAt w vs)) (fv body)
-        have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
-          (b := fv (.mem .tag (a :: path) body)) (fun i hi => List.mem_append_right _ hi)
-        have h4 : occ id (Value.int (tagAt w vs)) = 0 := by simp [occ]
-        simp only [occState]
-        omega
+    rcases hs.cell_at hcell with hget | ⟨w₀, hget, hw₀⟩
+    · simp only [step, evalAtoms, hv, hvs, MemOp.eval, hget]
+      exact Fault.freed (a := addr) (b := tg) (path := pth) (vs := vs) (by simp [evalAtoms, hv, hvs]) hget
+    rcases hfw : w₀.part pth with _ | w
+    · simp only [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
+      exact Fault.absent (a := addr) (b := tg) (path := pth) (vs := vs)
+        (by simp [evalAtoms, hv, hvs]) hget hfw
+    simp only [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
+    refine .next (.mk (henv.snoc .int) hbody hle hsub hst hs)
+      (fun hD hu => hu.mono rfl fun id => ?_)
+    have h2 := occEnv_push id env (.int (tagAt w vs)) (fv body)
+    have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
+      (b := fv (.mem .tag (a :: path) body)) (fun i hi => List.mem_append_right _ hi)
+    have h4 : occ id (Value.int (tagAt w vs)) = 0 := by simp [occ]
+    simp only [occState]
+    omega
   | @store _ a b body r σ _ _ hform hlin hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hform.ref
     obtain ⟨w, hw, hwt⟩ := atom_ok henv hform.value
     obtain ⟨addr, tag, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
-    obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
-    cases hget : cells[addr]? with
-    | none => exact absurd hlt (by simpa using Array.getElem?_eq_none_iff.mp hget)
-    | some x =>
-      cases x with
-      | none =>
-        simp only [step, evalAtoms, hv, hw, MemOp.eval, hget]
-        exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
-      | some old₀ =>
-        rcases hfo : old₀.part pth with _ | old
-        · simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, Value.putPart_none_of_part w hfo]
-          exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
-            (by simp [evalAtoms, hv, hw]) hget hfo
-        obtain ⟨v', hput⟩ := Value.putPart_of_part w hfo
-        have hvt' := putPart_ok hpl (hval old₀ hget) hwt hput
-        simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, hput]
-        refine .next (.mk (henv.snoc .unit) hbody hle hsub hst
-          (hs.set_cell hcell (fun u hu => by cases hu; exact hvt')))
-          (fun hD hu => hu.mono rfl fun id => ?_)
-        have h2 := moved_live hD henv hlin (live := fv (.mem .store [a, b] body))
-          (fun i hi => by
-            rcases List.mem_append.mp hi with h | h
-            · exact List.mem_append_left _ (atomVars_tail_sub h)
-            · exact List.mem_append_right _ h) id
-        have h3 := occEnv_push id env Value.unit (fv body)
-        have h4 := occ_eval id env hw
-        have h5 := occCells_set id hget (some v')
-        have h6 := occ_unit id
-        have h7 := occ_putPart id hfo hput
-        simp only [oweight] at h5
-        simp only [occState]
-        omega
+    rcases hs.cell_at hcell with hget | ⟨old₀, hget, hw₀⟩
+    · simp only [step, evalAtoms, hv, hw, MemOp.eval, hget]
+      exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
+    rcases hfo : old₀.part pth with _ | old
+    · simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, Value.putPart_none_of_part w hfo]
+      exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
+        (by simp [evalAtoms, hv, hw]) hget hfo
+    obtain ⟨v', hput⟩ := Value.putPart_of_part w hfo
+    have hvt' := putPart_ok hpl hw₀ hwt hput
+    simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, hput]
+    refine .next (.mk (henv.snoc .unit) hbody hle hsub hst
+      (hs.set_cell hcell (fun u hu => by cases hu; exact hvt')))
+      (fun hD hu => hu.mono rfl fun id => ?_)
+    have h2 := moved_live hD henv hlin (live := fv (.mem .store [a, b] body))
+      (fun i hi => by
+        rcases List.mem_append.mp hi with h | h
+        · exact List.mem_append_left _ (atomVars_tail_sub h)
+        · exact List.mem_append_right _ h) id
+    have h3 := occEnv_push id env Value.unit (fv body)
+    have h4 := occ_eval id env hw
+    have h5 := occCells_set id hget (some v')
+    have h6 := occ_unit id
+    have h7 := occ_putPart id hfo hput
+    simp only [oweight] at h5
+    simp only [occState]
+    omega
   | @swap _ a b body r σ _ _ hform hlin hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hform.ref
     obtain ⟨w, hw, hwt⟩ := atom_ok henv hform.value
     obtain ⟨addr, tag, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
-    obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
-    cases hget : cells[addr]? with
-    | none => exact absurd hlt (by simpa using Array.getElem?_eq_none_iff.mp hget)
-    | some x =>
-      cases x with
-      | none =>
-        simp only [step, evalAtoms, hv, hw, MemOp.eval, hget]
-        exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
-      | some old₀ =>
-        rcases hfo : old₀.part pth with _ | old
-        · simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, Value.putPart_none_of_part w hfo]
-          exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
-            (by simp [evalAtoms, hv, hw]) hget hfo
-        have hot := part_ok hpl (hval old₀ hget) hfo
-        obtain ⟨v', hput⟩ := Value.putPart_of_part w hfo
-        have hvt' := putPart_ok hpl (hval old₀ hget) hwt hput
-        simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, hput]
-        refine .next (.mk (henv.snoc hot) hbody hle hsub hst
-          (hs.set_cell hcell (fun u hu => by cases hu; exact hvt')))
-          (fun hD hu => hu.mono rfl fun id => ?_)
-        have h2 := moved_live hD henv hlin (live := fv (.mem .swap [a, b] body))
-          (fun i hi => by
-            rcases List.mem_append.mp hi with h | h
-            · exact List.mem_append_left _ (atomVars_tail_sub h)
-            · exact List.mem_append_right _ h) id
-        have h3 := occEnv_push id env old (fv body)
-        have h4 := occ_eval id env hw
-        have h5 := occCells_set id hget (some v')
-        have h7 := occ_putPart id hfo hput
-        simp only [oweight] at h5
-        simp only [occState]
-        omega
+    rcases hs.cell_at hcell with hget | ⟨old₀, hget, hw₀⟩
+    · simp only [step, evalAtoms, hv, hw, MemOp.eval, hget]
+      exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
+    rcases hfo : old₀.part pth with _ | old
+    · simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, Value.putPart_none_of_part w hfo]
+      exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
+        (by simp [evalAtoms, hv, hw]) hget hfo
+    have hot := part_ok hpl hw₀ hfo
+    obtain ⟨v', hput⟩ := Value.putPart_of_part w hfo
+    have hvt' := putPart_ok hpl hw₀ hwt hput
+    simp only [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, hput]
+    refine .next (.mk (henv.snoc hot) hbody hle hsub hst
+      (hs.set_cell hcell (fun u hu => by cases hu; exact hvt')))
+      (fun hD hu => hu.mono rfl fun id => ?_)
+    have h2 := moved_live hD henv hlin (live := fv (.mem .swap [a, b] body))
+      (fun i hi => by
+        rcases List.mem_append.mp hi with h | h
+        · exact List.mem_append_left _ (atomVars_tail_sub h)
+        · exact List.mem_append_right _ h) id
+    have h3 := occEnv_push id env old (fv body)
+    have h4 := occ_eval id env hw
+    have h5 := occCells_set id hget (some v')
+    have h7 := occ_putPart id hfo hput
+    simp only [oweight] at h5
+    simp only [occState]
+    omega
   | @focus _ a i body r σ σ' _ _ ha _ hpl' hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨addr, tg, pth, σ₀, rfl, hcell, hpl, hon, hl⟩ := hvt.ref_inv
