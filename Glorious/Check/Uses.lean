@@ -418,16 +418,19 @@ partial def takenApart (ctx : ACtx) : Pattern → AVal → Nat
     ((ps.zip args).map fun (p, v) => takenApart ctx p v).foldl (· + ·) 0
   | _, _ => 0
 
-/-- Can a use of the binding come of this value? -/
-partial def holdsTracked : AVal → Bool
-  | .tracked => true
-  | .data _ args => args.any holdsTracked
+/-- Does a value hold one `leaf` says yes of: in it, or in what a callable
+in it has of where it was made? -/
+partial def holdsVal (leaf : AVal → Bool) : AVal → Bool
+  | .data _ args => args.any (holdsVal leaf)
   | .clo b clauses env =>
     (b.fvClauses clauses).eraseDups.any fun y =>
       match env.lookup y with
-      | some v => holdsTracked v
+      | some v => holdsVal leaf v
       | none => false
-  | _ => false
+  | v => leaf v
+
+/-- Can a use of the binding come of this value? -/
+def holdsTracked : AVal → Bool := holdsVal fun | .tracked => true | _ => false
 
 /-- The name under which a callable keeps which functions were being followed
 where it was made. -/
@@ -445,15 +448,7 @@ def ACtx.inside (ctx : ACtx) (env : List (String × AVal)) : ACtx :=
   | _ => ctx
 
 /-- May a call of a `probe` come of this value? -/
-partial def holdsProbe : AVal → Bool
-  | .probe => true
-  | .data _ args => args.any holdsProbe
-  | .clo b clauses env =>
-    (b.fvClauses clauses).eraseDups.any fun y =>
-      match env.lookup y with
-      | some v => holdsProbe v
-      | none => false
-  | _ => false
+def holdsProbe : AVal → Bool := holdsVal fun | .probe => true | _ => false
 
 open Flat in
 mutual
