@@ -118,13 +118,8 @@ partial def atomsOf (t : ITy) (out : List Nat) : M (List Nat) := do
   match ← find t with
   | .var _ | .param _ | .int => pure out
   | .tuple fs | .data _ fs => fs.foldlM (fun o f => atomsOf f o) out
-  | .fn ps r ops tail _ env acc => do
-    let mut inner ← ps.foldlM (fun o f => atomsOf f o) []
-    inner ← atomsOf r inner
-    inner ← atomsOf env inner
-    let row ← flattenRow ⟨ops, tail⟩
-    for (_, targs) in row.ops do
-      inner ← targs.foldlM (fun o f => atomsOf f o) inner
+  | t@(.fn _ _ _ _ _ _ acc) => do
+    let mut inner ← (← partsOf t).foldlM (fun o f => atomsOf f o) []
     for r in ← accSet acc do
       if ((← isAtom r) || (← isRank r)) && !inner.contains r then inner := r :: inner
     let binders ← bindersOf acc

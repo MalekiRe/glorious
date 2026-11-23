@@ -96,6 +96,32 @@ structure IRow where
 
 def ITy.unit : ITy := .tuple []
 
+/-- What to make of each part of a type: the types directly in it (`ty`), and
+its regions, classes, accesses and row tail. -/
+structure ITy.On (m : Type → Type) [Monad m] where
+  ty : ITy → m ITy
+  rg : Nat → m Nat := pure
+  cls : ICls → m ICls := pure
+  acc : Nat → m Nat := pure
+  tail : Option Nat → m (Option Nat) := pure
+
+/-- A type with each of its parts made anew (`ITy.On`); the rest as it is. -/
+def ITy.mapM {m : Type → Type} [Monad m] (h : ITy.On m) : ITy → m ITy
+  | .tuple fs => do pure (.tuple (← fs.mapM h.ty))
+  | .data n args => do pure (.data n (← args.mapM h.ty))
+  | .fn ps r ops tail cls env acc => do
+    pure (.fn (← ps.mapM h.ty) (← h.ty r) (← ops.mapM fun (op, ts) => do pure (op, ← ts.mapM h.ty))
+      (← h.tail tail) (← h.cls cls) (← h.ty env) (← h.acc acc))
+  | .ref ρ t => do pure (.ref (← h.rg ρ) (← h.ty t))
+  | t => pure t
+
+/-- The types directly in a type, a callable's operations' last. -/
+def ITy.parts : ITy → List ITy
+  | .tuple fs | .data _ fs => fs
+  | .fn ps r ops _ _ env _ => ps ++ [r, env] ++ ops.flatMap (·.2)
+  | .ref _ t => [t]
+  | _ => []
+
 def ITy.func (ps : List ITy) (ret : ITy) (row : IRow) (cls : ICls) (env : ITy) (acc : Nat) : ITy :=
   .fn ps ret row.ops row.tail cls env acc
 
@@ -709,19 +735,15 @@ partial def flattenRow (r : IRow) : M IRow := do
       pure ⟨r.ops ++ rest.ops, rest.tail⟩
     | _ => pure r
 
+/-- The types directly in a type, a callable's operations as its row now is. -/
+def partsOf : ITy → M (List ITy)
+  | t@(.fn _ _ _ tail ..) => do pure (t.parts ++ (← flattenRow ⟨[], tail⟩).ops.flatMap (·.2))
+  | t => pure t.parts
+
 partial def occurs (id : Nat) (t : ITy) : M Bool := do
   match ← find t with
   | .var j => pure (id == j)
-  | .param _ | .int => pure false
-  | .tuple fs | .data _ fs => fs.anyM (occurs id)
-  | .fn ps r ops tail _ env _ => do
-    if ← ps.anyM (occurs id) then return true
-    if ← occurs id r then return true
-    if ← occurs id env then return true
-    let row ← flattenRow ⟨ops, tail⟩
-    row.ops.anyM fun (_, targs) => targs.anyM (occurs id)
-  | .ref _ t => occurs id t
-  | .never => pure false
+  | t => (← partsOf t).anyM (occurs id)
 
 partial def showTy (t : ITy) : M String := do
   match ← find t with
@@ -827,14 +849,7 @@ def requireOp (r : IRow) (op : Nat) (targs : List ITy) : M Unit := do
 
 /-- Replace a declaration's type parameters by arguments. -/
 partial def subst (args : List ITy) : ITy → ITy
-  | .var id => .var id
   | .param i => args[i]?.getD (.param i)
-  | .int => .int
-  | .tuple fs => .tuple (fs.map (subst args))
-  | .data n as => .data n (as.map (subst args))
-  | .fn ps r ops tail cls env acc =>
-    .fn (ps.map (subst args)) (subst args r)
-      (ops.map fun (op, targs) => (op, targs.map (subst args))) tail cls (subst args env) acc
   | .ref ρ t =>
     -- The region of a lifetime parameter is its argument's.
     if lifetimeBase ≤ ρ then
@@ -842,7 +857,7 @@ partial def subst (args : List ITy) : ITy → ITy
       | some (.ref ρ' _) => .ref ρ' (subst args t)
       | _ => .ref ρ (subst args t)
     else .ref ρ (subst args t)
-  | .never => .never
+  | t => Id.run (t.mapM { ty := pure ∘ subst args })
 
 def ctorDecl (tag : Nat) : M CtorDecl := do
   match (← get).ctors[tag]? with

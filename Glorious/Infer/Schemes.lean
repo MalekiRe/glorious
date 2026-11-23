@@ -13,19 +13,12 @@ open Glorious.Typing (Ty FnSig Hint Cert SigEntry DataInst OpInst)
 
 /-- A type with everything known about it written out. -/
 partial def resolve (t : ITy) : M ITy := do
-  match ← find t with
-  | .var id => pure (.var id)
-  | .param i => pure (.param i)
-  | .int => pure .int
-  | .tuple fs => do pure (.tuple (← fs.mapM resolve))
-  | .data n args => do pure (.data n (← args.mapM resolve))
-  | .fn ps r ops tail cls env acc => do
-    let row ← flattenRow ⟨ops, tail⟩
-    let ops ← row.ops.mapM fun (op, targs) => do pure (op, ← targs.mapM resolve)
-    pure (.fn (← ps.mapM resolve) (← resolve r) ops row.tail (← findCls cls) (← resolve env)
-      (← findAcc acc))
-  | .ref ρ t => do pure (.ref (← findRg ρ) (← resolve t))
-  | .never => pure .never
+  let t ← match ← find t with
+    | .fn ps r ops tail cls env acc => do
+      let row ← flattenRow ⟨ops, tail⟩
+      pure (.fn ps r row.ops row.tail cls env acc)
+    | t => pure t
+  t.mapM { ty := resolve, rg := findRg, cls := findCls, acc := findAcc }
 
 def resolveRow (r : IRow) : M IRow := do
   let r ← flattenRow r
@@ -57,23 +50,17 @@ structure Vars where
 def Vars.size (v : Vars) : Nat := v.tys.size + v.rows.size + v.clss.size
 
 partial def varsOf (t : ITy) (acc : Vars) : Vars :=
-  match t with
-  | .var id => { acc with tys := acc.tys.insert id }
-  | .param _ | .int => acc
-  | .tuple fs | .data _ fs => fs.foldl (fun a f => varsOf f a) acc
-  | .fn ps r ops tail cls env _ =>
-    let acc := ps.foldl (fun a f => varsOf f a) acc
-    let acc := varsOf r acc
-    let acc := varsOf env acc
-    let acc := ops.foldl (fun a e => e.2.foldl (fun a f => varsOf f a) a) acc
-    let acc := match tail with
-      | some v => { acc with rows := acc.rows.insert v }
-      | none => acc
-    match cls with
-    | .var c => { acc with clss := acc.clss.insert c }
-    | .lit _ => acc
-  | .ref _ t => varsOf t acc
-  | .never => acc
+  let acc := match t with
+    | .var id => { acc with tys := acc.tys.insert id }
+    | .fn _ _ _ tail cls _ _ =>
+      let acc := match tail with
+        | some v => { acc with rows := acc.rows.insert v }
+        | none => acc
+      match cls with
+      | .var c => { acc with clss := acc.clss.insert c }
+      | .lit _ => acc
+    | _ => acc
+  t.parts.foldl (fun a f => varsOf f a) acc
 
 def varsOfRow (r : IRow) (acc : Vars) : Vars :=
   varsOf (.fn [] .int r.ops r.tail (.lit false) .never 0) acc
@@ -107,13 +94,7 @@ def renCls : ICls → m ICls
 mutual
 partial def renTy : ITy → m ITy
   | .var id => do pure (.var (← f.ty id))
-  | .tuple fs => do pure (.tuple (← fs.mapM renTy))
-  | .data n args => do pure (.data n (← args.mapM renTy))
-  | .fn ps r ops tail cls env acc => do
-    pure (.fn (← ps.mapM renTy) (← renTy r) (← renOps ops) (← tail.mapM f.row) (← renCls f cls)
-      (← renTy env) (← f.acc acc))
-  | .ref ρ t => do pure (.ref (← f.rg ρ) (← renTy t))
-  | t => pure t
+  | t => t.mapM { ty := renTy, rg := f.rg, cls := renCls f, acc := f.acc, tail := (·.mapM f.row) }
 partial def renOps (ops : IOps) : m IOps :=
   ops.mapM fun (op, targs) => do pure (op, ← targs.mapM renTy)
 end
@@ -660,19 +641,11 @@ partial def settle : M Unit := do
 /-- The callables' records of what they touch that a type names: those of the
 callable types in it. (Not what those include in turn.) -/
 partial def namedAccs (t : ITy) (out : Std.HashSet Nat) : M (Std.HashSet Nat) := do
-  match ← find t with
-  | .var _ | .param _ | .int => pure out
-  | .tuple fs | .data _ fs => fs.foldlM (fun o f => namedAccs f o) out
-  | .fn ps r ops tail _ env a => do
-    let mut out ← ps.foldlM (fun o f => namedAccs f o) out
-    out ← namedAccs r out
-    out ← namedAccs env out
-    let row ← flattenRow ⟨ops, tail⟩
-    for (_, targs) in row.ops do
-      out ← targs.foldlM (fun o f => namedAccs f o) out
-    pure (out.insert (← findAcc a))
-  | .ref _ t => namedAccs t out
-  | .never => pure out
+  let t ← find t
+  let out ← (← partsOf t).foldlM (fun o f => namedAccs f o) out
+  match t with
+  | .fn _ _ _ _ _ _ a => pure (out.insert (← findAcc a))
+  | _ => pure out
 
 /-- Those a row's operations name. -/
 def namedAccsRow (r : IRow) (out : Std.HashSet Nat) : M (Std.HashSet Nat) := do
@@ -683,21 +656,14 @@ def namedAccsRow (r : IRow) (out : Std.HashSet Nat) : M (Std.HashSet Nat) := do
 those include: gathered for the types the whole program shares. -/
 partial def sharedRegions (t : ITy) (acc : Std.HashSet Nat × Std.HashSet Nat) :
     M (Std.HashSet Nat × Std.HashSet Nat) := do
-  match ← find t with
-  | .var _ | .param _ | .int => pure acc
-  | .tuple fs | .data _ fs => fs.foldlM (fun a f => sharedRegions f a) acc
-  | .fn ps r ops tail _ env a => do
-    let mut acc ← ps.foldlM (fun a f => sharedRegions f a) acc
-    acc ← sharedRegions r acc
-    acc ← sharedRegions env acc
-    let row ← flattenRow ⟨ops, tail⟩
-    for (_, targs) in row.ops do
-      acc ← targs.foldlM (fun a f => sharedRegions f a) acc
-    touched a acc
-  | .ref ρ t => do
-    let r ← findRg ρ
-    sharedRegions t (acc.1.insert r, acc.2)
-  | .never => pure acc
+  let t ← find t
+  let acc ← match t with
+    | .ref ρ _ => do pure (acc.1.insert (← findRg ρ), acc.2)
+    | _ => pure acc
+  let acc ← (← partsOf t).foldlM (fun a f => sharedRegions f a) acc
+  match t with
+  | .fn _ _ _ _ _ _ a => touched a acc
+  | _ => pure acc
 where
   touched (a : Nat) (acc : Std.HashSet Nat × Std.HashSet Nat) :
       M (Std.HashSet Nat × Std.HashSet Nat) := do
