@@ -248,6 +248,53 @@ def layoutOf (fields : Std.HashMap String (List String × List (List TypeExpr)))
     | v :: vs => vs.foldl (fun x y => call 0 "layout_widest" [x, y]) v
   (call 0 "layout_size" [whole], call 0 "layout_align" [whole])
 
+/-- `repr_store` and `repr_load` in the copy for `head` of `Repr`: each
+field written at its offset, and read back from there, in the order of
+`layoutOf` (a tag first, a byte, where there is more than one constructor).
+`ctors` are the constructors' names (none for a tuple) and fields. -/
+def reprOf (ctors : List (Option String × List TypeExpr)) (base : Nat) : Item × Item := Id.run do
+  let name := fun (x : String) => Expr.name none x
+  let call := fun (id : Nat) (f : String) (args : List Expr) => Expr.call id (name f) args
+  let mut id := base
+  let tagged := ctors.length > 1
+  let mut stores : List Clause := []
+  let mut loads : List Clause := []
+  for ((ctor, fs), k) in ctors.zipIdx do
+    let vars := (List.range fs.length).map fun i => s!"%v{i}"
+    let pat := match ctor with
+      | some c => Pattern.ctor c none (vars.map .var)
+      | none => Pattern.tuple (vars.map .var)
+    -- (Each field's offset, after the tag and the fields before it.)
+    let mut offsets : List Stmt := []
+    let mut layout := Expr.tuple [.int (if tagged then 1 else 0), .int 1]
+    for (f, i) in fs.zipIdx do
+      let ty := (TypeExpr.tuple [f]).asExpr
+      let size := Expr.call 0 (name instMark) [call id "size_of" [], ty]
+      let align := Expr.call 0 (name instMark) [call (id + 1) "align_of" [], ty]
+      let align' := Expr.call 0 (name instMark) [call (id + 2) "align_of" [], ty]
+      id := id + 3
+      offsets := offsets ++ [.let_ (.var s!"%o{i}") (call 0 "layout_start" [layout, align])]
+      layout := call 0 "layout_add" [layout, size, align']
+    let addr := fun (i : Nat) => call 0 "repr_at" [name "%at", name s!"%o{i}"]
+    let tag : List Stmt := if tagged then [.expr (call 0 "ptr_write" [name "%at", .int 8, .int k])] else []
+    let mut writes : List Stmt := []
+    let mut reads : List Stmt := []
+    for i in List.range fs.length do
+      writes := writes ++ [.expr (call id "repr_store" [addr i, name s!"%v{i}"])]
+      reads := reads ++ [.let_ (.var s!"%v{i}") (call (id + 1) "repr_load" [addr i])]
+      id := id + 2
+    let made := match ctor with
+      | some c => if fs.isEmpty then name c else call 0 c (vars.map name)
+      | none => .tuple (vars.map name)
+    stores := stores ++ [.mk [.var "%at", pat] (tag ++ offsets ++ writes ++ [.expr (.tuple [])])]
+    loads := loads ++ [.mk (if tagged then [.int k] else []) ((if tagged then [.expr (name unsafeMark)] else []) ++ offsets ++ reads ++ [.expr made])]
+  let load : List Clause := if tagged then
+      [.mk [.var "%at"] [.expr (call (id + 1) "match" [call 0 "ptr_read" [name "%at", .int (-8)],
+        .closure id (loads ++ [.mk [.wild] [.expr (call (id + 2) "repr_bad" [name "%at"])]])])]]
+    else loads.map fun ⟨_, body⟩ => .mk [.var "%at"] body
+  (Item.fnOf "repr_store" [] [] none (stores.map fun ⟨pats, body⟩ => .mk pats (.expr (name unsafeMark) :: body)),
+   Item.fnOf "repr_load" [] [] none (load.map fun ⟨pats, body⟩ => .mk pats (.expr (name unsafeMark) :: body)))
+
 /-- Is a field's type said, not a bare field name whose type is left to be
 found: of a type there is, or a type parameter. -/
 partial def typedField (known : Std.HashSet String) (ps : List String) : TypeExpr → Bool
@@ -628,6 +675,18 @@ def builtinHeads (declared : List (String × List String) := []) : List (String 
     ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
     ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
 
+/-- Is a type plain data: what a value of it is, bytes and nothing else, so
+far? `Int`, the scalars, a type parameter, and tuples and declared types of
+such, none holding itself. -/
+partial def plainType (fields : Std.HashMap String (List String × List (List TypeExpr)))
+    (seen : List String) : TypeExpr → Bool
+  | .name x args =>
+    x == "Int" || (scalars.lookup x).isSome || x.startsWith "%l"
+      || !seen.contains x && ((fields[x]?).any fun (_, cs) => cs.all (·.all (plainType fields (x :: seen))))
+        && args.all (plainType fields seen)
+  | .tuple args => args.all (plainType fields seen)
+  | _ => false
+
 /-- `Layout` (the prelude's) for each type: each declared type's right after
 its declaration, and those of the types with no declaration (`Int`, each
 scalar, tuples, callables, references) right after the trait's; each from the
@@ -643,6 +702,13 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
   let all := flatAll items
   unless all.any (fun | (.trait n _) => n == layoutTrait | _ => false) do return (items, memo)
   let hasNil := all.any (fun | (.trait n _) => n == nilTrait | _ => false)
+  let hasRepr := all.any (fun | (.trait n _) => n == reprTrait | _ => false)
+  -- (Each declared type's constructors, by name, with their fields.)
+  let ctorsOf : Std.HashMap String (List String × List (Option String × List TypeExpr)) := all.foldl (init := {}) fun m item =>
+    match item with
+    | (.struct n ps fs) => m.insert n (ps, [(some n, fs)])
+    | (.enum n ps cs) => m.insert n (ps, cs.map fun (c, fs) => (some c, fs))
+    | _ => m
   let fieldsOf : Std.HashMap String (List String × List (List TypeExpr)) := all.foldl (init := {}) fun m item =>
     match item with
     | (.struct n ps fs) => m.insert n (ps, [fs])
@@ -686,7 +752,21 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
           [Item.impl fresh nilTrait head fresh (asked.map (·, nilTrait)) []]
         else []
       | _ => []
-    (nils ++ [Item.impl fresh layoutTrait head fresh ((fresh.filter (!·.startsWith "'")).map (·, layoutTrait))
+    -- (`Repr`, of a declared type or a tuple, its fields written where
+    -- `Layout` puts them.)
+    let ctors : Option (List (Option String × List TypeExpr)) :=
+      if !hasRepr then none
+      else if head.startsWith "(tuple" then some [(none, fresh.map (TypeExpr.name · []))]
+      else (ctorsOf[head]?).map fun (ps, cs) =>
+        let m := ps.zip (fresh.map (TypeExpr.name · []))
+        cs.map fun (c, fs) => (c, fs.map (substTypeExpr m))
+    let reprs : List Item := match ctors.filter (·.all fun (_, fs) => fs.all (plainType fieldsOf [head])) with
+      | some cs =>
+        let (store, load) := reprOf cs (8000000000000000 + 100000 * count)
+        [Item.impl fresh reprTrait head fresh ((fresh.filter (!·.startsWith "'")).flatMap fun p => [(p, reprTrait), (p, layoutTrait)])
+          [store, load, .typeAlias askedOnlyName [] (.tuple [])]]
+      | none => []
+    (nils ++ reprs ++ [Item.impl fresh layoutTrait head fresh ((fresh.filter (!·.startsWith "'")).map (·, layoutTrait))
       -- (Checked only where something asks it: `askedOnlyName`.)
       [Item.fnOf sizeName [] [] (some int) [.mk [] [.expr sizeE]], Item.fnOf alignName [] [] (some int) [.mk [] [.expr alignE]],
        .typeAlias askedOnlyName [] (.tuple [])]])

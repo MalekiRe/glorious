@@ -211,6 +211,22 @@ fn ptr_mut_at<T>(address: usize) -> *mut T where T: Use<[1, 1]> { PtrMut(address
 fn ptr_address<T>(p: *const T) -> usize where T: Use<[1, 1]> { p.0 }
 fn ptr_mut_address<T>(p: *mut T) -> usize where T: Use<[1, 1]> { p.0 }
 fn ptr_const<T>(p: *mut T) -> *const T where T: Use<[1, 1]> { Ptr(p.0) }
+// The address so many `T`s on.
+fn ptr_offset<T>(p: *mut T, n: Int) -> *mut T where T: Layout { PtrMut(usize_of(int_add(usize_bits(p.0), int_mul(n, size_of<T>())))) }
+// What is at the address, copied out; and what is put there, moved in, what
+// was there neither given back nor destroyed. The address is a `T`'s.
+unsafe fn ptr_load<T>(p: *const T) -> T where T: Repr { <T as Repr>::repr_load(p.0) }
+unsafe fn ptr_store<T>(p: *mut T, value: T) where T: Repr { <T as Repr>::repr_store(p.0, value) }
+// Memory for so many `T`s, zeroed; and memory freed. Each is the memory's
+// owner's to get right.
+unsafe fn alloc_of<T>(count: Int) -> *mut T where T: Layout {
+    PtrMut(mem_alloc(usize_of(int_mul(count, size_of<T>())), usize_of(align_of<T>())))
+}
+unsafe fn free_of<T>(p: *mut T) { mem_free(p.0) }
+// So many `T`s copied from one place to another.
+unsafe fn copy_of<T>(to: *mut T, from: *const T, count: Int) where T: Layout {
+    mem_copy(to.0, from.0, usize_of(int_mul(count, size_of<T>())))
+}
 
 // `a[i]` is `index(a, i)`, and `a[i] = v` makes `a` be `index_set(a, i, v)`.
 // A place that is not there has no meaning: the program stops.

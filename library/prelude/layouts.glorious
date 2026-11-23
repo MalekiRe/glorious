@@ -25,3 +25,25 @@ fn layout_widest(x: (Int, Int), y: (Int, Int)) -> (Int, Int) {
 }
 fn layout_size(at: (Int, Int)) -> Int { let (s, a) = at; (s + a - 1) / a * a }
 fn layout_align(at: (Int, Int)) -> Int { let (s, a) = at; a }
+
+// What a value of a type is in memory: its `Layout`'s bytes from an address,
+// written there and read back. Written out for each type made of plain data,
+// from its structure, as `Layout` is (`Syntax.Flat.writeLayouts`), and for
+// `Int` and each scalar type. Writing one moves it into memory, and reading
+// one copies what is there: which of them may be done when is the caller's
+// to get right (`std::ptr`).
+trait Repr {
+    unsafe fn repr_store(at: usize, value: Self);
+    unsafe fn repr_load(at: usize) -> Self;
+}
+// (Where a field put after a layout so far starts.)
+fn layout_start(at: (Int, Int), align: Int) -> Int { let (s, a) = at; (s + align - 1) / align * align }
+// (An address so many bytes on.)
+fn repr_at(at: usize, offset: Int) -> usize { usize_of(int_add(usize_bits(at), offset)) }
+// (What a tag no constructor has gives: nothing, for memory that holds no
+// value of the type.)
+fn repr_bad<T>(at: usize) -> T where T: Use<[1, 1]> { match(int_div(1, 0)) { _ => tail repr_bad(at) } }
+impl Repr for Int {
+    unsafe fn repr_store(at: usize, value: Int) { ptr_write(at, 64, value) }
+    unsafe fn repr_load(at: usize) -> Int { ptr_read(at, 64) }
+}

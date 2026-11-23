@@ -336,6 +336,17 @@ In stages, each ending with every test program running on the machines:
    `arr_*` leave the compiler and `[T]` is a slice.
 5. The machines' values only scalars and addresses, with a C-like ABI.
 
+Stage 2 so far: `Repr` (the prelude's) writes a value to memory and reads
+it back, `repr_store` and `repr_load`, both `unsafe fn` (a trait's
+`unsafe fn` is called only in `unsafe`). `Int`'s and each scalar's are its
+bits; each declared type's and each tuple's are written out with its
+`Layout` (`Resolve.reprOf`): each field at the offset `Layout` gives it, an
+enum's tag a byte first. Only for plain data (`plainType`: `Int`, the
+scalars, type parameters, and tuples and declared types of such, none
+holding itself): a callable, a reference or an array is not bytes yet. Over
+it, in the prelude: `ptr_load`, `ptr_store`, `ptr_offset`, `alloc_of`,
+`free_of`, `copy_of`.
+
 The proofs are commented out meanwhile (`/-%proof .. %proof-/`), and come
 back redone for the machines as they will be; from stage 3 the proved Core
 type checker and certificate inference leave the pipeline until then.

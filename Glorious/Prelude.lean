@@ -106,6 +106,13 @@ private def casts : String :=
   String.join (Syntax.scalars.map fun (t, _) =>
     s!"#[intrinsic] fn {t}_of(n: Int) -> {t};\n#[intrinsic] fn {t}_bits(x: {t}) -> Int;\n")
 
+/-- Each scalar type in memory (`Repr`): its bits, so many of them, with a
+sign where the type has one. -/
+private def scalarReprs : String :=
+  String.join (Syntax.scalars.map fun (t, w) =>
+    let width : Int := w.getD (if t == "f64" then -64 else -32)
+    s!"impl Repr for {t} \{ unsafe fn repr_store(at: usize, value: {t}) \{ ptr_write(at, {width}, {t}_bits(value)) } unsafe fn repr_load(at: usize) -> {t} \{ {t}_of(ptr_read(at, {width})) } }\n")
+
 /-- The scalar types: what each has. -/
 private def scalars : String :=
   (include_str "../library/prelude/scalars.glorious") ++ String.join ((Syntax.scalars.filterMap fun (t, width) => width.map fun w =>
@@ -144,7 +151,7 @@ trait Elements { type Each; fn elements(Self) -> Each }
 
 private def layouts : String := include_str "../library/prelude/layouts.glorious"
 
-def source : String := intrinsics ++ casts ++ core ++ operators ++ scalars ++ world ++ fixedElements ++ layouts
+def source : String := intrinsics ++ casts ++ core ++ operators ++ scalars ++ world ++ fixedElements ++ layouts ++ scalarReprs
 
 /-- The prelude of a program run without the checker. -/
 def unchecked : String := intrinsics ++ casts ++ core ++ intOperators ++ world

@@ -15581,3 +15581,56 @@ fn main() -> Int {
 }
 #### expect
 error: 5:5: in `main`: `put` is unsafe: it can be called only in `unsafe { .. }` or in an `unsafe fn`
+#### case
+#### Plain data in memory: each type's `Repr` writes its fields where its
+#### `Layout` puts them, a tag first for an enum, and reads them back.
+struct P { x: Int, y: u8 }
+enum Shape { Dot, Circle(Int), Rect(P, i16) }
+fn main() -> Int {
+    unsafe {
+        let p = mem_alloc(64usize, 8usize);
+        <Shape as Repr>::repr_store(p, Rect(P { x: 41, y: 7u8 }, -3i16));
+        <(Int, Shape) as Repr>::repr_store(repr_at(p, 32), (5, Circle(9)));
+        let s: Shape = <Shape as Repr>::repr_load(p);
+        let t: (Int, Shape) = <(Int, Shape) as Repr>::repr_load(repr_at(p, 32));
+        mem_free(p);
+        print(size_of<Shape>());
+        match(s) {
+            Rect(P { x, y }, z) => print(x + int(y) + int(z)),
+            _ => print(0)
+        };
+        match(t) { (n, Circle(r)) => n + r, _ => 0 }
+    }
+}
+#### expect
+32
+45
+14
+#### case
+#### A growable buffer of plain data over memory the program allocates and
+#### frees: grown by allocating twice as much, copying, and freeing.
+struct Buf<T> { at: *mut T, cap: Int, len: Int }
+fn new_buf<T>() -> Buf<T> where T: Layout { Buf { at: unsafe { alloc_of(1) }, cap: 1, len: 0 } }
+fn push_buf<T>(b: Buf<T>, v: T) -> Buf<T> where T: Repr, T: Layout {
+    let b = if(b.len == b.cap) {
+        let bigger: *mut T = unsafe { alloc_of(2 * b.cap) };
+        unsafe { copy_of(bigger, ptr_const(b.at), b.len); free_of(b.at) };
+        Buf { at: bigger, cap: 2 * b.cap, len: b.len }
+    } else { b };
+    unsafe { ptr_store(ptr_offset(b.at, b.len), v) };
+    Buf { at: b.at, cap: b.cap, len: b.len + 1 }
+}
+fn get_buf<T>(b: &Buf<T>, i: Int) -> T where T: Repr, T: Layout { unsafe { ptr_load(ptr_const(ptr_offset(b.at, i))) } }
+fn fill(b: Buf<(Int, u16)>, i: Int) -> Buf<(Int, u16)> {
+    if(i < 10) { tail fill(push_buf(b, (i * i, u16(i))), i + 1) } else { b }
+}
+fn main() -> Int {
+    let b = fill(new_buf(), 0);
+    let (sq, n) = get_buf(&b, 7);
+    print(b.cap);
+    unsafe { free_of(b.at) };
+    sq + int(n)
+}
+#### expect
+16
+56
