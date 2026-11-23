@@ -15526,3 +15526,34 @@ impl<A> Count for Pack<A> { fn count(p: &Pack<A>) -> Int { 1 } }
 fn main() -> Int { let p: Pack<Int, Int> = Pack((1, 2)); let q: Pack<Int> = Pack((7,)); p.count() * 10 + q.count() }
 #### expect
 21
+#### case
+#### Memory, by address: blocks made and freed, bytes written, copied and
+#### read back with and without a sign.
+fn main() -> Int {
+    unsafe {
+        let p = mem_alloc(16usize, 8usize);
+        ptr_write(p, 64, 1234567);
+        ptr_write(p + 8usize, 8, 255);
+        let q = mem_alloc(16usize, 8usize);
+        mem_copy(q, p, 16usize);
+        let a = ptr_read(q, 64);
+        let b = ptr_read(q + 8usize, -8);
+        let c = ptr_read(q + 8usize, 8);
+        mem_free(p);
+        mem_free(q);
+        print(a);
+        print(b);
+        print(c);
+        a + b + c
+    }
+}
+#### expect
+1234567
+255
+-1
+1234821
+#### case
+#### A block read after it is freed: the machines say the program went wrong.
+fn main() -> Int { unsafe { let p = mem_alloc(8usize, 8usize); mem_free(p); ptr_read(p, 64) } }
+#### expect
+went wrong

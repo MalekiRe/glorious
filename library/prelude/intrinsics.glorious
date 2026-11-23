@@ -63,3 +63,9 @@
 #[intrinsic] unsafe fn heap_put<T>(cell: Int, value: T) where T: Use<[1, 1]>;
 // A machine is to start for a thread of the system's that C is about to start.
 #[intrinsic] unsafe fn heap_machine_coming() -> (Int, Int);
+// Memory, by address: a new block of so many bytes at a multiple of an
+// alignment, zeroed; a block freed, given where it starts; and so many bytes
+// copied from one place to another, as if through a buffer of their own.
+#[intrinsic] unsafe fn mem_alloc(size: usize, align: usize) -> usize;
+#[intrinsic] unsafe fn mem_free(at: usize);
+#[intrinsic] unsafe fn mem_copy(to: usize, from: usize, count: usize);

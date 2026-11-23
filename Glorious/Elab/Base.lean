@@ -373,7 +373,10 @@ def hosts : List (String × Nat × Nat) :=
    -- alone gives it meaning.
    ("heap_machine_coming", 10, 0),
    -- The name of the function a callable is of, and the callable back.
-   ("host_fn_name", 9, 1)]
+   ("host_fn_name", 9, 1),
+   -- Unsafe: memory, by address. A new block of so many bytes at a multiple
+   -- of an alignment; a block freed; bytes copied.
+   ("mem_alloc", 11, 2), ("mem_free", 12, 1), ("mem_copy", 13, 3)]
 
 /-- Is this the name of one of the machine's operations (declared
 `#[intrinsic]` in the prelude)? -/

@@ -886,6 +886,13 @@ fn sized(raw: u128, width: i128) -> i128 {
     }
 }
 
+/// The blocks of memory the program made and has not freed, each with the
+/// layout it was made with: every machine of the program shares them.
+fn blocks() -> std::sync::MutexGuard<'static, HashMap<usize, std::alloc::Layout>> {
+    static BLOCKS: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, std::alloc::Layout>>> = std::sync::OnceLock::new();
+    BLOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn read_at(at: usize, bytes: usize) -> u128 {
     let mut out = [0u8; 16];
     let n = bytes.min(16);
@@ -1699,6 +1706,30 @@ impl Vm {
                     // waiting for what it will fill waits for it.
                     (10, []) => {
                         self.heap.started();
+                        unit()
+                    }
+                    // Memory, by address: a block made, zeroed; one freed;
+                    // bytes copied.
+                    (11, [Value::Int(size), Value::Int(align)]) => {
+                        let layout = std::alloc::Layout::from_size_align((*size as usize).max(1), *align as usize)
+                            .map_err(|_| Stop::Wrong)?;
+                        // SAFETY: the layout's size is not zero.
+                        let at = unsafe { std::alloc::alloc_zeroed(layout) };
+                        if at.is_null() {
+                            return wrong();
+                        }
+                        blocks().insert(at as usize, layout);
+                        Value::Int(at as usize as i128)
+                    }
+                    (12, [Value::Int(at)]) => {
+                        let layout = blocks().remove(&(*at as usize)).ok_or(Stop::Wrong)?;
+                        // SAFETY: the block was made with this layout and is freed once.
+                        unsafe { std::alloc::dealloc(*at as usize as *mut u8, layout) };
+                        unit()
+                    }
+                    (13, [Value::Int(to), Value::Int(from), Value::Int(n)]) => {
+                        // SAFETY: none. The program said both places hold so many bytes.
+                        unsafe { std::ptr::copy(*from as usize as *const u8, *to as usize as *mut u8, *n as usize) };
                         unit()
                     }
                     // The name of the function a callable is of, and the

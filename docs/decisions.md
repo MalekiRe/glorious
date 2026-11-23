@@ -309,6 +309,37 @@ Do not add a parser rule, a checker rule or an error message that names a
 prelude function. If a prelude construct is awkward to type or to use, fix it
 in the prelude or with a general language rule.
 
+## A systems language: every value is bytes
+
+**Decision (user).** Glorious is a systems language, to replace Rust. Every
+value has a representation in bytes, memory is bytes, and what Rust has in
+its library is the library's here: `Vec<T>` over memory the library
+allocates and frees, `&[T]` and `&mut [T]` slices, `[T; N]` arrays held
+inline, `String` as UTF-8 bytes and `&str` a slice of them. A closure has a
+type of its own, with what it captured held inline, and is passed by
+generics (`F: Fn<..>`); `fn(..)` is a function that captures nothing. The
+compiler's own growable array leaves it.
+
+In stages, each ending with every test program running on the machines:
+
+1. Memory of bytes on every machine (`Host.Memory`: blocks made zeroed and
+   freed, never given again; a byte outside a live block makes the Core
+   machine and the Lean bytecode machine go wrong; the Rust VM uses the
+   system's allocator): `mem_alloc`, `mem_free`, `mem_copy`, `ptr_read`,
+   `ptr_write`. Then `std::alloc`, raw pointers, bytes, `String`, `&str`;
+   text literals as static bytes.
+2. A layout for every plain-data type (fields at offsets, an enum a tag and
+   a payload, `[T; N]` inline), and `ptr::read<T>` and `ptr::write<T>`
+   written for each: `Vec<T>`, slices and arrays of plain data.
+3. References as addresses: what is borrowed or changed lives in memory.
+4. Callables and resumptions as bytes: any `T` in memory; `Array` and
+   `arr_*` leave the compiler and `[T]` is a slice.
+5. The machines' values only scalars and addresses, with a C-like ABI.
+
+The proofs are commented out meanwhile (`/-%proof .. %proof-/`), and come
+back redone for the machines as they will be; from stage 3 the proved Core
+type checker and certificate inference leave the pipeline until then.
+
 ## A trailing `;` discards a value
 
 **Decision (user).** A block yields the value of its last expression. Ending
