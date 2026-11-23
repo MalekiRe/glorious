@@ -599,29 +599,22 @@ def needBounds (call : Nat) (bs : List (String × Ty)) : M Unit := do
 /-- `x.i.name` as the name and the way to the field, if that is what this
 is: each step a field's number or its name, with the identity of the read
 where it is by name. -/
-partial def fieldOfName (b : Flat.Body) (e : Flat.ExprId) : Option (String × List (String × Option Nat)) :=
+partial def fieldOfName (b : Flat.Body) (e : Flat.ExprId)
+    (root : Flat.ExprId → Option String := b.bare?) : Option (String × List (String × Option Nat)) :=
   let step := fun (inner : Flat.ExprId) (s : String × Option Nat) =>
-    match b.bare? inner with
+    match root inner with
     | some x => some (x, [s])
-    | none => (fieldOfName b inner).map fun (x, path) => (x, path ++ [s])
+    | none => (fieldOfName b inner root).map fun (x, path) => (x, path ++ [s])
   match b.expr e with
   | .proj inner idx => step inner (toString idx, none)
   | .fieldOf id inner name => step inner (name, some id)
   | _ => none
 
 /-- `(*p).i.name` likewise. -/
-partial def fieldOfDeref (b : Flat.Body) (e : Flat.ExprId) : Option (String × List (String × Option Nat)) :=
-  let step := fun (inner : Flat.ExprId) (s : String × Option Nat) =>
-    let direct := match b.expr inner with
-      | .deref r => b.bare? r
-      | _ => none
-    match direct with
-    | some x => some (x, [s])
-    | none => (fieldOfDeref b inner).map fun (x, path) => (x, path ++ [s])
-  match b.expr e with
-  | .proj inner idx => step inner (toString idx, none)
-  | .fieldOf id inner name => step inner (name, some id)
-  | _ => none
+def fieldOfDeref (b : Flat.Body) (e : Flat.ExprId) : Option (String × List (String × Option Nat)) :=
+  fieldOfName b e fun inner => match b.expr inner with
+    | .deref r => b.bare? r
+    | _ => none
 
 /-- The type of the field reached by `path` in a value of type `t`, and the
 way to it by number. Where `t` is not known yet, a step by number is settled
