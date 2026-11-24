@@ -56,6 +56,32 @@ def timedIO {α : Type} (name : String) (act : IO α) (said : Bool := true) : IO
   | .ok r => r
   | .error _ => f ()
 
+@[noinline] unsafe def clockImpl {β : Type} (x : β) : Nat × β :=
+  if !enabled then (0, x) else
+  match unsafeBaseIO (do
+    depth.modify (· + 1)
+    IO.monoNanosNow : IO Nat).toBaseIO with
+  | .ok t => (t, x)
+  | .error _ => (0, x)
+
+/-- The clock, read before `x` is used again: a stage that `span` ends
+starts here. Unlike `timed`, nothing holds what the stage computes from
+while it runs: a state passed through it stays the only one, and is changed
+in place, as it is untraced. -/
+@[implemented_by clockImpl] def clock {β : Type} (x : β) : Nat × β := (0, x)
+
+@[noinline] unsafe def spanImpl {β : Type} (name : String) (t0 : Nat) (x : β) : β :=
+  if !enabled then x else
+  match unsafeBaseIO (do
+    let t1 ← IO.monoNanosNow
+    depth.modify (· - 1)
+    let d ← depth.get
+    spans.modify (·.push ⟨name, d, t1 - t0⟩) : IO Unit).toBaseIO with
+  | _ => x
+
+/-- The stage that started at `clock`'s `t0` ends with `x` computed. -/
+@[implemented_by spanImpl] def span {β : Type} (_name : String) (_t0 : Nat) (x : β) : β := x
+
 /-- Time a computation. -/
 @[implemented_by timedImpl] def timed {α : Type} (name : String) (f : Unit → α) : α := f ()
 

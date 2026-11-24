@@ -464,6 +464,26 @@ beside one for every number? -/
 def noConsOverlap (impls : List Impl) : Bool :=
   impls.all fun J => impls.all fun I => !overlapsView I J
 
+/-- `noOverlap`, as a set of what each implementation is for: the same
+answer, in a step for each implementation rather than for each pair of
+them, which over the library's and a program's thousands made checking a
+module's declarations quadratic. -/
+def noOverlapFast (impls : List Impl) : Bool := Id.run do
+  let mut seen : Std.HashSet (String × String × Nat) := {}
+  for I in impls do
+    if seen.contains (I.trait, I.head, I.arity) then return false
+    seen := seen.insert (I.trait, I.head, I.arity)
+  return true
+
+/-- `noConsOverlap`, likewise: the traits with an implementation for every
+length of tuple, and for every length of function, found first. -/
+def noConsOverlapFast (impls : List Impl) : Bool :=
+  let cons : Std.HashSet String := impls.foldl (fun s J => if J.head == consHead then s.insert J.trait else s) {}
+  let fns : Std.HashSet String := impls.foldl (fun s J => if J.head == fnHead then s.insert J.trait else s) {}
+  impls.all fun I =>
+    !(0 < I.arity && (cons.contains I.trait && I.head == tupleHead I.arity
+      || fns.contains I.trait && I.head == fnArityHead (I.arity - 1)))
+
 /-%proof (commented out while the machines become bytes)
 theorem noConsOverlap_sound {impls : List Impl} (h : noConsOverlap impls = true) : NoConsOverlap impls := by
   intro i j I J hi hj ht hl hv

@@ -901,9 +901,10 @@ def declareTraits (items : List Item) : M Unit := do
                 Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, [], [], []⟩
             kimpls := s.kimpls.push ⟨Syntax.destroyTrait, head, arity, ctx⟩ }
   -- What `Traits.coherent` asks of the implementations.
-  unless Traits.noOverlap (← get).kimpls.impls.toList do
+  -- (As sets: the same answers as `Traits.noOverlap` and `noConsOverlap`.)
+  unless Traits.noOverlapFast (← get).kimpls.impls.toList do
     throw "two implementations are for the same trait and type"
-  unless Traits.noConsOverlap (← get).kimpls.impls.toList do
+  unless Traits.noConsOverlapFast (← get).kimpls.impls.toList do
     let impls := (← get).kimpls.impls.toList
     let tr := ((impls.find? fun J => impls.any fun I => Traits.overlapsView I J).map (·.trait)).getD ""
     throw s!"`{bareName tr}` is implemented for every length, `(H, ..R)` or `fn(..P) -> R`, and for a tuple or a function of one length: each has one implementation"

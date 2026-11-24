@@ -1004,8 +1004,13 @@ instance : EStateM.Backtrackable St St := ⟨id, fun _ saved => saved⟩
   | .ok a s => .ok (a, s)
   | .error e _ => .error e
 
-/-- `act`, its time added to `label`'s where a compile is traced (`Trace`). -/
-def timedM {α : Type} (label : String) (act : M α) : M α := fun s => Trace.timed label fun _ => act.run s
+/-- `act`, timed under `GLORIOUS_TRACE`; the state it is given is not held
+while it runs (`Trace.clock`), so traced it is changed in place as untraced:
+held, every array it grew was copied, and a traced compile took ten times
+as long, the most where the state is largest. -/
+def timedM {α : Type} (label : String) (act : M α) : M α := fun s =>
+  let (t0, s) := Trace.clock s
+  Trace.span label t0 (act.run s)
 
 /-- A message is what stops the checker, with nothing found. -/
 instance : MonadExceptOf String M where

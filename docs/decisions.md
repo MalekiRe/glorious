@@ -7812,15 +7812,18 @@ them; the others on the VM alone, and where the compiler refuses one, what
 it says is still held to what it should. With `GLORIOUS_COVEY=n` too, a
 quick run (`GLORIOUS_COVEY=4 GLORIOUS_SLOW=4`) took 52 to 58 s against 125
 s for all; the whole suite, every program on every machine, runs before a
-push. What is left of a quick run's time is compiling the ECS programs, each
-on its own, side by side on every core.
+push.
 
 Tried and undone: the ECS examples compiled after the whole library, the
-first alone, what it kept of `ecs` where every other started (with the
-library modules each names, what comes before `ecs` differs from program to
-program, and `ecs` is checked anew for each, 25 s apiece on its own). A
-quick run took no less, and eight ECS programs then ran out of steps on the
-Lean machines.
+first alone, what it kept of `ecs` where every other started. A quick run
+took no less, and eight ECS programs then ran out of steps on the Lean
+machines. It was tried for a check of `ecs` that the trace said took 25 s;
+it takes 1.5 s. The trace's own timing held the checker's state while a
+stage ran (`timedM` closed over it), so every array the stage grew was
+copied: a traced compile took ten times as long, the most where the state
+is largest. `timedM` now passes the state through the clock
+(`Trace.clock`, `Trace.span`) and holds nothing; a traced compile of an
+ECS program takes what an untraced one does, 3 s.
 
 ## Other standing decisions
 
