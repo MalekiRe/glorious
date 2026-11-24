@@ -1081,6 +1081,10 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
       checkArgs scope amb s!"intrinsic `{x}`" [.con "Fixed" [t, n], .int, t] args call
       mustDrop t "putting a value at a place of a `[T; N]` lets go of what was there"
       pure (.con "Fixed" [t, n])
+    | "fixed_len" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [.con "Fixed" [t, ← freshTy]] args call
+      mustDrop t "measuring a `[T; N]` lets go of it"
+      pure .int
     | "fixed_at" =>
       let how ← freshTy
       let cap ← freshCap

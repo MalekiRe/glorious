@@ -15718,3 +15718,12 @@ fn main() -> Int {
 }
 #### expect
 3630
+#### case
+#### A `[T; N]` of values with a `drop` destroys each, the last first.
+struct File(Int)
+impl Drop for File { fn drop(f: &mut File) { let File(n) = *f; print(n) } }
+fn main() -> Int { let e: [File; 2] = [File(20), File(21)]; 0 }
+#### expect
+21
+20
+0

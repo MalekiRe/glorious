@@ -161,6 +161,10 @@ fn rhs(out: &mut Vec<u8>, r: &Rhs) {
                     out.push(46);
                     nat(out, 1);
                 }
+                Prim::FixedLen => {
+                    out.push(46);
+                    nat(out, 4);
+                }
                 p => out.push(*p as u8),
             }
             atoms(out, xs);

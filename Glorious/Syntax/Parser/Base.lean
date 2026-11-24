@@ -4,6 +4,7 @@ public import Glorious.Syntax.Ast
 public import Glorious.Syntax.FlatOps
 public import Glorious.Syntax.Lexer
 public import Glorious.Value
+public import Glorious.Trace
 
 /-!
 # Parser
@@ -23,6 +24,10 @@ with the block.
 public section
 
 namespace Glorious.Syntax.Parse
+
+/-- (`GLORIOUS_FIXED_LITERALS`: every literal of a program's own text is a
+`[T; N]`, for finding what is to move from arrays.) -/
+initialize fixedLiterals : Bool ← do pure (← IO.getEnv "GLORIOUS_FIXED_LITERALS").isSome
 
 structure PCtx where
   toks : Array Token

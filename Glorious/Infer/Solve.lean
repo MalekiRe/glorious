@@ -505,6 +505,7 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
       | 1, [] => pure (array, none)
       | 2, [i] => do unify (← atomTy Γ i) .int; pure (t, none)
       | 3, [i, v] => do unify (← atomTy Γ i) .int; unify (← atomTy Γ v) t; pure (fixed, none)
+      | 4, [] => pure (.int, none)
       | _, _ => throw "an intrinsic of `[T; N]` is given what it does not take"
     | _, _ =>
       for a in args do

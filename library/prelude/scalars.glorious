@@ -426,6 +426,9 @@ fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { fixe
 trait Literal<T, N> { fn of_items(Array<T>) -> Self }
 #[fallback] impl<T, N> Literal<T, N> for Array<T> { fn of_items(items: [T]) -> Array<T> { items } }
 impl<T, N> Literal<T, N> for Fixed<T, N> where N: Known { fn of_items(items: [T]) -> Fixed<T, N> { fixed_of(items, N::VALUE) } }
+// A `[T; N]` of the elements of an array of exactly `N`: a literal, where
+// every one is one.
+fn fixed_literal<N, T>(items: Array<T>) -> Fixed<T, N> where N: Known { fixed_of(items, N::VALUE) }
 fn array_literal<N, T, A>(items: Array<T>) -> A where A: Literal<T, N> {
     <A as Literal<T, N>>::of_items(items)
 }

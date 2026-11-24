@@ -928,6 +928,7 @@ def checkPrim (C : Cert) (Γ : TEnv) (p : Prim) (args : List Atom) (σ : Ty) : B
       match atomTy Γ a with
       | some T => arrayElem T == some σ && atomTy Γ i == some .int && dupOk C σ
       | none => false
+    | 4, [a] => (atomTy Γ a).any (fun T => (arrayElem T).isSome) && σ == .int
     | 3, [a, i, v] =>
       match arrayElem σ with
       | some t => atomTy Γ a == some σ && atomTy Γ i == some .int && atomTy Γ v == some t && dupOk C σ

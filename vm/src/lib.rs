@@ -165,6 +165,7 @@ enum Prim {
     /// A `[T; N]` made of an array of the length, and an array made of one.
     FixedOf,
     FixedToArray,
+    FixedLen,
 }
 
 /// Where the constructors of `[T; N]` start (`Glorious.fixedBase`).
@@ -416,6 +417,7 @@ impl Reader<'_> {
                 1 => Ok(Prim::FixedToArray),
                 2 => Ok(Prim::ArrGet),
                 3 => Ok(Prim::ArrSet),
+                4 => Ok(Prim::FixedLen),
                 op => Err(format!("unknown intrinsic of `[T; N]` {op}")),
             },
             t => Err(format!("unknown intrinsic {t}")),
@@ -1422,6 +1424,10 @@ impl Vm {
                     Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop => {
                         array_prim(*p, args)
                     }
+                    Prim::FixedLen => match args.first() {
+                        Some(Value::Data(d)) => Ok(Value::Int(d.fields.len() as i128)),
+                        _ => wrong(),
+                    },
                     Prim::FixedOf | Prim::FixedToArray => {
                         let mut args = args.into_iter();
                         let Some(Value::Data(d)) = args.next() else { return wrong() };
@@ -2327,7 +2333,7 @@ fn prim(p: Prim, args: &[Value]) -> Step<Value> {
         Prim::Below => (0 <= a && a < b).then_some(a),
         // Of two integers these have no meaning.
         Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop | Prim::Cast
-        | Prim::FixedOf | Prim::FixedToArray => None,
+        | Prim::FixedOf | Prim::FixedToArray | Prim::FixedLen => None,
     };
     result.map(Value::Int).ok_or(Stop::Wrong)
 }

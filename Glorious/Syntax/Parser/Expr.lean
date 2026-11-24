@@ -430,12 +430,14 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
     advance
     -- Where the program has arrays of a fixed length, the literal is an
     -- array or one of exactly so many: whichever is wanted of it.
+    -- (A program's own literal, where every one is a `[T; N]`.)
+    let own := fixedLiterals && (← read).base ≥ 1000000 && (← read).path.head? != some "std"
     let fixedOf := fun (value : ExprId) (n : Nat) => do
-      callOf 0 none instMark #[← mk (.call (numbered opened 800000) (← preludeFn "array_literal") #[value]),
+      callOf 0 none instMark #[← mk (.call (numbered opened 800000) (← preludeFn (if own then "fixed_literal" else "array_literal")) #[value]),
         ← tree (TypeExpr.tuple [numberType n]).asExpr]
     if ← acceptPunct "]" then
       let value ← arrayValue [] empty
-      return ← if (← read).fixed then fixedOf value 0 else pure value
+      return ← if (← read).fixed || own then fixedOf value 0 else pure value
     let mut starts : Array Nat := #[numbered (← get) 700000]
     let first ← parseBinary 0 false
     if ← acceptPunct ";" then
@@ -449,7 +451,7 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
       elements := elements.push (← parseBinary 0 false)
     expectPunct "]"
     let value ← arrayValue elements.toList empty starts.toList
-    if (← read).fixed then fixedOf value elements.size else pure value
+    if (← read).fixed || own then fixedOf value elements.size else pure value
   | .ident "tail" =>
     advance
     let e ← parsePostfix noBlock

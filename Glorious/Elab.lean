@@ -1374,18 +1374,21 @@ def destroyers (tr : TraitInfo) : List Item :=
       [.mk given [.expr (.tuple [.closure 0 [.mk [.var "%arg0"]
         [.expr (.call dropCallId (name method) (passed ++ [name "%arg0"]))]]])]]
     -- An array: its elements one by one, from the last.
+    -- (A `[T; N]` so too, by its own intrinsics.)
     if let (true, [(_, [some element])]) := (D.array, D.ctors) then
+      let fixed := D.head == "Fixed"
       let from_ := "%destroy from " ++ D.head
       let before := Expr.call dropCallId (name "int_sub") [name "%n", .int 1]
+      let length := if fixed then Expr.call dropCallId (name "fixed_len") [name "%value"]
+        else .call dropCallId (name "arr_len") [name "%value", .int 0]
       [asValue,
         Item.fnOf method [] blank none
           [.mk (given ++ [.var "%value"])
-            [.expr (.call dropCallId (name from_)
-              (passed ++ [name "%value", .call dropCallId (name "arr_len") [name "%value", .int 0]]))]],
+            [.expr (.call dropCallId (name from_) (passed ++ [name "%value", length]))]],
         Item.fnOf from_ [] (blank ++ [none]) none
           [.mk (given ++ [.wild, .int 0]) [.expr unit],
             .mk (given ++ [.var "%value", .var "%n"])
-              [.expr (destroyCall tr element (.call dropCallId (name "arr_get") [name "%value", before])),
+              [.expr (destroyCall tr element (.call dropCallId (name (if fixed then "fixed_get" else "arr_get")) [name "%value", before])),
                 .expr (.tailCall dropCallId (name from_) (passed ++ [name "%value", before]))]]]
     else
     let clauses := D.ctors.map fun (ctor, parts) =>

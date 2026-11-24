@@ -180,7 +180,7 @@ inductive Prim where
   | cast (bits : Int) (into : Bool)
   /-- Of `[T; N]`: `0` one made of an array of exactly the length given,
   `1` an array made of one, `2` the element at a place, `3` one with
-  another element at a place. -/
+  another element at a place, `4` its length. -/
   | fixed (op : Nat)
   deriving Hashable, BEq
 
@@ -457,6 +457,7 @@ def Prim.eval : Prim → List Value → Option Value
     if n == fields.length then some (.data (fixedBase + fields.length) fields) else none
   | .fixed 1, [.data _ fields] => some (.data (arrayBase + fields.length) fields)
   | .fixed 2, [.data _ fields, .int i] => if 0 ≤ i then fields[i.toNat]? else none
+  | .fixed 4, [.data _ fields] => some (.int fields.length)
   | .fixed 3, [.data tag fields, .int i, v] =>
     if 0 ≤ i ∧ i.toNat < fields.length then some (.data tag (fields.set i.toNat v)) else none
   | _, _ => none
