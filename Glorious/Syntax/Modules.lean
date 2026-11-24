@@ -219,6 +219,12 @@ def declared (path : List String) (items : List Item) (taken : List String := []
   -- What the prelude declares is for every module; a module written inside
   -- the prelude is a module like any other.
   let everyone := path == preludePath
+  -- (A function two of its traits have, `fmt` of `Display` and of `Debug`:
+  -- each trait's its own, known by the trait's name and its.)
+  let methodNames := items.flatMap fun item =>
+    match (match item with | .pub _ i => i | i => i) with
+    | .trait _ methods => methods.map (·.1)
+    | _ => []
   for item in items do
     let (vis, item) := match item with
       | .pub parent i => (if parent then Vis.parent else Vis.pub, i)
@@ -239,7 +245,10 @@ def declared (path : List String) (items : List Item) (taken : List String := []
     | .alias name _ _ => out := add out name .const
     | .trait name methods =>
       out := add out name .trait
-      for (m, _, _) in methods do out := add out m .method
+      for (m, _, _) in methods do
+        if (methodNames.filter (· == m)).length > 1 then
+          out := out.push ⟨m, ⟨path, mangle path (sharedMethodName name m), vis, .method⟩, vis, 0⟩
+        else out := add out m .method
     | .typeAlias name _ _ => out := add out name .type
     | .fieldNames ctor names pubs => fields := fields.push (mangle path ctor, path, names, pubs)
     | _ => pure ()
@@ -532,6 +541,10 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
   | none =>
     if bound.contains name then return (none, name, none)
     if let some (a, b) := clash (ctx.of name) .value name then
+      -- (A function of two traits: which trait's is said with the trait.)
+      if a.kind == .method && b.kind == .method then
+        let traitOf := fun (e : Entry) => ((e.global.splitOn "::").dropLast.getLast?).getD e.global
+        throw s!"`{name}` is a function of more than one trait here, `{traitOf a}` and `{traitOf b}`: say which, `{traitOf a}::{name}(..)` or `<T as {traitOf b}>::{name}(..)`, or call it on a value, `x.{name}(..)`"
       throw s!"`{name}` is two things here, `{a.global}` and `{b.global}`: say which with its module"
     match lookupIn (ctx.of name) .value name with
     | some e =>
@@ -585,8 +598,11 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
           throw s!"`{last}::{name}` is private to {showPath o.home}: only what is `pub` can be named from outside"
         noteUse ctx.here b.entry
         return (none, b.entry.global, some b.entry)
+      -- (Of a trait, its own: where another trait of its module has a
+      -- function of the name, the one named after this trait.)
       let member := ((← unitOf o.home).bind fun u =>
-        u.own.find? fun b => b.name == name && b.entry.kind.space == .value).map (·.entry)
+        let named := u.own.filter fun b => b.name == name && b.entry.kind.space == .value
+        (named.find? fun b => o.kind == .trait && b.entry.global.endsWith (sharedMethodName last name)) <|> named.head?).map (·.entry)
       match member with
       | some m =>
         checkSealed ctx name m
@@ -1025,6 +1041,19 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
                 && named.entry.home == path)
         pure (found.map (·.2.1)) : RF (List Bound))
       unless bound.contains name do
+        -- (A function of more than one trait, `x.fmt(f)` of `Display`'s
+        -- and `Debug`'s: the first, with the others for the checker to
+        -- take where the value's type has their trait and not its.)
+        let traits := ((ctx.of name).filter fun b => b.name == name && b.entry.kind == .method).map (·.entry)
+        let traits := traits.foldl (fun acc e => if acc.any (·.global == e.global) then acc else acc ++ [e]) []
+        if let first :: others@(_ :: _) := traits then
+          let alts := others.map (·.global) ++ (← own true).map (·.entry.global)
+          unless id == 0 do
+            modifyThe St fun s => { s with dotAlts := (id, alts) :: s.dotAlts }
+          liftM (noteUse ctx.here first)
+          let mark ← fpush (.call 0 (← fpush (.name none receiverMark)) #[receiver])
+          let call ← fpush (.call id (← fpush (.name none first.global)) (#[mark] ++ args))
+          return ← resolveExprF ctx bound call
         if let some en := lookupIn (ctx.of name) .value name then
           if en.kind == .fn || en.kind == .method then
             let alts := (← own true).map (·.entry.global)
@@ -1205,6 +1234,18 @@ partial def resolveStmtsF (ctx : Ctx) (bound : List String) : List StmtId → RF
 
 end
 
+/-- The name a trait's function has in the whole program: the module's,
+or where another trait of the module has a function of the name, the
+trait's own (`sharedMethodName`). -/
+def methodName (ctx : Ctx) (trait m : String) : String :=
+  let own := ctx.scope.filter fun b =>
+    b.name == m && b.entry.home == ctx.here && b.entry.kind == .method && b.rank == 0
+  match own.find? fun b => b.entry.global.endsWith (sharedMethodName (lastSegment trait) m) with
+  | some b => b.entry.global
+  | none => match own.head? with
+    | some b => b.entry.global
+    | none => mangle ctx.here m
+
 /-- The name in the whole program of what this module declares as `name`. -/
 def ownName (ctx : Ctx) (space : Space) (name : String) : String :=
   match ctx.scope.find? fun b =>
@@ -1252,7 +1293,7 @@ def resolveItem (ctx : Ctx) : Item → R (List Item)
       -- (With the type parameters of its own, if it has some.)
       let (r, own) := methodGenerics r
       let known := "Self" :: extra ++ own
-      pure (ownName ctx .value m, ← ps.mapM (resolveType ctx known),
+      pure (methodName ctx name m, ← ps.mapM (resolveType ctx known),
         withMethodGenerics (← r.mapM (resolveType ctx known)) own)
     pure [.trait (ownName ctx .trait name) methods]
   | .use head lower upper => do
@@ -1326,7 +1367,7 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
     let generics := "Self" :: genericParams params ++ assocs
     let defaults ← defaults.mapM fun
       | .fn m ps annots ret b =>
-        resolveFnF ctx (ownName ctx .value m) generics m ps annots ret b
+        resolveFnF ctx (methodName ctx name m) generics m ps annots ret b
       | item => pure item
     pure [.traitInfo (ownName ctx .trait name) supers defaults params assocs]
   | .impl ps tr head args context methods => do
@@ -1350,7 +1391,9 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
         let units := (← get).units
         let member : Option Bound := match trEntry with
           | some t => (units.find? fun (u : Module) => u.path == t.home).bind fun u =>
-              u.own.find? fun (b : Bound) => b.name == m && b.entry.kind == Kind.method
+              let named := u.own.filter fun (b : Bound) => b.name == m && b.entry.kind == Kind.method
+              -- (The trait's own, where another of its module has one of the name.)
+              (named.find? fun b => b.entry.global.endsWith (sharedMethodName (lastSegment t.global) m)) <|> named.head?
           | none => none
         let m' := (member.map (·.entry.global)).getD m
         let item ← resolveFnF ctx m' generics m mps annots ret b

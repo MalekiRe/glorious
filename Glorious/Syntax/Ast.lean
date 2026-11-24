@@ -275,6 +275,10 @@ def ctorIsMark : String := "%ctor_is"
 the fields to go through by number. -/
 def focusMark : String := "%focus"
 
+/-- The name of a trait's function where another trait of its module has a
+function of the same name: the trait's and its own (`Debug::fmt`). -/
+def sharedMethodName (trait m : String) : String := s!"{trait}::{m}"
+
 /-- `[T]` as the parser reads it: a slice's elements, a type only behind a
 reference, `&[T]` (`Modules.resolveType` makes it the prelude's
 `SliceRef`). -/

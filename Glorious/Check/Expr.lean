@@ -713,7 +713,13 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Flat.ExprId)
           else do settleAssocsAll; headName 8 ty
       | none => pure none
     set saved
-    pure (h.bind fun h => alts.find? (·.startsWith (h ++ "::")))
+    let some h := h | return none
+    if let some own := alts.find? (·.startsWith (h ++ "::")) then return some own
+    -- (Or a function of another trait, where the type has that trait.)
+    let s ← get
+    pure (alts.find? fun alt => match s.methods[alt]? with
+      | some sig => s.kimpls.has (Syntax.traitBase sig.trait) h
+      | none => false)
 
 /-- How two functions take their first argument: `0` whole, `1` by a shared
 reference, `2` by a `&mut` one (none where it is no function known so). -/

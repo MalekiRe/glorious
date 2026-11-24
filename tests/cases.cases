@@ -14241,6 +14241,31 @@ fn main() -> Int { let mut c = Count { n: 0 }; sum2(&mut c) }
 #### expect
 6
 #### case
+#### Two traits may each have a function of one name: each trait's is its own, named with the trait (`<T as A>::f`), or found by the value it is called on.
+trait A { fn f(&Self) -> Int }
+trait B { fn f(&Self, Int) -> Int }
+impl A for Int { fn f(x: &Int) -> Int { *x + 1 } }
+impl B for Int { fn f(x: &Int, y: Int) -> Int { *x + y } }
+fn main() -> Int { <Int as A>::f(&1) * 10 + <Int as B>::f(&1, 5) }
+#### expect
+26
+#### case
+trait A { fn f(&Self) -> Int }
+trait B { fn f(&Self, Int) -> Int }
+struct P(Int)
+impl A for Int { fn f(x: &Int) -> Int { *x + 1 } }
+impl B for P { fn f(x: &P, y: Int) -> Int { x.0 + y } }
+fn main() -> Int { let p = P(3); let n = 4; n.f() * 10 + p.f(2) }
+#### expect
+55
+#### case
+trait A { fn f(&Self) -> Int }
+trait B { fn f(&Self, Int) -> Int }
+impl A for Int { fn f(x: &Int) -> Int { *x + 1 } }
+fn main() -> Int { f(&1) }
+#### expect
+error: 4:20: in `main`: `f` is a function of more than one trait here, `A` and `B`: say which, `A::f(..)` or `<T as B>::f(..)`, or call it on a value, `x.f(..)`
+#### case
 #### `[first, ..rest]`: a slice of at least so many elements, each a reference, the others a slice under a name or left. A clause's whole pattern; the shorter slices have to be other clauses'.
 fn sum(xs: &[Int]) -> Int { match(xs) { [] => 0, [x, ..rest] => *x + sum(rest) } }
 fn main() -> Int { sum(&[1, 2, 3, 4]) }
