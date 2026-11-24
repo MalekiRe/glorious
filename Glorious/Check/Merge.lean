@@ -542,6 +542,7 @@ delta_part StDelta2 diffPart2 applyPart2 fitsPart2 clearPart2 restorePart2 [
   argsChosen : ListD ((Nat × Nat) × Expr),
   decided : ListD Elab.Decision,
   traitShape : MapD String (Nat × List String),
+  selfDefaults : MapLD String Nat,
   writtenArgs : ListD (String × String × String × List Ty),
   supers : ListD (String × List String),
   ranked : ListD (Nat × List (Nat × String)),

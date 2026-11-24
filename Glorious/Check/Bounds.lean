@@ -1193,7 +1193,17 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   let mut last := false
   while !waiting.isEmpty do
    round := round + 1
-   last := last || waiting.length == before || round > 100
+   -- (Stuck: a trait's arguments not decided that are its type where a use
+   -- does not say, `x + y` of `Add<R = Self>`, are that, and the rounds go
+   -- on; if there are none, this is the last.)
+   if !last && (waiting.length == before || round > 100) then
+     let mut moved := false
+     for b in waiting do
+       if ← defaultTraitArgs b.trait b.ty b.args then moved := true
+     if moved && round <= 100 then
+       before := waiting.length + 1
+       settleAssocsAll
+     else last := true
    before := waiting.length
    -- (What the bounds met so far said a type left to an implementation is.)
    if round > 1 then timedM "bounds: rounds settle" settleAssocsAll

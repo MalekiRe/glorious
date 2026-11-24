@@ -529,6 +529,12 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
   let b := (← get).body
   -- A whole number written where a type of whole numbers is wanted is of it.
   if let .int n := b.expr a then
+    -- (Wanted where a trait asked of a decided type takes that type where a
+    -- use does not say, `R` of `Add<R = Self>`: of that type, as `x + 1` of
+    -- a `u8` is of two.)
+    if let .var v ← find p then
+      for bd in (← get).bounds do
+        if ← defaultTraitArgs bd.trait bd.ty bd.args (known := true) (only := some v) then break
     if let some fits ← literalAt p n a then return fits.map fun e => s!"{what}: {e}"
   -- A text written where `&str` is wanted is one.
   if ← textAt p a then return none
@@ -1358,6 +1364,7 @@ partial def inferCallFn (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (
       anew := anew ++ [(id, ← freshTy)]
     let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found ++ anew
     let subject := if targs.isEmpty then self else Ty.tuple (self :: targs)
+    let ownUses := (← get).assocUses.size
     for ((name, _), a) in sig.assocs.zip found do
       modify fun s =>
         { s with assocUses := s.assocUses.push (sig.trait, subject, name, a, s.owner, s.pos) }
@@ -1393,8 +1400,37 @@ partial def inferCallFn (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (
           modify fun s =>
             { s with dups := s.dups.push (p, s!"{pos}`{x}` may call what it is given more than once")
                      drops := s.drops.push (p, s!"{pos}`{x}` may leave what it is given uncalled") }
-    let r ← applyTy scope amb s!"`{x}`" callee args call
+    -- (Needed first: what it asks may decide what its arguments are wanted
+    -- to be, `x + 1` of `Add<R = Self>`. Kept after those its arguments
+    -- need, as they would have been.)
+    let at_ := (← get).bounds.size
+    -- (Wanted to be a whole number of a type, `n + 1` a clause of a `u8`
+    -- ends with: of a trait whose other arguments are its type where not
+    -- written, the type it is asked of is that one.)
+    if let some (id, wanted) := (← get).wantResult then
+      if id == call && (← get).selfDefaults.contains (Syntax.traitBase sig.trait) then
+        if let .var _ ← find self then unify self wanted
     needBounds call [(sig.trait, subject)]
+    let r ← applyTy scope amb s!"`{x}`" callee args call
+    modify fun s =>
+      match s.bounds[at_]? with
+      | some own => { s with bounds := (s.bounds.eraseIdx! at_).push own }
+      | none => s
+    -- (Of a type not decided at an argument that is a type of whole numbers
+    -- where the trait's argument is its type where not written, `n + 1`:
+    -- of that type, as an implementation that does not write it is.)
+    if let some places := (← get).selfDefaults[Syntax.traitBase sig.trait]? then
+      if let .var _ ← find self then
+        for i in places do
+          if let some a := targs[i]? then
+            if let .con n [] ← find a then
+              if n == "Int" || (Syntax.scalars.lookup n).isSome then
+                unify self a
+                break
+    -- (What the trait leaves to the implementation, there now if the
+    -- arguments decided which: `Output` of `x + 1`.)
+    if ((← get).assocUses.size > ownUses) && (← find r) matches .var _ then
+      settleAssocsFrom ownUses
     modify fun s => { s with methodCalls := s.methodCalls.push (call, sig.index) }
     -- (`a[i]` copies the element out: one that cannot be copied is taken
     -- out with `pop` or `remove`, or borrowed.)

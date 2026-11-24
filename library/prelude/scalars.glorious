@@ -806,7 +806,7 @@ fn char(code: Int) -> Option<char> {
 }
 
 // Floating point. `f64_add` and the rest take and give the bits.
-impl Add for f64 { fn +(a: f64, b: f64) -> f64 { f64_of(f64_add(f64_bits(a), f64_bits(b))) } }
+impl Add for f64 { type Output = f64; fn +(a: f64, b: f64) -> f64 { f64_of(f64_add(f64_bits(a), f64_bits(b))) } }
 impl Sub for f64 { fn -(a: f64, b: f64) -> f64 { f64_of(f64_sub(f64_bits(a), f64_bits(b))) } }
 impl Mul for f64 { fn *(a: f64, b: f64) -> f64 { f64_of(f64_mul(f64_bits(a), f64_bits(b))) } }
 impl Div for f64 { fn /(a: f64, b: f64) -> f64 { f64_of(f64_div(f64_bits(a), f64_bits(b))) } }
@@ -852,7 +852,7 @@ fn f64(n: Int) -> f64 { f64_of(f64_of_int(n, 0)) }
 // back to the nearest it can hold, which is the nearest to the true result.
 fn widen(x: f32) -> f64 { f64_of(f64_widen(f32_bits(x), 0)) }
 fn narrow(x: f64) -> f32 { f32_of(f64_narrow(f64_bits(x), 0)) }
-impl Add for f32 { fn +(a: f32, b: f32) -> f32 { narrow(widen(a) + widen(b)) } }
+impl Add for f32 { type Output = f32; fn +(a: f32, b: f32) -> f32 { narrow(widen(a) + widen(b)) } }
 impl Sub for f32 { fn -(a: f32, b: f32) -> f32 { narrow(widen(a) - widen(b)) } }
 impl Mul for f32 { fn *(a: f32, b: f32) -> f32 { narrow(widen(a) * widen(b)) } }
 impl Div for f32 { fn /(a: f32, b: f32) -> f32 { narrow(widen(a) / widen(b)) } }

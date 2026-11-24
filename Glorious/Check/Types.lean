@@ -611,6 +611,10 @@ structure St where
   /-- For each trait, how many type parameters it has and the names of the
   types it leaves to implementations. -/
   traitShape : Std.HashMap String (Nat × List String) := {}
+  /-- For each trait, which of its type parameters (by place among them) are
+  the type it is of where a use does not write them: `R` of
+  `trait Add<R = Self>`. -/
+  selfDefaults : Std.HashMap String (List Nat) := {}
   /-- A type a trait leaves to its implementations, at a use: the trait, what
   it is asked of (the type, and after it the trait's arguments if it has
   some), which type, the variable that stands for it, the function this is in,

@@ -6,7 +6,9 @@ infixl 6 -
 infixl 7 *
 infixl 7 /
 infixl 7 %
-trait Add { fn +(Self, Self) -> Self }
+// (`a + b` of two types, as Rust's: `String + &str`; of one where nothing
+// is written, `T: Add`.)
+trait Add<R = Self> { type Output; fn +(Self, R) -> Output }
 trait Sub { fn -(Self, Self) -> Self }
 trait Mul { fn *(Self, Self) -> Self }
 trait Div { fn /(Self, Self) -> Self }
@@ -49,7 +51,7 @@ trait Ord: Eq {
     fn >=(a: Self, b: Self) -> Bool { not (a < b) }
 }
 
-impl Add for Int { fn +(a: Int, b: Int) -> Int { int_add(a, b) } }
+impl Add for Int { type Output = Int; fn +(a: Int, b: Int) -> Int { int_add(a, b) } }
 impl Sub for Int { fn -(a: Int, b: Int) -> Int { int_sub(a, b) } }
 impl Mul for Int { fn *(a: Int, b: Int) -> Int { int_mul(a, b) } }
 impl Div for Int { fn /(a: Int, b: Int) -> Int { int_fit(int_div(a, b), 64) } }

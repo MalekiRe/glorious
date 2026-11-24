@@ -517,7 +517,13 @@ and typed, is given to every implementation that does not write it. -/
 private partial def parseTrait : P (List Item) := do
   advance
   let name ← expectIdent
-  let params ← parseGenerics
+  -- (`trait Add<R = Self>`: what a use that does not write `R` has; `Self`
+  -- is the type the trait is of there.)
+  let (params, pbounds, pdefaults) ← parseGenericsFull
+  unless (pbounds.filter (·.trait != knownTrait)).isEmpty do
+    failAt "what is asked of a type parameter is written on a function"
+  if pdefaults.any (·.2.1 == [variadicMark]) then
+    failAt "`..T` is a declared type's: a trait takes its arguments as it says"
   let mut supers : Array String := #[]
   if ← acceptPunct ":" then
     repeat
@@ -526,7 +532,8 @@ private partial def parseTrait : P (List Item) := do
   expectPunct "{"
   let mut methods : Array (String × List TypeExpr × Option TypeExpr) := #[]
   let mut unsafeMethods : Array String := #[]
-  let mut defaults : Array Item := #[]
+  let mut defaults : Array Item := (pdefaults.map fun (i, earlier, ty) =>
+    Item.typeAlias (traitParamDefaultName i) earlier ty).toArray
   let mut assocs : Array String := #[]
   repeat
     if (← peek) == .punct "}" then break

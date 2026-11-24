@@ -1368,6 +1368,12 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
     let defaults ← defaults.mapM fun
       | .fn m ps annots ret b =>
         resolveFnF ctx (methodName ctx name m) generics m ps annots ret b
+      -- (What a type parameter is where it is not written, or a type left
+      -- to implementations: its names resolved, `Self` and the parameters
+      -- before it as they are.)
+      | .typeAlias n aps body =>
+        if n.startsWith "%traitDefault" then do pure (.typeAlias n aps (← resolveType ctx (generics ++ aps) body))
+        else pure (.typeAlias n aps body)
       | item => pure item
     pure [.traitInfo (ownName ctx .trait name) supers defaults params assocs]
   | .impl ps tr head args context methods => do

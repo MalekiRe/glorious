@@ -47,7 +47,7 @@ private def wholeNumber (t : String) (width : Int) : String :=
   let mul := if wide then "wide_mul" else "int_mul"
   let test := fun (e : String) => "{ " ++ e ++ " }"
   s!"
-impl Add for {t} \{ fn +(a: {t}, b: {t}) -> {t} {op add} }
+impl Add for {t} \{ type Output = {t}; fn +(a: {t}, b: {t}) -> {t} {op add} }
 impl Sub for {t} \{ fn -(a: {t}, b: {t}) -> {t} {op sub} }
 impl Mul for {t} \{ fn *(a: {t}, b: {t}) -> {t} {op mul} }
 impl Div for {t} \{ fn /(a: {t}, b: {t}) -> {t} {op "int_div"} }
@@ -78,7 +78,7 @@ private def unsigned128 : String :=
   let op := fun (prim : String) => "{ " ++ s!"{t}_of({prim}({t}_bits(a), {t}_bits(b)))" ++ " }"
   let test := fun (e : String) => "{ " ++ e ++ " }"
   s!"
-impl Add for {t} \{ fn +(a: {t}, b: {t}) -> {t} {op "uw_add"} }
+impl Add for {t} \{ type Output = {t}; fn +(a: {t}, b: {t}) -> {t} {op "uw_add"} }
 impl Sub for {t} \{ fn -(a: {t}, b: {t}) -> {t} {op "uw_sub"} }
 impl Mul for {t} \{ fn *(a: {t}, b: {t}) -> {t} {op "uw_mul"} }
 impl Div for {t} \{ fn /(a: {t}, b: {t}) -> {t} {op "uw_div"} }

@@ -275,6 +275,11 @@ def ctorIsMark : String := "%ctor_is"
 the fields to go through by number. -/
 def focusMark : String := "%focus"
 
+/-- What a trait's `i`-th type parameter is where a use of the trait does not
+write it (`trait Add<R = Self>`), kept among what the trait gives
+implementations (`traitInfo`'s), with the parameters before it. -/
+def traitParamDefaultName (i : Nat) : String := s!"%traitDefault{i}"
+
 /-- The name of a trait's function where another trait of its module has a
 function of the same name: the trait's and its own (`Debug::fmt`). -/
 def sharedMethodName (trait m : String) : String := s!"{trait}::{m}"

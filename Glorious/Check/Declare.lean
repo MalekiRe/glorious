@@ -925,10 +925,22 @@ def declare (items : List Item) : M Unit := do
   -- What each trait leaves to its implementations, first: an effect's
   -- operation may name it of the effect's type parameters (`S::Out`).
   for item in items do
-    if let .traitInfo n _ _ params assocs := item then
+    if let .traitInfo n _ fns params assocs := item then
       unless (← get).traitShape.contains n do
-        let params := (genericParams params).filter (!isLifetime ·)
+        let all := genericParams params
+        let params := all.filter (!isLifetime ·)
         modify fun s => { s with traitShape := s.traitShape.insert n (params.length, assocs) }
+        -- (Those that are the trait's type where not written: by their
+        -- place among the types.)
+        let selfs := fns.filterMap fun
+          | .typeAlias a _ (.name "Self" []) =>
+            if a.startsWith "%traitDefault" then
+              ((a.drop "%traitDefault".length).toString.toNat?).map fun i =>
+                ((all.take i).filter (!isLifetime ·)).length
+            else none
+          | _ => none
+        unless selfs.isEmpty do
+          modify fun s => { s with selfDefaults := s.selfDefaults.insert n selfs }
   -- Names first, so that declarations may refer to each other.
   for item in items do
     match item with

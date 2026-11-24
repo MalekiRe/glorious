@@ -600,7 +600,7 @@ error: operation `choose`: a resumption is used at most once, so write `[0, 1]` 
 #### ran are now reported before it does.
 fn main() { 1 + (2, 3) }
 #### expect
-error: 1:13: in `main`: argument 2 of `+`: expected `Int`, found `(Int, Int)`
+error: 1:13: in `main`: `Int` does not implement `Add<(Int, Int)>`
 #### case
 fn f<T, U>(a: T, b: U) -> T { a }  fn main() { f(1) }
 #### expect
@@ -3315,7 +3315,7 @@ went wrong
 fn f(a: i8, b: u8) -> i8 { a + b }
 fn main() -> Int { 0 }
 #### expect
-error: 1:28: in `f`: argument 2 of `+`: expected `i8`, found `u8`
+error: 1:28: in `f`: `i8` does not implement `Add<u8>`
 #### case
 fn twice<T>(x: T) -> T where T: Add, T: Use<[0, *]> { x + x }
 fn main() -> Int { say(twice(3)); say(twice(3u8)); say(twice(1.5)); 0 }
@@ -4306,9 +4306,9 @@ error: `impl Container for Ints` does not say what `Item` is: write `type Item =
 trait Container { type Item; fn first(Self) -> Item }
 struct Ints(Int, Int)
 impl Container for Ints { type Item = Int; fn first(c: Ints) -> Int { c.0 } }
-fn main() -> Int { say(first(Ints(1, 2)) + 1.5); 0 }
+fn main() -> Int { let x: f64 = first(Ints(1, 2)); 0 }
 #### expect
-error: 4:20: in `main`: `Item` of `Container` for `Ints`: expected `Int`, found `f64`
+error: 4:20: in `main`: the value of a `let` with a type: expected `f64`, found `Int`
 #### case
 trait Iter { type Item; fn next(&mut Self) -> Option<Item> }
 struct Count(Int)
@@ -5001,7 +5001,7 @@ impl P { fn get(p: &Self, k: &Int) -> Int { p.x + *k } }
 fn get(p: &P, k: Int) -> Int { p.get(&k) }
 fn main() -> Int { let p = P { x: 1 }; get(&p, 2) + true }
 #### expect
-error: 4:40: in `main`: argument 2 of `+`: expected `Int`, found `Result<(), ()>`
+error: 4:40: in `main`: `Int` does not implement `Add<Result<(), ()>>`
 #### case
 #### `std::hash`: hashing, and a map that finds a key in a step or two.
 use std::hash::{HashMap};

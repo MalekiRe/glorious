@@ -7912,6 +7912,39 @@ refused, once the library gave some type a `drop`. Such a type is now
 destroyed as one with nothing to destroy, as a part nothing decides is
 (`settleBounds`), and the call is given that in its place.
 
+## A trait's type parameters with defaults; `Add<R = Self>`
+
+`trait Add<R = Self> { type Output; fn +(Self, R) -> Output }`, as Rust's,
+so that `String + &str` can be written. A trait's type parameter may say
+what it is where a use does not write it (`traitParamDefaultName`, kept
+among the trait's `traitInfo`). `traitArgDefaults`, before the
+implementations are filled in, writes the missing ones out with `Self` the
+type the trait is of there: `T: Add` is `T: Add<T>`, `impl Add for Int` is
+for `Add<Int>`, and the same of what an implementation asks of its
+parameters. A projection `<T as Add>::Output` must still write its
+arguments.
+
+Operators were typed by one type, `fn +(Self, Self) -> Self`; whole numbers
+took the other operand's type from that. The checker keeps this where Rust
+would find it from the only implementation (`selfDefaults`):
+
+- the bound of a trait function's call is needed before its arguments are
+  read, so a whole number given where the trait's argument is `Self` by
+  default is of the other operand's type when that is a type of numbers
+  (`u8 + 1`, `1 + a` of a `u8`);
+- an undecided operand whose other operand is a type of numbers is that
+  type (`n + 1`), and a result wanted to be a type of numbers is the
+  operand's;
+- `Output` is settled at the call where it can be (`settleAssocsFrom`);
+- bounds left undecided when nothing more is met take their defaults, and
+  the rounds go on.
+
+A use of `Output` whose subject contains it (`Output` of `Add` for
+`(?a, ?b)` that is `?a`) overflowed the stack when spelt; `spellTy` stops
+at a variable it is already spelling.
+
+Messages change: `i8 + u8` is "`i8` does not implement `Add<u8>`".
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

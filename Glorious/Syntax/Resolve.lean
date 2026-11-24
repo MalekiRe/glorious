@@ -1088,11 +1088,57 @@ def expandBlankets (items : List Item) : List Item := Id.run do
     unless more do break
   pure (rest ++ out.toList)
 
+/-- A trait's type parameters that a use does not write, written out as the
+trait says (`trait Add<R = Self>`): of a function's bounds, `T: Add` is
+`T: Add<T>`; of an implementation, `impl Add for Int` is for `Add<Int>`;
+of what an implementation asks, the same of its subject. `Self` is the type
+the trait is of there. -/
+def traitArgDefaults (items : List Item) : List Item := Id.run do
+  let defaults : Std.HashMap String (List (Nat × List String × TypeExpr)) := items.foldl (init := {}) fun m item =>
+    match item with
+    | .traitInfo name _ fns _ _ =>
+      let ds := fns.filterMap fun
+        | .typeAlias n earlier ty =>
+          if n.startsWith "%traitDefault" then ((n.drop "%traitDefault".length).toString.toNat?).map (·, earlier, ty) else none
+        | _ => none
+      if ds.isEmpty then m else m.insert name (ds.mergeSort fun a b => a.1 ≤ b.1)
+    | _ => m
+  if defaults.isEmpty then return items
+  let fill := fun (tr : String) (self : TypeExpr) (args : List TypeExpr) =>
+    match defaults[tr]? with
+    | none => args
+    | some ds => ds.foldl (fun args (i, earlier, ty) =>
+        if args.length == i then args ++ [substTypeExpr (("Self", self) :: earlier.zip args) ty] else args) args
+  let selfOf := fun (head : String) (args : List String) =>
+    if head.startsWith "(tuple" then TypeExpr.tuple (args.map (.name · []))
+    else TypeExpr.name head (args.map (.name · []))
+  let rec go : Item → Item
+    | .bounds f bs => .bounds f (bs.map fun b => { b with args := fill b.trait (.name b.subject []) b.args })
+    | .pub parent i => .pub parent (go i)
+    | .module name (some inner) => .module name (some (inner.map go))
+    | .impl ps tr head args context methods =>
+      let given := (List.range 64).filterMap fun i => methods.findSome? fun
+        | .typeAlias n _ body => if n == traitArgName i then some body else none
+        | _ => none
+      let filled := fill tr (selfOf head args) given
+      let more := (filled.drop given.length).zipIdx.map fun (t, j) => Item.typeAlias (traitArgName (given.length + j)) [] t
+      -- (What it asks of its type parameters, `where T: Add`, the same.)
+      let asked := context.zipIdx.flatMap fun ((subject, ctr), k) =>
+        let cgiven := (List.range 64).filterMap fun i => methods.findSome? fun
+          | .typeAlias n _ body => if n == ctxArgName k i then some body else none
+          | _ => none
+        let cfilled := fill ctr (.name subject []) cgiven
+        (cfilled.drop cgiven.length).zipIdx.map fun (t, j) => Item.typeAlias (ctxArgName k (cgiven.length + j)) [] t
+      .impl ps tr head args context (methods ++ more ++ asked)
+    | item => item
+  pure (items.map go)
+
 /-- Each implementation with the functions its trait gives a body that it
 does not write itself; and, where it gives its trait arguments, `impl
 From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
 the name of what it implements from here on. -/
 def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
+  let items := traitArgDefaults items
   -- (Implementations for every type written out for each.)
   let (items, memo) := Trace.timed "fill: layouts" fun _ => writeLayouts items memo
   let items := Trace.timed "fill: blankets" fun _ => expandBlankets items

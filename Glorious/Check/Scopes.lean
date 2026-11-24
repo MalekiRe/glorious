@@ -282,23 +282,26 @@ def projectionOf (t : Ty) : M (Option Ty) := do
 /-- A type as it is written in the name of a trait at its arguments: the
 spelling `TypeExpr.spell` gives the type an implementation writes. A type not
 yet known is spelt by its variable. -/
-partial def spellTy (t : Ty) : M String := do
+partial def spellTy (t : Ty) (seen : List Nat := []) : M String := do
   match ← find t with
   -- (One read from what a trait leaves to an implementation, not known
-  -- yet: as that is written, as a condition of it is.)
+  -- yet: as that is written, as a condition of it is. One that is part of
+  -- what it is asked of, `Output` of `Add` for `(?a, ?b)` that is `?a`, is
+  -- spelt by its variable.)
   | .var id => do
+    if seen.contains id then return s!"?{id}"
     match ← projectionOf (.var id) with
-    | some p => spellTy p
+    | some p => spellTy p (id :: seen)
     | none => pure s!"?{id}"
   | .con n [] => pure n
-  | .con n args => do pure s!"{n}<{", ".intercalate (← args.mapM spellTy)}>"
-  | .tuple args => do pure s!"({", ".intercalate (← args.mapM spellTy)})"
-  | .fn ps r _ _ _ => do pure s!"fn({", ".intercalate (← ps.mapM spellTy)}) -> {← spellTy r}"
+  | .con n args => do pure s!"{n}<{", ".intercalate (← args.mapM (spellTy · seen))}>"
+  | .tuple args => do pure s!"({", ".intercalate (← args.mapM (spellTy · seen))})"
+  | .fn ps r _ _ _ => do pure s!"fn({", ".intercalate (← ps.mapM (spellTy · seen))}) -> {← spellTy r seen}"
   | .ref how inner _ => do
     let uniq := match ← find how with
       | .con "&mut" [] => true
       | _ => false
-    pure ((if uniq then "&mut " else "&") ++ (← spellTy inner))
+    pure ((if uniq then "&mut " else "&") ++ (← spellTy inner seen))
 
 /-- What a trait is asked of, taken apart: the type, and the trait's own
 arguments if it has some. -/
@@ -308,6 +311,39 @@ def subjectOf (trait : String) (subject : Ty) : M (Ty × List Ty) := do
   match ← find subject with
   | .tuple (self :: args) => pure (self, args)
   | other => pure (other, [])
+
+/-- A trait asked of a type at arguments not decided, of a trait whose
+parameters there are the type where not written (`trait Add<R = Self>`):
+those arguments the type, as a use that does not write them has. With
+`known`, only where the type is decided. Whether one was. -/
+def defaultTraitArgs (trait : String) (subject : Ty) (keyed : List Ty := []) (known : Bool := false)
+    (only : Option Nat := none) : M Bool := do
+  let some places := (← get).selfDefaults[Syntax.traitBase trait]? | return false
+  -- (Of a bound keyed by its arguments, `Add<Int>`, they are `keyed`.)
+  let (self, args) ← if keyed.isEmpty then subjectOf (Syntax.traitBase trait) subject else pure (subject, keyed)
+  if known && only.isNone then if let .var _ ← find self then return false
+  -- (For a whole number written: only where the other is a type of whole
+  -- numbers, which it may then be.)
+  if known then
+    let scalar := fun (t : Ty) => match t with
+      | .con n [] => n == "Int" || (Syntax.scalars.lookup n).isSome
+      | _ => false
+    let others ← (self :: places.filterMap (args[·]?)).mapM find
+    unless others.any scalar do return false
+  let mut moved := false
+  for i in places do
+    if let some a := args[i]? then
+      match ← find a, ← find self with
+      | .var v, _ =>
+        if only.all (· == v) then
+          unify a self
+          moved := true
+      | _, .var w =>
+        if only.all (· == w) then
+          unify a self
+          moved := true
+      | _, _ => pure ()
+  pure moved
 
 /-- What an implementation's type parameters are for a type it is asked of:
 each that is an argument of its head, that argument of the type; each that
@@ -558,6 +594,13 @@ def settleAssocs : M Unit := do
           if let (.ref (.con "'" []) _ _, .ref (.con "'" []) _ _) := (← find x, ← find y) then unify x y
     | none => answers := (id, tr, name, asked) :: answers
   modify fun s => { s with assocUses := left ++ s.assocUses }
+
+/-- `settleAssocs` of those asked from the `k`-th on alone. -/
+def settleAssocsFrom (k : Nat) : M Unit := do
+  let uses := (← get).assocUses
+  modify fun s => { s with assocUses := uses.extract k uses.size }
+  settleAssocs
+  modify fun s => { s with assocUses := uses.extract 0 k ++ s.assocUses }
 
 /-- `settleAssocs` until it settles nothing more (a list of sixteen's types,
 each made of the rest's, take some dozens of rounds). -/

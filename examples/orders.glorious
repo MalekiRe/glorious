@@ -21,7 +21,7 @@ impl Priced for Order { fn total(o: &Order) -> Int { o.cents * o.count } }
 
 // A sum of money, written with its pence.
 struct Money(Int)
-impl Add for Money { fn +(a: Money, b: Money) -> Money { Money(a.0 + b.0) } }
+impl Add for Money { type Output = Money; fn +(a: Money, b: Money) -> Money { Money(a.0 + b.0) } }
 fn shown(m: Money) -> Str {
     let pence = m.0 % 100;
     show(m.0 / 100) ++ "." ++ (if(pence < 10) { "0" } else { "" }) ++ show(pence)
