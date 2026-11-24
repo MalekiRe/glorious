@@ -331,8 +331,9 @@ private partial def parseItem : P Item := do
       | .fn ps r => pure (s!"(fn{ps.length})", ps ++ [r])
       -- `impl<'a, T> Tr for &'a [T]`: for slices, the prelude's `SliceRef`
       -- (as `&[T]` is wherever a type is written).
-      | .ref uniq (.name "%prelude::Array" [t]) life =>
-        pure (if uniq then "SliceMut" else "SliceRef", [.name (life.getD elidedLife) [], t])
+      | .ref uniq (.name x [t]) life =>
+        if x == sliceMark then pure (if uniq then "SliceMut" else "SliceRef", [.name (life.getD elidedLife) [], t])
+        else pure (if uniq then "(&mut)" else "(&)", [.name x [t]])
       | .ref true t _ => pure ("(&mut)", [t])
       | .ref false t _ => pure ("(&)", [t])
       | _ => failAt "an implementation is for a type made with a name, a tuple, a function or a reference"
@@ -1605,7 +1606,7 @@ partial def describable (t : TypeExpr) : Bool :=
 /-- The text of `impl Reflect for` a declared type, or nothing. -/
 def reflectText (name : String) (params : List String) (isPub : Bool)
     (ctors : List (String × List TypeExpr × List String × List Bool)) (enum : Bool) : Option String := Id.run do
-  if name == "Array" || name == "Str" then return none
+  if name == "Str" then return none
   let tys := params.filter (!·.startsWith "'")
   let head := if params.isEmpty then name else s!"{name}<{", ".intercalate params}>"
   let generics := if params.isEmpty then "" else s!"<{", ".intercalate params}>"

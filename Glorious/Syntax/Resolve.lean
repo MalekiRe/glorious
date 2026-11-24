@@ -138,10 +138,10 @@ def givenTraitArgs (ms : List Item) : List TypeExpr :=
     | _ => none
   (List.range named.length).filterMap fun i => named.lookup (traitArgName i)
 
-/-- The names a type mentions, not through a reference, a callable or an
-array (each of which holds the other where it is). -/
+/-- The names a type mentions, not through a reference or a callable (each
+of which holds the other where it is). -/
 partial def heldNames : TypeExpr → List String
-  | .name x args => if (x.splitOn "::").getLast! == "Array" then [x] else x :: args.flatMap heldNames
+  | .name x args => x :: args.flatMap heldNames
   | .tuple args => args.flatMap heldNames
   | .performs r _ => heldNames r
   | _ => []
@@ -161,7 +161,6 @@ where it does not (a type parameter, or one not declared). -/
 partial def staticLayout (fields : Std.HashMap String (List String × List (List TypeExpr)))
     (seen : List String) : TypeExpr → Option (Nat × Nat)
   | .name x args =>
-    let last := (x.splitOn "::").getLast!
     if x == rankedMark then some (16, 8)
     else if x == "Int" then some (8, 8)
     else if let some w := scalars.lookup x then
@@ -169,7 +168,6 @@ partial def staticLayout (fields : Std.HashMap String (List String × List (List
         | some bits => bits.natAbs / 8
         | none => if x == "f32" || x == "char" then 4 else 8
       some (b, b)
-    else if last == "Array" then some (24, 8)
     else if seen.contains x then some (8, 8)
     else match fields[x]? with
       | some (ps, cs) =>
@@ -210,7 +208,6 @@ def layoutOf (fields : Std.HashMap String (List String × List (List TypeExpr)))
   let call := fun (id : Nat) (f : String) (args : List Expr) => Expr.call id (.name none f) args
   let constant := fun (s a : Int) =>
     (call 0 "layout_size" [pair (int s) (int a)], call 0 "layout_align" [pair (int s) (int a)])
-  let last := (head.splitOn "::").getLast!
   if head == "Int" then return constant 8 8
   if let some w := scalars.lookup head then
     let bytes : Int := match w with
@@ -219,7 +216,6 @@ def layoutOf (fields : Std.HashMap String (List String × List (List TypeExpr)))
     return constant bytes bytes
   if head.startsWith "(fn" then return constant 16 8
   if head == "(&)" || head == "(&mut)" then return constant 8 8
-  if last == "Array" then return constant 24 8
   let ctors : List (List TypeExpr) ← if head.startsWith "(tuple" then
       pure [fresh.map (TypeExpr.name · [])]
     else match fields[head]? with

@@ -157,10 +157,6 @@ fn rhs(out: &mut Vec<u8>, r: &Rhs) {
                     out.push(46);
                     nat(out, 0);
                 }
-                Prim::FixedToArray => {
-                    out.push(46);
-                    nat(out, 1);
-                }
                 Prim::FixedLen => {
                     out.push(46);
                     nat(out, 4);

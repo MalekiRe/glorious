@@ -932,9 +932,8 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
               (.con im.head ((List.range arity).map Traits.STy.var))).map (toDictE s.impls)
           else none
         let mut ctors : List (String × List (Option Elab.DictE)) := []
-        -- (A `[T; N]` is destroyed as an array is: it is built as one.)
-        let isArray := some im.head == s.arrayType || im.head == "Fixed"
-        if isArray then ctors := [("%each", [place 0])]
+        -- (A `[T; N]`: each of its elements.)
+        if im.head == "Fixed" then ctors := [("%each", [place 0])]
         else if im.head.startsWith "(tuple" then
           ctors := [("", (List.range arity).map place)]
         else if let some decl := s.types[im.head]? then
@@ -950,7 +949,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
                 parts := parts ++ [if plain then none
                   else (Traits.solveIx s.kimpls givens 1000 Syntax.destroyTrait (sty f)).map (toDictE s.impls)]
               ctors := ctors ++ [(c, parts)]
-        destroys := destroys.push ⟨im.head, im.context.length, hook, isArray, ctors⟩
+        destroys := destroys.push ⟨im.head, im.context.length, hook, im.head == "Fixed", ctors⟩
     let traitInfo : Elab.TraitInfo :=
       { dicts := s.dictTable.toList
         methods := s.methodCalls.toList

@@ -49,8 +49,6 @@ partial def writtenTy (vars : List (String × ITy)) : TypeExpr → M ITy
     if x == "Int" then return .int
     if Syntax.isScalar x then return .scalar (Syntax.scalarBits x)
     let s ← get
-    if s.arrayType == some x then
-      return .data arrayName (← args.mapM (writtenTy vars))
     -- (A `[T; N]`: of the element's type and the length's.)
     if x == "Fixed" then
       if let [t, n] := args then
@@ -468,29 +466,8 @@ partial def refSig (fn : Nat) : M ISig := do
 partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
   | .atom a => do pure (← widenTy (← atomTy Γ a), none)
   | .prim p args => do
-    -- An array is a value of the type kept for arrays, of its elements' type.
     let t ← freshTy
-    let array := ITy.data arrayName [t]
     match p, args with
-    | .arrGet, [a, i] =>
-      unify (← atomTy Γ a) array
-      unify (← atomTy Γ i) .int
-      pure (t, none)
-    | .arrSet, [a, i, v] =>
-      unify (← atomTy Γ a) array
-      unify (← atomTy Γ i) .int
-      unify (← atomTy Γ v) t
-      pure (array, none)
-    | .arrLen, [a, _] =>
-      unify (← atomTy Γ a) array
-      pure (.int, none)
-    | .arrPush, [a, v] =>
-      unify (← atomTy Γ a) array
-      unify (← atomTy Γ v) t
-      pure (array, none)
-    | .arrPop, [a, _] =>
-      unify (← atomTy Γ a) array
-      pure (.tuple [array, t], none)
     | .cast b into, [a] =>
       if into then do unify (← atomTy Γ a) .int; pure (.scalar b, none)
       else do unify (← atomTy Γ a) (.scalar b); pure (.int, none)
@@ -518,11 +495,6 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
       for s in ts do
         unify s t
       pure (.data fixedName [t, .data (lenBase + (tag - fixedBase)) []], none)
-    else if arrayBase ≤ tag then
-      let t ← freshTy
-      for s in ts do
-        unify s t
-      pure (.data arrayName [t], none)
     else
       let (result, fields) ← instCtor tag
       -- (A number written out is a scalar's where the field is one: a
@@ -739,12 +711,6 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
         unify t (.ref ρ σ)
         match args with
         | [_, .int i] => pure (.ref ρ (← field σ i.toNat))
-        | [_, ix] =>
-          -- A place found when the program runs: of an array.
-          unify (← atomTy Γ ix) .int
-          let elem ← freshTy
-          unify σ (.data arrayName [elem])
-          pure (.ref ρ elem)
         | _ => throw "a memory operation has the wrong number of arguments"
       | .focus, [t, _, _] => do
         -- A field of one of a type's several constructors.
@@ -757,7 +723,7 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
           unify t (.ref ρ (.data fixedName [elem, ← freshTy]))
           pure (.ref ρ elem)
         | [_, .int i, .int built] =>
-          if built ≤ 0 || arrayBase ≤ built.toNat then
+          if built ≤ 0 || fixedBase ≤ built.toNat then
             throw "a reference into a constructor's field names no constructor"
           let (whole, fields) ← instCtor built.toNat
           unify t (.ref ρ whole)

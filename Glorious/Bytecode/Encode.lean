@@ -78,11 +78,6 @@ def prim : Prim → Bytes
   | .uwShl => [37]
   | .uwShr => [38]
   | .intBelow => [39]
-  | .arrGet => [40]
-  | .arrSet => [41]
-  | .arrLen => [42]
-  | .arrPush => [43]
-  | .arrPop => [44]
   | .cast b into => 45 :: int b ++ [if into then 1 else 0]
   | .fixed op => 46 :: nat op
 

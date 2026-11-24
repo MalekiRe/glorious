@@ -539,9 +539,8 @@ partial def declsFor (types : List Ty) (opsTodo : List (Nat × List Ty)) (datas 
     match types with
     | [] => pure (datas.toList, ops.toList)
     | t :: rest =>
-      -- (the type of arrays is not one a certificate declares)
       let newData := (dataUses t).filter fun (name, args) =>
-        name != arrayName && !seen.contains (name, args.map Ty.shape)
+        !seen.contains (name, args.map Ty.shape)
       match newData with
       | [] => declsFor rest (opUses t) datas ops seen seenOps
       | (name, args) :: _ =>
@@ -592,8 +591,6 @@ partial def resolveType (typeNames params : List String) (locals : List (String 
       if x.startsWith "'" then pure (.ref (← freshRg) (.tuple []))
       else if x == "Int" then pure .int
       else if Syntax.isScalar x then pure (.scalar (Syntax.scalarBits x))
-      else if (← get).arrayType == some x then
-        pure (.data arrayName (← args.mapM (resolveType typeNames params locals)))
       else if x == "Fixed" && args.length == 2 then
         match args with
         | [t, n] => pure (.data fixedName [← resolveType typeNames params locals t,
@@ -641,10 +638,6 @@ partial def resolveType (typeNames params : List String) (locals : List (String 
   | .performs r _ => resolveType typeNames params locals r
 
 def declare (items : List Item) (g : Elab.Globals) : M Unit := do
-  let arrays := items.findSome? fun
-    | .fieldNames mark (name :: _) _ => if mark == Syntax.arrayMark then some name else none
-    | _ => none
-  modify fun s => { s with arrayType := arrays }
   let typeNames := items.filterMap fun
     | .enum name _ _ => some name
     | .struct name _ _ => some name

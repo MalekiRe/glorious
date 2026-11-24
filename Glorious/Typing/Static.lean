@@ -307,24 +307,6 @@ inductive HasRhs (Δ : Ctx) (Γ : TEnv) : Rhs → Ty → Prop where
   | atom {a : Atom} {τ : Ty} : HasAtom Γ a τ → HasRhs Δ Γ (.atom a) τ
   | prim {p : Prim} {a b : Atom} :
       HasAtom Γ a .int → HasAtom Γ b .int → HasRhs Δ Γ (.prim p [a, b]) .int
-  /-- An array is read at a place: a copy of the field, so it is duplicable. -/
-  | arrGet {a i : Atom} {T τ : Ty} :
-      HasAtom Γ a T → HasAtom Γ i .int → Uniform Δ T τ → Δ.dup τ →
-      HasRhs Δ Γ (.prim .arrGet [a, i]) τ
-  /-- The array with another value at a place. The array is copied, so it is
-  duplicable; and so, being of fields of that type, is the value. -/
-  | arrSet {a i v : Atom} {T τ : Ty} :
-      HasAtom Γ a T → HasAtom Γ i .int → HasAtom Γ v τ → Uniform Δ T τ → Δ.dup T →
-      HasRhs Δ Γ (.prim .arrSet [a, i, v]) T
-  | arrLen {a b : Atom} {T σ : Ty} :
-      HasAtom Γ a T → HasAtom Γ b σ → HasRhs Δ Γ (.prim .arrLen [a, b]) .int
-  | arrPush {a v : Atom} {T τ : Ty} :
-      HasAtom Γ a T → HasAtom Γ v τ → Grows Δ T τ → Δ.dup T →
-      HasRhs Δ Γ (.prim .arrPush [a, v]) T
-  /-- The array without its last element, and the last. -/
-  | arrPop {a b : Atom} {T τ σ : Ty} :
-      HasAtom Γ a T → HasAtom Γ b σ → Uniform Δ T τ → Shrinks Δ T → Δ.dup (.tuple [T, τ]) →
-      HasRhs Δ Γ (.prim .arrPop [a, b]) (.tuple [T, τ])
   | construct {tag : Nat} {args : List Atom} {T : Ty} {Fs : List Ty} :
       CtorOf Δ tag T Fs → HasAtoms Γ args Fs → HasRhs Δ Γ (.construct tag args) T
   /-- Reading a field copies it, so the field must be duplicable. -/

@@ -87,7 +87,7 @@ partial def shown (names : Array String) (v : Value) : String :=
   | none => match v with
   | .int n => toString n
   | .data tag fields =>
-    if arrayBase ≤ tag then
+    if fixedBase ≤ tag then
       let codes := fields.filterMap fun | .int n => some n | _ => none
       if codes.length == fields.length then String.ofList (codes.map fun n => Char.ofNat n.toNat)
       else s!"[{", ".intercalate (fields.map (shown names))}]"

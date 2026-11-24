@@ -1098,46 +1098,14 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
     | some r => pure r
     | none => freshTy
   | .prim => do
-    -- The intrinsics of arrays, of whatever their elements are. Reading a
+    -- The intrinsics of `[T; N]`, of whatever their elements are. Reading a
     -- place and putting another value at one let go of what is not given
     -- back.
-    let named := ((← get).arrayType).getD "Array"
-    let array := fun (t : Ty) => Ty.con named [t]
     let t ← freshTy
     match x with
-    | "arr_new" =>
-      checkArgs scope amb s!"intrinsic `{x}`" [] args call
-      pure (array t)
     | "fixed_make" =>
       checkArgs scope amb "the array" (List.replicate args.size t) args call
       pure (.con "Fixed" [t, lengthTy 64 args.size])
-    | "arr_at" =>
-      -- The reference to a place of an array, from a reference to the
-      -- array: the same kind of reference, borrowing from the same things.
-      let how ← freshTy
-      let cap ← freshCap
-      checkArgs scope amb s!"intrinsic `{x}`" [.ref how (array t) cap, .int] args call
-      pure (.ref how t cap)
-    | "arr_len_at" =>
-      checkArgs scope amb s!"intrinsic `{x}`" [.ref (← freshTy) (array t) (← freshCap)] args call
-      pure .int
-    | "arr_get" =>
-      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
-      mustDrop t "reading a place of an array lets go of the rest of it"
-      pure t
-    | "arr_set" =>
-      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int, t] args call
-      mustDrop t "putting a value at a place of an array lets go of what was there"
-      pure (array t)
-    | "arr_len" =>
-      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
-      pure .int
-    | "arr_push" =>
-      checkArgs scope amb s!"intrinsic `{x}`" [array t, t] args call
-      pure (array t)
-    | "arr_pop" =>
-      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
-      pure (.tuple [array t, t])
     -- Of `[T; N]`: `N` of one value, the element at a place, one with
     -- another there, and a place in one.
     | "fixed_fill" =>

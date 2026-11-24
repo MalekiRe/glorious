@@ -46,33 +46,23 @@ inductive Value where
   so that what it means for a borrow to be respected can be said. -/
   | ref (addr : Nat) (borrow : Nat) (path : List PathStep)
 
-/-- The constructors that build arrays: the one that takes `n` elements is
-`arrayBase + n`, above every constructor a program declares. And the name
-kept for the type of arrays. -/
-def arrayBase : Nat := 4611686018427387904
-
-/-%proof (commented out while the machines become bytes)
-theorem arrayBase_pos : 0 < arrayBase := by decide
-%proof-/
-
--- Nothing is to count down from it.
-attribute [irreducible] arrayBase
-
-def arrayName : Nat := 4611686018427387904
+/-- Where the names of the types no program declares start, above every one
+a program does. -/
+def builtinNames : Nat := 4611686018427387904
 
 /-- The name of the type the types for the typed lowering give what nothing
 determined (a type parameter a function holds no value of where it is
 called, as one read from a shared cell): no type declares it, so it is held
 by the machine, whatever it is. -/
-def anyName : Nat := arrayName + 1
+def anyName : Nat := builtinNames + 1
 
 /-- `[T; N]`: the constructor that builds one of `n` elements is
-`fixedBase + n`, as an array's is `arrayBase + n` (its values are built and
-read as arrays' are); its type is `fixedName` at the element's type and the
-length, the type `lenBase + n` for `n`. -/
+`fixedBase + n`, above every constructor a program declares; its type is
+`fixedName` at the element's type and the length, the type `lenBase + n`
+for `n`. -/
 def fixedBase : Nat := 6917529027641081856
-def fixedName : Nat := arrayName + 2
-def lenBase : Nat := arrayName + 3
+def fixedName : Nat := builtinNames + 2
+def lenBase : Nat := builtinNames + 3
 
 /-- The locals of one activation, oldest first. -/
 abbrev Env := List Value
@@ -164,17 +154,6 @@ inductive Prim where
   /-- The first integer, if it is at least zero and below the second: a place
   in something of that many places. Else no meaning. -/
   | intBelow
-  /-- Arrays. A value made of fields, however many, is read and changed at a
-  place given by an integer: the field at a place; the value with another
-  field there; how many fields; the value with one more field after the
-  last, built by the next constructor; and the value without its last, built
-  by the one before, paired with the last. None has a meaning at a place
-  that is not there, or of a value that is not made of fields. -/
-  | arrGet
-  | arrSet
-  | arrLen
-  | arrPush
-  | arrPop
   /-- A whole number seen as a scalar of so many bits (`into`), or a scalar
   as the whole number it is held as: the value as it is, of another type. -/
   | cast (bits : Int) (into : Bool)
@@ -444,15 +423,6 @@ def Prim.eval : Prim → List Value → Option Value
     if 0 ≤ b ∧ b < 128 then ofUnsigned (unsigned a * 2 ^ b.toNat) else none
   | .uwShr, [.int a, .int b] => if 0 ≤ b then ofUnsigned (unsigned a / 2 ^ b.toNat) else none
   | .intBelow, [.int a, .int b] => if 0 ≤ a ∧ a < b then checkedWide a else none
-  | .arrGet, [.data _ fields, .int i] => if 0 ≤ i then fields[i.toNat]? else none
-  | .arrSet, [.data tag fields, .int i, v] =>
-    if 0 ≤ i ∧ i.toNat < fields.length then some (.data tag (fields.set i.toNat v)) else none
-  | .arrLen, [.data _ fields, _] => some (.int fields.length)
-  | .arrPush, [.data tag fields, v] => some (.data (tag + 1) (fields ++ [v]))
-  | .arrPop, [.data tag fields, _] =>
-    match fields.getLast? with
-    | some last => some (.data 0 [.data (tag - 1) fields.dropLast, last])
-    | none => none
   -- (`[x; n]`: `n` of one value.)
   | .fixed 0, [x, .int n] => if 0 ≤ n then some (.data (fixedBase + n.toNat) (List.replicate n.toNat x)) else none
   | .fixed 2, [.data _ fields, .int i] => if 0 ≤ i then fields[i.toNat]? else none

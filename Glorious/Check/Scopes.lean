@@ -604,11 +604,11 @@ def runPending : M Unit := do
   for p in pending do
     let rows ← p.rows.mapM (·.mapM normPat)
     if let some ws ← uncovered p.tys rows then
-      -- (Not where it says nothing: any value, or an array's length.)
-      let telling := fun (w : String) => (w.toList.any fun c => c.isAlpha) && (w.splitOn "Array(").length == 1
+      -- (Not where it says nothing: any value, or a number.)
+      let telling := fun (w : String) => w.toList.any fun c => c.isAlpha
       let case_ := match ws with
         | [w] => if telling w then s!": not `{w}`" else ""
-        | ws => if ws.isEmpty || !ws.any telling || ws.any (fun w => (w.splitOn "Array(").length > 1) then ""
+        | ws => if ws.isEmpty || !ws.any telling then ""
           else s!": not `{", ".intercalate ws}`"
       throw s!"{p.pos}{p.what} not cover every case{case_}"
     -- A clause that tests for something the clauses before it have already

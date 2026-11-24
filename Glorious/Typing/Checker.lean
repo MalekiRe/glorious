@@ -186,29 +186,11 @@ theorem findOp_inst (os : List OpInst) (op : Nat) (args : List Ty) (θ : List Rg
     | some r => simp [Ty.inst_inst]
 %proof-/
 
-/-! ## Arrays
+/-! ## Arrays of a length their type says
 
-One name is kept for the type of arrays, applied to the type of the elements.
-It has a constructor for every length: the one that takes `n` elements is
-`arrayBase + n`. So an array of any length is a value of the type, built like
-any other, and a longer one is built by the next constructor. No certificate
-declares this type; what it says of the name is not looked at. -/
-
-/-- The field types of constructor `tag` of the type of arrays at `args`. -/
-def arrayFields (tag : Nat) : List Ty → Option (List Ty)
-  | [t] => if arrayBase ≤ tag then some (List.replicate (tag - arrayBase) t) else none
-  | _ => none
-
-/-%proof (commented out while the machines become bytes)
-theorem arrayFields_inst (tag : Nat) (args : List Ty) (θ : List Rgn) :
-    arrayFields tag (args.map (Ty.inst θ)) = (arrayFields tag args).map (·.map (Ty.inst θ)) := by
-  match args with
-  | [] => rfl
-  | [t] =>
-    simp only [List.map_cons, List.map_nil, arrayFields]
-    split <;> simp
-  | _ :: _ :: _ => rfl
-%proof-/
+One name is kept for `[T; N]`, applied to the element's type and the length's
+(`lenBase + N`). Its constructor for `N` elements is `fixedBase + N`. No
+certificate declares this type; what it says of the name is not looked at. -/
 
 /-- The field types of the constructor of a `[T; N]` (`fixedName` at the
 element's type and the length's type): `N` of the element's. -/
@@ -217,10 +199,9 @@ def fixedFields (tag : Nat) : List Ty → Option (List Ty)
     if lenBase ≤ len && tag == fixedBase + (len - lenBase) then some (List.replicate (len - lenBase) t) else none
   | _ => none
 
-/-- The field types of a constructor of a declared type, or of the type of arrays. -/
+/-- The field types of a constructor of a declared type, or of a `[T; N]`. -/
 def Cert.fields (C : Cert) (tag name : Nat) (args : List Ty) : Option (List Ty) :=
   if name = fixedName then fixedFields tag args
-  else if name = arrayName then arrayFields tag args
   else (findData C.datas name args).bind (·.lookup tag)
 
 def dataDup (ds : List DataInst) (name : Nat) (args : List Ty) : Bool :=
@@ -237,8 +218,7 @@ def dupTy (C : Cert) : Ty → Bool
   | .scalar _ => true
   | .tuple fs => dupTys C fs
   | .data name args =>
-    if name = arrayName then dupTys C args
-    else if name = fixedName then (match args with | t :: _ => dupTy C t | [] => true)
+    if name = fixedName then (match args with | t :: _ => dupTy C t | [] => true)
     else dataDup C.datas name args
   | .fn _ _ _ _ once _ _ => !once
   | .ref _ _ => true
@@ -530,9 +510,7 @@ constructor built it. -/
 def fieldsOf (C : Cert) : Ty → Option (List Ty)
   | .tuple Fs => some Fs
   | .data name args =>
-    -- An array's fields are not all there is to read: it may have none.
-    if name = arrayName then none
-    else if name = fixedName then
+    if name = fixedName then
       match args with
       | [_, .data len []] => fixedFields (fixedBase + (len - lenBase)) args
       | _ => none
@@ -765,67 +743,24 @@ theorem closesFit_sound {Γ : TEnv} {fn : Nat} {captures : List Atom} {θ : List
   · exact dupOk_all h2
 %proof-/
 
-/-- The type of an array's elements, if this is the type of arrays of some. -/
-def arrayElem : Ty → Option Ty
-  | .data name [t] => if name = arrayName then some t else none
+/-- The type of a `[T; N]`'s elements, if this is the type of one. -/
+def fixedElem : Ty → Option Ty
   | .data name [t, _] => if name = fixedName then some t else none
   | _ => none
 
-/-%proof (commented out while the machines become bytes)
-theorem arrayElem_eq {T t : Ty} (h : arrayElem T = some t) : T = .data arrayName [t] := by
-  unfold arrayElem at h
-  split at h <;> try (cases h; done)
-  split at h <;> try (cases h; done)
-  rename_i hn
-  cases h
-  rw [hn]
-%proof-/
 
-/-%proof (commented out while the machines become bytes)
-/-- A constructor of the type of arrays takes so many elements. -/
-theorem array_ctor {t : Ty} {tag : Nat} {Fs : List Ty}
-    (h : CtorOf C.ctx tag (.data arrayName [t]) Fs) :
-    arrayBase ≤ tag ∧ Fs = List.replicate (tag - arrayBase) t := by
-  rcases h with ⟨_, hT⟩ | ⟨_, name, args, hT, hF⟩
-  · cases hT
-  · cases hT
-    have hF' : C.fields tag arrayName [t] = some Fs := hF
-    simp only [Cert.fields, ↓reduceIte, arrayFields] at hF'
-    split at hF'
-    · rename_i hle
-      cases hF'
-      exact ⟨hle, rfl⟩
-    · cases hF'
-%proof-/
 
-/-%proof (commented out while the machines become bytes)
-theorem array_ctor_of {t : Ty} {tag : Nat} (h : arrayBase ≤ tag) :
-    CtorOf C.ctx tag (.data arrayName [t]) (List.replicate (tag - arrayBase) t) := by
-  refine .inr ⟨fun e => ?_, arrayName, [t], rfl, ?_⟩
-  · rw [e] at h
-    have := arrayBase_pos
-    omega
-  · show C.fields tag arrayName [t] = _
-    simp [Cert.fields, arrayFields, h]
-%proof-/
 
-/-%proof (commented out while the machines become bytes)
-theorem arrayElem_uniform {T t : Ty} (h : arrayElem T = some t) : Uniform C.ctx T t := by
-  rw [arrayElem_eq h]
-  intro tag Fs hc σ hσ
-  obtain ⟨_, rfl⟩ := array_ctor hc
-  exact List.eq_of_mem_replicate hσ
-%proof-/
 
 /-- The type of the field a reference is made to: a field found by number in
-a type with one shape, or a place of an array, which may be found by the
+a type with one shape, or a place of a `[T; N]`, which may be found by the
 program. -/
 def focusTy (C : Cert) (Γ : TEnv) (σ : Ty) : Atom → Option Ty
   | .int (.ofNat i) =>
     match placeTy C σ [i] with
     | some σ' => some σ'
-    | none => arrayElem σ
-  | ix => if atomTy Γ ix == some .int then arrayElem σ else none
+    | none => fixedElem σ
+  | ix => if atomTy Γ ix == some .int then fixedElem σ else none
 
 /-%proof (commented out while the machines become bytes)
 theorem focusTy_sound {Γ : TEnv} {σ σ' : Ty} {ix : Atom} (h : focusTy C Γ σ ix = some σ') :
@@ -845,68 +780,11 @@ theorem focusTy_sound {Γ : TEnv} {σ σ' : Ty} {ix : Atom} (h : focusTy C Γ σ
     · cases h
 %proof-/
 
-/-%proof (commented out while the machines become bytes)
-theorem arrayElem_grows {T t : Ty} (h : arrayElem T = some t) : Grows C.ctx T t := by
-  rw [arrayElem_eq h]
-  intro tag Fs hc
-  obtain ⟨hle, rfl⟩ := array_ctor hc
-  have hc' := array_ctor_of (C := C) (t := t) (tag := tag + 1) (Nat.le_succ_of_le hle)
-  have e : tag + 1 - arrayBase = (tag - arrayBase) + 1 := by omega
-  rw [e, List.replicate_succ'] at hc'
-  exact hc'
-%proof-/
 
-/-%proof (commented out while the machines become bytes)
-theorem arrayElem_shrinks {T t : Ty} (h : arrayElem T = some t) : Shrinks C.ctx T := by
-  rw [arrayElem_eq h]
-  intro tag Fs hc hne
-  obtain ⟨hle, rfl⟩ := array_ctor hc
-  have hpos : tag - arrayBase ≠ 0 := fun e => hne (by simp [e])
-  have hc' := array_ctor_of (C := C) (t := t) (tag := tag - 1) (by omega)
-  have e : tag - 1 - arrayBase = tag - arrayBase - 1 := by omega
-  rw [e] at hc'
-  simpa [List.dropLast_replicate] using hc'
-%proof-/
 
-/-- An intrinsic: arithmetic on two integers, or one of those on arrays. -/
+/-- An intrinsic: arithmetic on two integers, a cast, or one on `[T; N]`. -/
 def checkPrim (C : Cert) (Γ : TEnv) (p : Prim) (args : List Atom) (σ : Ty) : Bool :=
   match p with
-  | .arrGet =>
-    match args with
-    | [a, i] =>
-      match atomTy Γ a with
-      | some T => arrayElem T == some σ && atomTy Γ i == some .int && dupOk C σ
-      | none => false
-    | _ => false
-  | .arrSet =>
-    match args with
-    | [a, i, v] =>
-      match arrayElem σ with
-      | some t =>
-        atomTy Γ a == some σ && atomTy Γ i == some .int && atomTy Γ v == some t && dupOk C σ
-      | none => false
-    | _ => false
-  | .arrLen =>
-    match args with
-    | [a, b] => (atomTy Γ a).isSome && (atomTy Γ b).isSome && σ == .int
-    | _ => false
-  | .arrPush =>
-    match args with
-    | [a, v] =>
-      match arrayElem σ with
-      | some t => atomTy Γ a == some σ && atomTy Γ v == some t && dupOk C σ
-      | none => false
-    | _ => false
-  | .arrPop =>
-    match args with
-    | [a, b] =>
-      match atomTy Γ a with
-      | some T =>
-        match arrayElem T with
-        | some t => σ == .tuple [T, t] && (atomTy Γ b).isSome && dupOk C σ
-        | none => false
-      | none => false
-    | _ => false
   | .cast b into =>
     match args with
     | [a] => if into then atomTy Γ a == some .int && σ == .scalar b else atomTy Γ a == some (.scalar b) && σ == .int
@@ -921,11 +799,11 @@ def checkPrim (C : Cert) (Γ : TEnv) (p : Prim) (args : List Atom) (σ : Ty) : B
       | _, _ => false
     | 2, [a, i] =>
       match atomTy Γ a with
-      | some T => arrayElem T == some σ && atomTy Γ i == some .int && dupOk C σ
+      | some T => fixedElem T == some σ && atomTy Γ i == some .int && dupOk C σ
       | none => false
-    | 4, [a] => (atomTy Γ a).any (fun T => (arrayElem T).isSome) && σ == .int
+    | 4, [a] => (atomTy Γ a).any (fun T => (fixedElem T).isSome) && σ == .int
     | 3, [a, i, v] =>
-      match arrayElem σ with
+      match fixedElem σ with
       | some t => atomTy Γ a == some σ && atomTy Γ i == some .int && atomTy Γ v == some t && dupOk C σ
       | none => false
     | _, _ => false
@@ -1397,7 +1275,7 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
     | .focus, [a, ix, .int (-1)] =>
       match atomTy Γ a with
       | some (.ref r σ) =>
-        match arrayElem σ with
+        match fixedElem σ with
         | some σ' => regionOk C ϕ r && atomTy Γ ix == some .int && checkTm C ϕ (Γ ++ [.ref r σ']) body hs τ ε
         | none => false
       | _ => false

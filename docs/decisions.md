@@ -332,8 +332,8 @@ In stages, each ending with every test program running on the machines:
    a payload, `[T; N]` inline), and `ptr::read<T>` and `ptr::write<T>`
    written for each: `Vec<T>`, slices and arrays of plain data.
 3. References as addresses: what is borrowed or changed lives in memory.
-4. Callables and resumptions as bytes: any `T` in memory; `Array` and
-   `arr_*` leave the compiler and `[T]` is a slice.
+4. Callables and resumptions as bytes: any `T` in memory. (`Array` and
+   `arr_*` have left the compiler, and `[T]` is a slice.)
 5. The machines' values only scalars and addresses, with a C-like ABI.
 
 **The order, as it now stands.** A variable that is borrowed can hold any
@@ -7881,6 +7881,19 @@ not use go undestroyed (`if(c) { eat(n) } else { 7 }` did not destroy `n`).
 Neither alone did, nor the same in a program's own function. It copies plain
 data instead (`T: Use<[0, *]>`); what in the prelude's check reaches the
 program's is not found yet.
+
+**The compiler's growable array is gone** (stage 4 of "A systems language:
+every value is bytes", as far as arrays go). No `Array` type, no `arr_*`
+intrinsic, no array constructors (`arrayBase`) or type (`arrayName`) in
+Core, inference, the proved checker, the lowering, the Lean machines or the
+Rust VM; the machines' prims of a value made of fields are `[T; N]`'s
+alone (`fixed_get`, `fixed_set`, `fixed_fill`, `fixed_len`). `[T]` is a
+slice's elements, a type only behind a reference: alone it is refused, and
+the message says what a slice, an array and a `Vec` are written as. Every
+module, the prelude's too, reads `[a, b]` as a `[T; 2]` and `[a, b]` in a
+pattern as one; `[x; n]` is a `[T; n]` where `n` is a number or a length a
+type parameter stands for, and refused otherwise. A pattern's length that
+no clause covers, among rest patterns, is said without a case to name.
 
 A defect found here, and fixed: how a value of a type nothing decides is
 destroyed, where a call's callee is to be told (`S` of `match`, a type a

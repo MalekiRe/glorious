@@ -953,8 +953,6 @@ def declare (items : List Item) : M Unit := do
         -- (A trait's `unsafe fn`, by the trait's last name and its own.)
         if let [tr, m] := names then
           modify fun s => { s with unsafeFns := unsafeMethodKey tr m :: s.unsafeFns }
-      else if ctor == Syntax.arrayMark then
-        modify fun s => { s with arrayType := names.head? }
       else unless names.isEmpty do
         modify fun s => { s with fieldNames := s.fieldNames.insert ctor names }
     | _ => pure ()
@@ -1060,15 +1058,12 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option (Stri
       else throw s!"`{name}` is not a constructor of `{q}`"
     | none => pure (some (name, sig))
   | none =>
-    -- `[a, b, c]` in a pattern: the array type's constructor of so many
-    -- elements, each of the element's type.
-    if let (some n, some array) := (Syntax.arrayPatLen name, s.arrayType) then
-      if let some sig := s.ctors[array]? then
+    -- `[a, b, c]` in a pattern: the constructor of a `[T; 3]`, of so many
+    -- elements, each of the element's type, its length the pattern's.
+    if let some n := Syntax.fixedPatLen name then
+      if let some sig := s.ctors["Fixed"]? then
         let elem := sig.fields.headD .unit
-        -- (Of a `[T; N]`: its length is the pattern's.)
-        if (Syntax.fixedPatLen name).isSome then
-          return some (name, { sig with fields := List.replicate n elem, result := .con "Fixed" [elem, lengthTy 64 n] })
-        return some (name, { sig with fields := List.replicate n elem })
+        return some (name, { sig with fields := List.replicate n elem, result := .con "Fixed" [elem, lengthTy 64 n] })
     match (s.aliases[name]?).map Syntax.aliasValue with
     | some (.name q y) => resolveCtor y q
     | _ => pure none

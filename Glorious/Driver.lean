@@ -1309,7 +1309,7 @@ partial def showInner (names : Array String) : Value → String
     | none =>
       let args := ", ".intercalate (fields.map (showInner names))
       if tag == 0 then s!"({args})"
-      else if arrayBase ≤ tag then s!"[{args}]"
+      else if fixedBase ≤ tag then s!"[{args}]"
       else
         let name := names[tag]?.getD s!"#{tag}"
         if fields.isEmpty then name else s!"{name}({args})"
@@ -1426,7 +1426,7 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
           else s!"an operation on ({shown vs}) has no result: it would not fit, or there is none"
         else match vs with
           | [.data tag fields, .int i] =>
-            if arrayBase ≤ tag then s!"place `{i}` is asked of an array of {fields.length}"
+            if fixedBase ≤ tag then s!"place `{i}` is asked of an array of {fields.length}"
             else s!"an arithmetic intrinsic is applied to ({shown vs})"
           | _ => s!"an arithmetic intrinsic is applied to ({shown vs})"
       | none => unbound

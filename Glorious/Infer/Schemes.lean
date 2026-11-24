@@ -390,8 +390,7 @@ partial def nonDup (seen : List Nat) (t : ITy) : M Bool := do
   | .var _ | .param _ | .int | .scalar _ => pure false
   | .tuple fs => fs.anyM (nonDup seen)
   | .data name args =>
-    if name == arrayName then args.anyM (nonDup seen)
-    else if seen.contains name then pure false
+    if seen.contains name then pure false
     else
       let tags := (← get).types[name]?.getD []
       tags.anyM fun tag => do

@@ -54,8 +54,13 @@ def specialize (tag n : Nat) : List (List Pat) → List (List Pat)
 /-- Every constructor of a type, with its field types. -/
 def ctorsOf (C : Cert) : Ty → Option (List (Nat × List Ty))
   | .tuple Fs => some [(0, Fs)]
-  -- The type of arrays has a constructor for every length: no list has them all.
-  | .data name args => if name = arrayName then none else findData C.datas name args
+  -- (A `[T; N]` has one, of its `N` elements.)
+  | .data name args =>
+    if name = fixedName then
+      match args with
+      | [t, .data len []] => if lenBase ≤ len then some [(fixedBase + (len - lenBase), List.replicate (len - lenBase) t)] else none
+      | _ => none
+    else findData C.datas name args
   | .int => none
   | .scalar _ => none
   | .fn _ _ _ _ _ _ _ => none

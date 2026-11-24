@@ -926,8 +926,6 @@ structure St where
   whether what is being checked is in a block written `unsafe { .. }`. -/
   unsafeFns : List String := []
   unsafeBlock : Bool := false
-  /-- The prelude's type of arrays, by its name in this program. -/
-  arrayType : Option String := none
   dropSites : Array (Elab.DropSite × Nat) := #[]
   /-- Where the patterns being read are, and how many `_` they have had so
   far: a value a `_` lets go is destroyed, and is known to the elaborator by
@@ -1450,7 +1448,6 @@ partial def showTy : Ty → String
     match numberOf (.con n args), n, args with
     | some k, _, _ => toString k
     | none, "Fixed", [element, length] => s!"[{showTy element}; {showTy length}]"
-    | none, "Array", [element] => s!"[{showTy element}]"
     | none, _, _ => s!"{bareName n}<{", ".intercalate (args.map showTy)}>"
   | .tuple [one] => s!"({showTy one},)"
   | .tuple args => s!"({", ".intercalate (args.map showTy)})"

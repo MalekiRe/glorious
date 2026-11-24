@@ -101,7 +101,6 @@ partial def writeTy (t : Ty) : StateT Names M String := do
         | .tuple [] => pure "Bool"
         | _ => pure s!"Option<{← writeTy ok}>"
       | _ => pure s!"Result<{← writeTy ok}, {← writeTy err}>"
-    | "Array", [element] => pure s!"[{← writeTy element}]"
     | _, _ =>
       if n.startsWith "%" then
         modify fun s => { s with unwritable := some n }

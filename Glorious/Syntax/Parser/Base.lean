@@ -257,16 +257,6 @@ def valueOf (value : P ExprId) : P (Flat.Body × ExprId) := do
 with, whatever the program has in scope. -/
 def preludeFn (name : String) : P ExprId := mkName (some "%prelude") name
 
-/-- `[a, b, c]` as a value: the empty array with each pushed on. The calls
-have identities where they are given, so that they are known to return: an
-element computed before the next is then not one that could be left
-behind. -/
-def arrayValue (elements : List ExprId) (empty : Nat := 0) (pushes : List Nat := []) : P ExprId := do
-  let mut acc ← mk (.call empty (← preludeFn "array_empty") #[])
-  for (e, i) in elements.zipIdx do
-    acc ← mk (.call (pushes.getD i 0) (← preludeFn "array_push") #[acc, e])
-  pure acc
-
 /-- `a[i]`, if this is one: the array and the place. -/
 def indexed? (e : ExprId) : P (Option (Nat × ExprId × ExprId)) := do
   match ← node e with
@@ -618,7 +608,7 @@ partial def parseType : P TypeExpr := do
       expectPunct "]"
       return .name "%prelude::Fixed" [element, length]
     expectPunct "]"
-    pure (.name "%prelude::Array" [element])
+    pure (.name sliceMark [element])
   | .op "*" =>
     -- `*const T`, `*mut T`: an address, with what is said to be there.
     advance
@@ -946,7 +936,7 @@ def asTupleOf (j : Nat) : Pattern → Option Pattern
   | .wild => some .wild
   | .var x => some (.var x)
   | .ctor name none args =>
-    match arrayPatLen name, restPatParts name with
+    match fixedPatLen name, restPatParts name with
     | some n, _ => if n == j then some (.tuple args) else none
     | none, some (k, _, _, _) =>
       let named := args.length - 1
@@ -985,7 +975,7 @@ partial def restClausesOf (all : List Pattern) (total : Nat) : List ClauseId →
     -- from where the clauses end and its place among them.)
     let exact := if (all.any fun p => match p with
         | .ctor n none _ => (restPatParts n).isSome
-        | _ => false) then arrayPatLen name else none
+        | _ => false) then fixedPatLen name else none
     let parts : Option (Nat × Nat × Nat × Nat) ← match restPatParts name, exact with
       | some p, _ => pure (some p)
       | none, some n =>
@@ -1045,9 +1035,10 @@ partial def restClausesOf (all : List Pattern) (total : Nat) : List ClauseId →
     let covered ← if isExact then pure #[] else (List.range count).toArray.mapM fun j => do
       let clauses ← (all.filterMap (asTupleOf j)).toArray.mapM fun p => do
         mkC [p] #[← mkS (.expr (← mk (.tuple #[])))]
-      -- (No clause for the length: a callable that covers nothing.)
+      -- (No clause for the length: a callable that covers nothing of what
+      -- it is given, a number alone.)
       let clauses ← if clauses.isEmpty then
-          pure #[← mkC [.ctor (arrayPatName 0) none []] #[← mkS (.expr (← mk (.tuple #[])))]]
+          pure #[← mkC [.int 0] #[← mkS (.expr (← mk (.tuple #[])))]]
         else pure clauses
       mkS (.let_ .wild (← mk (.closure (id + 4 + count + j) clauses)))
     let never := s!"%rest{id}:never"

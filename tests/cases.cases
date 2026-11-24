@@ -4418,7 +4418,7 @@ fn main() -> Int { let mut a = Vec::new(); fill(100, &mut a); each([1, 2], { x =
 2
 10101
 #### case
-struct P { xs: [Int], n: Int }
+struct P { xs: [Int; 2], n: Int }
 fn main() -> Int { let mut p = P { xs: [1, 2], n: 0 }; p.xs[1] = 9; p.xs[0] + p.xs[1] }
 #### expect
 10
@@ -11026,7 +11026,7 @@ fn main() -> Int { let mut xs = [1, 2, 3]; let x = bump(&mut xs[0]) + xs[0] * 10
 #### expect
 222
 #### case
-struct S { xs: [Int], n: Int }
+struct S { xs: [Int; 3], n: Int }
 fn bump(r: &mut Int) -> Int { *r = *r + 1; *r }
 fn main() -> Int { let mut s = S { xs: [1, 2, 3], n: 0 }; let x = bump(&mut s.xs[1]) + s.xs[1] * 10; x + s.xs[1] * 100 + len(s.xs) * 1000 }
 #### expect
@@ -11983,7 +11983,7 @@ t
 7
 #### case
 trait Tr<S> { fn f(Self) -> Int }
-struct G<Q, S> { q: Q, s: [S] }
+struct G<Q, S> { q: Q, s: Option<S> }
 impl<Q, S> Drop for G<Q, S> where Q: Tr<S> { fn drop(g: G<Q, S>) { () } }
 fn main() -> Int { 0 }
 #### expect
@@ -12134,7 +12134,7 @@ struct A
 impl Make for A { type Out = _; fn make(a: A) -> (Int, Str) { (1, "x") } }
 trait Wrap<S> { type Out; fn wrap(Self, S) -> Self::Out; }
 struct B
-fn helper<T>(t: T) -> [T] { [t] }
+fn helper<T>(t: T) -> [T; 1] { [t] }
 impl<S> Wrap<S> for B { type Out = _; fn wrap(b: B, s: S) -> _ { helper(s) } }
 trait Shout<S> { type Out; fn shout(Self, S) -> Self::Out; }
 struct C
@@ -12858,7 +12858,7 @@ drop a
 #### case
 struct T { name: Str }
 impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-struct H { xs: [T], n: Int }
+struct H { xs: [T; 1], n: Int }
 fn main() -> Int { let mut h = H { xs: [T { name: "a" }], n: 0 }; h.xs[0] = T { name: "z" }; h.n = 5; say("set"); h.n }
 #### expect
 drop a
@@ -13117,7 +13117,7 @@ fn main() -> Int { let mut c = C { n: 1, m: 2 }; let mut slot = None; if(c.n > 0
 error: 2:71: in `main`: `c.n` is read while `slot` holds a `&mut` reference to it
 #### case
 #### A field of a value that is not a variable, borrowed with `&`: where the name is bound to what is plainly a value, it is kept where a reference can point.
-struct C { n: Int, xs: [Int] }
+struct C { n: Int, xs: [Int; 2] }
 fn main() -> Int { let c = C { n: 1, xs: [4, 5] }; len_at(&c.xs) + c.n }
 #### expect
 3
@@ -15137,10 +15137,10 @@ fn main() -> Int { let mut w = Windows { data: Vec::from_array([5, 6]), at: 0 };
 #### case
 trait Family { type Of<T>; fn single<T>(T) -> Of<T> }
 struct Arrays
-impl Family for Arrays { type Of<T> = [T]; fn single<T>(x: T) -> [T] { Some(x) } }
+impl Family for Arrays { type Of<T> = [T; 1]; fn single<T>(x: T) -> [T; 1] { Some(x) } }
 fn main() -> Int { 1 }
 #### expect
-error: 3:72: in `Family::single@Arrays`: the result of a clause: expected `[T]`, found `Result<T, ()>`
+error: 3:78: in `Family::single@Arrays`: the result of a clause: expected `[T; 1]`, found `Result<T, ()>`
 #### case
 use std::vec::{Vec};
 trait Shelf { type Holding<T>; fn empty<T>() -> Holding<T>; fn put<T>(Holding<T>, T) -> Holding<T>; fn count<T>(&Holding<T>) -> Int }

@@ -480,18 +480,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
       if n != args.size then
         throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.size}"
       let atoms ← elabArgs scope args
-      if x == "arr_new" then emit (.let_ (.construct arrayBase []))
-      else if x == "arr_at" then
-        -- The place is a local, so that it is plainly one found when the
-        -- program runs, and not a field's number.
-        match atoms with
-        | [r, i] =>
-          let at_ ← match i with
-            | .int _ => emit (.let_ (.atom i))
-            | _ => pure i
-          emit (.mem .focus [r, at_])
-        | _ => throw "intrinsic `arr_at` takes 2 arguments"
-      else if x == "fixed_at" then
+      if x == "fixed_at" then
         -- (A place in a `[T; N]`: `-1` says so.)
         match atoms with
         | [r, i] =>
@@ -500,12 +489,9 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
             | _ => pure i
           emit (.mem .focus [r, at_, .int (-1)])
         | _ => throw "intrinsic `fixed_at` takes 2 arguments"
-      else if x == "arr_len_at" then
-        -- The constructor that builds an array of `n` elements is the first
-        -- of them and `n`.
-        let built ← emit (.mem .tag atoms)
-        emit (.let_ (.prim .intSub [built, .int arrayBase]))
       else if x == "fixed_len_at" then
+        -- (The constructor that builds a `[T; N]` is the first of them and
+        -- `N`.)
         let built ← emit (.mem .tag atoms)
         emit (.let_ (.prim .intSub [built, .int fixedBase]))
       else emit (.let_ (.prim p atoms))
@@ -723,33 +709,8 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Flat.StmtId → M 
         | none => throw s!"unknown name `{x}`"
       | .deref e => elabExpr scope false e
       | _ => throw "only a mutable variable or `*reference` can be assigned"
-    -- `a[i] = v` and `a = push(a, v)`, of an array a variable holds: the
-    -- array is taken out of the variable, an empty one left in its place,
-    -- changed, and put back. Nothing else holds it meanwhile, so a machine
-    -- that can change it where it is may.
-    let inPlace : Option (Prim × Array Flat.ExprId) := match b.expr target, b.expr value, (← read).arrays with
-      | .name none x, .call _ fe vargs, some (array, push, index) =>
-        match b.bare? fe, vargs[0]?.bind b.bare? with
-        | some f, some y =>
-          let more := vargs.extract 1 vargs.size
-          if x == y && (lookupVar scope f).isNone then
-            if f == push && more.size == 1 then some (.arrPush, more)
-            else if f == Syntax.implFnName index array "index_set" && more.size == 2 then
-              some (.arrSet, more)
-            else none
-          else none
-        | _, _ => none
-      | _, _, _ => none
-    match inPlace with
-    | some (p, more) =>
-      let atoms ← elabArgs scope more
-      let empty ← emit (.let_ (.construct arrayBase []))
-      let old ← emit (.mem .swap [cell, empty])
-      let changed ← emit (.let_ (.prim p (old :: atoms)))
-      let _ ← emit (.mem .store [cell, changed])
-    | none =>
-      let a ← elabExpr scope false value
-      let _ ← emit (.mem .store [cell, a])
+    let a ← elabExpr scope false value
+    let _ ← emit (.mem .store [cell, a])
     elabStmts scope tailPos rest
   | .defer e => do
     -- The rest of the block runs under a guard whose cleanup is `e`.
@@ -1380,14 +1341,11 @@ def destroyers (tr : TraitInfo) : List Item :=
     let asValue := Item.fnOf (implDictName Syntax.destroyTrait D.head) [] (blank.drop 1) none
       [.mk given [.expr (.tuple [.closure 0 [.mk [.var "%arg0"]
         [.expr (.call dropCallId (name method) (passed ++ [name "%arg0"]))]]])]]
-    -- An array: its elements one by one, from the last.
-    -- (A `[T; N]` so too, by its own intrinsics.)
+    -- A `[T; N]`: its elements one by one, from the last.
     if let (true, [(_, [some element])]) := (D.array, D.ctors) then
-      let fixed := D.head == "Fixed"
       let from_ := "%destroy from " ++ D.head
       let before := Expr.call dropCallId (name "int_sub") [name "%n", .int 1]
-      let length := if fixed then Expr.call dropCallId (name "fixed_len") [name "%value"]
-        else .call dropCallId (name "arr_len") [name "%value", .int 0]
+      let length := Expr.call dropCallId (name "fixed_len") [name "%value"]
       [asValue,
         Item.fnOf method [] blank none
           [.mk (given ++ [.var "%value"])
@@ -1395,7 +1353,7 @@ def destroyers (tr : TraitInfo) : List Item :=
         Item.fnOf from_ [] (blank ++ [none]) none
           [.mk (given ++ [.wild, .int 0]) [.expr unit],
             .mk (given ++ [.var "%value", .var "%n"])
-              [.expr (destroyCall tr element (.call dropCallId (name (if fixed then "fixed_get" else "arr_get")) [name "%value", before])),
+              [.expr (destroyCall tr element (.call dropCallId (name "fixed_get") [name "%value", before])),
                 .expr (.tailCall dropCallId (name from_) (passed ++ [name "%value", before]))]]]
     else
     let clauses := D.ctors.map fun (ctor, parts) =>
@@ -1947,9 +1905,7 @@ def collect (items : List Syntax.Item) :
     -- How often a value is to be used is the checker's business.
     | .use _ _ _ => pure ()
     -- So are the names of fields, and by now every field is a number.
-    | .fieldNames mark known _ =>
-      if mark == Syntax.arrayMark then
-        if let [array, push, index] := known then g := { g with arrays := some (array, push, index) }
+    | .fieldNames _ _ _ => pure ()
     | .typeAlias _ _ _ => pure ()
     -- And modules: every name is one name of the whole program by now.
     | .pub _ _ => pure ()

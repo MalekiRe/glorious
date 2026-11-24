@@ -817,8 +817,8 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String 
         match goneOf vs with
         | some t => (.gone t, n)
         | none => (.data c vs, n))
-    else if x == "arr_len" && (ctx.fns[x]?).isNone then
-      -- Asking how long an array is only looks at it: the array is still
+    else if x == "fixed_len" && (ctx.fns[x]?).isNone then
+      -- Asking how long a `[T; N]` is only looks at it: it is still
       -- whoever's it was.
       let found ← runList ctx depth b env args
       pure (found.map fun (vs, n) =>

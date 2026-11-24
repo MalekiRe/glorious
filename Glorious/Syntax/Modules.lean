@@ -625,6 +625,9 @@ def resolveNamed (ctx : Ctx) (space : Space) (generics : List String) (written :
 
 partial def resolveType (ctx : Ctx) (generics : List String) : TypeExpr → R TypeExpr
   | .name x args => do
+    -- (`[T]` is a slice's elements, a type only behind a reference.)
+    if x == sliceMark then
+      throw "`[T]` alone is no type: a slice is `&[T]` (or `&mut [T]`), an array of so many `[T; N]`, and a list that grows a `Vec<T>`"
     -- `<T as Trait>::Name`: the trait is a trait, and the name is the trait's.
     if x == assocOfMark then
       match args with
@@ -648,7 +651,8 @@ partial def resolveType (ctx : Ctx) (generics : List String) : TypeExpr → R Ty
     pure (.name (← resolveNamed ctx .type generics "StrRef").1 (life.toList.map (.name · [])))
   -- `&'a [T]` and `&'a mut [T]`: elements borrowed, a slice, the prelude's
   -- `SliceRef<'a, T>` and `SliceMut<'a, T>`: an address and a length.
-  | .ref uniq (.name "%prelude::Array" [t]) life => do
+  | .ref uniq (.name x [t]) life => do
+    if x != sliceMark then return .ref uniq (← resolveType ctx generics (.name x [t])) life
     let name := if uniq then "SliceMut" else "SliceRef"
     pure (.name (← resolveNamed ctx .type generics name).1
       (life.toList.map (.name · []) ++ [← resolveType ctx generics t]))
@@ -840,7 +844,7 @@ partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
     pure (.tuple (args.map (·.1)), args.flatMap (·.2))
   | .ctor name qual args => do
     -- An array of so many elements: its parts are patterns like any.
-    if (arrayPatLen name).isSome then
+    if (fixedPatLen name).isSome then
       let args ← args.mapM (resolvePattern ctx)
       return (.ctor name none (args.map (·.1)), args.flatMap (·.2))
     if (byRef? (.ctor name qual args)).isSome then
@@ -1472,16 +1476,6 @@ def resolve (prelude root : List Syntax.Item) (kept : Option UnitsKept := none) 
               coerced := after.coerced.drop before.coerced.length, dotAlts := grown after.dotAlts before.dotAlts,
               fresh := after.fresh, made := after.made }
           unitsMade := (unitKey, (out.extract start out.size).toList, m) :: unitsMade
-      -- The prelude's type of arrays, by the name it has in this program.
-      if u.path == preludePath then
-        let named := fun (name : String) (kind : Kind) =>
-          (u.own.find? fun b => b.name == name && b.entry.kind == kind).map (·.entry.global)
-        if let some array := named "Array" .type then
-          -- With it, the function that adds an element and the trait of
-          -- `a[i]`, so that changing an array a variable holds can be done
-          -- where the array is.
-          out := out.push ((.fieldNames arrayMark
-            (array :: (named "array_push" .fn).toList ++ (named "Index" .trait).toList) []))
     -- Where each coercion applies: in the module that declares it, in one
     -- that brings its function in with `use`, and in one that brings in
     -- anything of a library module that declares one: `&Vec<T>` is a

@@ -18,8 +18,7 @@ two say the same size of every type.
   then the fields of the one it is, from after the tag.
 - A reference is an address.
 - What is not bytes yet is held by the machine (`Lay.held`): a callable (16
-  bytes, as `Layout` says), an array (24), and a type that holds itself
-  where it does (8).
+  bytes, as `Layout` says), and a type that holds itself where it does (8).
 -/
 
 @[expose] public section
@@ -33,7 +32,7 @@ already found. -/
 partial def heldWithin (C : Cert) (seen : List (Nat × List Ty)) : Ty → List (Nat × List Ty)
   | .tuple fs => fs.foldl (heldWithin C) seen
   | .data name args =>
-    if name == arrayName || seen.contains (name, args) then seen
+    if seen.contains (name, args) then seen
     else match findData C.datas name args with
       | some ctors => ctors.foldl (fun s (_, fs) => fs.foldl (heldWithin C) s) ((name, args) :: seen)
       | none => seen
@@ -57,9 +56,8 @@ partial def layOf (C : Cert) (seen : List (Nat × List Ty)) : Ty → Laid
     let (at_, size, align) := placeFields 0 (fs.map (layOf C seen))
     ⟨.fields 0 at_, alignUp size align, align⟩
   | .data name args =>
-    if name == arrayName then ⟨.held, 24, 8⟩
     -- (A `[T; N]`: its elements one after another, inline.)
-    else if name == fixedName then
+    if name == fixedName then
       match args with
       | [t, .data len []] =>
         let n := len - lenBase

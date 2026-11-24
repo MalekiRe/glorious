@@ -43,7 +43,7 @@ partial def parsePatternRest : P Pattern := do
     expectPunct "]"
     match before with
     | some k => pure (.ctor (restPatName k opened at_.line at_.col) none ps.toList)
-    | none => pure (.ctor ((if (← read).fixed then fixedPatName else arrayPatName) ps.size) none ps.toList)
+    | none => pure (.ctor (fixedPatName ps.size) none ps.toList)
   | .ident "let" =>
     -- `let name`: a new name, whatever constant or constructor has it.
     advance
@@ -426,45 +426,31 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
       if at_ < 100000 then base + at_ + offset
       else 800000000000000000 + (base / 1000000) * 100000000 + at_ * 10 + (offset / 100000) % 10
     let opened ← get
-    let empty := numbered opened 600000
     advance
-    -- Where the program has arrays of a fixed length, the literal is an
-    -- array or one of exactly so many: whichever is wanted of it.
-    -- (A literal is a `[T; N]`: there is no growable array, `[a, b]` is a
-    -- `[T; 2]` and `[]` a `[T; 0]`, as in Rust. The prelude's are arrays
-    -- while it moves off them.)
-    let own := (← read).base ≥ 1000000
-    let fixedOf := fun (value : ExprId) (n : Nat) => do
-      callOf 0 none instMark #[← mk (.call (numbered opened 800000) (← preludeFn "array_literal") #[value]),
-        ← tree (TypeExpr.tuple [numberType n]).asExpr]
-    -- (A program's own: its elements, as one `[T; N]`, built where it is.)
+    -- A literal is a `[T; N]`: there is no growable array, `[a, b]` is a
+    -- `[T; 2]` and `[]` a `[T; 0]`, as in Rust: its elements, as one
+    -- value, built where it is.
     let made := fun (elements : Array ExprId) => do
       mk (.call (numbered opened 800000) (← mkName none "fixed_make") elements)
-    if ← acceptPunct "]" then
-      if own then return ← made #[]
-      let value ← arrayValue [] empty
-      return ← if (← read).fixed then fixedOf value 0 else pure value
-    let mut starts : Array Nat := #[numbered (← get) 700000]
+    if ← acceptPunct "]" then return ← made #[]
     let first ← parseBinary 0 false
     if ← acceptPunct ";" then
       let count ← parseBinary 0 false
       expectPunct "]"
-      -- (`[x; 4]` of a program's own: four of `x`, a `[T; 4]`.)
-      if own then
-        if let .int n ← node count then
-          if n ≥ 0 then
-            return ← callOf 0 none instMark #[← mk (.call (numbered opened 900000) (← preludeFn "fixed_repeat_of") #[first]),
-              ← tree (TypeExpr.tuple [numberType n.toNat]).asExpr]
-      return ← mk (.call (numbered opened 900000) (← preludeFn "array_repeat") #[first, count])
+      -- `[x; 4]`: four of `x`, a `[T; 4]`; `[x; N]` of a length a type
+      -- parameter stands for, `N` of them.
+      let length ← match ← node count with
+        | .int n => if n ≥ 0 then pure (numberType n.toNat) else failAt "an array's length is not below zero"
+        | .name none x => pure (TypeExpr.name x [])
+        | _ => failAt "`[x; n]` is an array of so many, `n` a number or a length a type parameter stands for (`const N: Int`): a list of a length found as the program runs is a `Vec`, made with `push`"
+      return ← callOf 0 none instMark #[← mk (.call (numbered opened 900000) (← preludeFn "fixed_repeat_of") #[first]),
+        ← tree (TypeExpr.tuple [length]).asExpr]
     let mut elements : Array ExprId := #[first]
     while ← acceptPunct "," do
       if (← peek) == .punct "]" then break
-      starts := starts.push (numbered (← get) 700000)
       elements := elements.push (← parseBinary 0 false)
     expectPunct "]"
-    if own then return ← made elements
-    let value ← arrayValue elements.toList empty starts.toList
-    if (← read).fixed then fixedOf value elements.size else pure value
+    made elements
   | .ident "tail" =>
     advance
     let e ← parsePostfix noBlock
@@ -769,12 +755,12 @@ partial def parseStmts : P (Array StmtId) := do
           let here ← get
           let ctx ← read
           let id := if here < 100000 then ctx.base + here + 900000 else 0
-          let (pat, value) ← match pat, ctx.fixed with
-            | .ctor name none args, true =>
-              if (arrayPatLen name).isSome then
+          let (pat, value) ← match pat with
+            | .ctor name none args =>
+              if (fixedPatLen name).isSome then
                 pure (Pattern.tuple args, ← mk (.call id (← preludeFn "elements") #[value]))
               else pure (pat, value)
-            | _, _ => pure (pat, value)
+            | _ => pure (pat, value)
           out := out ++ (← settle (.let_ pat value))
     else if t == .ident "defer" then
       advance

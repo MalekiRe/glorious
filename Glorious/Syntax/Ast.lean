@@ -275,13 +275,10 @@ def ctorIsMark : String := "%ctor_is"
 the fields to go through by number. -/
 def focusMark : String := "%focus"
 
-/-- How the resolver says which type is the prelude's type of arrays, whatever
-a program has named its own: a list of names under this mark. -/
-def arrayMark : String := "%array"
-
-/-- The constructor an array of exactly `n` elements is taken apart by, in a
-pattern `[a, b, c]`. -/
-def arrayPatName (n : Nat) : String := s!"%array:{n}"
+/-- `[T]` as the parser reads it: a slice's elements, a type only behind a
+reference, `&[T]` (`Modules.resolveType` makes it the prelude's
+`SliceRef`). -/
+def sliceMark : String := "%slice"
 
 /-- `[a, b, c]` as a pattern of a `[T; 3]`, where literals are read with a
 length their type says. -/
@@ -348,10 +345,6 @@ def restPatParts (name : String) : Option (Nat × Nat × Nat × Nat) :=
     | [some k, some id, some line, some col] => some (k, id, line, col)
     | _ => none
   else none
-
-def arrayPatLen (name : String) : Option Nat :=
-  if name.startsWith "%array:" then (name.drop 7).toString.toNat?
-  else if name.startsWith "%fixed:" then (name.drop 7).toString.toNat? else none
 
 /-- The length of a pattern of a `[T; N]`, `fixedPatName`. -/
 def fixedPatLen (name : String) : Option Nat :=

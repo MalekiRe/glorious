@@ -299,9 +299,6 @@ structure Globals where
   aliases : Std.HashMap String Expr := {}
   /-- The body of each top-level function, by name. -/
   bodies : Std.HashMap String Flat.Body := {}
-  /-- The prelude's type of arrays, its function that adds an element, and
-  the trait of `a[i]`, by the names they have in this program. -/
-  arrays : Option (String × String × String) := none
   /-- What the checker learnt about the program's blocks, if it was run. -/
   blocks : Option Blocks := none
   /-- How each place a borrow is written, counted in the order they are
@@ -343,24 +340,16 @@ def prims : List (String × Prim × Nat) :=
    ("uw_add", .uwAdd, 2), ("uw_sub", .uwSub, 2), ("uw_mul", .uwMul, 2),
    ("uw_div", .uwDiv, 2), ("uw_rem", .uwRem, 2), ("uw_lt", .uwLt, 2),
    ("uw_shl", .uwShl, 2), ("uw_shr", .uwShr, 2), ("int_below", .intBelow, 2),
-   -- Arrays. `arr_new` is not an intrinsic of the machines: it is the array of
-   -- no elements, built like any value.
-   ("arr_get", .arrGet, 2), ("arr_set", .arrSet, 3), ("arr_len", .arrLen, 2),
-   ("arr_push", .arrPush, 2), ("arr_pop", .arrPop, 2), ("arr_new", .arrLen, 0),
-   -- The reference to a place of an array, from a reference to the array:
-   -- not an intrinsic of the machines either, but an operation on memory.
-   ("arr_at", .arrLen, 2),
-   -- (Of `[T; N]`.)
+   -- Of `[T; N]`: `N` of one value, the element at a place, one with another
+   -- there, the reference to a place from a reference to it (an operation
+   -- on memory, not of the machines), and its length.
    ("fixed_fill", .fixed 0, 2), ("fixed_get", .fixed 2, 2),
    ("fixed_set", .fixed 3, 3), ("fixed_at", .fixed 2, 2), ("fixed_len", .fixed 4, 1),
-   -- How many elements the array a reference points to has: the cell is
-   -- asked, and nothing is read out of it.
-   ("arr_len_at", .arrLen, 1),
    -- How many elements the `[T; N]` a reference points to has: its
-   -- constructor says, as an array's does.
-   ("fixed_len_at", .arrLen, 1),
+   -- constructor says, and nothing is read out of it.
+   ("fixed_len_at", .fixed 4, 1),
    -- `[a, b, c]`: a `[T; 3]` of them, as many as it is given.
-   ("fixed_make", .arrLen, 0)]
+   ("fixed_make", .fixed 4, 0)]
 
 /-- The names that take a scalar to the integer it is held as, and back. -/
 def casts : List String :=
@@ -1063,8 +1052,6 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option CtorI
     -- many elements.
     if let some n := Syntax.fixedPatLen name then
       return some { owner := "", tag := fixedBase + n, arity := n, single := true }
-    if let some n := Syntax.arrayPatLen name then
-      return some { owner := "", tag := arrayBase + n, arity := n, single := false }
     match (g.aliases[name]?).map Syntax.aliasValue with
     | some (.name q y) => resolveCtor y q
     | _ => pure none

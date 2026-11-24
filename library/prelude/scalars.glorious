@@ -195,14 +195,8 @@ impl Show for Result<(), ()> {
     fn fmt(b: &Result<(), ()>) -> Str { match(b) { Ok(_) => "true", Err(_) => "false" } }
 }
 
-// An array: its elements, one after another. The machines build its values
-// and read a place of one in a step; the constructor written here builds
-// none, and says only that an array holds values of the one type. An array
-// is a value: changing one makes another.
-struct Array<T>(T)
-
-// (An intrinsic, declared with the arrays it gives one of.) The name of the function a callable is of, as its characters' codes, and
-// the callable back.
+// The character at a place of the name of the function a callable is of,
+// as its code (`-1` past its end), and the callable back.
 #[intrinsic] unsafe fn host_fn_name<T>(value: T, at: Int) -> (Int, T) where T: Use<[1, 1]>;
 
 // An address, with what is said to be there: `*const T` and `*mut T`. To
@@ -479,7 +473,7 @@ impl<N> Known for B0<N> where N: Known { const VALUE: Int = int_mul(2, N::VALUE)
 impl<N> Known for B1<N> where N: Known { const VALUE: Int = int_add(int_mul(2, N::VALUE), 1); }
 
 // `[T; N]`: an array of exactly `N` elements.
-struct Fixed<T, N>(Array<T>)
+struct Fixed<T, N>(T)
 // (Built by the machines, one constructor of `N` fields for each `N`, the
 // length in its type: the field written here only says what it holds.)
 impl<T, N> Index for Fixed<T, N> {

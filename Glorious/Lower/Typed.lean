@@ -31,7 +31,7 @@ partial def undecided (C : Cert) (seen : List (Nat × List Ty)) : Ty → Bool
   | .data name args =>
     if name == anyName then true
     else if name == fixedName then args.take 1 |>.any (undecided C seen)
-    else if name == arrayName || seen.contains (name, args) || holdsItself C name args then false
+    else if seen.contains (name, args) || holdsItself C name args then false
     else match findData C.datas name args with
       | some ctors => ctors.any fun (_, fs) => fs.any (undecided C ((name, args) :: seen))
       | none => false
@@ -214,13 +214,13 @@ where
         | [r, .int tag] => match atomTy Γ r with
           | some (.ref _ σ) => do
             let ptr ← need (C.datas.find? fun d => d.ctors.any (·.1 == tag.toNat)) "a pointer type not known"
-            pure (.data ptr.name [← need (arrayElem σ) "the address of what is not a `[T; N]`"])
+            pure (.data ptr.name [← need (fixedElem σ) "the address of what is not a `[T; N]`"])
           | _ => throw "the address of what is not a reference"
         | _ => throw "an address without its pointer's constructor"
       | .focus, some (.ref r σ) =>
         match args with
         | [_, ix] => do pure (.ref r (← need (focusTy C Γ σ ix) "a field not known"))
-        | [_, _, .int (-1)] => do pure (.ref r (← need (arrayElem σ) "a place in what is not a `[T; N]`"))
+        | [_, _, .int (-1)] => do pure (.ref r (← need (fixedElem σ) "a place in what is not a `[T; N]`"))
         | [_, .int (.ofNat i), .int (.ofNat built)] => do
           pure (.ref r (← need ((ctorFieldsOf C built σ).bind (·[i]?)) "a field not known"))
         | _ => throw "a field not known"

@@ -898,7 +898,7 @@ def paramsOf (pats : List Pattern) (annots : List (Option TypeExpr)) : List Stri
   -- (A slice, `&[T]`, is a value: the prelude's `SliceRef`, an address and
   -- a length; `xs[i] = v` of an `xs: &mut [T]` borrows it to write.)
   let isRef := fun (t : TypeExpr) => match t with
-    | .ref _ (.name "%prelude::Array" _) _ => false
+    | .ref _ (.name n _) _ => n != sliceMark
     | .ref _ _ _ => true
     | _ => false
   ((pats.zip annots).filterMap fun
@@ -916,7 +916,7 @@ def promoteFnClause (annots : List (Option TypeExpr)) (c : ClauseId) : Build Cla
   let (values, refs) := paramsOf pats annots
   let c ← if refs.isEmpty then pure c else (throughParamsRewrite refs).clause c
   let slicesMut := (pats.zip annots).filterMap fun
-    | (.var x, some (.ref true (.name "%prelude::Array" _) _)) => some x
+    | (.var x, some (.ref true (.name n _) _)) => if n == sliceMark then some x else none
     | (.var x, some (.name n _)) => if n.endsWith "SliceMut" then some x else none
     | _ => none
   promoteClause values (← nameBorrowsClause c) slicesMut

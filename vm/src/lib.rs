@@ -155,16 +155,14 @@ enum Prim {
     UShl,
     UShr,
     Below,
-    ArrGet,
-    ArrSet,
-    ArrLen,
-    ArrPush,
-    ArrPop,
+    /// A `[T; N]`'s element at a place, and the array with another there.
+    /// (Their numbers are what a bundle writes them as.)
+    FixedGet = 40,
+    FixedSet = 41,
     /// A whole number seen as a scalar, or back: the value as it is.
-    Cast,
-    /// A `[T; N]` made of an array of the length, and an array made of one.
+    Cast = 45,
+    /// `[x; n]`: `n` of one value; and how many elements a `[T; N]` has.
     FixedOf,
-    FixedToArray,
     FixedLen,
 }
 
@@ -401,22 +399,19 @@ impl Reader<'_> {
             37 => Ok(Prim::UShl),
             38 => Ok(Prim::UShr),
             39 => Ok(Prim::Below),
-            40 => Ok(Prim::ArrGet),
-            41 => Ok(Prim::ArrSet),
-            42 => Ok(Prim::ArrLen),
-            43 => Ok(Prim::ArrPush),
-            44 => Ok(Prim::ArrPop),
+            // (A bundle's: as the intrinsics of `[T; N]` below.)
+            40 => Ok(Prim::FixedGet),
+            41 => Ok(Prim::FixedSet),
             45 => {
                 let _bits = self.int()?;
                 let _into = self.byte()?;
                 Ok(Prim::Cast)
             }
-            // `[T; N]`'s: read and written at a place as an array is.
+            // `[T; N]`'s.
             46 => match self.nat()? {
                 0 => Ok(Prim::FixedOf),
-                1 => Ok(Prim::FixedToArray),
-                2 => Ok(Prim::ArrGet),
-                3 => Ok(Prim::ArrSet),
+                2 => Ok(Prim::FixedGet),
+                3 => Ok(Prim::FixedSet),
                 4 => Ok(Prim::FixedLen),
                 op => Err(format!("unknown intrinsic of `[T; N]` {op}")),
             },
@@ -1263,9 +1258,6 @@ fn callback(vm: &mut Vm, callee: Value, arity: usize) -> Step<usize> {
     }
 }
 
-/// The tag of an array of no elements; an array of `n` has this plus `n`.
-const ARRAY_BASE: u64 = 1 << 62;
-
 /// Cells more than one holder reaches (`heap_new`, `heap_take`,
 /// `heap_put`): what the library's shared values and threads are kept in.
 /// Every machine of the program has them, one machine for each thread of
@@ -1431,9 +1423,7 @@ impl Vm {
             Rhs::Prim(p, args) => {
                 let args = self.atoms(args)?;
                 match p {
-                    Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop => {
-                        array_prim(*p, args)
-                    }
+                    Prim::FixedGet | Prim::FixedSet => fixed_prim(*p, args),
                     Prim::FixedLen => match args.first() {
                         Some(Value::Data(d)) => Ok(Value::Int(d.fields.len() as i128)),
                         _ => wrong(),
@@ -1443,7 +1433,6 @@ impl Vm {
                         [x, Value::Int(n)] if *n >= 0 => Ok(data(FIXED_BASE + *n as u64, vec![x.clone(); *n as usize])),
                         _ => wrong(),
                     },
-                    Prim::FixedToArray => wrong(),
                     Prim::Cast => args.into_iter().next().ok_or(Stop::Wrong),
                     _ => prim(*p, &args),
                 }
@@ -2237,33 +2226,22 @@ fn fields_of(d: Rc<Data>) -> (u64, Vec<Value>) {
     }
 }
 
-/// The intrinsics of arrays: a value made of fields, read and changed at a
-/// place.
-fn array_prim(p: Prim, args: Vec<Value>) -> Step<Value> {
+/// The intrinsics of `[T; N]`: a value made of fields, read and changed at
+/// a place.
+fn fixed_prim(p: Prim, args: Vec<Value>) -> Step<Value> {
     let mut args = args.into_iter();
     let Some(Value::Data(d)) = args.next() else {
         return wrong();
     };
     match (p, args.next(), args.next()) {
-        (Prim::ArrGet, Some(Value::Int(i)), None) => {
+        (Prim::FixedGet, Some(Value::Int(i)), None) => {
             usize::try_from(i).ok().and_then(|i| d.fields.get(i).cloned()).ok_or(Stop::Wrong)
         }
-        (Prim::ArrSet, Some(Value::Int(i)), Some(v)) => {
+        (Prim::FixedSet, Some(Value::Int(i)), Some(v)) => {
             let i = usize::try_from(i).ok().filter(|i| *i < d.fields.len()).ok_or(Stop::Wrong)?;
             let (tag, mut fields) = fields_of(d);
             fields[i] = v;
             Ok(data(tag, fields))
-        }
-        (Prim::ArrLen, Some(_), None) => Ok(Value::Int(d.fields.len() as i128)),
-        (Prim::ArrPush, Some(v), None) => {
-            let (tag, mut fields) = fields_of(d);
-            fields.push(v);
-            Ok(data(tag + 1, fields))
-        }
-        (Prim::ArrPop, Some(_), None) => {
-            let (tag, mut fields) = fields_of(d);
-            let last = fields.pop().ok_or(Stop::Wrong)?;
-            Ok(data(0, vec![data(tag.wrapping_sub(1), fields), last]))
         }
         _ => wrong(),
     }
@@ -2368,8 +2346,7 @@ fn prim(p: Prim, args: &[Value]) -> Step<Value> {
         }
         Prim::Below => (0 <= a && a < b).then_some(a),
         // Of two integers these have no meaning.
-        Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop | Prim::Cast
-        | Prim::FixedOf | Prim::FixedToArray | Prim::FixedLen => None,
+        Prim::FixedGet | Prim::FixedSet | Prim::Cast | Prim::FixedOf | Prim::FixedLen => None,
     };
     result.map(Value::Int).ok_or(Stop::Wrong)
 }
