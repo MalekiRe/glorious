@@ -68,6 +68,7 @@ fn mem_op(out: &mut Vec<u8>, op: &MemOp) {
         MemOp::AlignOf => (16, None),
         MemOp::Deref => (17, None),
         MemOp::StaticAt => (18, None),
+        MemOp::AddressOf => (19, None),
         MemOp::LoadL(l) => (10, Some(l)),
         MemOp::StoreL(l) => (11, Some(l)),
         MemOp::SwapL(l) => (12, Some(l)),

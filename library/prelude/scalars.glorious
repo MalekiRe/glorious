@@ -211,6 +211,42 @@ fn ptr_at<T>(address: usize) -> *const T { Ptr(address) }
 // alignment: as the type is laid out, which the program's types say.
 // (Of a `*mut T`: what its `T` is, the program's types say, where an
 // address made from it is a `*mut` of anything.)
+// Elements borrowed, one after another: so many `T`s from an address, there
+// for as long as `'a` (what `&'a [T]` is to be).
+struct SliceRef<'a, T> { at: *mut T, len: Int, life: &'a () }
+// So many `T`s from where a pointer points, borrowed for as long as the
+// caller says: the caller's to get right.
+unsafe fn slice_at<'a, T>(at: *mut T, len: Int) -> SliceRef<'a, T> { SliceRef { at: at, len: len, life: transmute(ptr_mut_address(at)) } }
+// All of a `[T; N]`'s elements, borrowed.
+fn fixed_slice<'a, T, N>(a: &'a [T; N]) -> SliceRef<'a, T> where N: Known {
+    unsafe { SliceRef { at: fixed_ptr(a), len: N::VALUE, life: transmute(a) } }
+}
+impl<'a, T> SliceRef<'a, T> {
+    fn len(s: &Self) -> Int { s.len }
+    fn is_empty(s: &Self) -> Bool { int_eq(s.len, 0) == 1 }
+    // The element at a place, if there is one there.
+    fn get(s: &Self, i: Int) -> Option<&'a T> {
+        match(int_mul(int_lt(-1, i), int_lt(i, s.len))) {
+            0 => None,
+            _ => Some(unsafe { ptr_ref_at(s.at, slice_place(s.at, i)) })
+        }
+    }
+    // Where its elements are.
+    fn as_ptr(s: &Self) -> *mut T { s.at }
+}
+// The address of the element at a place, from the first's.
+fn slice_place<T>(at: *mut T, i: Int) -> usize { usize_of(int_add(usize_bits(ptr_mut_address(at)), int_mul(i, usize_bits(size_of_at(at))))) }
+impl<'a, T> Indexed for SliceRef<'a, T> {
+    type Element = T;
+    fn element_at(s: &SliceRef<'a, T>, i: Int) -> &T {
+        match(int_mul(int_lt(-1, i), int_lt(i, s.len))) {
+            0 => abort("a place of a slice that is not there"),
+            _ => unsafe { ptr_ref_at(s.at, slice_place(s.at, i)) }
+        }
+    }
+    fn size_at(s: &SliceRef<'a, T>) -> Int { s.len }
+}
+
 // Text borrowed, `&'a str`: so many bytes of UTF-8 at an address, there for
 // as long as `'a`.
 struct StrRef<'a> { at: usize, len: Int, life: &'a () }
@@ -280,6 +316,8 @@ fn str_same(a: &StrRef, b: &StrRef, i: Int) -> Bool {
 // pointer to `T`s (`base`, for its type): the caller's to get right.
 #[intrinsic] unsafe fn ptr_ref_at<'a, T>(base: *mut T, at: usize) -> &'a T;
 #[intrinsic] unsafe fn ptr_mut_ref_at<'a, T>(base: *mut T, at: usize) -> &'a mut T;
+// Where a `[T; N]`'s elements are, one after another, in memory.
+#[intrinsic] unsafe fn fixed_ptr<T, N>(a: &[T; N]) -> *mut T;
 fn ptr_mut_at<T>(address: usize) -> *mut T { PtrMut(address) }
 fn ptr_address<T>(p: *const T) -> usize { p.0 }
 fn ptr_mut_address<T>(p: *mut T) -> usize { p.0 }

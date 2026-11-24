@@ -129,6 +129,7 @@ def memOp : MemOp → Bytes
   | .alignOf => [16]
   | .deref => [17]
   | .staticAt => [18]
+  | .addressOf => [19]
   | .loadL l => 10 :: lay l
   | .storeL l => 11 :: lay l
   | .swapL l => 12 :: lay l

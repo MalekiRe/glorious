@@ -387,7 +387,9 @@ def hosts : List (String × Nat × Nat) :=
    -- alignment.
    ("size_of_at", 15, 1), ("align_of_at", 16, 1),
    -- What a raw pointer points to, as a reference.
-   ("ptr_ref_at", 17, 2), ("ptr_mut_ref_at", 18, 2)]
+   ("ptr_ref_at", 17, 2), ("ptr_mut_ref_at", 18, 2),
+   -- Where a `[T; N]`'s elements are, as a `*mut T`.
+   ("fixed_ptr", 20, 1)]
 
 /-- The host operations that are the machine's memory by address: what each
 is (`MemOp`). -/
@@ -400,6 +402,7 @@ def memOfHost : Nat → Option MemOp
   | 15 => some .sizeOf
   | 16 => some .alignOf
   | 17 | 18 => some .deref
+  | 20 => some .addressOf
   | _ => none
 
 /-- Is this the name of one of the machine's operations (declared

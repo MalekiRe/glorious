@@ -693,6 +693,17 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
       | .writeBits, [a, w, v] => do addr a; int w; int v; pure .unit
       | .copy, [a, b, n] => do addr a; addr b; addr n; pure .unit
       | .sizeOf, [_] | .alignOf, [_] | .staticAt, _ => pure (.scalar (-64))
+      | .addressOf, [r, _] =>
+        match args with
+        | [_, .int tag] => do
+          -- (A `*mut T` of the `[T; N]`'s elements.)
+          let elem ← freshTy
+          unify r (.ref ρ (.data fixedName [elem, ← freshTy]))
+          let (whole, _) ← instCtor tag.toNat
+          match ← find whole with
+          | .data _ (t :: _) => do unify t elem; pure whole
+          | _ => throw "a pointer of a type with no argument"
+        | _ => throw "a `[T; N]`'s address without its pointer's constructor"
       | .deref, [p, a, _] =>
         match args with
         | [_, _, .int tag] => do

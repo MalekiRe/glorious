@@ -227,6 +227,9 @@ inductive MemOp where
   | deref
   /-- Where the program's static block `i` is. -/
   | staticAt
+  /-- Where the first element of a `[T; N]` a reference is to is, as a
+  `*mut T`: given the reference and the tag of `*mut T`'s constructor. -/
+  | addressOf
   /-- `load`, `store`, `swap`, `tag` and `focus` of a reference that is an
   address (a cell of memory, `Tm.cellL`), of a value laid out so (the
   typed lowering's). -/
@@ -302,7 +305,7 @@ def Lay.tagAt (m : Memory) (addr : Nat) : Lay → Option Nat
 def MemOp.name : MemOp → String
   | .load => "load" | .store => "store" | .swap => "swap" | .tag => "tag" | .focus => "focus"
   | .alloc => "alloc" | .free => "free" | .readBits => "read" | .writeBits => "write"
-  | .copy => "copy" | .sizeOf => "size" | .alignOf => "align" | .deref => "deref" | .staticAt => "static"
+  | .copy => "copy" | .sizeOf => "size" | .alignOf => "align" | .deref => "deref" | .staticAt => "static" | .addressOf => "address"
   | .loadL l => s!"load as {l.show}" | .storeL l => s!"store as {l.show}"
   | .swapL l => s!"swap as {l.show}" | .tagL l => s!"tag as {l.show}" | .focusL l => s!"focus as {l.show}"
 
@@ -352,6 +355,7 @@ def MemOp.evalLaid (m : Memory) (held : Held) : MemOp → List Value → Option 
     let (at_, _) ← fs[i.toNat]?
     if i < 0 then none
     pure (.ref (a + at_) b [], m, held)
+  | .addressOf, [.ref a _ [], .int c] => if 0 ≤ c then some (.data c.toNat [.int a], m, held) else none
   -- (Into a value the machine holds, or further into one.)
   | .focusL _, [.ref a b p, .int i] =>
     if 0 ≤ i then some (.ref a b (p ++ [⟨none, i.toNat⟩]), m, held) else none

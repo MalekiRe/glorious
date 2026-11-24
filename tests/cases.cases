@@ -15703,3 +15703,18 @@ fn main() -> Int {
 }
 #### expect
 51300
+#### case
+#### A slice is a pointer and a length: of a `[T; N]`'s elements, or of a
+#### `Vec`'s, looked at where they are.
+use std::vec::{Vec};
+fn total(s: SliceRef<Int>) -> Int { let mut t = 0; let mut i = 0; while({ i < s.len() }) { t = t + *element_at(&s, i); i = i + 1 }; t }
+fn main() -> Int {
+    let a: [Int; 3] = [1, 2, 3];
+    let mut v = Vec::new();
+    v.push(10); v.push(20);
+    let s = fixed_slice(&a);
+    let last = match(s.get(2)) { Some(x) => *x, None => 0 };
+    total(fixed_slice(&a)) * 100 + total(Vec::as_elements(&v)) + last * 1000
+}
+#### expect
+3630

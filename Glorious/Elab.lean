@@ -528,6 +528,9 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
           throw "`static_bytes` takes the bytes, each written out"
         return ← emit (.mem .staticAt atoms)
       match memOfHost id with
+      | some .addressOf =>
+        let tag := ((← read).ctors["PtrMut"]?).map (·.tag) |>.getD 0
+        emit (.mem .addressOf (atoms ++ [.int tag]))
       | some .deref =>
         -- (With the pointer type's constructor, for the type it points to.)
         let tag := ((← read).ctors["PtrMut"]?).map (·.tag) |>.getD 0

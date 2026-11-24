@@ -482,6 +482,8 @@ impl<T> Vec<T> {
     pub fn clear(value: &mut Self) { Vec::truncate(value, 0) }
     // The elements as a slice: looked at where they are.
     pub fn as_slice<'a>(value: &'a Self) -> Slice<'a, T> where T: Use<[1, 1]> { Slice::of_memory(value, value.at, value.len) }
+    // Its elements, borrowed where they are.
+    pub fn as_elements<'a>(value: &'a Self) -> SliceRef<'a, T> { unsafe { slice_at(value.at, value.len) } }
     // The elements one after another, by reference.
     pub fn iter<'a>(value: &'a Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { Slice::iter(&Vec::as_slice(value)) }
 }

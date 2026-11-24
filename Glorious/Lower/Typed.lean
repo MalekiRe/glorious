@@ -50,7 +50,7 @@ def need {α : Type} (o : Option α) (why : String) : L α :=
 `args`' first is to; not if what it reaches into is not bytes. -/
 def laidOp (C : Cert) (Γ : TEnv) (op : MemOp) (args : List Atom) : L MemOp := do
   -- (Those by address are as they are.)
-  if [.alloc, .free, .readBits, .writeBits, .copy, .sizeOf, .alignOf, .deref, .staticAt].contains op then return op
+  if [.alloc, .free, .readBits, .writeBits, .copy, .sizeOf, .alignOf, .deref, .staticAt, .addressOf].contains op then return op
   let some (.ref _ σ) := args.head?.bind (atomTy Γ) | throw "a memory operation not of a reference"
   -- (What nothing decided may be laid out otherwise where it is decided.)
   if undecided C [] σ then throw "a reference to what nothing decided the type of"
@@ -210,6 +210,13 @@ where
       | .store, _ | .free, _ | .writeBits, _ | .copy, _ => pure .unit
       | .tag, _ | .readBits, _ => pure .int
       | .alloc, _ | .staticAt, _ => pure (.scalar (-64))
+      | .addressOf, _ => match args with
+        | [r, .int tag] => match atomTy Γ r with
+          | some (.ref _ σ) => do
+            let ptr ← need (C.datas.find? fun d => d.ctors.any (·.1 == tag.toNat)) "a pointer type not known"
+            pure (.data ptr.name [← need (arrayElem σ) "the address of what is not a `[T; N]`"])
+          | _ => throw "the address of what is not a reference"
+        | _ => throw "an address without its pointer's constructor"
       | .focus, some (.ref r σ) =>
         match args with
         | [_, ix] => do pure (.ref r (← need (focusTy C Γ σ ix) "a field not known"))

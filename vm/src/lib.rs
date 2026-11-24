@@ -207,6 +207,8 @@ enum MemOp {
     Deref,
     /// Where the program's static block `i` is.
     StaticAt,
+    /// Where a `[T; N]` a reference is to is, as a `*mut T`.
+    AddressOf,
     /// Those of a reference that is an address, of a value laid out so.
     LoadL(Rc<Lay>),
     StoreL(Rc<Lay>),
@@ -556,6 +558,7 @@ impl Reader<'_> {
                     16 => MemOp::AlignOf,
                     17 => MemOp::Deref,
                     18 => MemOp::StaticAt,
+                    19 => MemOp::AddressOf,
                     10 => MemOp::LoadL(Rc::new(self.lay()?)),
                     11 => MemOp::StoreL(Rc::new(self.lay()?)),
                     12 => MemOp::SwapL(Rc::new(self.lay()?)),
@@ -1706,6 +1709,9 @@ impl Vm {
             args[0] = Value::Ref(a, None);
         }
         match (op, args.as_mut_slice()) {
+            (MemOp::AddressOf, [Value::Ref(a, p), Value::Int(tag)]) if steps(p).is_empty() => {
+                Ok(data(u64::try_from(*tag).map_err(|_| Stop::Wrong)?, vec![Value::Int(*a as i128)]))
+            }
             (MemOp::StaticAt, [Value::Int(i)]) => {
                 let at = self.static_at.get(usize::try_from(*i).map_err(|_| Stop::Wrong)?).ok_or(Stop::Wrong)?;
                 Ok(Value::Int(*at as i128))
