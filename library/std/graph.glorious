@@ -62,9 +62,9 @@ fn way_from<N: Eq>(way: &Vec<N>, node: N, i: Int, found: Bool, out: &mut Vec<N>)
 // nodes done with, each after all it leads to. (A node is being looked at,
 // `1`, or done with, `2`; one met again while being looked at is on a way
 // that comes back to itself.)
-fn visit_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: Vec<N>, i: Int, state: HashMap<N, Int>, done: &mut Vec<N>, way: &mut Vec<N>, budget: &mut StepBudget)
+fn visit_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: &Vec<N>, i: Int, state: HashMap<N, Int>, done: &mut Vec<N>, way: &mut Vec<N>, budget: &mut StepBudget)
     -> Result<HashMap<N, Int>, GraphError<N>> where N: Use<[0, *]> {
-    if(i >= Vec::len(&nodes)) { Ok(state) } else {
+    if(i >= Vec::len(nodes)) { Ok(state) } else {
         let node = nodes[i];
         match(StepBudget::charge(budget, 1)) {
             Err(e) => Err(GraphError::Limit(e)),
@@ -74,7 +74,7 @@ fn visit_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: Vec<N>, i: Int
                 None =>
                     let next = successors(graph, node);
                     Vec::push(way, node);
-                    let below = visit_each(graph, next, 0, std::hash::insert(state, node, 1), done, way, budget);
+                    let below = visit_each(graph, &next, 0, std::hash::insert(state, node, 1), done, way, budget);
                     std::value::discard(Vec::pop(way));
                     match(below) {
                         Ok(after) => Vec::push(done, node); visit_each(graph, nodes, i + 1, std::hash::insert(after, node, 2), done, way, budget),
@@ -97,7 +97,7 @@ pub fn topological_order<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes:
     copied(&nodes, 0, &mut given);
     let mut done = Vec::new();
     let mut way = Vec::new();
-    match(visit_each(graph, given, 0, std::hash::new(), &mut done, &mut way, budget)) {
+    match(visit_each(graph, &given, 0, std::hash::new(), &mut done, &mut way, budget)) {
         Ok(_) => Vec::reverse(&mut done); Ok(done),
         Err(e) => Err(e)
     }
@@ -140,9 +140,9 @@ fn lowered<N: Eq + Hash>(s: &mut Search<N>, from: Option<N>, to: Int) where N: U
 
 // Each of the nodes one leads to, in turn. One not seen before is gone into,
 // and is the root of a group if nothing under it gets back above it.
-fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nodes: Vec<N>, i: Int, s: &mut Search<N>, budget: &mut StepBudget)
+fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nodes: &Vec<N>, i: Int, s: &mut Search<N>, budget: &mut StepBudget)
     -> Result<(), BudgetExceeded> where N: Use<[0, *]> {
-    if(i >= Vec::len(&nodes)) { Ok(()) } else {
+    if(i >= Vec::len(nodes)) { Ok(()) } else {
         let to = nodes[i];
         let first = number(s.seen, to);
         if(first < 0) {
@@ -151,7 +151,7 @@ fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nod
                 Ok(_) =>
                     entered(s, to);
                     let next = successors(graph, to);
-                    match(search_each(graph, Some(to), next, 0, s, budget)) {
+                    match(search_each(graph, Some(to), &next, 0, s, budget)) {
                         Err(e) => Err(e),
                         Ok(_) =>
                             let reached = number(s.low, to);
@@ -180,7 +180,7 @@ pub fn strongly_connected_components<'a, N: Eq + Hash, G: Graph<Node = N>>(graph
     let mut s = Search { seen: std::hash::new(), low: std::hash::new(), open: std::hash::new(), stack: Vec::new(), next: 0, groups: Vec::new() };
     let mut given = Vec::new();
     copied(&nodes, 0, &mut given);
-    match(search_each(graph, None, given, 0, &mut s, budget)) {
+    match(search_each(graph, None, &given, 0, &mut s, budget)) {
         Ok(_) => match(s) { Search { seen: _, low: _, open: _, stack: _, next: _, groups } => Ok(groups) },
         Err(e) => Err(e)
     }

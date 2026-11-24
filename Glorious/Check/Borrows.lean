@@ -486,6 +486,70 @@ where
 
 /-! ## Expressions -/
 
+/-- The captures of the references a type has in it, not looking inside a
+callable's type, which has lifetimes of its own. -/
+partial def outerRefCaps : Ty → List Nat
+  | .ref _ t c => c :: outerRefCaps t
+  | .con _ args => args.flatMap outerRefCaps
+  | .tuple args => args.flatMap outerRefCaps
+  | _ => []
+
+/-- The capture variables of the references and callables in a type, as far
+as it is known. -/
+partial def refCaps : Ty → List Nat
+  | .ref _ inner cap => cap :: refCaps inner
+  | .fn ps r _ _ cap => cap :: (ps.flatMap refCaps ++ refCaps r)
+  | .con _ args | .tuple args => args.flatMap refCaps
+  | .var _ => []
+
+/-- A function's type with the lifetimes of its parameters and result each
+anew, and what each captured captured by the new one too: the type of a call
+of a function of the group at lifetimes of its own (`St.groupSigned`). Its
+types are the same: in the group a function is one type. -/
+partial def freshSigCaps (t : Ty) : M Ty := do
+  let capOf := fun (c : Nat) => (do
+    let root ← (findCap c : M Nat)
+    match (← get).lookup root with
+    | some c' => pure c'
+    | none =>
+      let c' ← (freshCap : M Nat)
+      modify ((root, c') :: ·)
+      pure c' : StateT (List (Nat × Nat)) M Nat)
+  let rec go (t : Ty) : StateT (List (Nat × Nat)) M Ty := do
+    match ← (find t : M Ty) with
+    | .var id => pure (.var id)
+    | .con n args => pure (.con n (← args.mapM go))
+    | .tuple args => pure (.tuple (← args.mapM go))
+    -- (A callable's own capture stays what it is: what it may do, jump to
+    -- a label or hold what has to be used, is the same at every call.)
+    | .fn ps r effs tail cap => do
+      let ps ← ps.mapM go
+      let r ← go r
+      let effs ← effs.mapM fun (e, args) => do pure (e, ← args.mapM go)
+      pure (.fn ps r effs tail cap)
+    | .ref how inner cap => do pure (.ref how (← go inner) (← capOf cap))
+  match ← find t with
+  | .fn ps r effs tail cap =>
+    let ((ps, r, effs), renamed) ← (do
+      let ps ← ps.mapM go
+      let r ← go r
+      let effs ← effs.mapM fun (e, args) => do pure (e, ← args.mapM go)
+      pure (ps, r, effs) : StateT (List (Nat × Nat)) M _).run []
+    -- (A reference given back with no lifetime written holds what the one
+    -- reference it is given holds, as the signature says (`signatureTy`):
+    -- at the call's own. A lifetime written is one at every place it is
+    -- written, and stays so.)
+    let rigid := (← get).rigidCaps
+    let named := renamed.filterMap fun (old, new) => if (rigid.lookup old).isSome then some new else none
+    let given := ((← (ps.flatMap outerRefCaps).mapM findCap).eraseDups).filter (!named.contains ·)
+    if let [one] := given then
+      for c in outerRefCaps r do
+        let c ← findCap c
+        unless named.contains c || c == one do
+          captures c (.ty (Ty.life one))
+    pure (.fn ps r effs tail cap)
+  | other => pure other
+
 /-- What a name in an expression refers to. -/
 inductive Head where
   | local (b : Binding)
@@ -541,6 +605,8 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
     -- (`f<A>(..)` of the function being checked, or one checked with it:
     -- its type parameters are what they are in here.)
     modify fun st => { st with instWith := none }
+    -- (One whose signature is written whole: at lifetimes of its own.)
+    if s.groupSigned.contains x then return .fn (← freshSigCaps t) [] true
     return .fn t [] true
   if let some scheme := s.fns[x]? then
     if s.unsafeFns.contains x && !(s.unsafeBlock || s.unsafeFns.contains s.owner) then

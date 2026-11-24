@@ -749,6 +749,9 @@ structure St where
   fns : Std.HashMap String Scheme := {}
   /-- The functions being inferred together, with their types so far. -/
   group : List (String × Ty) := []
+  /-- The functions of the group whose signatures are written whole: each
+  call of one inside the group is at lifetimes of its own. -/
+  groupSigned : List String := []
   pending : Array Pending := #[]
   /-- Field reads whose subject was not yet known: subject, index, field type,
   where the read is, and the read's node where it has one (else 0): one of

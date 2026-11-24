@@ -15771,3 +15771,41 @@ fn main() -> Int { let v = std::vec::range(0, 5); say(v[2]); say(v[4]); say(len_
 8
 3
 0
+#### case
+#### A function that calls itself, its signature written whole: each call
+#### is at lifetimes of its own, so a reference to a value made inside it
+#### is given to it where its caller's is given too; and a reference given
+#### back through a call of itself still holds what it was given.
+use std::vec::{Vec};
+fn kids(n: Int) -> Vec<Int> { if(n > 0) { std::vec::range(0, n) } else { Vec::new() } }
+fn walk(nodes: &Vec<Int>, i: Int, acc: Int) -> Int {
+    if(i >= Vec::len(nodes)) { acc } else {
+        let n = nodes[i];
+        match(n % 2) {
+            0 => walk(nodes, i + 1, acc + 1),
+            _ => let next = kids(n - 1); let below = walk(&next, 0, 0); walk(nodes, i + 1, acc + below + 1)
+        }
+    }
+}
+// A reference given back through a call of itself: still borrowed from its argument.
+fn last<'a>(v: &'a Vec<Int>, i: Int) -> &'a Int { if(i + 1 >= Vec::len(v)) { Vec::index(v, i) } else { last(v, i + 1) } }
+fn main() -> Int { let v = std::vec::range(0, 6); say(*last(&v, 0)); walk(&v, 0, 0) }
+#### expect
+5
+14
+#### case
+#### A reference to a value made inside it, given back through a call of
+#### itself, is refused: the call's result holds what it was given.
+use std::vec::{Vec};
+fn bad<'a>(v: &'a Vec<Int>, n: Int) -> &'a Int { if(n == 0) { Vec::index(v, 0) } else { let w = std::vec::range(0, 3); bad(&w, n - 1) } }
+fn main() -> Int { let v = std::vec::range(0, 6); *bad(&v, 2) }
+#### expect
+error: 2:89: in `bad`: `w` could be used after its block has ended: something that uses it is the block's result
+#### case
+#### The same with the lifetime not written: what is given back holds what
+#### the one reference it is given holds.
+use std::vec::{Vec};
+fn bad(v: &Vec<Int>, n: Int) -> &Int { if(n == 0) { Vec::index(v, 0) } else { let w = std::vec::range(0, 3); bad(&w, n - 1) } }
+fn main() -> Int { let v = std::vec::range(0, 6); *bad(&v, 2) }
+#### expect
+error: 2:79: in `bad`: `w` could be used after its block has ended: something that uses it is the block's result

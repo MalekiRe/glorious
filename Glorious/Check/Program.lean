@@ -732,8 +732,15 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
             continue
           set pre
           for (g, _) in rest do checkMaybe g
+          -- (Callees first, a function's calls of itself are at the one
+          -- type it is being found to have, and see less of what a
+          -- signature says than its callers do: what the signatures refused
+          -- is what is said.)
           let said := (now.refusals.find? (·.startsWith failMark)).getD ""
-          throw s!"a group was refused checked one after another from signatures, and not callees first ({said}); this is a compiler defect"
+          let msg := match (said.drop failMark.length).toString.splitOn " " with
+            | _ :: rest => " ".intercalate rest
+            | [] => said
+          throw msg
         if deltas.isSome then
           match sigsKept, passes with
           | some d, 1 => groupDeltas := groupDeltas.push (sigKey, (d, #[]))

@@ -71,14 +71,6 @@ partial def refLives : TypeExpr → List (Option String)
   | .performs r _ => refLives r
   | _ => []
 
-/-- The captures of the references a type has in it, not looking inside a
-callable's type, which has lifetimes of its own. -/
-partial def outerRefCaps : Ty → List Nat
-  | .ref _ t c => c :: outerRefCaps t
-  | .con _ args => args.flatMap outerRefCaps
-  | .tuple args => args.flatMap outerRefCaps
-  | _ => []
-
 /-- What the trait declares of a function an implementation gives, at the
 implementation's type, with the trait's name (`checkGroupFn`). -/
 def implWanted (d : FnDecl) (rigid : List (String × Ty)) : M (Option (Ty × String)) := do
@@ -517,6 +509,15 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
   let ret := ret <|> match wanted with
     | some (.fn _ r _ _ _, _) => some r
     | _ => none
+  -- (A function of the group whose signature is written whole is known to
+  -- its calls of itself by it before its body is read: each at lifetimes
+  -- of its own, `freshSigCaps`.)
+  let callsGroup := d.body.exprs.any fun n => match n with
+    | .name _ y => group.any (·.1 == y)
+    | _ => false
+  if !signature && callsGroup && (← get).groupSigned.contains d.name && annots.all Option.isSome && ret.isSome then
+    if let some u := group.lookup d.name then
+      if let .var _ ← find u then unify u (← signatureTy rigid annots ret)
   let t ← if signature then signatureTy rigid annots ret
     else (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (do
         modify fun s => { s with body := d.body }
@@ -558,7 +559,11 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   let mut group : List (String × Ty) := []
   for d in decls do
     group := (d.name, ← freshTy) :: group
-  modify fun s => { s with group := group }
+  -- (Those written whole, every parameter's type and the result's: a call
+  -- of one in the group is at lifetimes of its own, its signature saying
+  -- how they are related, as a caller's is.)
+  let signed := (decls.filter fun d => !d.annots.isEmpty && d.annots.all Option.isSome && d.ret.isSome).map (·.name)
+  modify fun s => { s with group := group, groupSigned := signed }
   let mut defs : List (String × Ty) := []
   let mut reused : List (String × Ty) := []
   for d in decls do
@@ -621,7 +626,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   let lateDrops ← once (← get).drops
   let lateStays ← once (← get).stays
   modify fun s =>
-    { s with group := [], dups := #[], lateDups := s.lateDups ++ late, drops := #[],
+    { s with group := [], groupSigned := [], dups := #[], lateDups := s.lateDups ++ late, drops := #[],
              lateDrops := s.lateDrops ++ lateDrops, stays := #[],
              lateStays := s.lateStays ++ lateStays }
 
