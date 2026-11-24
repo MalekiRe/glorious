@@ -435,6 +435,28 @@ is told of). `String` is a `Vec<u8>`, with `from_str`, `push_str` and
 `Str` meanwhile. Next: the library's text functions over `&str` and
 `String`, then `Str` gone.
 
+**No growable array** (decision, user). `[a, b]` is a `[T; N]`, `[]` a
+`[T; 0]`, `&[T]` a slice (a pointer and a length, as `&str`), and what
+grows is a `Vec` (no `vec![..]`: no macros). A length is known as Rust knows
+it (decision, user): a function generic in a length is made a copy for each
+length it is used at, as the elaborator already makes one for each
+implementation of a trait it is used at (`Specialize`: a length is a
+`Known` type, `B1<B0<Z>>`, and its `VALUE` a constant in the copy). The
+plan:
+
+1. `[T; N]` in Core: values as the machines build arrays' now (one
+   constructor's fields, the elements), of a data type of the compiler's
+   (`fixedName`, its arguments the element's type and the length, a type of
+   its own for each), laid out inline; a literal is its elements built,
+   `[x; N]` one operation of the constant length; `a[i]` and `&a[i]` by a
+   place found when the program runs, as of arrays now.
+2. `&[T]` the prelude's slice: a pointer and a length, from a `[T; N]` or
+   a `Vec`.
+3. The library's modules, then the tests, from growable arrays to `Vec`,
+   `[T; N]` and slices.
+4. `Array`, `arr_*` and the prelude's array functions gone from the
+   compiler, the Lean machines and the Rust VM.
+
 Stage 2 so far: `Repr` (the prelude's) writes a value to memory and reads
 it back, `repr_store` and `repr_load`, both `unsafe fn` (a trait's
 `unsafe fn` is called only in `unsafe`). `Int`'s and each scalar's are its
