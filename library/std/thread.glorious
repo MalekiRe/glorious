@@ -104,7 +104,7 @@ impl Scope {
         let cell = new_cell<Option<T>>(None);
         let queue = s.queue;
         push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });
-        Handle { cell: cell, none: fixed_of([], 0), held: None }
+        Handle { cell: cell, none: no_elements(), held: None }
     }
     // A thread in this scope, waited for before this gives back what it
     // gave: it may borrow what the caller has, since it is done before the
@@ -113,7 +113,7 @@ impl Scope {
         let cell = new_cell<Option<T>>(None);
         let queue = s.queue;
         push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });
-        join(Handle { cell: cell, none: fixed_of([], 0), held: None })
+        join(Handle { cell: cell, none: no_elements(), held: None })
     }
 }
 
@@ -193,7 +193,7 @@ pub fn spawn_os<T, F>(f: F) -> OsThread<T> where F: Fn<(), Output = T>, F: 'stat
         if(pthread_create(place, 0usize, entry, 0usize) != 0i32) { abort("a thread could not be started") } else { () };
         let id = usize(ptr_read(place, 64));
         free(place);
-        OsThread { id: id, cell: cell, none: fixed_of([], 0) }
+        OsThread { id: id, cell: cell, none: no_elements() }
     }
 }
 // Wait for a thread of the system's to be done, and what it gave.
@@ -209,9 +209,9 @@ pub trait Share { fn share(&Self) -> Self }
 pub struct Mutex<T> { cell: Int, none: [T; 0] }
 impl<T> Use<[0, *]> for Mutex<T> {}
 impl<T> Mutex<T> {
-    pub fn new(value: T) -> Mutex<T> { Mutex { cell: new_cell(value), none: fixed_of([], 0) } }
+    pub fn new(value: T) -> Mutex<T> { Mutex { cell: new_cell(value), none: no_elements() } }
 }
-impl<T> Share for Mutex<T> { fn share(m: &Mutex<T>) -> Mutex<T> { Mutex { cell: m.cell, none: fixed_of([], 0) } } }
+impl<T> Share for Mutex<T> { fn share(m: &Mutex<T>) -> Mutex<T> { Mutex { cell: m.cell, none: no_elements() } } }
 // Run `f` with the value: no other thread has it meanwhile.
 // (`f` is called once, as Rust's `FnOnce`: it may give away what it holds.)
 pub fn lock<T, R, F>(m: &Mutex<T>, f: F) -> R where F: for<'a> Fn<(&'a mut T,), Output = R>, F: Returns, F: Use<[1, 1]> {
@@ -225,9 +225,9 @@ pub fn lock<T, R, F>(m: &Mutex<T>, f: F) -> R where F: for<'a> Fn<(&'a mut T,), 
 pub struct Shared<T> { cell: Int, none: [T; 0] }
 impl<T> Use<[0, *]> for Shared<T> {}
 impl<T> Shared<T> {
-    pub fn new(value: T) -> Shared<T> { Shared { cell: new_cell(value), none: fixed_of([], 0) } }
+    pub fn new(value: T) -> Shared<T> { Shared { cell: new_cell(value), none: no_elements() } }
 }
-impl<T> Share for Shared<T> { fn share(s: &Shared<T>) -> Shared<T> { Shared { cell: s.cell, none: fixed_of([], 0) } } }
+impl<T> Share for Shared<T> { fn share(s: &Shared<T>) -> Shared<T> { Shared { cell: s.cell, none: no_elements() } } }
 // Run `f` with the value.
 pub fn with_shared<T, R, F>(s: &Shared<T>, f: F) -> R where F: for<'a> Fn<(&'a T,), Output = R>, F: Returns {
     let value = take_cell<T>(s.cell);
@@ -262,9 +262,9 @@ pub struct Receiver<T> { cell: Int, none: [T; 0] }
 impl<T> Use<[0, *]> for Receiver<T> {}
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let cell = new_cell<Vec<T>>(Vec::new());
-    (Sender { cell: cell, none: fixed_of([], 0) }, Receiver { cell: cell, none: fixed_of([], 0) })
+    (Sender { cell: cell, none: no_elements() }, Receiver { cell: cell, none: no_elements() })
 }
-impl<T> Share for Sender<T> { fn share(s: &Sender<T>) -> Sender<T> { Sender { cell: s.cell, none: fixed_of([], 0) } } }
+impl<T> Share for Sender<T> { fn share(s: &Sender<T>) -> Sender<T> { Sender { cell: s.cell, none: no_elements() } } }
 pub fn send<T>(s: &Sender<T>, value: T) {
     let mut queue = take_cell<Vec<T>>(s.cell);
     Vec::push(&mut queue, value);

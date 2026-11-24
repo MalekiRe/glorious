@@ -4005,14 +4005,14 @@ impl<E, S, P> IntoSystem<E, S> for Parallel<P> where P: IntoSystem<E, S>, P: Bra
 // (Run in passes over the nodes, in the order given: each node whose nodes
 // before it have run is run, on a thread of its own, one after another.)
 pub struct Node<N, P, D> { systems: P, none: [(N, D); 0] }
-pub fn node<N, P>(name: N, systems: P) -> Node<N, P, ()> { discard(name); Node { systems: systems, none: fixed_of([], 0) } }
+pub fn node<N, P>(name: N, systems: P) -> Node<N, P, ()> { discard(name); Node { systems: systems, none: no_elements() } }
 impl<N, P, D> Node<N, P, D> {
     // This node runs after the node named `other`.
     pub fn after<M>(n: Self, other: M) -> Node<N, P, (M, D)> {
         discard(other);
         let Node { systems, none } = n;
         discard(none);
-        Node { systems: systems, none: fixed_of([], 0) }
+        Node { systems: systems, none: no_elements() }
     }
 }
 pub struct Graph<Ns> { nodes: Ns }
@@ -4164,7 +4164,7 @@ impl<E, S, N, P, D, R> IntoNodes<E, S> for (Node<N, P, D>, R) where P: IntoSyste
         let (n, rest) = list;
         let Node { systems, none } = n;
         discard(none);
-        (Node { systems: <P as IntoSystem<E, S>>::into_system(systems), none: fixed_of([], 0) }, <R as IntoNodes<E, S>>::into_nodes(rest))
+        (Node { systems: <P as IntoSystem<E, S>>::into_system(systems), none: no_elements() }, <R as IntoNodes<E, S>>::into_nodes(rest))
     }
 }
 // A graph's nodes: each name once, and each name a node runs after one of
@@ -4228,10 +4228,10 @@ impl<S> Use<[0, *]> for WorldHook<S> {}
 impl<S> Clone for WorldHook<S> { fn clone(h: &WorldHook<S>) -> WorldHook<S> { *h } }
 
 pub trait LifecycleEvent { const KIND: Int; fn component() -> Str; fn of(Vec<Entity>) -> Self }
-impl<T> LifecycleEvent for OnAdd<T> where T: Schedule { const KIND: Int = 0; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: Vec<Entity>) -> OnAdd<T> { OnAdd { entities: entities, none: fixed_of([], 0) } } }
-impl<T> LifecycleEvent for OnInsert<T> where T: Schedule { const KIND: Int = 1; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: Vec<Entity>) -> OnInsert<T> { OnInsert { entities: entities, none: fixed_of([], 0) } } }
-impl<T> LifecycleEvent for OnReplace<T> where T: Schedule { const KIND: Int = 2; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: Vec<Entity>) -> OnReplace<T> { OnReplace { entities: entities, none: fixed_of([], 0) } } }
-impl<T> LifecycleEvent for OnRemove<T> where T: Schedule { const KIND: Int = 3; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: Vec<Entity>) -> OnRemove<T> { OnRemove { entities: entities, none: fixed_of([], 0) } } }
+impl<T> LifecycleEvent for OnAdd<T> where T: Schedule { const KIND: Int = 0; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: Vec<Entity>) -> OnAdd<T> { OnAdd { entities: entities, none: no_elements() } } }
+impl<T> LifecycleEvent for OnInsert<T> where T: Schedule { const KIND: Int = 1; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: Vec<Entity>) -> OnInsert<T> { OnInsert { entities: entities, none: no_elements() } } }
+impl<T> LifecycleEvent for OnReplace<T> where T: Schedule { const KIND: Int = 2; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: Vec<Entity>) -> OnReplace<T> { OnReplace { entities: entities, none: no_elements() } } }
+impl<T> LifecycleEvent for OnRemove<T> where T: Schedule { const KIND: Int = 3; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: Vec<Entity>) -> OnRemove<T> { OnRemove { entities: entities, none: no_elements() } } }
 
 // A hook's system, where both the app and the world's table reach it.
 pub struct SharedSystem<Q> { shared: Mutex<Q> }
@@ -4446,8 +4446,8 @@ impl<H, R, S, L> ByName<S, L> for (Column<H>, R)
     where H: Schedule, L: Dispatch<OnAdd<H>, S>, L: Dispatch<OnInsert<H>, S>, S: Fires<S, L>, S: Requests<S, L>, R: ByName<S, L> {
     fn fire_by_name(app: &mut App<S, L>, kind: Int, name: Str, entities: Vec<Entity>) {
         if(<H as Schedule>::NAME == name) {
-            if(kind == 0) { app.emit<OnAdd<H>>(&OnAdd { entities: entities, none: fixed_of([], 0) }) }
-            else { app.emit<OnInsert<H>>(&OnInsert { entities: entities, none: fixed_of([], 0) }) }
+            if(kind == 0) { app.emit<OnAdd<H>>(&OnAdd { entities: entities, none: no_elements() }) }
+            else { app.emit<OnInsert<H>>(&OnInsert { entities: entities, none: no_elements() }) }
         } else { <R as ByName<S, L>>::fire_by_name(app, kind, name, entities) }
     }
 }
@@ -4484,11 +4484,11 @@ impl<S, L> Hooked<S, L> for () {
 impl<H, ..R, S, L> Hooked<S, L> for (H, ..R)
     where L: Dispatch<OnAdd<H>, S>, L: Dispatch<OnInsert<H>, S>, S: Fires<S, L>, S: Requests<S, L>, (..R): Hooked<S, L> {
     fn adds(app: &mut App<S, L>, entities: Vec<Entity>) {
-        if(len_at(&entities) > 0) { app.emit<OnAdd<H>>(&OnAdd { entities: clone(&entities), none: fixed_of([], 0) }) } else { () };
+        if(len_at(&entities) > 0) { app.emit<OnAdd<H>>(&OnAdd { entities: clone(&entities), none: no_elements() }) } else { () };
         <(..R) as Hooked<S, L>>::adds(app, entities)
     }
     fn inserts(app: &mut App<S, L>, entities: Vec<Entity>) {
-        if(len_at(&entities) > 0) { app.emit<OnInsert<H>>(&OnInsert { entities: clone(&entities), none: fixed_of([], 0) }) } else { () };
+        if(len_at(&entities) > 0) { app.emit<OnInsert<H>>(&OnInsert { entities: clone(&entities), none: no_elements() }) } else { () };
         <(..R) as Hooked<S, L>>::inserts(app, entities)
     }
 }
@@ -4498,7 +4498,7 @@ impl<S, L> RemoveHooks<S, L> for () { fn removing(app: &mut App<S, L>, entity: E
 impl<T, R, S, L> RemoveHooks<S, L> for (Column<T>, R)
     where S: Get<T>, L: Dispatch<OnRemove<T>, S>, S: Fires<S, L>, S: Requests<S, L>, R: RemoveHooks<S, L> {
     fn removing(app: &mut App<S, L>, entity: Entity) {
-        if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: Vec::from_array([entity]), none: fixed_of([], 0) }) };
+        if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: Vec::from_array([entity]), none: no_elements() }) };
         <R as RemoveHooks<S, L>>::removing(app, entity)
     }
 }
@@ -4532,8 +4532,8 @@ impl<G, T, H, R, S, L> EvictIn<G, T, S, L> for (Column<H>, R)
         if(<H as Same<T>>::same()) { () }
         else if(<<H as OneOf>::Groups as Shares<(G,)>>::shares()) {
             if(<S as Get<H>>::has(&app.world.columns, entity)) {
-                app.emit<OnReplace<H>>(&OnReplace { entities: Vec::from_array([entity]), none: fixed_of([], 0) });
-                app.emit<OnRemove<H>>(&OnRemove { entities: Vec::from_array([entity]), none: fixed_of([], 0) })
+                app.emit<OnReplace<H>>(&OnReplace { entities: Vec::from_array([entity]), none: no_elements() });
+                app.emit<OnRemove<H>>(&OnRemove { entities: Vec::from_array([entity]), none: no_elements() })
             } else { () }
         } else { () };
         <R as EvictIn<G, T, S, L>>::evicting_in(app, entity)
@@ -4614,7 +4614,7 @@ pub trait ExitGroup<G, N, S, L> { fn switch_to(&mut App<S, L>, &mut Commands<S>,
 impl<G, N, S, L> ExitGroup<G, N, S, L> for () where S: Holds<N>, L: Dispatch<OnEnter<N>, S> {
     fn switch_to(app: &mut App<S, L>, commands: &mut Commands<S>, next: N) {
         discard(app.world.put_resource(next));
-        hooks<OnEnter<N>, S, L>(app, &OnEnter { none: fixed_of([], 0) }, commands)
+        hooks<OnEnter<N>, S, L>(app, &OnEnter { none: no_elements() }, commands)
     }
 }
 pub trait ClearGroup<G, S, L> { fn clear_group(&mut App<S, L>, &mut Commands<S>) }
@@ -4625,7 +4625,7 @@ impl<X, R, G, S, L> ClearGroup<G, S, L> for (Resource<X>, R)
         let active = if(<<X as State>::Group as Same<G>>::same()) { is_some(app.world.resource<X>()) } else { false };
         if(active) {
             <L as Links<X, S, L>>::leave_links(app, commands);
-            hooks<OnExit<X>, S, L>(app, &OnExit { none: fixed_of([], 0) }, commands);
+            hooks<OnExit<X>, S, L>(app, &OnExit { none: no_elements() }, commands);
             discard(app.world.remove_resource<X>())
         } else { <R as ClearGroup<G, S, L>>::clear_group(app, commands) }
     }
@@ -4640,11 +4640,11 @@ impl<X, R, G, N, S, L> ExitGroup<G, N, S, L> for (Resource<X>, R)
         let active = if(<<X as State>::Group as Same<G>>::same()) { is_some(app.world.resource<X>()) } else { false };
         if(active) {
             <L as Links<X, S, L>>::leave_links(app, commands);
-            hooks<OnExit<X>, S, L>(app, &OnExit { none: fixed_of([], 0) }, commands);
+            hooks<OnExit<X>, S, L>(app, &OnExit { none: no_elements() }, commands);
             discard(app.world.remove_resource<X>());
             discard(app.world.put_resource(next));
-            hooks<OnEnter<N>, S, L>(app, &OnEnter { none: fixed_of([], 0) }, commands);
-            hooks<OnTransition<X, N>, S, L>(app, &OnTransition { none: fixed_of([], 0) }, commands)
+            hooks<OnEnter<N>, S, L>(app, &OnEnter { none: no_elements() }, commands);
+            hooks<OnTransition<X, N>, S, L>(app, &OnTransition { none: no_elements() }, commands)
         } else { <R as ExitGroup<G, N, S, L>>::switch_to(app, commands, next) }
     }
 }
@@ -4661,7 +4661,7 @@ impl<X, R, G, S, L> LeaveGroup<G, S, L> for (Resource<X>, R)
     fn leave_group(app: &mut App<S, L>, commands: &mut Commands<S>) {
         let active = if(<<X as State>::Group as Same<G>>::same()) { is_some(app.world.resource<X>()) } else { false };
         if(active) {
-            hooks<OnExit<X>, S, L>(app, &OnExit { none: fixed_of([], 0) }, commands);
+            hooks<OnExit<X>, S, L>(app, &OnExit { none: no_elements() }, commands);
             discard(app.world.remove_resource<X>())
         } else { <R as LeaveGroup<G, S, L>>::leave_group(app, commands) }
     }
@@ -4673,7 +4673,7 @@ impl<X, R, G, S, L> LeaveGroup<G, S, L> for (Column<X>, R) where R: LeaveGroup<G
 // (A state put in, and its `OnEnter` systems run: no transition.)
 fn enter_plain<Y, S, L>(app: &mut App<S, L>, state: Y, commands: &mut Commands<S>) where S: Holds<Y>, L: Dispatch<OnEnter<Y>, S> {
     discard(app.world.put_resource(state));
-    hooks<OnEnter<Y>, S, L>(app, &OnEnter { none: fixed_of([], 0) }, commands)
+    hooks<OnEnter<Y>, S, L>(app, &OnEnter { none: no_elements() }, commands)
 }
 
 // What follows the state `X` among the app's systems: left newest first,
@@ -4806,8 +4806,8 @@ impl<H, R, S, L> Fires<S, L> for (Column<H>, R) where S: Get<H>, L: Dispatch<OnA
         let old = before[len_at(before) - 1 - depth];
         let came = owners_from(<S as Get<H>>::column(&app.world.columns), old);
         let here = if(len_at(&came) > 0) {
-            hooks<OnAdd<H>, S, L>(app, &OnAdd { entities: clone(&came), none: fixed_of([], 0) }, commands);
-            hooks<OnInsert<H>, S, L>(app, &OnInsert { entities: came, none: fixed_of([], 0) }, commands);
+            hooks<OnAdd<H>, S, L>(app, &OnAdd { entities: clone(&came), none: no_elements() }, commands);
+            hooks<OnInsert<H>, S, L>(app, &OnInsert { entities: came, none: no_elements() }, commands);
             true
         } else { false };
         let rest = <R as Fires<S, L>>::fire(app, before, depth + 1, commands);
@@ -5440,7 +5440,7 @@ impl<P> PointKind for P { const EXCLUSIVE: Bool = true; }
 
 // The system that runs what was asked of the sync point named `P`.
 pub struct SyncPointOf<P> { none: [P; 0] }
-pub fn sync_point<P>(point: P) -> SyncPointOf<P> { discard(point); SyncPointOf { none: fixed_of([], 0) } }
+pub fn sync_point<P>(point: P) -> SyncPointOf<P> { discard(point); SyncPointOf { none: no_elements() } }
 // What a point's bridges may touch: of an envelope, what its `Env` query
 // does; of any other, everything.
 pub trait PointTouches { fn point_touches() -> Vec<Str> }
@@ -5986,14 +5986,14 @@ impl<S, L> App<S, L> {
     pub fn add_sub_state<P, X>(app: Self) -> App<S, (SubOf<P, X>, L)> where X: State, L: Follows<<X as State>::Group, S> {
         if(<L as Follows<<X as State>::Group, S>>::has_parent()) { abort("the state group already follows a parent state") };
         let App { world, systems, guard } = app;
-        App { world: world, systems: (SubOf { none: fixed_of([], 0) }, systems), guard: guard }
+        App { world: world, systems: (SubOf { none: no_elements() }, systems), guard: guard }
     }
     // Behaviors, and the instances they keep.
     pub fn add_behaviors(app: Self) -> App<(Resource<Instances>, S), L> { app.insert_resource(Instances { running: Vec::new(), next: 0 }) }
     // The behavior `B`, run at the label `E`.
     pub fn add_behavior<B, E>(app: Self) -> App<S, (BehaviorsOf<B, S>, L)> where E: Schedule {
         let App { world, systems, guard } = app;
-        App { world: world, systems: (BehaviorsOf { label: <E as Schedule>::NAME, entities: Vec::new(), ids: Vec::new(), states: Vec::new(), none: fixed_of([], 0) }, systems), guard: guard }
+        App { world: world, systems: (BehaviorsOf { label: <E as Schedule>::NAME, entities: Vec::new(), ids: Vec::new(), states: Vec::new(), none: no_elements() }, systems), guard: guard }
     }
     // A place for the events of type `E` delivered to entities.
     pub fn add_inbox<E>(app: Self) -> App<(Resource<Inbox<E>>, S), L> { app.insert_resource(Inbox::new()) }
@@ -6017,7 +6017,7 @@ impl<S, L> App<S, L> {
         where C: State, L: Follows<<C as State>::Group, S> {
         if(<L as Follows<<C as State>::Group, S>>::has_parent()) { abort("the state group already follows a parent state") };
         let App { world, systems, guard } = app.insert_resource(Computer { f: f });
-        App { world: world, systems: (ComputedOf { none: fixed_of([], 0) }, systems), guard: guard }
+        App { world: world, systems: (ComputedOf { none: no_elements() }, systems), guard: guard }
     }
     // The world's structural operations, with the hooks they fire.
     pub fn spawn_bundle<B>(app: &mut Self, bundle: B) -> Entity where B: Bundle<S>, B: Hooked<S, L>, S: ByName<S, L> {
@@ -6045,18 +6045,18 @@ impl<S, L> App<S, L> {
               L: Dispatch<OnAdd<T>, S>, L: Dispatch<OnInsert<T>, S>, L: Dispatch<OnReplace<T>, S>, T: EvictsHooked<S, L>, S: ByName<S, L> {
         <T as EvictsHooked<S, L>>::evicting_hooked(app, entity);
         let had = <S as Get<T>>::has(&app.world.columns, entity);
-        if(had) { app.emit<OnReplace<T>>(&OnReplace { entities: Vec::from_array([entity]), none: fixed_of([], 0) }) };
+        if(had) { app.emit<OnReplace<T>>(&OnReplace { entities: Vec::from_array([entity]), none: no_elements() }) };
         let old = app.world.insert(entity, value);
         let brought = replace(&mut app.world.brought_entities, Vec::new());
         let names = replace(&mut app.world.brought_names, Vec::new());
-        if(not(had)) { app.emit<OnAdd<T>>(&OnAdd { entities: Vec::from_array([entity]), none: fixed_of([], 0) }) };
+        if(not(had)) { app.emit<OnAdd<T>>(&OnAdd { entities: Vec::from_array([entity]), none: no_elements() }) };
         fire_brought(app, &brought, &names, 0);
-        app.emit<OnInsert<T>>(&OnInsert { entities: Vec::from_array([entity]), none: fixed_of([], 0) });
+        app.emit<OnInsert<T>>(&OnInsert { entities: Vec::from_array([entity]), none: no_elements() });
         fire_brought(app, &brought, &names, 1);
         old
     }
     pub fn remove<T>(app: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, T: Schedule, T: Take<S>, S: Fires<S, L>, S: Requests<S, L>, L: Dispatch<OnRemove<T>, S> {
-        if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: Vec::from_array([entity]), none: fixed_of([], 0) }) };
+        if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: Vec::from_array([entity]), none: no_elements() }) };
         app.world.remove<T>(entity)
     }
     pub fn despawn(app: &mut Self, entity: Entity) -> Bool where S: Columns, S: Unlinks<S>, S: RemoveHooks<S, L> {

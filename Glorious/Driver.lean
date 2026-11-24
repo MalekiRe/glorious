@@ -1443,8 +1443,11 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
       | none => unbound
     | .place pl =>
       -- (In the function whose code it is, where one is found.)
-      let within := (c.core.fns.toList.zipIdx.find? fun (f, _) => f.clauses.any (tmHas ·.body s.tm)).map
-        fun (_, k) => s!" (in `{fnName k}`)"
+      -- (Said only where one function has the code: the same code may be
+      -- in several.)
+      let within := match c.core.fns.toList.zipIdx.filter fun (f, _) => f.clauses.any (tmHas ·.body s.tm) with
+        | [(_, k)] => some s!" (in {fnName k})"
+        | _ => none
       match s.env[pl.var]? with
       | some v => s!"`{showValue c.ctorNames v}` does not have the field being read{within.getD ""}"
       | none => unbound

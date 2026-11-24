@@ -434,6 +434,8 @@ impl<T, N> Literal<T, N> for Fixed<T, N> where N: Known { fn of_items(items: [T]
 // A `[T; N]` of the elements of an array of exactly `N`: a literal, where
 // every one is one.
 fn fixed_literal<N, T>(items: Array<T>) -> Fixed<T, N> where N: Known { fixed_of(items, N::VALUE) }
+// `[]` of a length its type says, `[T; 0]`, however literals are read.
+fn no_elements<T>() -> [T; 0] { fixed_of(arr_new(), 0) }
 fn array_literal<N, T, A>(items: Array<T>) -> A where A: Literal<T, N> {
     <A as Literal<T, N>>::of_items(items)
 }
