@@ -1236,7 +1236,13 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     match solved with
     | some d => table := record table b.call (← timedM "bounds: dict" (toDictEShared impls marker d))
     | none =>
-      if b.trait == Syntax.destroyTrait then continue
+      -- (How a value of a type nothing here decides is destroyed: as one
+      -- with nothing to destroy, as a part nothing decides is. Its place
+      -- among what the call is given is kept: the callee takes one there.)
+      if b.trait == Syntax.destroyTrait then
+        if let some d := Traits.solveIx kimpls givens 100000 b.trait (.con "(reference)" []) then
+          table := record table b.call (← toDictEShared impls marker d)
+        continue
       if !last && !(← zonk b.ty).ground then
         waiting := waiting ++ [b]
         continue

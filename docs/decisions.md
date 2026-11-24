@@ -7864,12 +7864,15 @@ and `array_get` until arrays go: by their names a dot call `v.push(x)` of a
 the trait written of `I` there, where another trait of the program leaves an
 `Item` too.
 
-Known defect, found here: a variadic implementation that builds `(h, ..r)`
-of a type a trait leaves (`R::Got<'a>`) inside a `match` arm, in a program
-that loads some of the library (`std::vec`, `std::hash`), is accepted and
-goes wrong, `match` given a dictionary it does not take (or its Core is
-refused); without the library it runs. The test of it keeps its columns in
-`[T; N]` meanwhile.
+A defect found here, and fixed: how a value of a type nothing decides is
+destroyed, where a call's callee is to be told (`S` of `match`, a type a
+trait leaves, `Option<(H::Got<'a>, ..R::Got<'a>)>`), was left out of what
+the call is given, and every dictionary after it was given one place early:
+a variadic implementation building `(h, ..r)` in a `match` arm went wrong,
+`match` given a dictionary where it took the subject, or its Core was
+refused, once the library gave some type a `drop`. Such a type is now
+destroyed as one with nothing to destroy, as a part nothing decides is
+(`settleBounds`), and the call is given that in its place.
 
 ## Other standing decisions
 

@@ -15534,8 +15534,9 @@ fn main() -> Int { <(Int, Int, Int) as Size<Int>>::size(&5) }
 #### case
 #### A query over columns as head and rest, its columns as nested pairs
 
+use std::vec::{Vec};
 struct Entity { index: Int, generation: Int }
-struct Column<T> { dense: [T; 2], owners: [Entity; 2], slots: [Int; 2] }
+struct Column<T> { dense: Vec<T>, owners: Vec<Entity>, slots: Vec<Int> }
 fn slot_of<T>(column: &Column<T>, entity: Entity) -> Int {
     if(entity.index < len_at(&column.slots)) {
         let at = column.slots[entity.index];
@@ -15586,7 +15587,7 @@ struct Position(Int)
 struct Velocity(Int)
 
 
-struct Query<Q, St = <Q as Item>::Store> { store: St, entities: [Entity; 2] }
+struct Query<Q, St = <Q as Item>::Store> { store: St, entities: Vec<Entity> }
 
 fn each<Q>(query: &mut Query<Q>, f: for<'a> fn(Entity, Q::Got<'a>)) where Q: Item {
     let mut i = 0;
@@ -15604,9 +15605,9 @@ fn movement(query: &mut Query<(&mut Position, &Velocity)>) {
 fn main() -> Int {
     let e0 = Entity { index: 0, generation: 0 };
     let e1 = Entity { index: 1, generation: 0 };
-    let ps = Column { dense: [Position(1), Position(2)], owners: [e0, e1], slots: [0, 1] };
-    let vs = Column { dense: [Velocity(10), Velocity(0)], owners: [e1, e1], slots: [0 - 1, 0] };
-    let mut query: Query<(&mut Position, &Velocity)> = Query { store: (ps, (vs, ())), entities: [e0, e1] };
+    let ps = Column { dense: Vec::from_array([Position(1), Position(2)]), owners: Vec::from_array([e0, e1]), slots: Vec::from_array([0, 1]) };
+    let vs = Column { dense: Vec::from_array([Velocity(10)]), owners: Vec::from_array([e1]), slots: Vec::from_array([0 - 1, 0]) };
+    let mut query: Query<(&mut Position, &Velocity)> = Query { store: (ps, (vs, ())), entities: Vec::from_array([e0, e1]) };
     movement(&mut query);
     movement(&mut query);
     query.store.0.dense[1].0
