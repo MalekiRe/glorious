@@ -295,11 +295,14 @@ impl<T> HashSet<T> {
 }
 
 pub fn fold_map<T, U, V, e: EffectRow>(m: HashMap<T, U>, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> {
-    match(m) {
-        HashMap(buckets, _) => fold(buckets, init, fn(acc, bucket) {
-            fold(bucket, acc, fn(a, pair) { match(pair) { (k, v) => f(a, k, v) } })
-        })
-    }
+    match(m) { HashMap(buckets, _) => fold_buckets(buckets, 0, init, f) }
+}
+// Each bucket's pairs, from the bucket at `i` on.
+fn fold_buckets<T, U, V, e: EffectRow>(bs: [[(T, U)]], i: Int, acc: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> {
+    if(i >= len_at(&bs)) { acc } else { tail fold_buckets(bs, i + 1, fold_pairs(bs[i], 0, acc, f), f) }
+}
+fn fold_pairs<T, U, V, e: EffectRow>(ps: [(T, U)], i: Int, acc: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> {
+    if(i >= len_at(&ps)) { acc } else { match(ps[i]) { (k, v) => tail fold_pairs(ps, i + 1, f(acc, k, v), f) } }
 }
 pub fn keys<T, U>(m: HashMap<T, U>) -> [T] where T: Use<[0, *]>, U: Use<[0, *]> { fold_map(m, [], fn(out, k, v) { push(out, k) }) }
 pub fn values<T, U>(m: HashMap<T, U>) -> [U] where T: Use<[0, *]>, U: Use<[0, *]> { fold_map(m, [], fn(out, k, v) { push(out, v) }) }

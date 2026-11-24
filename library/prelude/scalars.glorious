@@ -597,18 +597,36 @@ fn text_before<T>(a: T, i: Int, rest: Str) -> Str where T: Index, T: Use<[0, *]>
     }
 }
 
-// `f(f(f(init, a[0]), a[1]), ..)`.
-fn fold<T, U, e: EffectRow>(a: [T], init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where T: Use<[0, *]>, U: Use<[1, 1]> { fold_from(a, arr_len(a, 0), 0, init, f) }
-fn fold_from<T, U, e: EffectRow>(a: [T], n: Int, i: Int, acc: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where T: Use<[0, *]>, U: Use<[1, 1]> {
+// `f(f(f(init, a[0]), a[1]), ..)`, of the elements of anything that has
+// them one after another: an array, a `[T; N]`, a `Vec`, a slice.
+fn fold<A, T, U, e: EffectRow>(a: A, init: U, f: fn(U, T) -> U / {| e}) -> U / {| e}
+where A: Indexed<Element = T>, T: Use<[0, *]>, U: Use<[1, 1]> {
+    let held = a;
+    fold_from(&held, size_at(&held), 0, init, f)
+}
+fn fold_from<A, T, U, e: EffectRow>(a: &A, n: Int, i: Int, acc: U, f: fn(U, T) -> U / {| e}) -> U / {| e}
+where A: Indexed<Element = T>, T: Use<[0, *]>, U: Use<[1, 1]> {
     match(int_lt(i, n)) {
         0 => acc,
-        _ => tail fold_from(a, n, int_add(i, 1), f(acc, arr_get(a, i)), f)
+        _ => tail fold_from(a, n, int_add(i, 1), f(acc, *element_at(a, i)), f)
     }
 }
-fn each<T, e: EffectRow>(a: [T], f: fn(T) -> () / {| e}) -> () / {| e} where T: Use<[0, *]> { fold(a, (), fn(done, x) { f(x) }) }
+fn each<A, T, e: EffectRow>(a: A, f: fn(T) -> () / {| e}) -> () / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> { fold(a, (), fn(done, x) { f(x) }) }
 
 impl<T> Show for Array<T> where T: Show, T: Use<[0, *]> {
     fn show(a: Array<T>) -> Str {
+        "[" ++ fold(a, "", fn(text, x) {
+            match(text) {
+                StrEnd => show(x),
+                _ => text ++ ", " ++ show(x)
+            }
+        }) ++ "]"
+    }
+}
+
+// A `[T; N]` written as an array is.
+impl<T, N> Show for Fixed<T, N> where T: Show, T: Use<[0, *]>, N: Known {
+    fn show(a: Fixed<T, N>) -> Str {
         "[" ++ fold(a, "", fn(text, x) {
             match(text) {
                 StrEnd => show(x),
@@ -715,6 +733,15 @@ impl<T, E> Eq for Result<T, E> where T: Eq, E: Eq {
             (Err(a), Err(b)) => a == b,
             _ => false
         }
+    }
+}
+impl<T, N> Eq for Fixed<T, N> where T: Eq, T: Use<[0, *]>, N: Known {
+    fn ==(a: Fixed<T, N>, b: Fixed<T, N>) -> Bool { fixed_same(&a, &b, 0) }
+}
+fn fixed_same<T, N>(a: &Fixed<T, N>, b: &Fixed<T, N>, i: Int) -> Bool where T: Eq, T: Use<[0, *]>, N: Known {
+    match(int_lt(i, N::VALUE)) {
+        0 => true,
+        _ => if(*element_at(a, i) == *element_at(b, i)) { fixed_same(a, b, int_add(i, 1)) } else { false }
     }
 }
 impl<T> Eq for Array<T> where T: Eq, T: Use<[0, *]> {
