@@ -28,8 +28,8 @@ fn hash_text(text: Str, h: Int) -> Int {
 impl<A, B> Hash for (A, B) where A: Hash, B: Hash {
     fn hash(p: (A, B)) -> Int { match(p) { (a, b) => combine(hash(a), hash(b)) } }
 }
-impl<T> Hash for Array<T> where T: Hash, T: Use<[0, *]> {
-    fn hash(a: Array<T>) -> Int { fold(a, 17, fn(h, x) { combine(h, hash(x)) }) }
+impl<T, N> Hash for [T; N] where T: Hash, T: Use<[0, *]>, N: Known {
+    fn hash(a: [T; N]) -> Int { fold(a, 17, fn(h, x) { combine(h, hash(x)) }) }
 }
 
 // A map: its buckets, and how many keys it has. A key is hashed and

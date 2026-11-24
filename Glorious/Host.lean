@@ -145,13 +145,15 @@ def call (w : World) (id : Nat) (args : List Value) : Option (Value × World) :=
     | [v] => some (v, w)
     | _ => none
   else if id = 9 then
+    -- (The character at a place of the name of the function a callable is
+    -- of, `-1` past its end; and the callable back.)
     match args with
-    | [v] =>
+    | [v, .int i] =>
       let name := match v with
         | .clo f _ => (w.names[f]?).getD ""
         | _ => ""
-      let codes := name.toList.map fun c => Value.int c.toNat
-      some (.data 0 [.data (arrayBase + codes.length) codes, v], w)
+      let code : Int := if 0 ≤ i then ((name.toList[i.toNat]?).map (·.toNat : Char → Int)).getD (-1) else -1
+      some (.data 0 [.int code, v], w)
     | _ => none
   else none
 

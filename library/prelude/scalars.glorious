@@ -203,7 +203,7 @@ struct Array<T>(T)
 
 // (An intrinsic, declared with the arrays it gives one of.) The name of the function a callable is of, as its characters' codes, and
 // the callable back.
-#[intrinsic] unsafe fn host_fn_name<T>(value: T) -> ([Int], T) where T: Use<[1, 1]>;
+#[intrinsic] unsafe fn host_fn_name<T>(value: T, at: Int) -> (Int, T) where T: Use<[1, 1]>;
 
 // An address, with what is said to be there: `*const T` and `*mut T`. To
 // have one says nothing of what is at the address; reading and writing
@@ -464,27 +464,8 @@ trait Index {
     fn index(Self, Int) -> Elem
     fn index_set(Self, Int, Elem) -> Self
 }
-impl<T> Index for Array<T> {
-    type Elem = T;
-    fn index(a: Array<T>, i: Int) -> T { arr_get(a, i) }
-    fn index_set(a: Array<T>, i: Int, v: T) -> Array<T> { arr_set(a, i, v) }
-}
-
 trait Len { fn len(Self) -> Int }
-impl<T> Len for Array<T> where T: Use<[1, 1]> { fn len(a: Array<T>) -> Int { arr_len(a, 0) } }
 impl Len for Str { fn len(text: Str) -> Int { length(text) } }
-
-// What `[a, b]` and `[x; n]` are made with.
-fn array_empty<T>() -> [T] { arr_new() }
-fn array_repeat<T>(x: T, n: Int) -> [T] where T: Use<[0, *]> { repeat_onto(x, n, arr_new()) }
-fn repeat_onto<T>(x: T, n: Int, out: [T]) -> [T] where T: Use<[0, *]> {
-    match(int_lt(0, n)) {
-        0 => out,
-        _ => tail repeat_onto(x, int_sub(n, 1), arr_push(out, x))
-    }
-}
-
-fn array_push<T>(a: [T], v: T) -> [T] where T: Use<[1, 1]> { arr_push(a, v) }
 
 // Whole numbers as types, for how long a `[T; N]` is: the bits from the
 // lowest, `B1<B0<B1<Z>>>` for five. What number a type stands for is its
@@ -499,58 +480,51 @@ impl<N> Known for B1<N> where N: Known { const VALUE: Int = int_add(int_mul(2, N
 
 // `[T; N]`: an array of exactly `N` elements.
 struct Fixed<T, N>(Array<T>)
-// (Built by the machines, as an array is, with the length in its type: the
-// field written here only says what it holds.)
+// (Built by the machines, one constructor of `N` fields for each `N`, the
+// length in its type: the field written here only says what it holds.)
 impl<T, N> Index for Fixed<T, N> {
     type Elem = T;
     fn index(a: Fixed<T, N>, i: Int) -> T { fixed_get(a, i) }
     fn index_set(a: Fixed<T, N>, i: Int, v: T) -> Fixed<T, N> { fixed_set(a, i, v) }
 }
 impl<T, N> Len for Fixed<T, N> where N: Known { fn len(a: Fixed<T, N>) -> Int { N::VALUE } }
-// Its elements as an array that can grow.
-fn to_array<T, N>(a: Fixed<T, N>) -> Array<T> { fixed_to_array(a) }
 // In memory, its elements one after another, as Rust lays out `[T; N]`.
 impl<T, N> Layout for Fixed<T, N> where T: Layout, N: Known {
     const SIZE: Int = int_mul(N::VALUE, size_of<T>());
     const ALIGN: Int = align_of<T>();
 }
-impl<T, N> Repr for Fixed<T, N> where T: Repr, T: Layout, N: Known {
-    unsafe fn repr_store(at: usize, value: Fixed<T, N>) { fixed_store(at, fixed_to_array(value), N::VALUE) }
-    unsafe fn repr_load(at: usize) -> Fixed<T, N> { fixed_of(fixed_load(at, 0, N::VALUE, arr_new()), N::VALUE) }
-}
-// (The last of so many elements written after the others, and the rest.)
-unsafe fn fixed_store<T>(at: usize, items: [T], n: Int) where T: Repr, T: Layout {
-    match(int_lt(0, n)) {
-        0 => (),
-        _ => fixed_store_last(at, arr_pop(items, 0), n)
+// (Each element written where it goes; the array let go of, its elements
+// written out. Read back, the first fills it and each after is put in its
+// place.)
+impl<T, N> Repr for Fixed<T, N> where T: Repr, T: Layout, N: Known, T: Use<[0, *]> {
+    unsafe fn repr_store(at: usize, value: Fixed<T, N>) { fixed_store_from(at, value, 0, N::VALUE) }
+    unsafe fn repr_load(at: usize) -> Fixed<T, N> {
+        match(int_eq(N::VALUE, 0)) {
+            1 => unsafe { transmute(fixed_make()) },
+            _ =>
+                let mut out = fixed_fill(unsafe { <T as Repr>::repr_load(at) }, N::VALUE);
+                let mut i = 1;
+                while({ int_lt(i, N::VALUE) == 1 }) {
+                    out = fixed_set(out, i, unsafe { <T as Repr>::repr_load(repr_at(at, int_mul(i, size_of<T>()))) });
+                    i = int_add(i, 1)
+                };
+                out
+        }
     }
 }
-unsafe fn fixed_store_last<T>(at: usize, popped: ([T], T), n: Int) where T: Repr, T: Layout {
-    let (rest, last) = popped;
-    <T as Repr>::repr_store(repr_at(at, int_mul(int_sub(n, 1), size_of<T>())), last);
-    tail fixed_store(at, rest, int_sub(n, 1))
-}
-unsafe fn fixed_load<T>(at: usize, i: Int, n: Int, out: [T]) -> [T] where T: Repr, T: Layout {
+// (Plain data, copied: each element written where it goes.)
+unsafe fn fixed_store_from<T, N>(at: usize, a: Fixed<T, N>, i: Int, n: Int) where T: Repr, T: Layout, T: Use<[0, *]> {
     match(int_lt(i, n)) {
-        0 => out,
-        _ => tail fixed_load(at, int_add(i, 1), n, arr_push(out, <T as Repr>::repr_load(repr_at(at, int_mul(i, size_of<T>())))))
+        0 => (),
+        _ => <T as Repr>::repr_store(repr_at(at, int_mul(i, size_of<T>())), fixed_get(a, i)); tail fixed_store_from(at, a, int_add(i, 1), n)
     }
 }
-// `N` of one value.
-fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { fixed_of(array_repeat(x, N::VALUE), N::VALUE) }
-
-// What `[a, b, c]` is in a program that has arrays of a fixed length: an
-// array, or one of exactly three. Where nothing says which, an array.
-trait Literal<T, N> { fn of_items(Array<T>) -> Self }
-#[fallback] impl<T, N> Literal<T, N> for Array<T> { fn of_items(items: [T]) -> Array<T> { items } }
-impl<T, N> Literal<T, N> for Fixed<T, N> where N: Known { fn of_items(items: [T]) -> Fixed<T, N> { fixed_of(items, N::VALUE) } }
+// `N` of one value: `[x; N]`.
+fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { fixed_fill(x, N::VALUE) }
 // `[x; 4]`: four of `x`.
-fn fixed_repeat_of<N, T>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { fixed_of(array_repeat(x, N::VALUE), N::VALUE) }
-// `[]` of a length its type says, `[T; 0]`, however literals are read.
+fn fixed_repeat_of<N, T>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { fixed_fill(x, N::VALUE) }
+// `[]` of a length its type says, `[T; 0]`.
 fn no_elements<T>() -> [T; 0] { fixed_make() }
-fn array_literal<N, T, A>(items: Array<T>) -> A where A: Literal<T, N> {
-    <A as Literal<T, N>>::of_items(items)
-}
 
 // What `[first, ..rest]` in a pattern is read with: whether a slice (or an
 // array) has so many elements, or exactly so many, and what is left without
@@ -591,31 +565,6 @@ impl<'a, T> RestOf for SliceMut<'a, T> {
         unsafe { (slice_mut_at(s.at, int_sub(s.len, 1)), ptr_mut_ref_at(s.at, slice_place(s.at, int_sub(s.len, 1)))) }
     }
 }
-fn rest_turn<T>(from: Array<T>, onto: Array<T>) -> Array<T> where T: Use<[1, 1]> {
-    match(from) {
-        [] => onto,
-        some => tail rest_turn_one(arr_pop(some, 0), onto)
-    }
-}
-fn rest_turn_one<T>(popped: (Array<T>, T), onto: Array<T>) -> Array<T> where T: Use<[1, 1]> {
-    match(popped) { (shorter, x) => tail rest_turn(shorter, arr_push(onto, x)) }
-}
-
-// The array without its last element, and that element; nothing if it is empty.
-fn array_pop<T>(a: [T]) -> Option<([T], T)> where T: Use<[1, 1]> {
-    match(a) {
-        [] => None,
-        some => Some(arr_pop(some, 0))
-    }
-}
-
-// The element at a place, if the place is there.
-fn array_get<T>(a: [T], i: Int) -> Option<T> {
-    match(int_mul(int_lt(-1, i), int_lt(i, arr_len(a, 0)))) {
-        0 => None,
-        _ => Some(arr_get(a, i))
-    }
-}
 
 // How many elements what a reference points to has (an array, a `[T; N]`,
 // a `Vec`, a slice).
@@ -641,12 +590,6 @@ trait Indexed {
 trait IndexedMut: Indexed {
     fn place_at(Int, &mut Self) -> &mut Self::Element
 }
-impl<T> Indexed for Array<T> where T: Use<[1, 1]> {
-    type Element = T;
-    fn element_at(a: &Array<T>, i: Int) -> &T { arr_at(a, i) }
-    fn size_at(a: &Array<T>) -> Int { arr_len_at(a) }
-}
-impl<T> IndexedMut for Array<T> where T: Use<[1, 1]> { fn place_at(i: Int, a: &mut Array<T>) -> &mut <Array<T> as Indexed>::Element { arr_at(a, i) } }
 impl<T, N> Indexed for Fixed<T, N> where N: Known {
     type Element = T;
     fn element_at(a: &Fixed<T, N>, i: Int) -> &T { fixed_at(a, i) }
@@ -692,44 +635,6 @@ fn element_mut<A, T>(a: &mut A, i: Int) -> Option<&mut T> where A: IndexedMut, A
     }
 }
 
-// An array put back where a reference points, after it was taken out with
-// `replace` to be changed, an empty one left in its place. The empty one is
-// written over: it holds nothing, so nothing is lost, whatever an element is.
-// Unsafe, since that is for whoever calls it to have seen to: an array that
-// was not taken out would be lost with all it holds.
-unsafe fn restore_at<T>(a: &mut Array<T>, items: Array<T>) where T: Use<[1, 1]> { overwrite(a, items) }
-
-// An element added to the array a reference points to.
-fn push_at<T>(a: &mut Array<T>, x: T) where T: Use<[1, 1]> {
-    let more = array_push(replace(a, array_empty()), x);
-    unsafe { restore_at(a, more) }
-}
-
-// The last element taken off it, if it has one.
-fn pop_at<T>(a: &mut Array<T>) -> Option<T> where T: Use<[1, 1]> {
-    match(array_pop(replace(a, array_empty()))) {
-        Some((rest, last)) => unsafe { restore_at(a, rest) }; Some(last),
-        None => None
-    }
-}
-// Take out the element at a place: those after it move down one.
-fn remove_at<T>(a: &mut Array<T>, at: Int) -> T {
-    let mut after = array_empty();
-    while({ len_at(&*a) > at + 1 }) { match(pop_at(a)) { Some(x) => push_at(&mut after, x), None => () } };
-    let taken = match(pop_at(a)) { Some(x) => x, None => abort("remove_at: no element at that place") };
-    while({ len_at(&after) > 0 }) { match(pop_at(&mut after)) { Some(x) => push_at(a, x), None => () } };
-    taken
-}
-
-// The elements from one place up to, not including, another.
-fn slice<A, T>(a: A, from: Int, to: Int) -> [T] where A: Indexed<Element = T>, T: Use<[0, *]> { let held = a; slice_onto(&held, from, to, array_empty()) }
-fn slice_onto<A, T>(a: &A, i: Int, to: Int, out: [T]) -> [T] where A: Indexed<Element = T>, T: Use<[0, *]> {
-    match(int_lt(i, to)) {
-        0 => out,
-        _ => tail slice_onto(a, int_add(i, 1), to, array_push(out, *element_at(a, i)))
-    }
-}
-
 // Characters as a text (`std::text::chars` is a text's characters).
 fn text<A>(a: A) -> Str where A: Indexed<Element = char> { let held = a; text_before(&held, size_at(&held), StrEnd) }
 fn text_before<A>(a: &A, i: Int, rest: Str) -> Str where A: Indexed<Element = char> {
@@ -764,7 +669,8 @@ fn elements_from<A, T>(a: &A, n: Int, i: Int, text: Str) -> Str where A: Indexed
     }
 }
 
-impl<T> Show for Array<T> where T: Show, T: Use<[1, 1]> { fn fmt(a: &Array<T>) -> Str { elements_text(a) } }
+// A slice written as an array is.
+impl<'a, T> Show for SliceRef<'a, T> where T: Show { fn fmt(s: &SliceRef<'a, T>) -> Str { elements_text(s) } }
 
 // A `[T; N]` written as an array is.
 impl<T, N> Show for Fixed<T, N> where T: Show, N: Known { fn fmt(a: &Fixed<T, N>) -> Str { elements_text(a) } }
@@ -793,10 +699,6 @@ impl<A, B, C> Clone for (A, B, C) where A: Clone, B: Clone, C: Clone {
 impl<T, E> Clone for Result<T, E> where T: Clone, E: Clone {
     fn clone(r: &Result<T, E>) -> Result<T, E> { match(r) { &Ok(v) => Ok(clone(v)), &Err(e) => Err(clone(e)) } }
 }
-impl<T> Clone for Array<T> where T: Clone { fn clone(a: &Array<T>) -> Array<T> { clone_onto(a, 0, arr_new()) } }
-fn clone_onto<T: Clone>(a: &Array<T>, i: Int, out: Array<T>) -> Array<T> {
-    if(i < arr_len_at(a)) { tail clone_onto(a, i + 1, arr_push(out, clone(arr_at(a, i)))) } else { out }
-}
 
 // Of a result: what `Ok` holds, or else leaving for the label with the error
 // (`try(r, @f)` in a function that gives a `Result`); the same with the
@@ -818,7 +720,7 @@ fn some_or_leave<T, R, L, e: EffectRow>(value: Result<T, ()>, target: L, fallbac
 
 // Stopping: what is said is written, and the program stops there, with no
 // cleanup run (the library specification's §6.1).
-fn abort<T>(message: Str) -> T { host_write(message); arr_get(arr_new(), 0) }
+fn abort<T>(message: Str) -> T { host_write(message); fixed_get(no_elements(), 0) }
 fn unreachable<T>(message: Str) -> T where T: Use<[1, 1]> { abort(message) }
 // What an `Option` or a `Result` has, asked of it as a value's own: `o.map(f)`.
 // (An `Option<T>` is a `Result<T, ()>`, so each is both's.)
@@ -875,17 +777,6 @@ fn fixed_same<T, N>(a: &Fixed<T, N>, b: &Fixed<T, N>, i: Int) -> Bool where T: E
     match(int_lt(i, N::VALUE)) {
         0 => true,
         _ => if(*element_at(a, i) == *element_at(b, i)) { fixed_same(a, b, int_add(i, 1)) } else { false }
-    }
-}
-impl<T> Eq for Array<T> where T: Eq, T: Use<[0, *]> {
-    fn ==(a: Array<T>, b: Array<T>) -> Bool {
-        match(int_eq(len(a), len(b))) { 0 => false, _ => same_from(a, b, 0) }
-    }
-}
-fn same_from<T>(a: Array<T>, b: Array<T>, i: Int) -> Bool where T: Eq, T: Use<[0, *]> {
-    match(int_lt(i, len(a))) {
-        0 => true,
-        _ => match(index(a, i) == index(b, i)) { Ok(_) => tail same_from(a, b, int_add(i, 1)), Err(_) => false }
     }
 }
 

@@ -1240,8 +1240,13 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- with nothing to destroy, as a part nothing decides is. Its place
       -- among what the call is given is kept: the callee takes one there.)
       if b.trait == Syntax.destroyTrait then
-        if let some d := Traits.solveIx kimpls givens 100000 b.trait (.con "(reference)" []) then
-          table := record table b.call (← toDictEShared impls marker d)
+        -- (A callable's is its own, given where it is given up.)
+        let callable ← match ← find b.ty with
+          | .fn .. => pure true
+          | _ => pure false
+        unless callable do
+          if let some d := Traits.solveIx kimpls givens 100000 b.trait (.con "(reference)" []) then
+            table := record table b.call (← toDictEShared impls marker d)
         continue
       if !last && !(← zonk b.ty).ground then
         waiting := waiting ++ [b]

@@ -351,7 +351,7 @@ def prims : List (String × Prim × Nat) :=
    -- not an intrinsic of the machines either, but an operation on memory.
    ("arr_at", .arrLen, 2),
    -- (Of `[T; N]`.)
-   ("fixed_of", .fixed 0, 2), ("fixed_to_array", .fixed 1, 1), ("fixed_get", .fixed 2, 2),
+   ("fixed_fill", .fixed 0, 2), ("fixed_get", .fixed 2, 2),
    ("fixed_set", .fixed 3, 3), ("fixed_at", .fixed 2, 2), ("fixed_len", .fixed 4, 1),
    -- How many elements the array a reference points to has: the cell is
    -- asked, and nothing is read out of it.
@@ -384,7 +384,7 @@ def hosts : List (String × Nat × Nat) :=
    -- alone gives it meaning.
    ("heap_machine_coming", 10, 0),
    -- The name of the function a callable is of, and the callable back.
-   ("host_fn_name", 9, 1),
+   ("host_fn_name", 9, 2),
    -- Unsafe: memory, by address. A new block of so many bytes at a multiple
    -- of an alignment; a block freed; bytes copied.
    ("mem_alloc", 11, 2), ("mem_free", 12, 1), ("mem_copy", 13, 3),

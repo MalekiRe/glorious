@@ -300,18 +300,14 @@ def scalarLiteral (neg : Bool) : P (Option ExprId) := do
     some <$> tree (textValue codes)
   | .bytes codes =>
     if neg then failAt "bytes have no sign"
-    -- (Each push numbered, by the text's place, the token and the byte, in
-    -- a space of their own.)
+    -- (`b"hi"`: a `[u8; 2]` of them, numbered by the text's place and the
+    -- token, in a space of its own.)
     let at_ ← get
     let base := (← read).base
     advance
-    let pushes := (List.range codes.length).map fun i =>
-      if i < 1000 then 850000000000000000 + (base / 1000000) * 100000000000 + at_ * 1000 + i else 0
     let bytes ← codes.mapM fun (c : Nat) => tree (scalarValue "u8_of" (c : Int))
-    -- (The empty array begun with numbered too: what it asks of the bytes'
-    -- type, how one is destroyed, is asked at it.)
-    let empty := 850000000000000000 + (base / 1000000) * 100000000000 + at_ * 1000 + 999
-    some <$> arrayValue bytes empty pushes
+    let made := 850000000000000000 + (base / 1000000) * 100000000000 + at_ * 1000 + 999
+    some <$> mk (.call made (← mkName none "fixed_make") bytes.toArray)
   | _ => pure none
 
 /-- A literal as a pattern: the value it is, to be compared with. -/

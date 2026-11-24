@@ -49,7 +49,7 @@ fn parse_frame(text: Str) -> Option<Frame> {
     let parts = split(location, ':');
     let count = len_at(&parts);
     if(count < 2) { None } else {
-        let file = join(slice(clone(&parts), 0, count - 1), ":");
+        let file = join(parts.as_slice().split_at(count - 1).0, ":");
         let function = match(rest) {
             Some(r) => let f = if(ends_with(r, ")")) { take(r, length((r)) - 1) } else { r }; if(starts_with(f, "discriminator")) { None } else { Some(f) },
             None => None

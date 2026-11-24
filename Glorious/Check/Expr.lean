@@ -1138,15 +1138,13 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
     | "arr_pop" =>
       checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
       pure (.tuple [array t, t])
-    -- Of `[T; N]`: one of an array of exactly the length, an array of one,
-    -- the element at a place, one with another there, and a place in one.
-    | "fixed_of" =>
+    -- Of `[T; N]`: `N` of one value, the element at a place, one with
+    -- another there, and a place in one.
+    | "fixed_fill" =>
       let n ← freshTy
-      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
+      checkArgs scope amb s!"intrinsic `{x}`" [t, .int] args call
+      mustDup t "`[x; n]` is `n` of one value, copied"
       pure (.con "Fixed" [t, n])
-    | "fixed_to_array" =>
-      checkArgs scope amb s!"intrinsic `{x}`" [.con "Fixed" [t, ← freshTy]] args call
-      pure (array t)
     | "fixed_get" =>
       checkArgs scope amb s!"intrinsic `{x}`" [.con "Fixed" [t, ← freshTy], .int] args call
       mustDrop t "reading a place of a `[T; N]` lets go of the rest of it"

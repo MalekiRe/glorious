@@ -865,6 +865,11 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
     match item with
     | .impl _ tr h _ _ _ => if tr == layoutTrait then s.insert h else s
     | _ => s
+  -- (And one whose `Repr` is: none is written for it.)
+  let ownRepr : Std.HashSet String := all.foldl (init := {}) fun s item =>
+    match item with
+    | .impl _ tr h _ _ _ => if tr == reprTrait then s.insert h else s
+    | _ => s
   -- (Each declared type's constructors, by name, with their fields.)
   let ctorsOf : Std.HashMap String (List String × List (Option String × List TypeExpr)) := all.foldl (init := {}) fun m item =>
     match item with
@@ -922,7 +927,7 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
       else (ctorsOf[head]?).map fun (ps, cs) =>
         let m := ps.zip (fresh.map (TypeExpr.name · []))
         cs.map fun (c, fs) => (c, fs.map (substTypeExpr m))
-    let reprs : List Item := match ctors.filter (·.all fun (_, fs) => fs.all (plainType fieldsOf [head])) with
+    let reprs : List Item := match (ctors.filter fun _ => !ownRepr.contains head).filter (·.all fun (_, fs) => fs.all (plainType fieldsOf [head])) with
       | some cs =>
         let (store, load) := reprOf cs (8000000000000000 + 100000 * count)
         [Item.impl fresh reprTrait head fresh ((fresh.filter (!·.startsWith "'")).flatMap fun p => [(p, reprTrait), (p, layoutTrait)])

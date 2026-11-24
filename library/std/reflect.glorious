@@ -116,10 +116,10 @@ impl Reflect for Str {
     fn describe_as(v: &Str, all: Bool, token: Unchecked) -> Described { TextValue(clone(v)) }
     fn set_from(v: &mut Str, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { *v = clone(&text); Ok(TextValue(text)) }
 }
-impl<T> Reflect for Array<T> where T: Reflect {
+impl<T, N> Reflect for [T; N] where T: Reflect, N: Known {
     const INFO: TypeInfo = TypeInfo { name: "Array", kind: KindList, public: true, variants: Vec::new() };
-    fn describe_as(v: &Array<T>, all: Bool, token: Unchecked) -> Described { ListValue(described_each(v, all, token)) }
-    fn set_from(v: &mut Array<T>, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { Err("a list is not set from text") }
+    fn describe_as(v: &[T; N], all: Bool, token: Unchecked) -> Described { ListValue(described_each(v, all, token)) }
+    fn set_from(v: &mut [T; N], path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { Err("an array is not set from text") }
 }
 impl<T> Reflect for Vec<T> where T: Reflect {
     const INFO: TypeInfo = TypeInfo { name: "Vec", kind: KindList, public: true, variants: Vec::new() };

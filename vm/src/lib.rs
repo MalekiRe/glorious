@@ -1438,19 +1438,12 @@ impl Vm {
                         Some(Value::Data(d)) => Ok(Value::Int(d.fields.len() as i128)),
                         _ => wrong(),
                     },
-                    Prim::FixedOf | Prim::FixedToArray => {
-                        let mut args = args.into_iter();
-                        let Some(Value::Data(d)) = args.next() else { return wrong() };
-                        let n = d.fields.len();
-                        if let Prim::FixedOf = p {
-                            if !matches!(args.next(), Some(Value::Int(k)) if k == n as i128) {
-                                return wrong();
-                            }
-                        }
-                        let base = if let Prim::FixedOf = p { FIXED_BASE } else { ARRAY_BASE };
-                        let (_, fields) = fields_of(d);
-                        Ok(data(base + n as u64, fields))
-                    }
+                    // `[x; n]`: `n` of one value.
+                    Prim::FixedOf => match args.as_slice() {
+                        [x, Value::Int(n)] if *n >= 0 => Ok(data(FIXED_BASE + *n as u64, vec![x.clone(); *n as usize])),
+                        _ => wrong(),
+                    },
+                    Prim::FixedToArray => wrong(),
                     Prim::Cast => args.into_iter().next().ok_or(Stop::Wrong),
                     _ => prim(*p, &args),
                 }
@@ -2194,13 +2187,14 @@ impl Vm {
                     (14, [v]) => v.clone(),
                     // The name of the function a callable is of, and the
                     // callable back.
-                    (9, [v]) => {
+                    // (The character at a place of it, `-1` past its end.)
+                    (9, [v, Value::Int(i)]) => {
                         let name = match v {
                             Value::Clo(c) => self.shared_names.get(c.func).cloned().unwrap_or_default(),
                             _ => String::new(),
                         };
-                        let codes: Vec<Value> = name.chars().map(|c| Value::Int(c as i128)).collect();
-                        data(0, vec![data(ARRAY_BASE + codes.len() as u64, codes), v.clone()])
+                        let code = if *i >= 0 { name.chars().nth(*i as usize).map(|c| c as i128).unwrap_or(-1) } else { -1 };
+                        data(0, vec![Value::Int(code), v.clone()])
                     }
                     _ => return wrong(),
                 };

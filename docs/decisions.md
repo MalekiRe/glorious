@@ -7864,6 +7864,24 @@ and `array_get` until arrays go: by their names a dot call `v.push(x)` of a
 the trait written of `I` there, where another trait of the program leaves an
 `Item` too.
 
+The prelude has no growable array left: no `Index`, `Len`, `Indexed`,
+`Show`, `Clone` or `Eq` of arrays, no `array_*`, `push_at`, `pop_at`,
+`remove_at`, `restore_at`, `slice` or `Literal`. A `[T; N]` is built by
+`fixed_make` (its elements) and `fixed_fill` (`N` of one value, the
+machines' `.fixed 0`, which made one of an array before); its `Repr` writes
+and reads each element, and `Elements` (`let [a, b] = xs`) reads each out
+where it is. `b"hi"` is a `[u8; 2]`. `abort` stops with a place of a `[T;
+0]`. `host_fn_name` gives a function's name a character at a time (`-1`
+past its end) where it gave an array of them. Slices show as arrays do.
+
+Known defect, found here: the prelude's `repr_store` of a `[T; N]`, first
+written to borrow its parameter (`fixed_at(&value, i)`) and then give it
+away (`transmute(value)`), made every program's value that one path does
+not use go undestroyed (`if(c) { eat(n) } else { 7 }` did not destroy `n`).
+Neither alone did, nor the same in a program's own function. It copies plain
+data instead (`T: Use<[0, *]>`); what in the prelude's check reaches the
+program's is not found yet.
+
 A defect found here, and fixed: how a value of a type nothing decides is
 destroyed, where a call's callee is to be told (`S` of `match`, a type a
 trait leaves, `Option<(H::Got<'a>, ..R::Got<'a>)>`), was left out of what

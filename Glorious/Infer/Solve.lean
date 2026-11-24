@@ -496,13 +496,12 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
       else do unify (← atomTy Γ a) (.scalar b); pure (.int, none)
     -- (A `[T; N]`: of its elements' type and its length, a type of its own.)
     | .fixed 0, [a, .int n] =>
-      unify (← atomTy Γ a) array
+      unify (← atomTy Γ a) t
       pure (.data fixedName [t, .data (lenBase + n.toNat) []], none)
     | .fixed op, a :: rest => do
       let fixed := ITy.data fixedName [t, ← freshTy]
       unify (← atomTy Γ a) fixed
       match op, rest with
-      | 1, [] => pure (array, none)
       | 2, [i] => do unify (← atomTy Γ i) .int; pure (t, none)
       | 3, [i, v] => do unify (← atomTy Γ i) .int; unify (← atomTy Γ v) t; pure (fixed, none)
       | 4, [] => pure (.int, none)
@@ -781,7 +780,7 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
       | 6, [_] => pure .int
       | 7, [c] => do int c; freshTy
       | 8, [c, _] => do int c; pure .unit
-      | 9, [v] => pure (ITy.tuple [.data arrayName [.int], v])
+      | 9, [v, i] => do int i; pure (ITy.tuple [.int, v])
       | 10, [] => pure (ITy.tuple [.int, .int])
       -- (`transmute`: the value, of another type.)
       | 14, [_] => freshTy

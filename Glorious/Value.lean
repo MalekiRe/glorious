@@ -453,9 +453,8 @@ def Prim.eval : Prim → List Value → Option Value
     match fields.getLast? with
     | some last => some (.data 0 [.data (tag - 1) fields.dropLast, last])
     | none => none
-  | .fixed 0, [.data _ fields, .int n] =>
-    if n == fields.length then some (.data (fixedBase + fields.length) fields) else none
-  | .fixed 1, [.data _ fields] => some (.data (arrayBase + fields.length) fields)
+  -- (`[x; n]`: `n` of one value.)
+  | .fixed 0, [x, .int n] => if 0 ≤ n then some (.data (fixedBase + n.toNat) (List.replicate n.toNat x)) else none
   | .fixed 2, [.data _ fields, .int i] => if 0 ≤ i then fields[i.toNat]? else none
   | .fixed 4, [.data _ fields] => some (.int fields.length)
   | .fixed 3, [.data tag fields, .int i, v] =>

@@ -911,18 +911,13 @@ def checkPrim (C : Cert) (Γ : TEnv) (p : Prim) (args : List Atom) (σ : Ty) : B
     match args with
     | [a] => if into then atomTy Γ a == some .int && σ == .scalar b else atomTy Γ a == some (.scalar b) && σ == .int
     | _ => false
-  -- `[T; N]`: made of an array of the length, made an array, read at a
-  -- place and written at one.
+  -- `[T; N]`: `N` of one value, read at a place and written at one.
   | .fixed op =>
     match op, args with
     | 0, [a, .int n] =>
       match atomTy Γ a, σ with
       | some A, .data name [t, .data len []] =>
-        name == fixedName && arrayElem A == some t && len == lenBase + n.toNat && dupOk C σ
-      | _, _ => false
-    | 1, [a] =>
-      match atomTy Γ a, arrayElem σ with
-      | some A, some t => arrayElem A == some t && σ == .data arrayName [t] && dupOk C σ
+        name == fixedName && A == t && len == lenBase + n.toNat && dupOk C t && dupOk C σ
       | _, _ => false
     | 2, [a, i] =>
       match atomTy Γ a with

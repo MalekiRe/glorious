@@ -135,12 +135,12 @@ private def fixedElements : String :=
       | [] => "()"
       | [x] => s!"({x},)"
       | xs => s!"({", ".intercalate xs})"
-    -- (The last element comes off first.)
-    let pops := places.reverse.map fun i =>
-      s!"let (r{i}, x{i}) = arr_pop({if i + 1 == n then "fixed_to_array(a)" else s!"r{i + 1}"}, 0); "
+    -- (Each element read out where it is, and the array let go of without
+    -- being destroyed: its elements are the tuple's now.)
+    let reads := places.map fun i => s!"let x{i} = unsafe \{ read_out(fixed_at(&a, {i})) }; "
     s!"impl<T> Elements for Fixed<T, {number n}> \{
     type Each = {tuple (places.map fun _ => "T")};
-    fn elements(a: Fixed<T, {number n}>) -> {tuple (places.map fun _ => "T")} \{ {String.join pops}{tuple (places.map fun i => s!"x{i}")} }
+    fn elements(a: Fixed<T, {number n}>) -> {tuple (places.map fun _ => "T")} \{ {String.join reads}let _: () = unsafe \{ transmute(a) }; {tuple (places.map fun i => s!"x{i}")} }
 }
 "
   "
