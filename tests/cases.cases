@@ -4739,7 +4739,7 @@ Ok((39, 17))
 39
 #### case
 use std::set;
-fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4]); say(set::to_array(a)); say(set::to_array(set::union(a, b))); say(set::to_array(set::intersection(a, b))); say(set::to_array(set::difference(a, b))); say(set::contains(a, 2)); say(set::is_subset(set::from([1, 2]), a)); set::len(a) }
+fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4]); say(set::to_vec(a)); say(set::to_vec(set::union(a, b))); say(set::to_vec(set::intersection(a, b))); say(set::to_vec(set::difference(a, b))); say(set::contains(a, 2)); say(set::is_subset(set::from([1, 2]), a)); set::len(a) }
 #### expect
 [1, 2, 3]
 [1, 2, 3, 4]
@@ -12672,7 +12672,7 @@ fn main() -> Int { let mut q = VecDeque::new(); VecDeque::push_back(&mut q, 1); 
 21
 #### case
 use std::set;
-fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4]); say(set::to_array(set::union(a, b))); say(set::to_array(set::intersection(a, b))); set::len(a) }
+fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4]); say(set::to_vec(set::union(a, b))); say(set::to_vec(set::intersection(a, b))); set::len(a) }
 #### expect
 [1, 2, 3, 4]
 [2, 3]

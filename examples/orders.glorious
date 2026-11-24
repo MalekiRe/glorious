@@ -54,7 +54,7 @@ fn main() -> Int {
     let mut ledger = Ledger { name: "march", lines: 0 };
     let by_customer = totals(&orders, 0, std::map::new());
     let names = std::map::keys(by_customer);
-    let mut it = into_iter(names);
+    let mut it = std::vec::Vec::into_iter(names);
     let written = fold(&mut it, 0, { (n, name) =>
         let cents = match(std::map::get(by_customer, name)) { Some(c) => c, None => 0 };
         record(&mut ledger, name ++ ": " ++ shown(Money(cents)));

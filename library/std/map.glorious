@@ -1,3 +1,4 @@
+use std::vec::{Vec};
 // A map from keys to values, the keys kept in order: a tree that stays
 // balanced, so finding, adding and taking away go through as many keys as the
 // number of keys has bits. A key is a type with `<`.
@@ -147,16 +148,24 @@ pub fn fold<T, U, V, e: EffectRow>(m: Map<T, U>, init: V, f: fn(V, T, U) -> V / 
 pub fn len<T, U>(m: Map<T, U>) -> Int { fold(m, 0, fn(n, k, v) { n + 1 }) }
 pub fn is_empty<T, U>(m: Map<T, U>) -> Bool { match(m) { Map(Leaf) => true, _ => false } }
 
-pub fn keys<T, U>(m: Map<T, U>) -> [T] { fold(m, [], fn(out, k, v) { push(out, k) }) }
-pub fn values<T, U>(m: Map<T, U>) -> [U] { fold(m, [], fn(out, k, v) { push(out, v) }) }
-pub fn entries<T, U>(m: Map<T, U>) -> [(T, U)] { fold(m, [], fn(out, k, v) { push(out, (k, v)) }) }
+// The keys, what they stand for, and both, in order.
+pub fn keys<T, U>(m: Map<T, U>) -> Vec<T> { fold(m, Vec::new(), fn(out, k, v) { let mut o = out; Vec::push(&mut o, k); o }) }
+pub fn values<T, U>(m: Map<T, U>) -> Vec<U> { fold(m, Vec::new(), fn(out, k, v) { let mut o = out; Vec::push(&mut o, v); o }) }
+pub fn entries<T, U>(m: Map<T, U>) -> Vec<(T, U)> { fold(m, Vec::new(), fn(out, k, v) { let mut o = out; Vec::push(&mut o, (k, v)); o }) }
 
-// The map of an array of keys with what each stands for; a later one wins.
-pub fn from<T, U>(pairs: [(T, U)]) -> Map<T, U> where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> { std::vec::fold_pairs(pairs, new(), fn(m, k, v) { insert(m, k, v) }) }
+// The map of keys with what each stands for, one after another; a later
+// one wins.
+pub fn from<A, T, U>(pairs: A) -> Map<T, U> where A: Indexed<Element = (T, U)>, T: Ord, T: Use<[0, *]>, U: Use<[0, *]> {
+    let held = pairs;
+    from_at(&held, size_at(&held), 0, new())
+}
+fn from_at<A, T, U>(pairs: &A, n: Int, i: Int, m: Map<T, U>) -> Map<T, U> where A: Indexed<Element = (T, U)>, T: Ord, T: Use<[0, *]>, U: Use<[0, *]> {
+    if(i < n) { match(*element_at(pairs, i)) { (k, v) => tail from_at(pairs, n, i + 1, insert(m, k, v)) } } else { m }
+}
 
 // The map with `key` standing for what `f` makes of what it stood for.
 pub fn update<T, U, e: EffectRow>(m: Map<T, U>, key: T, f: fn(Option<U>) -> U / {| e}) -> Map<T, U> / {| e} where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> { insert(m, key, f(get(m, key))) }
 
 // The least and the greatest key, each with what it stands for.
-pub fn least<T, U>(m: Map<T, U>) -> Option<(T, U)> { match(entries(m)) { es => std::vec::first(es) } }
-pub fn greatest<T, U>(m: Map<T, U>) -> Option<(T, U)> where T: Use<[0, *]>, U: Use<[0, *]> { match(entries(m)) { es => std::vec::last(es) } }
+pub fn least<T, U>(m: Map<T, U>) -> Option<(T, U)> where T: Use<[0, *]>, U: Use<[0, *]> { let es = entries(m); match(Vec::first(&es)) { Some(e) => Some(*e), None => None } }
+pub fn greatest<T, U>(m: Map<T, U>) -> Option<(T, U)> where T: Use<[0, *]>, U: Use<[0, *]> { let es = entries(m); match(Vec::last(&es)) { Some(e) => Some(*e), None => None } }

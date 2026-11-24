@@ -2,6 +2,7 @@
 
 use std::map;
 use std::map::Map;
+use std::vec::{Vec};
 
 pub struct Set<T>(Map<T, ()>)
 
@@ -14,10 +15,10 @@ pub fn len<T>(s: Set<T>) -> Int { match(s) { Set(m) => map::len(m) } }
 pub fn is_empty<T>(s: Set<T>) -> Bool { match(s) { Set(m) => map::is_empty(m) } }
 
 // The values, in order.
-pub fn to_array<T>(s: Set<T>) -> [T] { match(s) { Set(m) => map::keys(m) } }
+pub fn to_vec<T>(s: Set<T>) -> Vec<T> { match(s) { Set(m) => map::keys(m) } }
 
-// The set of the values of an array.
-pub fn from<T>(a: [T]) -> Set<T> where T: Ord, T: Use<[0, *]> { fold(a, new(), fn(s, x) { insert(s, x) }) }
+// The set of values one after another.
+pub fn from<A, T>(a: A) -> Set<T> where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> { fold(a, new(), fn(s, x) { insert(s, x) }) }
 
 pub fn fold_set<T, U, e: EffectRow>(s: Set<T>, init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where U: Use<[1, 1]> { match(s) { Set(m) => map::fold(m, init, fn(acc, k, v) { f(acc, k) }) } }
 
