@@ -6989,8 +6989,12 @@ its own: covey programs took 5.5 to 7 s; once one program had checked
 
 The suite: `GLORIOUS_ONLY=cases` runs the test programs alone (11 s),
 `GLORIOUS_ONLY=examples` the examples alone, `GLORIOUS_ONLY=text` the
-programs whose source has the text in it (without the checks). The examples
-are started first. What each program's certificate search found (its
+programs whose source has the text in it (without the checks).
+`GLORIOUS_COVEY=n` runs one in every `n` of `covey`'s programs, another part
+each run (`library/selftest-covey-part`), so that each runs once in `n` runs:
+they are most of a run's time, each compiling all of `ecs` (with `n = 5`,
+40 s against 90 s for all). A change is tried so; the whole suite, every
+program, runs before it is committed. The examples are started first. What each program's certificate search found (its
 places, the way that passed) is kept by its text (`library/selftest-known`)
 and tried first the next time, as the command tries what a file's last
 compile found.

@@ -686,7 +686,22 @@ def selftest (vm : Option String) : IO UInt32 := do
       { cmd := "sh", env := #[("VM", some (← IO.FS.realPath vm).toString)]
         args := #["-c", s!"read dir && cd \"$dir\" && ls | grep '[.]sh$' | xargs -P {← vmJobs} -n 1 sh"]
         stdin := .piped, stdout := .piped, stderr := .piped }
-  let examples := (← exampleCases "examples") ++ (← exampleCases "covey")
+  -- (`GLORIOUS_COVEY=n`: a part of `covey`'s programs, one in every `n`,
+  -- another part each time, so that every program is run once in `n` runs:
+  -- for a quick look at a change. They are most of the time of a run, and
+  -- the whole suite still runs every one.)
+  let covey ← exampleCases "covey"
+  let covey ← match (← IO.getEnv "GLORIOUS_COVEY").bind String.toNat? with
+    | some n =>
+      if n ≤ 1 then pure covey else do
+        let file := (← Target.libraryDir) / "selftest-covey-part"
+        let part := ((← (do pure (some (← IO.FS.readFile file))) <|> pure none).bind (·.trimAscii.toString.toNat?)).getD 0 % n
+        IO.FS.createDirAll (← Target.libraryDir)
+        IO.FS.writeFile file (toString ((part + 1) % n))
+        IO.eprintln s!"covey: part {part + 1} of {n}"
+        pure (covey.zipIdx.filterMap fun (c, i) => if i % n == part then some c else none)
+    | none => pure covey
+  let examples := (← exampleCases "examples") ++ covey
   -- (The programs that take the Lean machines too long come last, and are
   -- run on the Rust VM alone.)
   -- (`GLORIOUS_ONLY=text`: only the programs whose source has the text in
