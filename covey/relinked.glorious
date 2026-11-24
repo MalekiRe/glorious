@@ -30,7 +30,7 @@ fn watch(docked: &mut Query<(&Name,), (Relinked<DockedAt>,)>, squads: &mut Query
     let mut all = [];
     docked.for_each() { (n,) => all = push(all, n.0); };
     squads.for_each() { (n,) => all = push(all, n.0 + 100); };
-    let line = std::text::join(std::vec::Vec::into_array(std::vec::map(sort(all), fn(v: Int) -> Str { show(v) })), " ");
+    let line = std::text::join(std::vec::map(sort(all), fn(v: Int) -> Str { show(v) }), " ");
     match(seen.get_mut()) { Some((mut s,)) => push_at(&mut s.0, line);, None => () }
 }
 

@@ -80,7 +80,7 @@ fn main() -> Int {
     app.emit(&Update);
     match(app.world.get_mut<Position>(watched)) { Some(mut p) => p.0 = 11;, None => () };
     app.emit(&Update);
-    say(match(app.world.get<Watch>(log)) { Some(w) => std::text::join(std::vec::Vec::into_array(std::vec::map(clone(&w.1), fn(n: Int) -> Str { show(n) })), " "), None => "" });
+    say(match(app.world.get<Watch>(log)) { Some(w) => std::text::join(std::vec::map(clone(&w.1), fn(n: Int) -> Str { show(n) }), " "), None => "" });
     say("--");
 
     let mut app = App::new().register<Stunned>().register<Count>()

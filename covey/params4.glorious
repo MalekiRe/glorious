@@ -63,7 +63,7 @@ fn faster(q: &mut Query<(&mut Velocity,), ()>) { q.for_each() { (mut v,) => v.0 
 fn pos<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Position> { match(world.get<Position>(e)) { Some(p) => p.0, None => 0 - 1 } }
 fn vel<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Velocity> { match(world.get<Velocity>(e)) { Some(v) => v.0, None => 0 - 1 } }
 fn logged<S>(world: &World<S>, e: Entity) -> Str where S: ecs::Get<Log> {
-    match(world.get<Log>(e)) { Some(l) => std::text::join(std::vec::Vec::into_array(std::vec::map(clone(&l.0), fn(n: Int) -> Str { show(n) })), " "), None => "" }
+    match(world.get<Log>(e)) { Some(l) => std::text::join(std::vec::map(clone(&l.0), fn(n: Int) -> Str { show(n) }), " "), None => "" }
 }
 
 fn main() -> Int {

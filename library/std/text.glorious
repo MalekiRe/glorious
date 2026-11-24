@@ -72,10 +72,12 @@ pub fn lines(text: Str) -> [Str] { split(text, '\n') }
 pub fn words(text: Str) -> Vec<Str> { vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
 
 // Texts one after another, with another between each two.
-pub fn join(parts: [Str], between: Str) -> Str {
+// Texts one after another (an array, a `[Str; N]`, a `Vec<Str>`, a
+// slice), as one.
+pub fn join<A>(parts: A, between: Str) -> Str where A: Indexed<Element = Str> {
     fold(parts, "", fn(out, part) { if(is_empty(out)) { part } else { out ++ between ++ part } })
 }
-pub fn concat(parts: [Str]) -> Str { fold(parts, "", fn(out, part) { out ++ part }) }
+pub fn concat<A>(parts: A) -> Str where A: Indexed<Element = Str> { fold(parts, "", fn(out, part) { out ++ part }) }
 
 pub fn repeat(text: Str, n: Int) -> Str { if(n <= 0) { "" } else { text ++ repeat(text, n - 1) } }
 

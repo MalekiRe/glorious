@@ -68,7 +68,7 @@ fn jvalue(cs: &[char], i: Int) -> (Json, Int) {
 }
 pub fn parse_json(text: Str) -> Json { let cs = chars(text); let (v, _) = jvalue(&cs, 0); v }
 fn jquote(t: Str) -> Str {
-    "\"" ++ std::text::concat(std::vec::Vec::into_array(std::vec::map(chars(t), fn(c: char) -> Str { if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else if(c == '\n') { "\\n" } else { show(c) } }))) ++ "\""
+    "\"" ++ std::text::concat(std::vec::map(chars(t), fn(c: char) -> Str { if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else if(c == '\n') { "\\n" } else { show(c) } })) ++ "\""
 }
 fn jitems(vs: &[Json]) -> Str { let mut out = []; let mut i = 0; while({ i < len_at(vs) }) { push_at(&mut out, written(&vs[i])); i = i + 1 }; join(out, ",") }
 // A JSON value written.
@@ -120,8 +120,8 @@ pub fn value_text(d: &Described) -> Str {
                 i = i + 1
             };
             if(len_at(&parts) == 0) { *name }
-            else if(placed) { *name ++ "(" ++ join(std::vec::Vec::into_array(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (_, v) = p; v })), ", ") ++ ")" }
-            else { *name ++ " { " ++ join(std::vec::Vec::into_array(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (k, v) = p; k ++ ": " ++ v })), ", ") ++ " }" },
+            else if(placed) { *name ++ "(" ++ join(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (_, v) = p; v }), ", ") ++ ")" }
+            else { *name ++ " { " ++ join(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (k, v) = p; k ++ ": " ++ v }), ", ") ++ " }" },
         ListValue(vs) =>
             let mut out = [];
             let mut i = 0;
@@ -280,7 +280,7 @@ impl<S, L> Session<S, L> {
         else if(name == "overview") {
             let infos = app.system_infos();
             Ok("frame " ++ show(session.frame) ++ "\n" ++ show(len_at(&app.world.entities())) ++ " entities\ncomponents: " ++ join(app.world.component_names(), ", ")
-                ++ "\nsystems: " ++ join(std::vec::Vec::into_array(std::vec::map(infos, fn(i: SystemInfo) -> Str { i.name })), ", ")
+                ++ "\nsystems: " ++ join(std::vec::map(infos, fn(i: SystemInfo) -> Str { i.name }), ", ")
                 ++ "\nlabels you can emit/step: " ++ join(clone(&session.labels), ", "))
         }
         else if(name == "emit") {

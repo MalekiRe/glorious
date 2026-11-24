@@ -147,5 +147,5 @@ pub fn stats(code: &Code) -> Str {
     show(len_at(&code.instructions)) ++ " instructions (" ++ show(vector) ++ " vector, "
         ++ show(count(fn(i: Str) -> Bool { starts_with(i, "call") })) ++ " calls, "
         ++ show(count(fn(i: Str) -> Bool { starts_with(i, "j") })) ++ " branches) in "
-        ++ join(std::vec::Vec::into_array(std::vec::map(clone(&code.symbols), short_type)), ", ")
+        ++ join(std::vec::map(clone(&code.symbols), short_type), ", ")
 }
