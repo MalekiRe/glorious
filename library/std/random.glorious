@@ -6,6 +6,7 @@
 // no array half filled.
 
 pub use std::host::Entropy;
+use std::vec::{Vec};
 use std::host::{IoError};
 
 pub enum RandomError { Exhausted, InvalidRange, Unsupported, Host(IoError) }
@@ -13,7 +14,7 @@ pub enum RandomError { Exhausted, InvalidRange, Unsupported, Host(IoError) }
 pub trait RandomSource {
     type Effects: EffectRow;
     // So many bytes, all of them, or why not.
-    fn fill(&mut Self, Int) -> Result<[u8], RandomError> / { | Self::Effects };
+    fn fill(&mut Self, Int) -> Result<Vec<u8>, RandomError> / { | Self::Effects };
 }
 
 // The machine's own chance, where the program has been given `Entropy`.
@@ -21,7 +22,7 @@ pub struct HostEntropy;
 
 impl RandomSource for HostEntropy {
     type Effects = {Entropy};
-    fn fill(source: &mut HostEntropy, count: Int) -> Result<[u8], RandomError> / {Entropy} {
+    fn fill(source: &mut HostEntropy, count: Int) -> Result<Vec<u8>, RandomError> / {Entropy} {
         match(random_bytes(count)) { Ok(bytes) => Ok(bytes), Err(e) => Err(RandomError::Host(e)) }
     }
 }
@@ -38,7 +39,7 @@ fn times(x: u64, k: u64) -> u64 { to(wide(x) * wide(k) % 18446744073709551616u12
 // bits that would be lost are taken off first.)
 fn shl_wrap(x: u64, k: Int) -> u64 { shl(bit_and(x, shr(18446744073709551615u64, k)), k) }
 fn rotl(x: u64, k: Int) -> u64 { bit_or(shl_wrap(x, k), shr(x, 64 - k)) }
-fn word(bytes: &[u8], at: Int, i: Int, sofar: u64) -> u64 {
+fn word<A>(bytes: &A, at: Int, i: Int, sofar: u64) -> u64 where A: Indexed<Element = u8> {
     if(i < 0) { sofar } else {
         let b: u64 = match(element(bytes, at + i)) { Some(b) => to(*b), None => 0u64 };
         word(bytes, at, i - 1, bit_or(shl(sofar, 8), b))
@@ -47,7 +48,9 @@ fn word(bytes: &[u8], at: Int, i: Int, sofar: u64) -> u64 {
 
 impl SeededRng {
     // From thirty-two bytes; fewer are as if the rest were zeros.
-    pub fn from_seed(seed: [u8]) -> Self {
+    // (Of bytes one after another: an array, a `[u8; N]`, a `Vec<u8>`, a slice.)
+    pub fn from_seed<A>(bytes: A) -> Self where A: Indexed<Element = u8> {
+        let seed = bytes;
         let a = word(&seed, 0, 7, 0u64);
         let b = word(&seed, 8, 7, 0u64);
         let c = word(&seed, 16, 7, 0u64);
@@ -72,27 +75,28 @@ impl SeededRng {
     }
 }
 
-fn le_bytes(n: u64, count: Int, out: [u8]) -> [u8] {
-    if(count == 0) { out } else { le_bytes(shr(n, 8), count - 1, push(out, to(bit_and(n, 255u64)))) }
+fn le_bytes(n: u64, count: Int, out: &mut Vec<u8>) {
+    if(count == 0) { () } else { Vec::push(out, to(bit_and(n, 255u64))); tail le_bytes(shr(n, 8), count - 1, out) }
 }
-fn seeded_bytes(rng: &mut SeededRng, count: Int, out: [u8]) -> [u8] {
-    if(count <= 0) { out } else {
+fn seeded_bytes(rng: &mut SeededRng, count: Int, out: &mut Vec<u8>) {
+    if(count <= 0) { () } else {
         let most = if(count < 8) { count } else { 8 };
         let next = SeededRng::next_u64(rng);
-        seeded_bytes(rng, count - most, le_bytes(next, most, out))
+        le_bytes(next, most, out);
+        tail seeded_bytes(rng, count - most, out)
     }
 }
 
 impl RandomSource for SeededRng {
     type Effects = {};
-    fn fill(source: &mut SeededRng, count: Int) -> Result<[u8], RandomError> { Ok(seeded_bytes(source, count, [])) }
+    fn fill(source: &mut SeededRng, count: Int) -> Result<Vec<u8>, RandomError> { let mut out = Vec::new(); seeded_bytes(source, count, &mut out); Ok(out) }
 }
 
 // Sixty-four bits: eight bytes of the source, the least first.
 pub fn random_u64<R: RandomSource>(source: &mut R) -> Result<u64, RandomError> / { | <R as RandomSource>::Effects } where R: Use<[1, 1]> {
     match(fill(source, 8)) {
         Err(e) => Err(e),
-        Ok(bytes) => if(len(bytes) == 8) { Ok(word(&bytes, 0, 7, 0u64)) } else { Err(RandomError::Exhausted) }
+        Ok(bytes) => if(Vec::len(&bytes) == 8) { Ok(word(&bytes, 0, 7, 0u64)) } else { Err(RandomError::Exhausted) }
     }
 }
 

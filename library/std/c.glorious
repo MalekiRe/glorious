@@ -1,6 +1,7 @@
 // What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
+use std::vec::{Vec};
 use std::slice::{Slice};
 use std::value::{Rejected};
 
@@ -31,24 +32,26 @@ pub extern "C" {
 pub unsafe fn read_byte(at: usize) -> u8 { u8(ptr_read(at, -8)) }
 pub unsafe fn write_byte(at: usize, b: u8) { ptr_write(at, 8, int(b)) }
 
-// The bytes of an array at an address, one after another.
-pub unsafe fn write_bytes(at: usize, bytes: [u8]) { write_from(at, bytes, 0) }
-unsafe fn write_from(at: usize, bytes: [u8], i: Int) {
-    if(i < len(bytes)) { write_byte(at, bytes[i]); tail write_from(at + 1usize, bytes, i + 1) } else { () }
+// Bytes one after another (an array, a `[u8; N]`, a `Vec<u8>`, a slice)
+// at an address.
+pub unsafe fn write_bytes<A>(at: usize, bytes: &A) where A: Indexed<Element = u8> { write_from(at, bytes, 0) }
+unsafe fn write_from<A>(at: usize, bytes: &A, i: Int) where A: Indexed<Element = u8> {
+    if(i < size_at(bytes)) { write_byte(at, *element_at(bytes, i)); tail write_from(at + 1usize, bytes, i + 1) } else { () }
 }
 
 // So many bytes from an address.
-pub unsafe fn read_bytes(at: usize, n: Int) -> [u8] { read_onto(at, n, []) }
-unsafe fn read_onto(at: usize, n: Int, out: [u8]) -> [u8] {
-    if(n <= 0) { out } else { tail read_onto(at + 1usize, n - 1, push(out, read_byte(at))) }
+pub unsafe fn read_bytes(at: usize, n: Int) -> Vec<u8> { let mut out = Vec::new(); read_onto(at, n, &mut out); out }
+unsafe fn read_onto(at: usize, n: Int, out: &mut Vec<u8>) {
+    if(n <= 0) { () } else { Vec::push(out, read_byte(at)); tail read_onto(at + 1usize, n - 1, out) }
 }
 
 // A text as C has it: its bytes and a zero after them, in memory that is the
 // caller's to `free`.
 pub unsafe fn c_string(text: Str) -> usize {
-    let bytes = std::text::utf8(text);
-    let at = malloc(usize(len(bytes) + 1));
-    write_bytes(at, push(bytes, 0u8));
+    let mut bytes = std::text::utf8(text);
+    Vec::push(&mut bytes, 0u8);
+    let at = malloc(usize(Vec::len(&bytes)));
+    write_bytes(at, &bytes);
     at
 }
 
@@ -153,15 +156,15 @@ fn first_zero<'a>(bytes: &Slice<'a, u8>, i: Int) -> Option<Int> {
     }
 }
 
-fn zero_in(bytes: &[u8], i: Int) -> Option<Int> {
+fn zero_in<A>(bytes: &A, i: Int) -> Option<Int> where A: Indexed<Element = u8> {
     match(element(bytes, i)) {
         Some(b) => if(*b == 0u8) { Some(i) } else { tail zero_in(bytes, i + 1) },
         None => None
     }
 }
 
-fn slice_bytes<'a>(bytes: &Slice<'a, u8>, i: Int, out: [u8]) -> [u8] {
-    match(Slice::get(bytes, i)) { Some(b) => tail slice_bytes(bytes, i + 1, push(out, *b)), None => out }
+fn slice_bytes<'a>(bytes: &Slice<'a, u8>, i: Int, out: &mut Vec<u8>) {
+    match(Slice::get(bytes, i)) { Some(b) => Vec::push(out, *b); tail slice_bytes(bytes, i + 1, out), None => () }
 }
 
 // Bytes that end in a zero and have no other: a text as C reads one, looked
@@ -187,18 +190,24 @@ impl<'a> CStr<'a> {
     // The text, if the bytes are UTF-8.
     pub fn to_str(value: Self) -> Option<Str> {
         let found = CStr::bytes(value);
-        std::text::from_utf8(slice_bytes(&found, 0, []))
+        let mut out = Vec::new();
+        slice_bytes(&found, 0, &mut out);
+        std::text::from_utf8(out)
     }
 }
 
 // The bytes C has at an address, up to its zero: copied out, the zero
 // with them. Unsafe: the address has to be one where that many bytes can
 // be read.
-pub unsafe fn bytes_at(at: usize, maximum_length: Int) -> Result<[u8], CStrError> { until_zero(at, maximum_length, []) }
-unsafe fn until_zero(at: usize, left: Int, out: [u8]) -> Result<[u8], CStrError> {
-    if(left <= 0) { Err(CStrError::MissingTerminator) } else {
+pub unsafe fn bytes_at(at: usize, maximum_length: Int) -> Result<Vec<u8>, CStrError> {
+    let mut out = Vec::new();
+    if(until_zero(at, maximum_length, &mut out)) { Ok(out) } else { Err(CStrError::MissingTerminator) }
+}
+unsafe fn until_zero(at: usize, left: Int, out: &mut Vec<u8>) -> Bool {
+    if(left <= 0) { false } else {
         let b = read_byte(at);
-        if(b == 0u8) { Ok(push(out, b)) } else { tail until_zero(at + 1usize, left - 1, push(out, b)) }
+        Vec::push(out, b);
+        if(b == 0u8) { true } else { tail until_zero(at + 1usize, left - 1, out) }
     }
 }
 
@@ -208,20 +217,28 @@ pub struct CString { memory: Allocation, length: Int }
 
 impl CString {
     // From bytes with no zero among them; with one, the bytes come back.
-    pub fn from_vec(bytes: [u8]) -> Result<Self, Rejected<[u8], NulError>> {
-        match(zero_in(&bytes, 0)) {
-            Some(at) => Err(Rejected { value: bytes, error: NulError { position: at } }),
-            None =>
-                let n = len(bytes);
-                match(Layout::from_size_align(n + 1, 1)) {
-                    Err(_) => Err(Rejected { value: bytes, error: NulError { position: n } }),
-                    Ok(layout) => match(allocate(layout)) {
-                        Err(_) => Err(Rejected { value: bytes, error: NulError { position: n } }),
-                        Ok(memory) =>
-                            unsafe { write_bytes(Allocation::as_ptr(&memory), push(bytes, 0u8)) };
-                            Ok(Self { memory: memory, length: n })
-                    }
-                }
+    pub fn from_vec(bytes: Vec<u8>) -> Result<Self, Rejected<Vec<u8>, NulError>> {
+        let zero = zero_in(&bytes, 0);
+        let n = Vec::len(&bytes);
+        // (Its memory, where there is no zero and memory was given.)
+        let memory = match(zero) {
+            Some(_) => None,
+            None => match(Layout::from_size_align(n + 1, 1)) {
+                Err(_) => None,
+                Ok(layout) => match(allocate(layout)) { Err(_) => None, Ok(m) => Some(m) }
+            }
+        };
+        let position = match(zero) { Some(at) => at, None => n };
+        CString::made(bytes, memory, n, position)
+    }
+    fn made(bytes: Vec<u8>, memory: Option<Allocation>, n: Int, position: Int) -> Result<Self, Rejected<Vec<u8>, NulError>> {
+        match(memory) {
+            None => Err(Rejected { value: bytes, error: NulError { position: position } }),
+            Some(memory) =>
+                let mut all = bytes;
+                Vec::push(&mut all, 0u8);
+                unsafe { write_bytes(Allocation::as_ptr(&memory), &all) };
+                Ok(Self { memory: memory, length: n })
         }
     }
     pub fn from_str(text: Str) -> Result<Self, NulError> {
@@ -232,13 +249,13 @@ impl CString {
     pub fn len(value: &Self) -> Int { value.length }
     pub fn release(value: Self) { match(value) { CString { memory, length: _ } => Allocation::release(memory) } }
     // Its bytes, without the zero and with it; the memory is given back.
-    pub fn into_bytes(value: Self) -> [u8] {
+    pub fn into_bytes(value: Self) -> Vec<u8> {
         match(value) { CString { memory, length } =>
             let bytes = unsafe { read_bytes(Allocation::as_ptr(&memory), length) };
             Allocation::release(memory);
             bytes }
     }
-    pub fn into_bytes_with_nul(value: Self) -> [u8] {
+    pub fn into_bytes_with_nul(value: Self) -> Vec<u8> {
         match(value) { CString { memory, length } =>
             let bytes = unsafe { read_bytes(Allocation::as_ptr(&memory), length + 1) };
             Allocation::release(memory);

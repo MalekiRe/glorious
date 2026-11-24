@@ -20,7 +20,7 @@ fn le_onto(out: [u8], n: Int, count: Int) -> [u8] {
 fn all_onto<'a>(out: [u8], bytes: &Slice<'a, u8>, i: Int) -> [u8] {
     match(Slice::get(bytes, i)) { Some(b) => all_onto(push(out, *b), bytes, i + 1), None => out }
 }
-fn array_onto(out: [u8], bytes: &[u8], i: Int) -> [u8] {
+fn array_onto<A>(out: [u8], bytes: &A, i: Int) -> [u8] where A: Indexed<Element = u8> {
     match(element(bytes, i)) { Some(b) => array_onto(push(out, *b), bytes, i + 1), None => out }
 }
 
@@ -211,7 +211,7 @@ pub struct FingerprintWriter { bytes: [u8] }
 impl FingerprintWriter {
     pub fn new(domain: Str, schema: u32) -> Self {
         let name = utf8(domain);
-        let start = le_onto(le_onto(push(utf8("GLORIOUS-FP"), 0u8), int(schema), 4), len(name), 8);
+        let start = le_onto(le_onto(push(array_onto([], &utf8("GLORIOUS-FP"), 0), 0u8), int(schema), 4), len_at(&name), 8);
         Self { bytes: array_onto(start, &name, 0) }
     }
     pub fn tag(value: &mut Self, tag: u32) { value.bytes = le_onto(replace(&mut value.bytes, []), int(tag), 4); }
@@ -223,7 +223,7 @@ impl FingerprintWriter {
     }
     pub fn text(value: &mut Self, text: Str) {
         let written = utf8(text);
-        let counted = le_onto(replace(&mut value.bytes, []), len(written), 8);
+        let counted = le_onto(replace(&mut value.bytes, []), len_at(&written), 8);
         value.bytes = array_onto(counted, &written, 0);
     }
     pub fn digest(value: &mut Self, digest: &Digest256) {

@@ -6,65 +6,67 @@
 
 use std::host::{IoError, Console, write_stdout, write_stderr, read_stdin};
 use std::text::{utf8};
+use std::vec::{Vec};
 
 pub trait Read {
     type Effects: EffectRow;
     // Up to so many bytes. None, asked for some, is the end of the stream.
-    fn read(&mut Self, Int) -> Result<[u8], IoError> / { | Self::Effects };
+    fn read(&mut Self, Int) -> Result<Vec<u8>, IoError> / { | Self::Effects };
 }
 
 pub trait Write {
     type Effects: EffectRow;
     // How many of the bytes were taken, from the first of them.
-    fn write(&mut Self, [u8]) -> Result<Int, IoError> / { | Self::Effects };
+    fn write(&mut Self, Vec<u8>) -> Result<Int, IoError> / { | Self::Effects };
     fn flush(&mut Self) -> Result<(), IoError> / { | Self::Effects };
 }
 
-// The bytes of an array from one place up to another.
-fn piece(bytes: &[u8], from: Int, upto: Int, out: [u8]) -> [u8] {
-    if(from >= upto) { out } else {
-        match(element(bytes, from)) {
-            Some(b) => tail piece(bytes, from + 1, upto, push(out, *b)),
-            None => out
-        }
-    }
+// The bytes from one place up to another, copied.
+fn piece<A>(bytes: &A, from: Int, upto: Int) -> Vec<u8> where A: Indexed<Element = u8> {
+    let mut out = Vec::new();
+    piece_onto(bytes, from, if(upto > size_at(bytes)) { size_at(bytes) } else { upto }, &mut out);
+    out
+}
+fn piece_onto<A>(bytes: &A, from: Int, upto: Int, out: &mut Vec<u8>) where A: Indexed<Element = u8> {
+    if(from >= upto) { () } else { Vec::push(out, *element_at(bytes, from)); tail piece_onto(bytes, from + 1, upto, out) }
 }
 
-// One array's bytes after another's.
-fn joined(onto: [u8], more: &[u8], i: Int) -> [u8] {
-    match(element(more, i)) {
-        Some(b) => tail joined(push(onto, *b), more, i + 1),
-        None => onto
-    }
+// Bytes with more after them.
+fn joined<A>(onto: Vec<u8>, more: &A) -> Vec<u8> where A: Indexed<Element = u8> {
+    let mut out = onto;
+    piece_onto(more, 0, size_at(more), &mut out);
+    out
 }
+fn append_from<A>(onto: &mut Vec<u8>, more: &A) where A: Indexed<Element = u8> { piece_onto(more, 0, size_at(more), onto) }
 
 // Bytes held in memory: read from where the last read stopped, written at
 // the end.
-pub struct MemoryCursor { bytes: [u8], at: Int }
+pub struct MemoryCursor { bytes: Vec<u8>, at: Int }
 
 impl MemoryCursor {
-    pub fn new(bytes: [u8]) -> Self { Self { bytes: bytes, at: 0 } }
+    // Of bytes one after another (an array, a `[u8; N]`, a `Vec<u8>`, a
+    // slice), copied.
+    pub fn new<A>(bytes: A) -> Self where A: Indexed<Element = u8> { let held = bytes; Self { bytes: piece(&held, 0, size_at(&held)), at: 0 } }
     pub fn position(value: &Self) -> Int { value.at }
-    pub fn into_inner(value: Self) -> [u8] { match(value) { MemoryCursor { bytes, at } => bytes } }
+    pub fn into_inner(value: Self) -> Vec<u8> { match(value) { MemoryCursor { bytes, at } => bytes } }
 }
 
 impl Read for MemoryCursor {
     type Effects = {};
-    fn read(cursor: &mut MemoryCursor, most: Int) -> Result<[u8], IoError> {
+    fn read(cursor: &mut MemoryCursor, most: Int) -> Result<Vec<u8>, IoError> {
         let from = cursor.at;
-        let n = len_at(&cursor.bytes);
+        let n = Vec::len(&cursor.bytes);
         let upto = if(from + most > n) { n } else { from + most };
         cursor.at = upto;
-        Ok(piece(&cursor.bytes, from, upto, []))
+        Ok(piece(&cursor.bytes, from, upto))
     }
 }
 
 impl Write for MemoryCursor {
     type Effects = {};
-    fn write(cursor: &mut MemoryCursor, bytes: [u8]) -> Result<Int, IoError> {
-        let held = &mut cursor.bytes;
-        *held = joined(replace(held, []), &bytes, 0);
-        Ok(len(bytes))
+    fn write(cursor: &mut MemoryCursor, bytes: Vec<u8>) -> Result<Int, IoError> {
+        append_from(&mut cursor.bytes, &bytes);
+        Ok(Vec::len(&bytes))
     }
     fn flush(cursor: &mut MemoryCursor) -> Result<(), IoError> { Ok(()) }
 }
@@ -76,29 +78,29 @@ pub struct Stdin
 
 impl Write for Stdout {
     type Effects = {Console};
-    fn write(out: &mut Stdout, bytes: [u8]) -> Result<Int, IoError> / {Console} { write_stdout(bytes) }
+    fn write(out: &mut Stdout, bytes: Vec<u8>) -> Result<Int, IoError> / {Console} { write_stdout(bytes) }
     fn flush(out: &mut Stdout) -> Result<(), IoError> / {Console} { Ok(()) }
 }
 
 impl Write for Stderr {
     type Effects = {Console};
-    fn write(out: &mut Stderr, bytes: [u8]) -> Result<Int, IoError> / {Console} { write_stderr(bytes) }
+    fn write(out: &mut Stderr, bytes: Vec<u8>) -> Result<Int, IoError> / {Console} { write_stderr(bytes) }
     fn flush(out: &mut Stderr) -> Result<(), IoError> / {Console} { Ok(()) }
 }
 
 impl Read for Stdin {
     type Effects = {Console};
-    fn read(from: &mut Stdin, most: Int) -> Result<[u8], IoError> / {Console} { read_stdin(most) }
+    fn read(from: &mut Stdin, most: Int) -> Result<Vec<u8>, IoError> / {Console} { read_stdin(most) }
 }
 
 // How far `write_all` got before it failed.
 pub struct WriteAllError { pub written: Int, pub error: IoError }
 
-fn write_from<W: Write>(writer: &mut W, bytes: [u8], done: Int)
-    -> Result<(), WriteAllError> / { | <W as Write>::Effects } where W: Use<[1, 1]> {
-    let n = len(bytes);
+fn write_from<W: Write, A>(writer: &mut W, bytes: &A, done: Int)
+    -> Result<(), WriteAllError> / { | <W as Write>::Effects } where W: Use<[1, 1]>, A: Indexed<Element = u8> {
+    let n = size_at(bytes);
     if(done >= n) { Ok(()) } else {
-        match(write(writer, piece(&bytes, done, n, []))) {
+        match(write(writer, piece(bytes, done, n))) {
             // A writer that takes nothing has failed: going round again
             // would never end.
             Ok(took) =>
@@ -109,26 +111,28 @@ fn write_from<W: Write>(writer: &mut W, bytes: [u8], done: Int)
     }
 }
 
-// Every byte written, or how many were when it failed.
-pub fn write_all<W: Write>(writer: &mut W, bytes: [u8])
-    -> Result<(), WriteAllError> / { | <W as Write>::Effects } where W: Use<[1, 1]> {
-    write_from(writer, bytes, 0)
+// Every byte written (of an array, a `[u8; N]`, a `Vec<u8>`, a slice), or
+// how many were when it failed.
+pub fn write_all<W: Write, A>(writer: &mut W, bytes: A)
+    -> Result<(), WriteAllError> / { | <W as Write>::Effects } where W: Use<[1, 1]>, A: Indexed<Element = u8> {
+    let held = bytes;
+    write_from(writer, &held, 0)
 }
 
 // A text written as its UTF-8 bytes.
 pub fn write_str<W: Write>(writer: &mut W, text: Str)
     -> Result<(), WriteAllError> / { | <W as Write>::Effects } where W: Use<[1, 1]> {
-    write_from(writer, utf8(text), 0)
+    write_from(writer, &utf8(text), 0)
 }
 
-fn read_more<R: Read>(reader: &mut R, out: [u8], limit: Int)
-    -> Result<[u8], IoError> / { | <R as Read>::Effects } where R: Use<[1, 1]> {
-    let left = limit - len(out);
+fn read_more<R: Read>(reader: &mut R, out: Vec<u8>, limit: Int)
+    -> Result<Vec<u8>, IoError> / { | <R as Read>::Effects } where R: Use<[1, 1]> {
+    let left = limit - Vec::len(&out);
     if(left <= 0) { Ok(out) } else {
         match(read(reader, if(left > 4096) { 4096 } else { left })) {
             Ok(got) =>
-                if(len(got) == 0) { Ok(out) }
-                else { tail read_more(reader, joined(out, &got, 0), limit) },
+                if(Vec::len(&got) == 0) { Ok(out) }
+                else { tail read_more(reader, joined(out, &got), limit) },
             Err(e) => Err(e)
         }
     }
@@ -136,8 +140,8 @@ fn read_more<R: Read>(reader: &mut R, out: [u8], limit: Int)
 
 // Everything a stream still has, up to so many bytes.
 pub fn read_to_end<R: Read>(reader: &mut R, limit: Int)
-    -> Result<[u8], IoError> / { | <R as Read>::Effects } where R: Use<[1, 1]> {
-    read_more(reader, [], limit)
+    -> Result<Vec<u8>, IoError> / { | <R as Read>::Effects } where R: Use<[1, 1]> {
+    read_more(reader, Vec::new(), limit)
 }
 
 // Where copying stopped: more may have been read than was written.
@@ -149,9 +153,9 @@ fn copy_more<R: Read, W: Write>(reader: &mut R, writer: &mut W, limit: Int, done
     if(left <= 0) { Ok(done) } else {
         match(read(reader, if(left > 4096) { 4096 } else { left })) {
             Ok(got) =>
-                let n = len(got);
+                let n = Vec::len(&got);
                 if(n == 0) { Ok(done) } else {
-                    match(write_from(writer, got, 0)) {
+                    match(write_from(writer, &got, 0)) {
                         Ok(_) => tail copy_more(reader, writer, limit, done + n),
                         Err(e) => Err(CopyError { read: done + n, written: done + e.written, error: e.error })
                     }
@@ -171,93 +175,103 @@ pub fn copy_stream<R: Read, W: Write>(reader: &mut R, writer: &mut W, limit: Int
 
 // What was left when a buffered writer could not finish: the writer, the
 // bytes not written, and why.
-pub struct FinishWriteFailure<W> { pub writer: W, pub pending: [u8], pub error: IoError }
+pub struct FinishWriteFailure<W> { pub writer: W, pub pending: Vec<u8>, pub error: IoError }
 
 // Bytes kept until there are enough to be worth writing. Letting one go
 // writes nothing: `finish` asks for what is kept to be written, and
 // `into_parts` gives it back.
-pub struct BufferWriter<W> { inner: W, held: [u8], capacity: Int }
+pub struct BufferWriter<W> { inner: W, held: Vec<u8>, capacity: Int }
 
 impl<W> BufferWriter<W> {
     pub fn new(writer: W, capacity: Int) -> Self where W: Use<[1, 1]> {
-        Self { inner: writer, held: [], capacity: if(capacity < 1) { 1 } else { capacity } }
+        Self { inner: writer, held: Vec::new(), capacity: if(capacity < 1) { 1 } else { capacity } }
     }
     pub fn get_ref<'a>(value: &'a Self) -> &'a W where W: Use<[1, 1]> { &value.inner }
     // How many bytes are kept.
-    pub fn buffered(value: &Self) -> Int { len_at(&value.held) }
-    pub fn pending(value: &Self) -> [u8] { value.held }
-    pub fn into_parts(value: Self) -> (W, [u8]) where W: Use<[1, 1]> { match(value) { BufferWriter { inner, held, capacity: _ } => (inner, held) } }
+    pub fn buffered(value: &Self) -> Int { Vec::len(&value.held) }
+    pub fn pending(value: &Self) -> Vec<u8> { piece(&value.held, 0, Vec::len(&value.held)) }
+    pub fn into_parts(value: Self) -> (W, Vec<u8>) where W: Use<[1, 1]> { match(value) { BufferWriter { inner, held, capacity: _ } => (inner, held) } }
     // What is kept written, and the writer given back; or all three of what
     // there was, where it could not be.
-    pub fn finish(value: Self) -> Result<W, FinishWriteFailure<W>> / { | <W as Write>::Effects } where W: Write, W: Use<[0, *]> {
+pub fn finish(value: Self) -> Result<W, FinishWriteFailure<W>> / { | <W as Write>::Effects } where W: Write, W: Use<[1, 1]> {
         match(value) {
             BufferWriter { inner, held, capacity: _ } =>
                 let mut writer = inner;
-                match(write_from(&mut writer, held, 0)) {
-                    Ok(_) => match(flush(&mut writer)) {
-                        Ok(_) => Ok(writer),
-                        Err(e) => Err(FinishWriteFailure { writer: writer, pending: [], error: e })
-                    },
-                    Err(e) => Err(FinishWriteFailure { writer: writer, pending: piece(&held, e.written, len(held), []), error: e.error })
-                }
+                let n = Vec::len(&held);
+                // (What became of it first, and then the writer given back
+                // once, whichever it was.)
+                let outcome = match(write_from(&mut writer, &held, 0)) {
+                    Ok(_) => match(flush(&mut writer)) { Ok(_) => Ok(()), Err(e) => Err((Vec::new(), e)) },
+                    Err(e) => Err((piece(&held, e.written, n), e.error))
+                };
+                finished(writer, outcome)
         }
+    }
+}
+fn finished<W>(writer: W, outcome: Result<(), (Vec<u8>, IoError)>) -> Result<W, FinishWriteFailure<W>> where W: Use<[1, 1]> {
+    match(outcome) {
+        Ok(_) => Ok(writer),
+        Err((pending, e)) => Err(FinishWriteFailure { writer: writer, pending: pending, error: e })
     }
 }
 
 impl<W> Write for BufferWriter<W> where W: Write {
     type Effects = { | <W as Write>::Effects };
-    fn write(b: &mut BufferWriter<W>, bytes: [u8]) -> Result<Int, IoError> / {| <W as Write>::Effects} {
-        b.held = joined(b.held, &bytes, 0);
-        if(len_at(&b.held) >= b.capacity) {
-            match(write_from(&mut b.inner, b.held, 0)) {
-                Ok(_) => b.held = []; Ok(len(bytes)),
+    fn write(b: &mut BufferWriter<W>, bytes: Vec<u8>) -> Result<Int, IoError> / {| <W as Write>::Effects} {
+        append_from(&mut b.held, &bytes);
+        let n = Vec::len(&bytes);
+        if(Vec::len(&b.held) >= b.capacity) {
+            let kept = replace(&mut b.held, Vec::new());
+            match(write_from(&mut b.inner, &kept, 0)) {
+                Ok(_) => Ok(n),
                 // (What the writer took is no longer kept.)
-                Err(e) => b.held = piece(&b.held, e.written, len_at(&b.held), []); Err(e.error)
+                Err(e) => b.held = piece(&kept, e.written, Vec::len(&kept)); Err(e.error)
             }
-        } else { Ok(len(bytes)) }
+        } else { Ok(n) }
     }
     fn flush(b: &mut BufferWriter<W>) -> Result<(), IoError> / {| <W as Write>::Effects} {
-        match(write_from(&mut b.inner, b.held, 0)) {
-            Ok(_) => b.held = []; flush(&mut b.inner),
-            Err(e) => b.held = piece(&b.held, e.written, len_at(&b.held), []); Err(e.error)
+        let kept = replace(&mut b.held, Vec::new());
+        match(write_from(&mut b.inner, &kept, 0)) {
+            Ok(_) => flush(&mut b.inner),
+            Err(e) => b.held = piece(&kept, e.written, Vec::len(&kept)); Err(e.error)
         }
     }
 }
 
 // Bytes read ahead, so that a little is not asked of the reader each time.
-pub struct BufferReader<R> { inner: R, held: [u8], at: Int, capacity: Int }
+pub struct BufferReader<R> { inner: R, held: Vec<u8>, at: Int, capacity: Int }
 
 impl<R> BufferReader<R> {
     pub fn new(reader: R, capacity: Int) -> Self where R: Use<[1, 1]> {
-        Self { inner: reader, held: [], at: 0, capacity: if(capacity < 1) { 1 } else { capacity } }
+        Self { inner: reader, held: Vec::new(), at: 0, capacity: if(capacity < 1) { 1 } else { capacity } }
     }
     pub fn get_ref<'a>(value: &'a Self) -> &'a R where R: Use<[1, 1]> { &value.inner }
     // The reader, and the bytes read from it that nothing has asked for yet.
-    pub fn into_parts(value: Self) -> (R, [u8]) where R: Use<[1, 1]> {
-        match(value) { BufferReader { inner, held, at, capacity: _ } => (inner, piece(&held, at, len(held), [])) }
+    pub fn into_parts(value: Self) -> (R, Vec<u8>) where R: Use<[1, 1]> {
+        match(value) { BufferReader { inner, held, at, capacity: _ } => (inner, piece(&held, at, Vec::len(&held))) }
     }
 }
 
 impl<R> Read for BufferReader<R> where R: Read {
     type Effects = { | <R as Read>::Effects };
-    fn read(b: &mut BufferReader<R>, most: Int) -> Result<[u8], IoError> / {| <R as Read>::Effects} {
-        if(b.at < len_at(&b.held)) {
+    fn read(b: &mut BufferReader<R>, most: Int) -> Result<Vec<u8>, IoError> / {| <R as Read>::Effects} {
+        if(b.at < Vec::len(&b.held)) {
             let from = b.at;
-            let n = len_at(&b.held);
+            let n = Vec::len(&b.held);
             let upto = if(from + most > n) { n } else { from + most };
             b.at = upto;
-            Ok(piece(&b.held, from, upto, []))
+            Ok(piece(&b.held, from, upto))
         } else {
             // Nothing kept: more is read, as much as is kept at a time or
             // as much as is asked for, whichever is more.
             match(read(&mut b.inner, if(most > b.capacity) { most } else { b.capacity })) {
                 Err(e) => Err(e),
                 Ok(got) =>
-                    let n = len(got);
+                    let n = Vec::len(&got);
                     let upto = if(most > n) { n } else { most };
                     b.held = got;
                     b.at = upto;
-                    Ok(piece(&b.held, 0, upto, []))
+                    Ok(piece(&b.held, 0, upto))
             }
         }
     }

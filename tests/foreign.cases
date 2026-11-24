@@ -213,9 +213,9 @@ true
 #### Memory that has to be given back: an `Allocation` is borrowed for its address and then released.
 use std::ffi::{Layout, Allocation, allocate, write_bytes, read_bytes};
 fn sum_at(at: usize) -> Int {
-    unsafe { write_bytes(at, [1u8, 2u8, 3u8]) };
+    unsafe { write_bytes(at, &[1u8, 2u8, 3u8]) };
     let back = unsafe { read_bytes(at, 3) };
-    int(back[0]) + int(back[1]) + int(back[2])
+    int(*element_at(&back, 0)) + int(*element_at(&back, 1)) + int(*element_at(&back, 2))
 }
 fn work(memory: Allocation) -> Int {
     let n = sum_at(Allocation::as_ptr(&memory));
@@ -247,9 +247,9 @@ hi from a stream
 #### The same with the release written as a cleanup, before the memory is used.
 use std::ffi::{Layout, Allocation, allocate, write_bytes, read_bytes};
 fn sum_at(at: usize) -> Int {
-    unsafe { write_bytes(at, [1u8, 2u8, 3u8]) };
+    unsafe { write_bytes(at, &[1u8, 2u8, 3u8]) };
     let back = unsafe { read_bytes(at, 3) };
-    int(back[0]) + int(back[1]) + int(back[2])
+    int(*element_at(&back, 0)) + int(*element_at(&back, 1)) + int(*element_at(&back, 2))
 }
 fn work(memory: Allocation) -> Int {
     defer { Allocation::release(memory); }
@@ -272,7 +272,7 @@ fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<
     / { | <R as Read>::Effects, <W as Write>::Effects } {
     match(read(reader, 4)) {
         Ok(got) =>
-            if(len(got) == 0) { Ok(done) }
+            if(len_at(&got) == 0) { Ok(done) }
             else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },
         Err(e) => Err(e)
     }
@@ -305,7 +305,7 @@ fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<
     / { | <R as Read>::Effects, <W as Write>::Effects } {
     match(read(reader, 4)) {
         Ok(got) =>
-            if(len(got) == 0) { Ok(done) }
+            if(len_at(&got) == 0) { Ok(done) }
             else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },
         Err(e) => Err(e)
     }
@@ -329,10 +329,10 @@ fn main() -> Int {
         Err(_) => 0 - 1,
         Ok(text) =>
             say(unsafe { strlen(CString::as_ptr(&text)) });
-            say(match(unsafe { bytes_at(CString::as_ptr(&text), 100) }) { Ok(bytes) => len(bytes), Err(_) => 0 - 1 });
+            say(match(unsafe { bytes_at(CString::as_ptr(&text), 100) }) { Ok(bytes) => len_at(&bytes), Err(_) => 0 - 1 });
             say(CString::into_bytes(text));
             // A zero inside is refused, and says where.
-            say(match(CString::from_vec([104u8, 0u8, 105u8])) { Ok(made) => CString::release(made); 0 - 1, Err(Rejected { value, error }) => error.position * 10 + len(value) });
+            say(match(CString::from_vec(std::vec::Vec::from_array([104u8, 0u8, 105u8]))) { Ok(made) => CString::release(made); 0 - 1, Err(Rejected { value, error }) => error.position * 10 + len_at(&value) });
             let raw = [111u8, 107u8, 0u8];
             say(match(CStr::from_bytes_with_nul(Slice::of(&raw))) { Ok(view) => match(CStr::to_str(view)) { Some(s) => s, None => "?" }, Err(_) => "bad" });
             let cut = [111u8, 107u8];

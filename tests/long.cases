@@ -3,17 +3,17 @@
 use std::fingerprint::{Hasher, FingerprintWriter, Digest256, Blake3, blake3};
 use std::slice::{Slice};
 use std::text::{utf8};
-fn hash_text(text: Str) -> u64 { let mut h = Hasher::new(); let bytes = utf8(text); Hasher::write(&mut h, Slice::of(&bytes)); Hasher::finish(&h) }
+fn hash_text(text: Str) -> u64 { let mut h = Hasher::new(); let bytes = utf8(text); Hasher::write(&mut h, std::vec::Vec::as_slice(&bytes)); Hasher::finish(&h) }
 fn main() -> Int {
     say(hash_text(""));
     say(hash_text("a"));
     say(hash_text("foobar"));
     let abc = utf8("abc");
-    say(Digest256::to_hex(&blake3(Slice::of(&abc))));
+    say(Digest256::to_hex(&blake3(std::vec::Vec::as_slice(&abc))));
     let mut b = Blake3::new();
     let ab = utf8("ab"); let c = utf8("c");
-    Blake3::update(&mut b, Slice::of(&ab));
-    Blake3::update(&mut b, Slice::of(&c));
+    Blake3::update(&mut b, std::vec::Vec::as_slice(&ab));
+    Blake3::update(&mut b, std::vec::Vec::as_slice(&c));
     let d = Blake3::finish(b);
     say(Digest256::to_hex(&d));
     say(match(Digest256::parse_hex(Digest256::to_hex(&d))) { Ok(back) => back == d, Err(_) => false });

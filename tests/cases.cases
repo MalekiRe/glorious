@@ -7606,7 +7606,7 @@ error: 2:39: in `main`: `f64` does not implement `std::hash::Hash`
 #### case
 #### Library conformance S36: utf8 bad.
 use alloc::string::{String};
-fn main() -> Int { let bad: [u8] = [u8(255), u8(65)]; match(String::from_utf8(bad)) { Ok(_) => 0, Err(bytes) => len(bytes) } }
+fn main() -> Int { let bad = std::vec::Vec::from_array([u8(255), u8(65)]); match(String::from_utf8(bad)) { Ok(_) => 0, Err(bytes) => len_at(&bytes) } }
 #### expect
 2
 #### case
@@ -7854,8 +7854,8 @@ fn main() -> Int {
     let mut c = MemoryCursor::new([]);
     write_str(&mut c, "hello, ");
     write_str(&mut c, "streams");
-    let first = match(read(&mut c, 5)) { Ok(b) => len(b), Err(_) => 0 - 1 };
-    let rest = match(read_to_end(&mut c, 1000)) { Ok(b) => b, Err(_) => [] };
+    let first = match(read(&mut c, 5)) { Ok(b) => len_at(&b), Err(_) => 0 - 1 };
+    let rest = match(read_to_end(&mut c, 1000)) { Ok(b) => b, Err(_) => std::vec::Vec::new() };
     say(match(String::from_utf8(rest)) { Ok(s) => String::to_str(&s), Err(_) => "?" });
     first * 100 + MemoryCursor::position(&c) }
 #### expect
@@ -8790,7 +8790,7 @@ use std::host::{IoError};
 fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {
     match(read(reader, 4)) {
         Ok(got) =>
-            if(len(got) == 0) { Ok(done) }
+            if(len_at(&got) == 0) { Ok(done) }
             else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },
         Err(e) => Err(e)
     }
@@ -8808,7 +8808,7 @@ use std::host::{IoError};
 fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> / { | <R as Read>::Effects, <W as Write>::Effects } {
     match(read(reader, 4)) {
         Ok(got) =>
-            if(len(got) == 0) { Ok(done) }
+            if(len_at(&got) == 0) { Ok(done) }
             else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },
         Err(e) => Err(e)
     }
@@ -8827,7 +8827,7 @@ use std::stream::{Stdout};
 fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> / {| <R as Read>::Effects, <W as Write>::Effects} {
     match(read(reader, 4)) {
         Ok(got) =>
-            if(len(got) == 0) { Ok(done) }
+            if(len_at(&got) == 0) { Ok(done) }
             else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },
         Err(e) => Err(e)
     }
@@ -8844,7 +8844,7 @@ use std::host::{IoError};
 fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> / { | <R as Read>::Effects } {
     match(read(reader, 4)) {
         Ok(got) =>
-            if(len(got) == 0) { Ok(done) }
+            if(len_at(&got) == 0) { Ok(done) }
             else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },
         Err(e) => Err(e)
     }
@@ -8864,7 +8864,7 @@ fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<
     tick();
     match(read(reader, 4)) {
         Ok(got) =>
-            if(len(got) == 0) { Ok(done) }
+            if(len_at(&got) == 0) { Ok(done) }
             else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },
         Err(e) => Err(e)
     }
@@ -10565,7 +10565,7 @@ use std::slice::{Slice};
 
 fn enc(text: Str, alphabet: Base64Alphabet, padding: Padding) -> Str {
     let bytes = std::text::utf8(text);
-    base64_encode(Slice::of(&bytes), Base64Options { alphabet: alphabet, padding: padding })
+    base64_encode(std::vec::Vec::as_slice(&bytes), Base64Options { alphabet: alphabet, padding: padding })
 }
 fn dec(text: Str, padding: Padding) -> Str {
     match(base64_decode(text, Base64Options { alphabet: Base64Alphabet::Standard, padding: padding })) {
@@ -10616,9 +10616,9 @@ use std::host::{IoError};
 struct Full { taken: [u8], room: Int }
 impl Write for Full {
     type Effects = {};
-    fn write(w: &mut Full, bytes: [u8]) -> Result<Int, IoError> {
+    fn write(w: &mut Full, bytes: std::vec::Vec<u8>) -> Result<Int, IoError> {
         if(w.room <= 0) { Err(IoError { code: 28 }) } else {
-            let n = if(len(bytes) > w.room) { w.room } else { len(bytes) };
+            let n = if(len_at(&bytes) > w.room) { w.room } else { len_at(&bytes) };
             w.room = w.room - n;
             Ok(n)
         }
@@ -10627,23 +10627,23 @@ impl Write for Full {
 }
 fn main() -> Int {
     let mut out = BufferWriter::new(MemoryCursor::new([]), 4);
-    write(&mut out, [1u8, 2u8]);
+    write(&mut out, std::vec::Vec::from_array([1u8, 2u8]));
     say(BufferWriter::buffered(&out));
-    write(&mut out, [3u8, 4u8, 5u8]);
+    write(&mut out, std::vec::Vec::from_array([3u8, 4u8, 5u8]));
     say(BufferWriter::buffered(&out));
-    write(&mut out, [6u8]);
-    say(match(BufferWriter::finish(out)) { Ok(inner) => MemoryCursor::into_inner(inner), Err(_) => [] });
+    write(&mut out, std::vec::Vec::from_array([6u8]));
+    say(match(BufferWriter::finish(out)) { Ok(inner) => MemoryCursor::into_inner(inner), Err(_) => std::vec::Vec::new() });
     // A writer that fills: what was not written comes back with it.
     let mut small = BufferWriter::new(Full { taken: [], room: 3 }, 100);
-    write(&mut small, [1u8, 2u8, 3u8, 4u8, 5u8]);
-    say(match(BufferWriter::finish(small)) { Ok(_) => [], Err(failure) => failure.pending });
+    write(&mut small, std::vec::Vec::from_array([1u8, 2u8, 3u8, 4u8, 5u8]));
+    say(match(BufferWriter::finish(small)) { Ok(_) => std::vec::Vec::new(), Err(failure) => failure.pending });
     // Reading a little at a time from a reader asked rarely.
     let mut source = MemoryCursor::new([]);
     write_str(&mut source, "abcdefgh");
     let mut reader = BufferReader::new(source, 5);
-    say(match(read(&mut reader, 2)) { Ok(got) => got, Err(_) => [] });
-    say(match(read(&mut reader, 2)) { Ok(got) => got, Err(_) => [] });
-    match(BufferReader::into_parts(reader)) { (inner, kept) => MemoryCursor::position(&inner) * 10 + len(kept) }
+    say(match(read(&mut reader, 2)) { Ok(got) => got, Err(_) => std::vec::Vec::new() });
+    say(match(read(&mut reader, 2)) { Ok(got) => got, Err(_) => std::vec::Vec::new() });
+    match(BufferReader::into_parts(reader)) { (inner, kept) => MemoryCursor::position(&inner) * 10 + len_at(&kept) }
 }
 
 #### expect
@@ -12731,7 +12731,7 @@ fn main() -> Int { let mut xs = [1, 2, 3]; bump(&mut xs[len(xs) - 1]) * 10 + xs[
 use std::fingerprint::{Hasher, Digest256};
 use std::slice::{Slice};
 use std::text::{utf8};
-fn hash_text(text: Str) -> u64 { let mut h = Hasher::new(); let bytes = utf8(text); Hasher::write(&mut h, Slice::of(&bytes)); Hasher::finish(&h) }
+fn hash_text(text: Str) -> u64 { let mut h = Hasher::new(); let bytes = utf8(text); Hasher::write(&mut h, std::vec::Vec::as_slice(&bytes)); Hasher::finish(&h) }
 fn main() -> Int {
     say(hash_text(""));
     say(hash_text("a"));

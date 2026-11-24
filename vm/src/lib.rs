@@ -1063,6 +1063,16 @@ fn freed() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<usize, u
     FREED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How many freed blocks are kept from the system, the last freed.
+const QUARANTINED: usize = 4096;
+
+/// The blocks the program freed most lately, not yet given back.
+fn quarantine() -> std::sync::MutexGuard<'static, std::collections::VecDeque<(usize, std::alloc::Layout)>> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<(usize, std::alloc::Layout)>>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Whether none of the `n` bytes from `at` is in a block the program freed:
 /// what its own reading, writing and copying by address are asked, as on the
 /// Lean machines. (Memory C made is not known here, and is let be.)
@@ -1847,8 +1857,18 @@ impl Vm {
             (MemOp::Free, [Value::Int(at)]) => {
                 let layout = blocks().remove(&(*at as usize)).ok_or(Stop::Wrong)?;
                 freed().insert(*at as usize, layout.size());
-                // SAFETY: the block was made with this layout and is freed once.
-                unsafe { std::alloc::dealloc(*at as usize as *mut u8, layout) };
+                // Kept a while before it is given back, so that what C makes
+                // is not where a block the program freed was: a use of that
+                // block after it was freed is still seen as one.
+                let mut held = quarantine();
+                held.push_back((*at as usize, layout));
+                if held.len() > QUARANTINED {
+                    if let Some((start, layout)) = held.pop_front() {
+                        freed().remove(&start);
+                        // SAFETY: the block was made with this layout and is freed once.
+                        unsafe { std::alloc::dealloc(start as *mut u8, layout) };
+                    }
+                }
                 Ok(unit())
             }
             (MemOp::ReadBits, [Value::Int(at), Value::Int(width)]) => {

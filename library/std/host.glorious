@@ -7,21 +7,22 @@
 
 use std::c::{malloc, free, c_string, text_at, write_bytes, read_byte};
 use std::text::{utf8, from_utf8};
+use std::vec::{Vec};
 
 // Why the operating system refused: its number for the reason.
 pub struct IoError { pub code: Int }
 
 pub effect Console {
-    write_stdout(bytes: [u8]) -> Result<Int, IoError>
-    write_stderr(bytes: [u8]) -> Result<Int, IoError>
-    read_stdin(most: Int) -> Result<[u8], IoError>
+    write_stdout(bytes: Vec<u8>) -> Result<Int, IoError>
+    write_stderr(bytes: Vec<u8>) -> Result<Int, IoError>
+    read_stdin(most: Int) -> Result<Vec<u8>, IoError>
 }
 pub effect FileRead {
-    read_file(path: Str) -> Result<[u8], IoError>
+    read_file(path: Str) -> Result<Vec<u8>, IoError>
 }
 pub effect FileWrite {
-    write_file(path: Str, bytes: [u8]) -> Result<(), IoError>
-    write_file_atomic(path: Str, bytes: [u8]) -> Result<(), IoError>
+    write_file(path: Str, bytes: Vec<u8>) -> Result<(), IoError>
+    write_file_atomic(path: Str, bytes: Vec<u8>) -> Result<(), IoError>
 }
 pub effect Diagnostic {
     write_diagnostic(text: Str) -> Result<(), IoError>
@@ -38,7 +39,7 @@ pub effect Clock {
     monotonic() -> Int
 }
 pub effect Entropy {
-    random_bytes(n: Int) -> Result<[u8], IoError>
+    random_bytes(n: Int) -> Result<Vec<u8>, IoError>
 }
 
 extern "C" {
@@ -57,13 +58,10 @@ extern "C" {
 unsafe fn refused() -> IoError { IoError { code: ptr_read(__errno_location(), 32) } }
 
 // Every byte written, or why not.
-unsafe fn write_all(fd: i32, bytes: [u8]) -> Result<Int, IoError> {
-    let n = len(bytes);
-    let at = malloc(usize(n + 1));
-    write_bytes(at, bytes);
-    let done = write_on(fd, at, n, 0);
-    free(at);
-    done
+unsafe fn write_all(fd: i32, bytes: Vec<u8>) -> Result<Int, IoError> {
+    // (From where the `Vec` has them.)
+    let n = Vec::len(&bytes);
+    write_on(fd, ptr_mut_address(Vec::as_mut_ptr(&bytes)), n, 0)
 }
 unsafe fn write_on(fd: i32, at: usize, n: Int, sent: Int) -> Result<Int, IoError> {
     if(sent >= n) { Ok(n) } else {
@@ -72,35 +70,37 @@ unsafe fn write_on(fd: i32, at: usize, n: Int, sent: Int) -> Result<Int, IoError
     }
 }
 
-unsafe fn bytes_at(out: [u8], at: usize, n: Int) -> [u8] {
-    if(n <= 0) { out } else { tail bytes_at(push(out, read_byte(at)), at + 1usize, n - 1) }
+unsafe fn bytes_at(out: &mut Vec<u8>, at: usize, n: Int) {
+    if(n <= 0) { () } else { Vec::push(out, read_byte(at)); tail bytes_at(out, at + 1usize, n - 1) }
 }
 
 // What can be read now, at most so many bytes: none at the end.
-unsafe fn read_some(fd: i32, most: Int) -> Result<[u8], IoError> {
+unsafe fn read_some(fd: i32, most: Int) -> Result<Vec<u8>, IoError> {
     let room = if(most < 1) { 1 } else { most };
     let buf = malloc(usize(room));
     let k = int(read(fd, buf, usize(room)));
-    let got = if(k < 0) { Err(refused()) } else { Ok(bytes_at([], buf, k)) };
+    let got = if(k < 0) { Err(refused()) } else { let mut out = Vec::new(); bytes_at(&mut out, buf, k); Ok(out) };
     free(buf);
     got
 }
 
 // Everything there is to read.
-unsafe fn read_all(fd: i32, buf: usize, out: [u8]) -> Result<[u8], IoError> {
+unsafe fn read_all(fd: i32, buf: usize, out: &mut Vec<u8>) -> Bool {
     let k = int(read(fd, buf, 65536usize));
-    if(k < 0) { Err(refused()) } else {
-        if(k == 0) { Ok(out) } else { tail read_all(fd, buf, bytes_at(out, buf, k)) }
+    if(k < 0) { false } else {
+        if(k == 0) { true } else { bytes_at(out, buf, k); tail read_all(fd, buf, out) }
     }
 }
 
-unsafe fn read_path(path: Str) -> Result<[u8], IoError> {
+unsafe fn read_path(path: Str) -> Result<Vec<u8>, IoError> {
     let p = c_string(path);
     let fd = open(p, 0i32, 0i32);
     free(p);
     if(fd < 0i32) { Err(refused()) } else {
         let buf = malloc(65536usize);
-        let got = read_all(fd, buf, []);
+        let mut out = Vec::new();
+        let read_through = read_all(fd, buf, &mut out);
+        let got = if(read_through) { Ok(out) } else { Err(refused()) };
         free(buf);
         close(fd);
         got
@@ -109,7 +109,7 @@ unsafe fn read_path(path: Str) -> Result<[u8], IoError> {
 
 // Made if it is not there, emptied if it is, readable by all and writable
 // by its owner.
-unsafe fn write_path(path: Str, bytes: [u8]) -> Result<(), IoError> {
+unsafe fn write_path(path: Str, bytes: Vec<u8>) -> Result<(), IoError> {
     let p = c_string(path);
     let fd = open(p, 577i32, 420i32);
     free(p);
@@ -122,7 +122,7 @@ unsafe fn write_path(path: Str, bytes: [u8]) -> Result<(), IoError> {
 
 // Written beside the file and then given its name, so that the name is
 // never that of half a file.
-unsafe fn write_path_atomic(path: Str, bytes: [u8]) -> Result<(), IoError> {
+unsafe fn write_path_atomic(path: Str, bytes: Vec<u8>) -> Result<(), IoError> {
     let beside = path ++ ".writing";
     match(write_path(beside, bytes)) {
         Err(e) => Err(e),
@@ -155,20 +155,24 @@ unsafe fn where_now() -> Result<Str, IoError> {
     got
 }
 
+// Bytes with one more after them.
+fn pushed(bytes: Vec<u8>, b: u8) -> Vec<u8> { let mut out = bytes; Vec::push(&mut out, b); out }
+
 // The texts between zeros.
-fn between_zeros(bytes: [u8], i: Int, word: [u8], out: [Str]) -> [Str] {
-    if(i >= len(bytes)) { out } else {
-        if(int(bytes[i]) == 0) {
+fn between_zeros(bytes: &Vec<u8>, i: Int, word: Vec<u8>, out: [Str]) -> [Str] {
+    if(i >= Vec::len(bytes)) { out } else {
+        let b = *Vec::index(bytes, i);
+        if(int(b) == 0) {
             let text = match(from_utf8(word)) { Some(t) => t, None => "" };
-            tail between_zeros(bytes, i + 1, [], push(out, text))
-        } else { tail between_zeros(bytes, i + 1, push(word, bytes[i]), out) }
+            tail between_zeros(bytes, i + 1, Vec::new(), push(out, text))
+        } else { tail between_zeros(bytes, i + 1, pushed(word, b), out) }
     }
 }
 
 // What the process was started with, as the operating system has it.
 unsafe fn arguments() -> Result<[Str], IoError> {
     match(read_path("/proc/self/cmdline")) {
-        Ok(bytes) => Ok(between_zeros(bytes, 0, [], [])),
+        Ok(bytes) => Ok(between_zeros(&bytes, 0, Vec::new(), [])),
         Err(e) => Err(e)
     }
 }
@@ -182,11 +186,11 @@ unsafe fn clock(which: i32) -> Int {
     nanos
 }
 
-unsafe fn chance(n: Int) -> Result<[u8], IoError> {
+unsafe fn chance(n: Int) -> Result<Vec<u8>, IoError> {
     let room = if(n < 1) { 1 } else { n };
     let buf = malloc(usize(room));
     let k = int(getrandom(buf, usize(n), 0u32));
-    let got = if(k < n) { Err(refused()) } else { Ok(bytes_at([], buf, n)) };
+    let got = if(k < n) { Err(refused()) } else { let mut out = Vec::new(); bytes_at(&mut out, buf, n); Ok(out) };
     free(buf);
     got
 }
@@ -228,15 +232,16 @@ pub fn read_text(path: Str) -> Result<Str, IoError> / {FileRead} {
 pub fn write_text(path: Str, text: Str) -> Result<(), IoError> / {FileWrite} { write_file(path, utf8(text)) }
 
 // The next line of standard input without its end, or nothing at the end.
-pub fn read_line() -> Option<Str> / {Console} { line_from([], false) }
-fn line_from(line: [u8], any: Bool) -> Option<Str> / {Console} {
+pub fn read_line() -> Option<Str> / {Console} { line_from(Vec::new(), false) }
+fn line_from(line: Vec<u8>, any: Bool) -> Option<Str> / {Console} {
     match(read_stdin(1)) {
         Err(_) => None,
         Ok(bytes) =>
-            if(len(bytes) == 0) {
+            if(Vec::len(&bytes) == 0) {
                 if(any) { from_utf8(line) } else { None }
             } else {
-                if(int(bytes[0]) == 10) { from_utf8(line) } else { tail line_from(push(line, bytes[0]), true) }
+                let b = *Vec::index(&bytes, 0);
+                if(int(b) == 10) { from_utf8(line) } else { tail line_from(pushed(line, b), true) }
             }
     }
 }

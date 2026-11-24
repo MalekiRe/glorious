@@ -107,44 +107,45 @@ pub fn pad_end(text: Str, width: Int, with: char) -> Str {
 }
 
 // A text as bytes: each character as UTF-8 has it.
-pub fn utf8(text: Str) -> [u8] { utf8_onto(text, []) }
-fn utf8_onto(text: Str, out: [u8]) -> [u8] {
+pub fn utf8(text: Str) -> Vec<u8> { let mut out = Vec::new(); utf8_onto(text, &mut out); out }
+fn utf8_onto(text: Str, out: &mut Vec<u8>) {
     match(text) {
-        StrEnd => out,
-        StrChar(c, rest) => tail utf8_onto(rest, encode(int(c), out))
+        StrEnd => (),
+        StrChar(c, rest) => encode(int(c), out); tail utf8_onto(rest, out)
     }
 }
 fn byte(n: Int) -> u8 { u8(n) }
-fn encode(code: Int, out: [u8]) -> [u8] {
-    if(code < 128) { push(out, byte(code)) } else {
-        if(code < 2048) { push(push(out, byte(192 + code / 64)), byte(128 + code % 64)) } else {
+fn encode(code: Int, out: &mut Vec<u8>) {
+    if(code < 128) { Vec::push(out, byte(code)) } else {
+        if(code < 2048) { Vec::push(out, byte(192 + code / 64)); Vec::push(out, byte(128 + code % 64)) } else {
             if(code < 65536) {
-                push(push(push(out, byte(224 + code / 4096)), byte(128 + code / 64 % 64)), byte(128 + code % 64))
+                Vec::push(out, byte(224 + code / 4096)); Vec::push(out, byte(128 + code / 64 % 64)); Vec::push(out, byte(128 + code % 64))
             } else {
-                push(push(push(push(out, byte(240 + code / 262144)), byte(128 + code / 4096 % 64)),
-                    byte(128 + code / 64 % 64)), byte(128 + code % 64))
+                Vec::push(out, byte(240 + code / 262144)); Vec::push(out, byte(128 + code / 4096 % 64));
+                Vec::push(out, byte(128 + code / 64 % 64)); Vec::push(out, byte(128 + code % 64))
             }
         }
     }
 }
 
-// The text some bytes are, if they are UTF-8.
-pub fn from_utf8(bytes: [u8]) -> Option<Str> { decode(bytes, len(bytes), "") }
+// The text some bytes one after another are (an array, a `[u8; N]`, a
+// `Vec<u8>`, a slice), if they are UTF-8.
+pub fn from_utf8<A>(bytes: A) -> Option<Str> where A: Indexed<Element = u8> { let held = bytes; decode(&held, size_at(&held), "") }
 // Read from the end, so that the text is built from its last character back.
-fn decode(bytes: [u8], end: Int, out: Str) -> Option<Str> {
+fn decode<A>(bytes: &A, end: Int, out: Str) -> Option<Str> where A: Indexed<Element = u8> {
     if(end == 0) { Some(out) } else {
-        let last = int(bytes[end - 1]);
+        let last = int(*element_at(bytes, end - 1));
         if(last < 128) { tail decode_one(bytes, end - 1, last, out) } else {
             if(end < 2) { None } else {
-                let b1 = int(bytes[end - 2]);
+                let b1 = int(*element_at(bytes, end - 2));
                 if(b1 >= 192) { tail decode_one(bytes, end - 2, (b1 - 192) * 64 + (last - 128), out) } else {
                     if(end < 3) { None } else {
-                        let b2 = int(bytes[end - 3]);
+                        let b2 = int(*element_at(bytes, end - 3));
                         if(b2 >= 224) {
                             tail decode_one(bytes, end - 3, ((b2 - 224) * 64 + (b1 - 128)) * 64 + (last - 128), out)
                         } else {
                             if(end < 4) { None } else {
-                                let b3 = int(bytes[end - 4]);
+                                let b3 = int(*element_at(bytes, end - 4));
                                 tail decode_one(bytes, end - 4,
                                     (((b3 - 240) * 64 + (b2 - 128)) * 64 + (b1 - 128)) * 64 + (last - 128), out)
                             }
@@ -155,7 +156,7 @@ fn decode(bytes: [u8], end: Int, out: Str) -> Option<Str> {
         }
     }
 }
-fn decode_one(bytes: [u8], end: Int, code: Int, out: Str) -> Option<Str> {
+fn decode_one<A>(bytes: &A, end: Int, code: Int, out: Str) -> Option<Str> where A: Indexed<Element = u8> {
     match(char(code)) { Some(c) => tail decode(bytes, end, StrChar(c, out)), None => None }
 }
 
@@ -164,27 +165,20 @@ fn decode_one(bytes: [u8], end: Int, code: Int, out: Str) -> Option<Str> {
 // them, in memory it allocates and frees.
 pub struct String { bytes: Vec<u8> }
 
-// The bytes of a vector of them, as an array.
-fn bytes_of(v: &Vec<u8>) -> [u8] {
-    let mut out = [];
-    let mut i = 0;
-    while({ i < Vec::len(v) }) { match(Vec::get(v, i)) { Some(b) => push_at(&mut out, *b), None => () }; i = i + 1 };
-    out
-}
-
 impl String {
     pub fn new() -> Self { Self { bytes: Vec::new() } }
     // Of borrowed text, its bytes copied.
     pub fn from_str(text: &str) -> Self { let mut s = String::new(); String::push_str(&mut s, text); s }
     // Of a `Str`, its characters as UTF-8.
-    pub fn from_text(text: Str) -> Self { Self { bytes: Vec::from_array(utf8(text)) } }
-    pub fn from_utf8(bytes: [u8]) -> Result<Self, [u8]> {
-        match(from_utf8(bytes)) { Some(_) => Ok(Self { bytes: Vec::from_array(bytes) }), None => Err(bytes) }
+    pub fn from_text(text: Str) -> Self { Self { bytes: utf8(text) } }
+    pub fn from_utf8(bytes: Vec<u8>) -> Result<Self, Vec<u8>> {
+        let ok = match(from_utf8(&bytes)) { Some(_) => true, None => false };
+        if(ok) { Ok(Self { bytes: bytes }) } else { Err(bytes) }
     }
-    pub fn into_bytes(value: Self) -> [u8] { match(value) { String { bytes } => Vec::into_array(bytes) } }
+    pub fn into_bytes(value: Self) -> Vec<u8> { match(value) { String { bytes } => bytes } }
     // The text as a value of its own.
     pub fn to_str(value: &Self) -> Str {
-        match(from_utf8(bytes_of(&value.bytes))) { Some(text) => text, None => "" }
+        match(from_utf8(&value.bytes)) { Some(text) => text, None => "" }
     }
     // How many bytes.
     pub fn len(value: &Self) -> Int { Vec::len(&value.bytes) }
@@ -195,7 +189,7 @@ impl String {
         while({ i < text.len() }) { Vec::push(&mut value.bytes, text.byte(i)); i = i + 1 }
     }
     // A `Str`'s characters, as UTF-8, put after these.
-    pub fn push_text(value: &mut Self, text: Str) { Vec::extend(&mut value.bytes, utf8(text)) }
+    pub fn push_text(value: &mut Self, text: Str) { Vec::append(&mut value.bytes, utf8(text)) }
     pub fn push(value: &mut Self, c: char) { String::push_text(value, show(c)) }
     pub fn clear(value: &mut Self) { Vec::clear(&mut value.bytes) }
     // The text, borrowed where it is.

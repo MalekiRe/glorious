@@ -4,6 +4,7 @@
 
 use std::value::{Rejected};
 use std::text::{utf8, from_utf8};
+use std::vec::{Vec};
 
 pub struct SourceId(u32);
 
@@ -18,32 +19,25 @@ pub struct SourceLocation { pub source: SourceId, pub line: Int, pub column_byte
 pub struct Utf16Location { pub line: Int, pub column_units: Int }
 pub enum SourceError { UnknownSource, InvalidRange, InvalidBoundary, IndexOverflow }
 
-struct Source { name: Str, bytes: [u8], lines: [Int] }
+struct Source { name: Str, bytes: Vec<u8>, lines: [Int] }
 
 // Texts, each given a number when it is put in. It reads no files.
 pub struct SourceMap { sources: [Source] }
 
-fn byte_at(bytes: &[u8], i: Int) -> Int { match(element(bytes, i)) { Some(b) => int(*b), None => 0 } }
+fn byte_at(bytes: &Vec<u8>, i: Int) -> Int { match(element(bytes, i)) { Some(b) => int(*b), None => 0 } }
 
 // Where each line starts: after each end of line, and at the start.
-fn line_starts(bytes: &[u8], i: Int, out: [Int]) -> [Int] {
+fn line_starts(bytes: &Vec<u8>, i: Int, out: [Int]) -> [Int] {
     if(i >= len_at(bytes)) { out } else {
         tail line_starts(bytes, i + 1, if(byte_at(bytes, i) == 10) { push(out, i + 1) } else { out })
     }
 }
 
-fn piece(bytes: &[u8], from: Int, upto: Int, out: [u8]) -> [u8] {
-    if(from >= upto) { out } else {
-        match(element(bytes, from)) {
-            Some(b) => tail piece(bytes, from + 1, upto, push(out, *b)),
-            None => out
-        }
-    }
-}
+fn piece(bytes: &Vec<u8>, from: Int, upto: Int) -> Vec<u8> { std::vec::take(std::vec::drop(bytes, from), upto - from) }
 
 // Is a place between two characters, and not inside one? A byte that goes
 // on a character begun before it is `10` and six bits.
-fn on_boundary(bytes: &[u8], at: Int) -> Bool {
+fn on_boundary(bytes: &Vec<u8>, at: Int) -> Bool {
     if(at == len_at(bytes)) { true } else { let b = byte_at(bytes, at); b < 128 or { b >= 192 } }
 }
 
@@ -62,7 +56,7 @@ fn int_at(items: &[Int], i: Int) -> Int { match(element(items, i)) { Some(n) => 
 
 // How many units of UTF-16 the characters from one place to another are: a
 // character of four bytes is two, any other one.
-fn units_between(bytes: &[u8], at: Int, end: Int, units: Int) -> Int {
+fn units_between(bytes: &Vec<u8>, at: Int, end: Int, units: Int) -> Int {
     if(at >= end) { units } else {
         let b = byte_at(bytes, at);
         if(b < 128) { tail units_between(bytes, at + 1, end, units + 1) } else {
@@ -76,7 +70,7 @@ fn units_between(bytes: &[u8], at: Int, end: Int, units: Int) -> Int {
 
 // The place so many units of UTF-16 on from another, if that is between
 // two characters and before a limit.
-fn after_units(bytes: &[u8], at: Int, limit: Int, units: Int) -> Option<Int> {
+fn after_units(bytes: &Vec<u8>, at: Int, limit: Int, units: Int) -> Option<Int> {
     if(units == 0) { Some(at) } else {
         if(units < 0 or { at >= limit }) { None } else {
             let b = byte_at(bytes, at);
@@ -107,7 +101,7 @@ impl SourceMap {
         match(SourceMap::source(m, id)) { Some(s) => Some(s.name), None => None }
     }
     pub fn text(m: &Self, id: SourceId) -> Option<Str> {
-        match(SourceMap::source(m, id)) { Some(s) => from_utf8(s.bytes), None => None }
+        match(SourceMap::source(m, id)) { Some(s) => from_utf8(&s.bytes), None => None }
     }
     // The text of a stretch, which has to begin and end between characters.
     pub fn slice(m: &Self, span: SourceSpan) -> Result<Str, SourceError> {
@@ -116,7 +110,7 @@ impl SourceMap {
             Some(s) =>
                 if(span.start < 0 or { span.end < span.start or { span.end > len_at(&s.bytes) } }) { Err(SourceError::InvalidRange) } else {
                     if(on_boundary(&s.bytes, span.start) and { on_boundary(&s.bytes, span.end) }) {
-                        match(from_utf8(piece(&s.bytes, span.start, span.end, []))) { Some(text) => Ok(text), None => Err(SourceError::InvalidBoundary) }
+                        match(from_utf8(piece(&s.bytes, span.start, span.end))) { Some(text) => Ok(text), None => Err(SourceError::InvalidBoundary) }
                     } else { Err(SourceError::InvalidBoundary) }
                 }
         }
