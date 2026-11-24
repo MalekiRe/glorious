@@ -7,9 +7,13 @@
 // 1:7: `,` or `]`
 // 0
 
+use std::vec::{Vec};
+
+// A `Vec` with one more at its end.
+fn pushed<T>(v: Vec<T>, x: T) -> Vec<T> { let mut v = v; v.push(x); v }
 use std::text::{join};
 
-enum Json { Null, Bool(Bool), Num(Int), Text(Str), List([Json]), Object([(Str, Json)]) }
+enum Json { Null, Bool(Bool), Num(Int), Text(Str), List(Vec<Json>), Object(Vec<(Str, Json)>) }
 
 struct ParseError { at: Int, wanted: Str }
 
@@ -61,32 +65,33 @@ fn value(r: &mut Reader) -> Result<Json, ParseError> {
         Some('t') => word(r, "true", Json::Bool(true)),
         Some('f') => word(r, "false", Json::Bool(false)),
         Some('"') => r.at = r.at + 1; match(text(r, "")) { Ok(s) => Ok(Json::Text(s)), Err(e) => Err(e) },
-        Some('[') => r.at = r.at + 1; items(r, []),
-        Some('{') => r.at = r.at + 1; fields(r, []),
+        Some('[') => r.at = r.at + 1; let mut out = Vec::new(); match(items(r, &mut out)) { Ok(_) => Ok(Json::List(out)), Err(e) => Err(e) },
+        Some('{') => r.at = r.at + 1; let mut out = Vec::new(); match(fields(r, &mut out)) { Ok(_) => Ok(Json::Object(out)), Err(e) => Err(e) },
         Some(c) => if('0' <= c and { c <= '9' }) { Ok(Json::Num(digits(r, 0))) } else { Err(ParseError { at: r.at, wanted: "a value" }) },
         None => Err(ParseError { at: r.at, wanted: "a value" })
     }
 }
 
-fn items(r: &mut Reader, out: [Json]) -> Result<Json, ParseError> {
+fn items(r: &mut Reader, out: &mut Vec<Json>) -> Result<(), ParseError> {
     skip_spaces(r);
-    if(peek(&*r) is Some(']')) { r.at = r.at + 1; Ok(Json::List(out)) } else {
+    if(peek(&*r) is Some(']')) { r.at = r.at + 1; Ok(()) } else {
         match(value(r)) {
             Err(e) => Err(e),
             Ok(item) =>
+                out.push(item);
                 skip_spaces(r);
                 match(peek(&*r)) {
-                    Some(',') => r.at = r.at + 1; items(r, push(out, item)),
-                    Some(']') => r.at = r.at + 1; Ok(Json::List(push(out, item))),
+                    Some(',') => r.at = r.at + 1; items(r, out),
+                    Some(']') => r.at = r.at + 1; Ok(()),
                     _ => Err(ParseError { at: r.at, wanted: "`,` or `]`" })
                 }
         }
     }
 }
 
-fn fields(r: &mut Reader, out: [(Str, Json)]) -> Result<Json, ParseError> {
+fn fields(r: &mut Reader, out: &mut Vec<(Str, Json)>) -> Result<(), ParseError> {
     skip_spaces(r);
-    if(peek(&*r) is Some('}')) { r.at = r.at + 1; Ok(Json::Object(out)) } else {
+    if(peek(&*r) is Some('}')) { r.at = r.at + 1; Ok(()) } else {
         match(expect(r, '"', "a name")) {
             Err(e) => Err(e),
             Ok(_) => match(text(r, "")) {
@@ -96,10 +101,11 @@ fn fields(r: &mut Reader, out: [(Str, Json)]) -> Result<Json, ParseError> {
                     Ok(_) => match(value(r)) {
                         Err(e) => Err(e),
                         Ok(item) =>
+                            out.push((name, item));
                             skip_spaces(r);
                             match(peek(&*r)) {
-                                Some(',') => r.at = r.at + 1; fields(r, push(out, (name, item))),
-                                Some('}') => r.at = r.at + 1; Ok(Json::Object(push(out, (name, item)))),
+                                Some(',') => r.at = r.at + 1; fields(r, out),
+                                Some('}') => r.at = r.at + 1; Ok(()),
                                 _ => Err(ParseError { at: r.at, wanted: "`,` or `}`" })
                             }
                     }
@@ -120,16 +126,16 @@ fn written(j: &Json) -> Str {
         &Json::Bool(b) => if(*b) { "true" } else { "false" },
         &Json::Num(n) => show(*n),
         &Json::Text(s) => "\"" ++ *s ++ "\"",
-        &Json::List(items) => "[" ++ join(each(items, 0, []), ", ") ++ "]",
-        &Json::Object(pairs) => "{" ++ join(each_field(pairs, 0, []), ", ") ++ "}"
+        &Json::List(items) => "[" ++ join(each(items, 0, Vec::new()), ", ") ++ "]",
+        &Json::Object(pairs) => "{" ++ join(each_field(pairs, 0, Vec::new()), ", ") ++ "}"
     }
 }
-fn each(items: &[Json], i: Int, out: [Str]) -> [Str] {
-    match(element(items, i)) { Some(item) => each(items, i + 1, push(out, written(item))), None => out }
+fn each(items: &Vec<Json>, i: Int, out: Vec<Str>) -> Vec<Str> {
+    match(element(items, i)) { Some(item) => each(items, i + 1, pushed(out, written(item))), None => out }
 }
-fn each_field(pairs: &[(Str, Json)], i: Int, out: [Str]) -> [Str] {
+fn each_field(pairs: &Vec<(Str, Json)>, i: Int, out: Vec<Str>) -> Vec<Str> {
     match(element(pairs, i)) {
-        Some(pair) => each_field(pairs, i + 1, push(out, "\"" ++ pair.0 ++ "\": " ++ written(&pair.1))),
+        Some(pair) => each_field(pairs, i + 1, pushed(out, "\"" ++ pair.0 ++ "\": " ++ written(&pair.1))),
         None => out
     }
 }
@@ -138,7 +144,7 @@ fn each_field(pairs: &[(Str, Json)], i: Int, out: [Str]) -> [Str] {
 fn get<'a>(j: &'a Json, name: Str) -> Option<&'a Json> {
     match(j) { &Json::Object(pairs) => find(pairs, name, 0), _ => None }
 }
-fn find<'a>(pairs: &'a [(Str, Json)], name: Str, i: Int) -> Option<&'a Json> {
+fn find<'a>(pairs: &'a Vec<(Str, Json)>, name: Str, i: Int) -> Option<&'a Json> {
     match(element(pairs, i)) {
         Some(pair) => if(pair.0 == name) { Some(&pair.1) } else { find(pairs, name, i + 1) },
         None => None

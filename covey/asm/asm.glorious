@@ -4,13 +4,14 @@
 // file, normalized (addresses and offsets left out), and counts that say
 // most about the code. Reading the binary is the caller's: this reads the
 // text.
+use std::vec::{Vec};
 use std::text::{starts_with, ends_with, contains, find, take, drop, trim, split, words, join, parse_int, char_at};
 
 // What to collect: a function by path, matched by its last segment; or the
 // lines `first` to `last` of a file (a closure's body).
 pub enum Target { Function(Str), Lines(Str, Int, Int) }
 
-pub struct Code { pub instructions: [Str], pub symbols: [Str] }
+pub struct Code { pub instructions: Vec<Str>, pub symbols: Vec<Str> }
 
 // One source location of an instruction's inline chain.
 struct Frame { file: Str, line: Int, function: Option<Str> }
@@ -74,7 +75,7 @@ fn is_hex(word: Str) -> Bool {
 // An instruction with its addresses and offsets left out.
 fn normalize(instruction: Str) -> Str {
     let ws = std::vec::Vec::into_array(words(instruction));
-    let mut out = [];
+    let mut out = Vec::new();
     let mut i = 0;
     let mut going = true;
     while({ if(going) { i < len_at(&ws) } else { false } }) {
@@ -82,17 +83,17 @@ fn normalize(instruction: Str) -> Str {
         let hex = if(ends_with(word, ",")) { take(word, length((word)) - 1) } else { word };
         let next_symbol = if(i + 1 < len_at(&ws)) { starts_with(ws[i + 1], "<") } else { false };
         if(if(length((hex)) >= 4) { if(is_hex(hex)) { next_symbol } else { false } } else { false }) {
-            push_at(&mut out, "<addr>");
+            Vec::push(&mut out, "<addr>");
             let symbol = ws[i + 1];
             let bare = split(symbol, '+')[0];
             let bare = if(ends_with(bare, ">")) { take(bare, length((bare)) - 1) } else { bare };
-            push_at(&mut out, bare ++ ">");
+            Vec::push(&mut out, bare ++ ">");
             i = i + 2
         } else if(starts_with(word, "#")) { going = false }
         else {
             match(find(word, "(%rip)")) {
-                Some(at) => push_at(&mut out, "<rip>" ++ drop(word, at + 6)),
-                None => push_at(&mut out, word)
+                Some(at) => Vec::push(&mut out, "<rip>" ++ drop(word, at + 6)),
+                None => Vec::push(&mut out, word)
             };
             i = i + 1
         }
@@ -104,9 +105,9 @@ fn normalize(instruction: Str) -> Str {
 // whether it had line tables at all. Each location block (the innermost
 // line, then the `inlined by` callers) is of the instructions after it; an
 // instruction is the target's where any frame of its chain is.
-pub fn scan(lines: [Str], target: Target) -> (Code, Bool) {
-    let mut instructions = [];
-    let mut symbols = [];
+pub fn scan(lines: Vec<Str>, target: Target) -> (Code, Bool) {
+    let mut instructions = Vec::new();
+    let mut symbols = Vec::new();
     let mut symbol = "";
     let mut function: Option<Str> = None;
     let mut matched = false;
@@ -131,13 +132,13 @@ pub fn scan(lines: [Str], target: Target) -> (Code, Bool) {
         } else if(if(white) { matched } else { false }) {
             let instruction = trim(line);
             if(instruction == "") { () } else {
-                push_at(&mut instructions, normalize(instruction));
-                if(std::vec::contains(clone(&symbols), symbol)) { () } else { push_at(&mut symbols, symbol) }
+                Vec::push(&mut instructions, normalize(instruction));
+                if(std::vec::contains(clone(&symbols), symbol)) { () } else { Vec::push(&mut symbols, symbol) }
             }
         } else { () };
         i = i + 1
     };
-    (Code { instructions: instructions, symbols: std::vec::Vec::into_array(std::vec::sort(symbols)) }, saw_lines)
+    (Code { instructions: instructions, symbols: std::vec::sort(symbols) }, saw_lines)
 }
 
 // Counts that say most about the code.

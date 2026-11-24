@@ -2,14 +2,15 @@
 // devtools::value::parse_debug): tuples, lists, maps, structs with named
 // or positional fields, text, characters, numbers, and bare names (unit
 // structs and variants). What is not one of those is kept as raw text.
+use std::vec::{Vec};
 use std::text::{join};
 
 pub enum Value {
     VUnit, VBool(Bool), VInt(Int), VFloat(f64), VChar(char), VStr(Str),
     // Named fields: `Pos { x: 1.0 }`; positional, `Hp(3)`, a tuple where
     // the name is empty.
-    VStruct(Str, [(Str, Value)]), VTuple(Str, [Value]),
-    VList([Value]), VMap([(Value, Value)]),
+    VStruct(Str, Vec<(Str, Value)>), VTuple(Str, Vec<Value>),
+    VList(Vec<Value>), VMap(Vec<(Value, Value)>),
     // A bare name: `None`, `Idle`.
     VName(Str),
     VRaw(Str)
@@ -64,29 +65,32 @@ fn quoted(cs: &Vec<char>, i: Int, close: char) -> (Str, Int) {
 // list holds is read by it again.)
 // One character, or the text as it is.
 fn char_or_raw(t: Str) -> Value { let one = chars(t); if(len_at(&one) == 1) { VChar(one[0]) } else { VRaw(t) } }
+// What a list closed by `c` is, of its values or its pairs.
+fn made_of(c: char, vs: Vec<Value>, pairs: Vec<(Value, Value)>) -> Value {
+    if(c == '(') { if(len_at(&vs) == 0) { VUnit } else { VTuple("", vs) } }
+    else if(c == '[') { VList(vs) }
+    else if(len_at(&vs) > 0) { VList(vs) } else { VMap(pairs) }
+}
 fn value_at(cs: &Vec<char>, i: Int) -> (Value, Int) {
     let i = skip_space(cs, i);
     let c = at(cs, i);
     if(if(c == '(') { true } else if(c == '[') { true } else { c == '{' }) {
         // (A list up to its close: values, or of braces `key: value` pairs.)
         let close = if(c == '(') { ')' } else if(c == '[') { ']' } else { '}' };
-        let mut vs = [];
-        let mut pairs = [];
+        let mut vs = Vec::new();
+        let mut pairs = Vec::new();
         let mut j = skip_space(cs, i + 1);
         while({ if(j < len_at(cs)) { at(cs, j) != close } else { false } }) {
             let (v, k) = value_at(cs, j);
             j = skip_space(cs, k);
             if(if(c == '{') { at(cs, j) == ':' } else { false }) {
                 let (w, k2) = value_at(cs, j + 1);
-                push_at(&mut pairs, (v, w));
+                Vec::push(&mut pairs, (v, w));
                 j = skip_space(cs, k2)
-            } else { push_at(&mut vs, v) };
+            } else { Vec::push(&mut vs, v) };
             if(at(cs, j) == ',') { j = skip_space(cs, j + 1) } else { () }
         };
-        let made = if(c == '(') { if(len_at(&vs) == 0) { VUnit } else { VTuple("", vs) } }
-            else if(c == '[') { VList(vs) }
-            else if(len_at(&vs) > 0) { VList(vs) } else { VMap(pairs) };
-        (made, j + 1)
+        (made_of(c, vs, pairs), j + 1)
     }
     else if(c == '"') { let (t, j) = quoted(cs, i, '"'); (VStr(t), j) }
     else if(c == '\'') { let (t, j) = quoted(cs, i, '\''); (char_or_raw(t), j) }
@@ -99,12 +103,12 @@ fn value_at(cs: &Vec<char>, i: Int) -> (Value, Int) {
         if(at(cs, j) == '(') {
             match(value_at(cs, j)) {
                 (VTuple(_, vs), e) => (VTuple(name, vs), e),
-                (VUnit, e) => (VTuple(name, []), e),
-                (other, e) => (VTuple(name, [other]), e)
+                (VUnit, e) => (VTuple(name, Vec::new()), e),
+                (other, e) => (VTuple(name, Vec::from_array([other])), e)
             }
         } else if(at(cs, k) == '{') {
             // (Named fields: `name: value` up to `}`.)
-            let mut fs = [];
+            let mut fs = Vec::new();
             let mut e = skip_space(cs, k + 1);
             while({ if(e < len_at(cs)) { at(cs, e) != '}' } else { false } }) {
                 let mut field = "";
@@ -112,7 +116,7 @@ fn value_at(cs: &Vec<char>, i: Int) -> (Value, Int) {
                 e = skip_space(cs, e);
                 if(at(cs, e) == ':') { e = e + 1 } else { () };
                 let (v, e2) = value_at(cs, e);
-                push_at(&mut fs, (field, v));
+                Vec::push(&mut fs, (field, v));
                 e = skip_space(cs, e2);
                 if(at(cs, e) == ',') { e = skip_space(cs, e + 1) } else { () }
             };
@@ -153,20 +157,20 @@ pub fn get<'a>(value: &'a Value, path: Str) -> Option<&'a Value> {
     };
     at_
 }
-fn item_of<'a>(vs: &'a [Value], place: Option<Int>) -> Option<&'a Value> {
+fn item_of<'a>(vs: &'a Vec<Value>, place: Option<Int>) -> Option<&'a Value> {
     match(place) { Some(p) => if(p < len_at(vs)) { let v = &vs[p]; Some(v) } else { None }, None => None }
 }
-fn field_of<'a>(fs: &'a [(Str, Value)], name: Str) -> Option<&'a Value> {
+fn field_of<'a>(fs: &'a Vec<(Str, Value)>, name: Str) -> Option<&'a Value> {
     let mut found: Option<&'a Value> = None;
     let mut i = 0;
     while({ i < len_at(fs) }) { let pair = &fs[i]; if(pair.0 == name) { found = Some(&pair.1) } else { () }; i = i + 1 };
     found
 }
 
-fn shown_all(vs: &[Value]) -> Str {
-    let mut out = [];
+fn shown_all(vs: &Vec<Value>) -> Str {
+    let mut out = Vec::new();
     let mut i = 0;
-    while({ i < len_at(vs) }) { push_at(&mut out, shown(&vs[i])); i = i + 1 };
+    while({ i < len_at(vs) }) { Vec::push(&mut out, shown(&vs[i])); i = i + 1 };
     join(out, ", ")
 }
 // A value written as `{:?}` writes it.
@@ -179,16 +183,16 @@ pub fn shown(value: &Value) -> Str {
         VChar(c) => "'" ++ show(*c) ++ "'",
         VStr(t) => "\"" ++ escaped(*t) ++ "\"",
         VStruct(n, fs) =>
-            let mut out = [];
+            let mut out = Vec::new();
             let mut i = 0;
-            while({ i < len_at(fs) }) { let pair = &fs[i]; push_at(&mut out, pair.0 ++ ": " ++ shown(&pair.1)); i = i + 1 };
+            while({ i < len_at(fs) }) { let pair = &fs[i]; Vec::push(&mut out, pair.0 ++ ": " ++ shown(&pair.1)); i = i + 1 };
             *n ++ " { " ++ join(out, ", ") ++ " }",
         VTuple(n, vs) => *n ++ "(" ++ shown_all(vs) ++ ")",
         VList(vs) => "[" ++ shown_all(vs) ++ "]",
         VMap(ps) =>
-            let mut out = [];
+            let mut out = Vec::new();
             let mut i = 0;
-            while({ i < len_at(ps) }) { let pair = &ps[i]; push_at(&mut out, shown(&pair.0) ++ ": " ++ shown(&pair.1)); i = i + 1 };
+            while({ i < len_at(ps) }) { let pair = &ps[i]; Vec::push(&mut out, shown(&pair.0) ++ ": " ++ shown(&pair.1)); i = i + 1 };
             "{" ++ join(out, ", ") ++ "}",
         VName(n) => *n,
         VRaw(t) => *t

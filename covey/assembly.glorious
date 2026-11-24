@@ -14,7 +14,7 @@ mod asm;
 use asm::{Target, Code, scan, stats};
 
 fn main() -> Int {
-    let objdump = ["<frame>:", "game::apply_damage:", "/src/game.rs:10", "inlined by /src/game.rs:30 (run)", "\tmov    %rax,%rbx", "\tcall   1234 <helper+0x10>", "other::finish:", "/src/other.rs:5", "\tret"];
+    let objdump = std::vec::Vec::from_array(["<frame>:", "game::apply_damage:", "/src/game.rs:10", "inlined by /src/game.rs:30 (run)", "\tmov    %rax,%rbx", "\tcall   1234 <helper+0x10>", "other::finish:", "/src/other.rs:5", "\tret"]);
     let (found, saw): (Code, Bool) = scan(clone(&objdump), Target::Function("apply_damage"));
     say(if(saw) { "true" } else { "false" });
     let instructions = found.instructions;

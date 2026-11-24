@@ -4897,6 +4897,16 @@ fn main() -> Int { let mut n = 1; twice({ p => *p = *p * 3 }, &mut n); n }
 #### expect
 9
 #### case
+#### A method called on a plain `let`, where the prelude has a function of
+#### the name that takes the value whole (`len`): the type's own borrows it,
+#### and the value is given away after.
+use std::vec::{Vec};
+fn eat(v: Vec<Int>) -> Int { v.len() * 10 }
+fn main() -> Int { let v = Vec::from_array([1, 2]); say(v.len()); eat(v) }
+#### expect
+2
+20
+#### case
 #### A `[T; N]` taken apart by a pattern of its elements, in a `match` and
 #### in a `let`: the clause covers every value, as a tuple's does.
 fn sum3(a: [Int; 3]) -> Int { match(a) { [x, y, z] => x + y + z } }
