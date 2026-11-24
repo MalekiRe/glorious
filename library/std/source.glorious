@@ -19,17 +19,18 @@ pub struct SourceLocation { pub source: SourceId, pub line: Int, pub column_byte
 pub struct Utf16Location { pub line: Int, pub column_units: Int }
 pub enum SourceError { UnknownSource, InvalidRange, InvalidBoundary, IndexOverflow }
 
-struct Source { name: Str, bytes: Vec<u8>, lines: [Int] }
+struct Source { name: Str, bytes: Vec<u8>, lines: Vec<Int> }
 
 // Texts, each given a number when it is put in. It reads no files.
-pub struct SourceMap { sources: [Source] }
+pub struct SourceMap { sources: Vec<Source> }
 
 fn byte_at(bytes: &Vec<u8>, i: Int) -> Int { match(element(bytes, i)) { Some(b) => int(*b), None => 0 } }
 
 // Where each line starts: after each end of line, and at the start.
-fn line_starts(bytes: &Vec<u8>, i: Int, out: [Int]) -> [Int] {
-    if(i >= len_at(bytes)) { out } else {
-        tail line_starts(bytes, i + 1, if(byte_at(bytes, i) == 10) { push(out, i + 1) } else { out })
+fn line_starts(bytes: &Vec<u8>, i: Int, out: &mut Vec<Int>) {
+    if(i >= len_at(bytes)) { () } else {
+        if(byte_at(bytes, i) == 10) { Vec::push(out, i + 1) } else { () };
+        tail line_starts(bytes, i + 1, out)
     }
 }
 
@@ -42,7 +43,7 @@ fn on_boundary(bytes: &Vec<u8>, at: Int) -> Bool {
 }
 
 // The last line that starts at or before a place.
-fn line_of(lines: &[Int], at: Int, low: Int, high: Int) -> Int {
+fn line_of(lines: &Vec<Int>, at: Int, low: Int, high: Int) -> Int {
     if(low + 1 >= high) { low } else {
         let mid = (low + high) / 2;
         match(element(lines, mid)) {
@@ -52,7 +53,7 @@ fn line_of(lines: &[Int], at: Int, low: Int, high: Int) -> Int {
     }
 }
 
-fn int_at(items: &[Int], i: Int) -> Int { match(element(items, i)) { Some(n) => *n, None => 0 } }
+fn int_at(items: &Vec<Int>, i: Int) -> Int { match(element(items, i)) { Some(n) => *n, None => 0 } }
 
 // How many units of UTF-16 the characters from one place to another are: a
 // character of four bytes is two, any other one.
@@ -85,14 +86,16 @@ fn after_units(bytes: &Vec<u8>, at: Int, limit: Int, units: Int) -> Option<Int> 
 }
 
 impl SourceMap {
-    pub fn new() -> Self { Self { sources: [] } }
+    pub fn new() -> Self { Self { sources: Vec::new() } }
     pub fn len(m: &Self) -> Int { len_at(&m.sources) }
     pub fn insert(m: &mut Self, name: Str, text: Str) -> Result<SourceId, Rejected<(Str, Str), SourceError>> {
         let n = len_at(&m.sources);
         if(n > 4294967295) { Err(Rejected { value: (name, text), error: SourceError::IndexOverflow }) } else {
             let bytes = utf8(text);
-            let lines = line_starts(&bytes, 0, [0]);
-            push_at(&mut m.sources, Source { name: name, bytes: bytes, lines: lines });
+            let mut lines = Vec::new();
+            Vec::push(&mut lines, 0);
+            line_starts(&bytes, 0, &mut lines);
+            Vec::push(&mut m.sources, Source { name: name, bytes: bytes, lines: lines });
             Ok(SourceId(to(n)))
         }
     }

@@ -32,7 +32,7 @@ pub effect ProcessEnvironment {
     current_dir() -> Result<Str, IoError>
 }
 pub effect ProcessArgs {
-    args() -> Result<[Str], IoError>
+    args() -> Result<Vec<Str>, IoError>
 }
 pub effect Clock {
     now() -> Int
@@ -159,20 +159,21 @@ unsafe fn where_now() -> Result<Str, IoError> {
 fn pushed(bytes: Vec<u8>, b: u8) -> Vec<u8> { let mut out = bytes; Vec::push(&mut out, b); out }
 
 // The texts between zeros.
-fn between_zeros(bytes: &Vec<u8>, i: Int, word: Vec<u8>, out: [Str]) -> [Str] {
-    if(i >= Vec::len(bytes)) { out } else {
+fn between_zeros(bytes: &Vec<u8>, i: Int, word: Vec<u8>, out: &mut Vec<Str>) {
+    if(i >= Vec::len(bytes)) { () } else {
         let b = *Vec::index(bytes, i);
         if(int(b) == 0) {
             let text = match(from_utf8(word)) { Some(t) => t, None => "" };
-            tail between_zeros(bytes, i + 1, Vec::new(), push(out, text))
+            Vec::push(out, text);
+            tail between_zeros(bytes, i + 1, Vec::new(), out)
         } else { tail between_zeros(bytes, i + 1, pushed(word, b), out) }
     }
 }
 
 // What the process was started with, as the operating system has it.
-unsafe fn arguments() -> Result<[Str], IoError> {
+unsafe fn arguments() -> Result<Vec<Str>, IoError> {
     match(read_path("/proc/self/cmdline")) {
-        Ok(bytes) => Ok(between_zeros(&bytes, 0, Vec::new(), [])),
+        Ok(bytes) => let mut out = Vec::new(); between_zeros(&bytes, 0, Vec::new(), &mut out); Ok(out),
         Err(e) => Err(e)
     }
 }

@@ -257,17 +257,18 @@ impl<T> Use<[0, *]> for Sender<T> {}
 pub struct Receiver<T> { cell: Int, none: [T; 0] }
 impl<T> Use<[0, *]> for Receiver<T> {}
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let cell = new_cell<[T]>([]);
+    let cell = new_cell<Vec<T>>(Vec::new());
     (Sender { cell: cell, none: fixed_of([], 0) }, Receiver { cell: cell, none: fixed_of([], 0) })
 }
 impl<T> Share for Sender<T> { fn share(s: &Sender<T>) -> Sender<T> { Sender { cell: s.cell, none: fixed_of([], 0) } } }
 pub fn send<T>(s: &Sender<T>, value: T) {
-    let queue = take_cell<[T]>(s.cell);
-    put_cell(s.cell, push(queue, value))
+    let mut queue = take_cell<Vec<T>>(s.cell);
+    Vec::push(&mut queue, value);
+    put_cell(s.cell, queue)
 }
 fn waiting_values<T>(cell: Int) -> Bool {
-    let queue = take_cell<[T]>(cell);
-    let any = len_at(&queue) > 0;
+    let queue = take_cell<Vec<T>>(cell);
+    let any = Vec::len(&queue) > 0;
     put_cell(cell, queue);
     any
 }
@@ -279,8 +280,8 @@ pub fn recv<T>(r: &Receiver<T>) -> Option<T> / {Threads} {
 }
 // The next value sent, if there is one now.
 pub fn try_recv<T>(r: &Receiver<T>) -> Option<T> {
-    let mut queue = take_cell<[T]>(r.cell);
-    let got = if(len_at(&queue) > 0) { Some(remove_at(&mut queue, 0)) } else { None };
+    let mut queue = take_cell<Vec<T>>(r.cell);
+    let got = Vec::remove(&mut queue, 0);
     put_cell(r.cell, queue);
     got
 }

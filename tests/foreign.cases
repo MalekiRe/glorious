@@ -156,7 +156,7 @@ fn main() -> Int { run_host({
     println(if(b >= a) { "the clock goes on" } else { "the clock went back" });
     println(match(random_bytes(8)) { Ok(bytes) => show(len(bytes)), Err(_) => "no chance" });
     println(match(current_dir()) { Ok(_) => "somewhere", Err(_) => "nowhere" });
-    println(match(args()) { Ok(a) => if(len(a) > 0) { "started" } else { "?" }, Err(_) => "?" });
+    println(match(args()) { Ok(a) => if(a.len() > 0) { "started" } else { "?" }, Err(_) => "?" });
     0 }) }
 #### expect
 hello, host

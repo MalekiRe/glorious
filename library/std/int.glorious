@@ -31,7 +31,8 @@ pub fn div_floor(a: Int, b: Int) -> Int {
 pub fn mod_floor(a: Int, b: Int) -> Int { a - div_floor(a, b) * b }
 
 // The digits of a number that is not negative, the first first.
-pub fn digits(n: Int) -> [Int] { if(n < 10) { [n] } else { push(digits(n / 10), n % 10) } }
+pub fn digits(n: Int) -> std::vec::Vec<Int> { let mut out = std::vec::Vec::new(); digits_onto(n, &mut out); out }
+fn digits_onto(n: Int, out: &mut std::vec::Vec<Int>) { if(n < 10) { () } else { digits_onto(n / 10, out) }; std::vec::Vec::push(out, n % 10) }
 
 // The whole root: the greatest `r` with `r * r <= n`, for `n` not negative.
 pub fn sqrt(n: Int) -> Int { if(n < 2) { n } else { sqrt_from(n, n) } }

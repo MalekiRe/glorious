@@ -9998,7 +9998,7 @@ fn main() -> Int {
     say(run("12345", 3));
     let input = chars("ab");
     let mut c = Cursor::new(std::vec::Vec::as_slice(&input));
-    say(match(many(&mut c, 5, stuck)) { Err((found, ParseError::NoProgress)) => len(found), _ => 0 - 1 });
+    say(match(many(&mut c, 5, stuck)) { Err((found, ParseError::NoProgress)) => found.len(), _ => 0 - 1 });
     // What a parser that finds nothing read is given back.
     say(match(attempt(&mut c, digit)) { ParseStep::NoMatch => Cursor::position(&c), _ => 0 - 1 });
     0

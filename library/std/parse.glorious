@@ -3,6 +3,7 @@
 
 use std::slice::{Slice};
 use std::budget::{BudgetExceeded, BudgetKind};
+use std::vec::{Vec};
 pub use std::error::{MarkError};
 
 // A row of things read from front to back.
@@ -45,8 +46,8 @@ pub fn attempt<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, parse: fn(
 }
 
 fn many_onto<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, limit: Int,
-    parse: fn(&mut Cursor<'a, T>) -> ParseStep<U, E> / e, out: [U], count: Int)
-    -> Result<[U], ([U], ParseError<E>)> / { | e } where E: Use<[1, 1]>, T: Use<[1, 1]> {
+    parse: fn(&mut Cursor<'a, T>) -> ParseStep<U, E> / e, out: Vec<U>, count: Int)
+    -> Result<Vec<U>, (Vec<U>, ParseError<E>)> / { | e } where E: Use<[1, 1]>, T: Use<[1, 1]> {
     if(Cursor::is_done(cursor)) { Ok(out) } else {
         if(count >= limit) {
             Err((out, ParseError::Limit(BudgetExceeded { kind: BudgetKind::Items, requested: count + 1, remaining: 0 })))
@@ -56,8 +57,10 @@ fn many_onto<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, limit: Int,
                 ParseStep::Matched(item) =>
                     // One that found something without moving on would
                     // find it again for ever.
-                    if(cursor.at == before) { Err((push(out, item), ParseError::NoProgress)) }
-                    else { many_onto(cursor, limit, parse, push(out, item), count + 1) },
+                    let mut out = out;
+                    Vec::push(&mut out, item);
+                    if(cursor.at == before) { Err((out, ParseError::NoProgress)) }
+                    else { many_onto(cursor, limit, parse, out, count + 1) },
                 ParseStep::NoMatch => Ok(out),
                 ParseStep::Failed(e) => Err((out, ParseError::User(e)))
             }
@@ -69,6 +72,6 @@ fn many_onto<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, limit: Int,
 // found each time. What was found is given back with what went wrong, too.
 pub fn many<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, limit: Int,
     parse: fn(&mut Cursor<'a, T>) -> ParseStep<U, E> / e)
-    -> Result<[U], ([U], ParseError<E>)> / { | e } where E: Use<[1, 1]>, T: Use<[1, 1]> {
-    many_onto(cursor, limit, parse, [], 0)
+    -> Result<Vec<U>, (Vec<U>, ParseError<E>)> / { | e } where E: Use<[1, 1]>, T: Use<[1, 1]> {
+    many_onto(cursor, limit, parse, Vec::new(), 0)
 }

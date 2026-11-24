@@ -70,7 +70,7 @@ pub fn fold<T, U, e: EffectRow>(it: Iter<T>, init: U, f: fn(U, T) -> U / {| e}) 
     match(next(it)) { Some((x, rest)) => tail fold(rest, f(init, x), f), None => init }
 }
 
-pub fn collect<T>(it: Iter<T>) -> [T] where T: Use<[1, 1]> { fold(it, [], fn(out, x) { push(out, x) }) }
+pub fn collect<T>(it: Iter<T>) -> std::vec::Vec<T> where T: Use<[1, 1]> { fold(it, std::vec::Vec::new(), fn(out, x) { let mut out = out; std::vec::Vec::push(&mut out, x); out }) }
 pub fn count<T>(it: Iter<T>) -> Int { fold(it, 0, fn(n, x) { n + 1 }) }
 pub fn sum(it: Iter<Int>) -> Int { fold(it, 0, fn(total, x) { total + x }) }
 pub fn each<T, e: EffectRow>(it: Iter<T>, f: fn(T) -> () / {| e}) -> () / {| e} where T: Use<[1, 1]> { fold(it, (), fn(done, x) { f(x) }) }
