@@ -398,9 +398,9 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     let mut m : Infer.Memo := {}
     for i in [0:inferShards] do
       if let some part ← Store.load (α := Infer.Memo) (dir / s!"infer.{i}") "infer" then
-        m := if m.inst.isEmpty && m.schemes.isEmpty && m.faces.isEmpty then part else
+        m := if m.isEmpty then part else
           { inst := part.inst.fold (·.insert) m.inst, schemes := part.schemes.fold (·.insert) m.schemes
-            faces := part.faces.fold (·.insert) m.faces }
+            faces := part.faces.fold (·.insert) m.faces, mains := part.mains.fold (·.insert) m.mains }
     pure m
   -- (The prelude and library as checked, by an earlier process of this
   -- compiler, for any program.)
@@ -457,11 +457,23 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     for i in [0:inferShards] do
       let made : Infer.Made :=
         { inst := c.inferMade.inst.filter (shardOf ·.1 == i), schemes := c.inferMade.schemes.filter (shardOf ·.1 == i)
-          faces := c.inferMade.faces.filter (shardOf ·.1 == i) }
+          faces := c.inferMade.faces.filter (shardOf ·.1 == i), mains := c.inferMade.mains.filter (shardOf ·.1 == i) }
       let inferNew := made.inst.any (fun (k, sig, _) => !((memo.inst.get? k).getD []).any (·.1 == sig))
         || made.schemes.any (fun (k, _) => !memo.schemes.contains k)
         || made.faces.any (fun (k, _) => !memo.faces.contains k)
-      if inferNew then keep <| Trace.timedIO "save: infer" (Store.save (dir / s!"infer.{i}") "infer" (Infer.toMemo made) (chain := 64))
+        || made.mains.any (fun (k, _) => !memo.mains.contains k)
+      -- (With what was kept before and not made again: a compile that took
+      -- what it needed from what was kept makes nothing of the rest, which
+      -- the next may need.)
+      if inferNew then
+        let now := Infer.toMemo made
+        let mine := fun (k : UInt64) => shardOf k == i
+        let merged : Infer.Memo :=
+          { inst := memo.inst.fold (fun m k v => if mine k && !m.contains k then m.insert k v else m) now.inst
+            schemes := memo.schemes.fold (fun m k v => if mine k && !m.contains k then m.insert k v else m) now.schemes
+            faces := memo.faces.fold (fun m k v => if mine k && !m.contains k then m.insert k v else m) now.faces
+            mains := memo.mains.fold (fun m k v => if mine k && !m.contains k then m.insert k v else m) now.mains }
+        keep <| Trace.timedIO "save: infer" (Store.save (dir / s!"infer.{i}") "infer" merged (chain := 64))
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
     -- (The library's modules, and the program's modules that are files, as

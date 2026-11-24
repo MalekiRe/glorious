@@ -273,15 +273,26 @@ def Frozen.face (fz : Frozen) : UInt64 :=
     hash (set s.fixedRgs), hash (set s.fixedAccs), hash fz.counts, hash fz.atoms, hash fz.ranks,
     hash fz.nodes, hash fz.lows, hash fz.kept, hash fz.waiting].foldl mixHash 7
 
+/-- What `main` was found to be, kept for a later compile whose `main` and
+what it uses show the same (its key in `certifyM`): its type, the hints of
+its locals, and each function at the signature it uses it at, by the
+function's key, with the regions of that use. -/
+structure MainKept where
+  ty : Ty
+  hints : List Hint
+  wanted : List (UInt64 × FnSig × List Nat × Option Nat × List Nat)
+
 /-- What certificate inference keeps between compiles: instantiations, by
-the key of the function and the signature, and groups' schemes, by key. -/
+the key of the function and the signature, groups' schemes, by key, and
+`main`'s, by its key. -/
 structure Memo where
   inst : Std.HashMap UInt64 (List (FnSig × Remembered)) := {}
   schemes : Std.HashMap UInt64 Frozen := {}
   /-- What each group showed those that use it (`faceOf`), by its key. -/
   faces : Std.HashMap UInt64 UInt64 := {}
+  mains : Std.HashMap UInt64 MainKept := {}
 
-def Memo.isEmpty (m : Memo) : Bool := m.inst.isEmpty && m.schemes.isEmpty && m.faces.isEmpty
+def Memo.isEmpty (m : Memo) : Bool := m.inst.isEmpty && m.schemes.isEmpty && m.faces.isEmpty && m.mains.isEmpty
 
 instance : Nonempty Memo := ⟨{}⟩
 
@@ -290,6 +301,7 @@ structure Made where
   inst : Array (UInt64 × FnSig × Remembered) := #[]
   schemes : Array (UInt64 × Frozen) := #[]
   faces : Array (UInt64 × UInt64) := #[]
+  mains : Array (UInt64 × MainKept) := #[]
 
 structure St where
   fns : Array Core.Fn
@@ -444,6 +456,10 @@ structure St where
   made that can be kept. -/
   frozen : Std.HashMap UInt64 Frozen := {}
   frozenMade : Array (UInt64 × Frozen) := #[]
+  /-- What `main` was found to be by an earlier compile, by its key, and
+  what this one found. -/
+  keptMains : Std.HashMap UInt64 MainKept := {}
+  mainsMade : Array (UInt64 × MainKept) := #[]
 
 /-- (One result made at each step, not a pair inside an `Except`: most of
 inference is small steps. What fails goes back to the state it began

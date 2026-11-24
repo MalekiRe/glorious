@@ -1000,9 +1000,8 @@ def compileSource (src : String) (check : Bool := true)
     let way := match way with
       | some k => [(("%way", 0), k)]
       | none => []
-    -- (Without a certificate, inference's types alone, for the lowering.
-    -- Found anew each time: with what the last compile kept, inference takes
-    -- longer than without.)
+    -- (Without a certificate, inference's types alone, for the lowering,
+    -- with what the last compile kept: `main`'s by its key among them.)
     let (types, made) := if cert.isSome || !check then (cert, made)
       else match Trace.timed "types" fun _ =>
           Infer.certifyKept declared out.program false out.envSizes (memo := memo) (anyUnknown := true) with

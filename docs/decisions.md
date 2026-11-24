@@ -396,10 +396,17 @@ As it is done (`Lower.Typed`, `Lower.Layout`, `Lay`):
   memory, such a reference is held too.
 - What the machines run is the program lowered, where it can be
   (`Compiled.lower`, `Compiled.checked` the Core the certificate is of). A
-  program without a certificate has its types found for it on every
-  compile: about a second on `states2` (a leaf edit 0.54 s before, 1.58 s
-  now). Inference with what the last compile kept is slower still, so it
-  is found anew each time, until inference is made to keep more.
+  program without a certificate (one that uses `Vec`, whose `forget` is a
+  `transmute`, among them) has its types found for it on every compile,
+  with what the last compile kept: each group's scheme and instances, and
+  `main`'s type, hints and the instances it asks, by `main`'s key (what it
+  is made of and what each group it uses shows it, as a group's key is).
+  `main` was inferred anew on every compile before, 0.86 s of a leaf edit
+  of `states2` (1.84 s); with it kept, a leaf edit is 0.98 s, inference
+  0.36 s. What a compile keeps of inference is merged with what was kept
+  before: a compile that took all it needed from what was kept made none of
+  the groups' schemes again, and saving what it made alone left the next
+  compile to infer most of them anew.
 
 **`Vec<T>` over memory** (`std::vec`). `Vec { at: *mut T, cap, len }`: its
 elements one after another in memory it allocates (`mem_alloc`, growing by

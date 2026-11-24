@@ -255,24 +255,60 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       (fun g => let rg := (st.scc[g]?).getD g; if rg == r then none else some rg) |>.eraseDups)) {}
   modify fun s =>
     { s with
-      keyed := !(st.memo.isEmpty && st.frozen.isEmpty && !st.remember)
+      keyed := !(st.memo.isEmpty && st.frozen.isEmpty && st.keptMains.isEmpty && !st.remember)
       ownKeys := (List.range n).toArray.map fun f => mixHash (hash (st.fns[f]?.map (·.clauses))) (extra f)
       members, outside, keyBase := globals }
   let τ ← freshTy
-  (fun s => Trace.timed "infer: main" fun _ => (do inferTm (← freshAcc) ⟨[], none⟩ τ #[] p.main : M Unit).run s : M Unit)
-  let mainHints := (← get).hints
-  let refs := (← get).refs
-  (fun s => Trace.timed "infer: settle" fun _ => (settleAll).run s : M Unit)
-  -- A callable type a declaration writes says nothing of regions, so a callable
-  -- kept in such a place can touch none.
-  -- (But for the regions its own type binds.)
-  for g in [0:(← get).globalAccs] do
-    let own ← bindersOf g
-    unless ((← accSet g).filter fun r => !own.contains r).isEmpty do
-      throw "region: a callable kept in a declared type touches a mutable variable"
-  let mainTy ← zonk {} τ
-  let mainHints ← zonkHints {} mainHints
-  let wanted ← refs.toList.mapM fun (g, gs) => do pure (g, (← demand {} gs).1)
+  -- (`main`'s key, for what an earlier compile kept: what it is made of,
+  -- and what each group it uses shows it, as a group's key is.)
+  let mainKey ← (fun s => Trace.timed "infer: main's key" fun _ => (do
+    if !(← get).keyed then pure (0 : UInt64) else do
+    let mut k := mixHash st.keyBase (hash p.main)
+    for g in ((tmRefs p.main).map fun f => (st.scc[f]?).getD f).eraseDups do
+      k := mixHash k (← faceOf g)
+    pure k : M UInt64).run s : M UInt64)
+  -- (Kept, where every function it uses has the key it had: what it was
+  -- found to be is taken, the regions of each use made anew.)
+  let keptMain ← match (← get).keptMains[mainKey]? with
+    | some m =>
+      if mainKey == 0 then pure none else do
+      let byKey := (← get).byKey
+      let wanted := m.wanted.filterMap fun (k, sig, atoms, own, more) => (byKey.get? k).map (·, sig, atoms, own, more)
+      if wanted.length != m.wanted.length then pure none else do
+      let mut fresh : Std.HashMap Nat Nat := {}
+      let mut uses : List (Nat × Use) := []
+      for (g, sig, atoms, own, more) in wanted do
+        for a in atoms ++ own.toList ++ more do
+          unless fresh.contains a do fresh := fresh.insert a (← freshAtom)
+        let at_ := fun (a : Nat) => fresh.getD a a
+        uses := uses ++ [(g, ⟨sig, atoms.map at_, own.map at_, more.map at_⟩)]
+      -- (And kept again, for the compile after.)
+      modify fun s => { s with mainsMade := s.mainsMade.push (mainKey, m) }
+      pure (some (m.ty, m.hints, uses))
+    | none => pure none
+  let (mainTy, mainHints, wanted) ← match keptMain with
+    | some found => pure found
+    | none => do
+      (fun s => Trace.timed "infer: main" fun _ => (do inferTm (← freshAcc) ⟨[], none⟩ τ #[] p.main : M Unit).run s : M Unit)
+      let mainHints := (← get).hints
+      let refs := (← get).refs
+      (fun s => Trace.timed "infer: settle" fun _ => (settleAll).run s : M Unit)
+      -- A callable type a declaration writes says nothing of regions, so a callable
+      -- kept in such a place can touch none.
+      -- (But for the regions its own type binds.)
+      for g in [0:(← get).globalAccs] do
+        let own ← bindersOf g
+        unless ((← accSet g).filter fun r => !own.contains r).isEmpty do
+          throw "region: a callable kept in a declared type touches a mutable variable"
+      let mainTy ← zonk {} τ
+      let mainHints ← zonkHints {} mainHints
+      let wanted ← refs.toList.mapM fun (g, gs) => do pure (g, (← demand {} gs).1)
+      -- (Kept for the next compile, by the keys of the functions it uses.)
+      if mainKey != 0 && (← get).remember then
+        let keys ← wanted.mapM fun (g, u) => do pure (← fnKey g, u.sig, u.atoms, u.own, u.more)
+        unless keys.any (·.1 == 0) do
+          modify fun s => { s with mainsMade := s.mainsMade.push (mainKey, ⟨mainTy, mainHints, keys⟩) }
+      pure (mainTy, mainHints, wanted)
   modify fun s =>
     { s with incls := #[], places := #[], coerces := #[], nevers := #[], onces := #[], shows := #[] }
   (fun s => Trace.timed "infer: instantiate" fun _ => (do for (g, gs) in wanted do instantiate g gs : M Unit).run s : M Unit)
@@ -331,8 +367,8 @@ def certifyKept (items : List Item) (p : Core.Program) (strict : Bool)
   let g ← Elab.collectDeclared items
   match (certifyM items g p envSizes).run
     { fns := p.fns, strict, regions, loans, ranked, widen, anyUnknown, memo := memo.inst
-      frozen := memo.schemes, keptFaces := memo.faces, remember } with
-  | .ok cert st => pure (cert, ⟨st.made, st.frozenMade, st.facesMade⟩)
+      frozen := memo.schemes, keptFaces := memo.faces, keptMains := memo.mains, remember } with
+  | .ok cert st => pure (cert, ⟨st.made, st.frozenMade, st.facesMade, st.mainsMade⟩)
   | .error e _ => throw e
 
 /-- The certificate alone, with nothing kept. -/
@@ -347,7 +383,8 @@ def toMemo (made : Made) : Memo :=
       let old := m.getD k []
       if old.any (·.1 == sig) then m else m.insert k ((sig, r) :: old)) {}
     schemes := made.schemes.foldl (fun m (k, fz) => m.insert k fz) {}
-    faces := made.faces.foldl (fun m (k, f) => m.insert k f) {} }
+    faces := made.faces.foldl (fun m (k, f) => m.insert k f) {}
+    mains := made.mains.foldl (fun m (k, f) => m.insert k f) {} }
 
 /-- Which part of a program a certificate fails on, for reporting a defect in
 this pass or in the elaborator. -/
