@@ -373,12 +373,12 @@ impl<T> Index for Vec<T> {
         v
     }
 }
-impl<T> Indexed for Vec<T> {
+impl<T> Indexed for Vec<T> where T: Use<[1, 1]> {
     type Element = T;
     fn element_at(v: &Vec<T>, i: Int) -> &T { must_be_at(v, i); at_ref(v, i) }
     fn size_at(v: &Vec<T>) -> Int { v.len }
 }
-impl<T> IndexedMut for Vec<T> {
+impl<T> IndexedMut for Vec<T> where T: Use<[1, 1]> {
     fn place_at(i: Int, v: &mut Vec<T>) -> &mut <Vec<T> as Indexed>::Element { must_be_at(&*v, i); at_mut(v, i) }
 }
 // Written as an array is: `[a, b]`.

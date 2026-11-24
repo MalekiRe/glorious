@@ -4892,9 +4892,51 @@ fn main() -> Int { let mut n = 1; twice({ p => *p = *p * 3 }, &mut n); n }
 #### expect
 9
 #### case
+#### Dotted calls on a variable whose type's own functions borrow it, where
+#### the prelude has a function of the name that takes a value whole
+#### (`push`, `len`, `get`): each borrows it, none gives it away.
+fn main() -> Int {
+    let mut v = std::vec::Vec::new();
+    v.push(1); v.push(2);
+    say(v.len());
+    match(v.get(0)) { Some(n) => say(*n), None => () };
+    v.len()
+}
+#### expect
+2
+1
+2
+#### case
+#### A dotted call in a function named as the method it calls: the type's
+#### own function, also where the program is refused elsewhere and checked
+#### again callees first (the refusal said is the program's).
+struct P { x: Int }
+impl P { fn get(p: &Self, k: &Int) -> Int { p.x + *k } }
+fn get(p: &P, k: Int) -> Int { p.get(&k) }
+fn main() -> Int { let p = P { x: 1 }; get(&p, 2) + true }
+#### expect
+error: 4:40: in `main`: argument 2 of `+`: expected `Int`, found `Result<(), ()>`
+#### case
 #### `std::hash`: hashing, and a map that finds a key in a step or two.
-use std::hash;
-fn main() -> Int { let m = hash::from([("one", 1), ("two", 2), ("three", 3)]); say(hash::get(m, "two")); say(hash::get(m, "four")); let big = fold(std::vec::range(0, 60), hash::new(), fn(acc, i) { hash::insert(acc, i * 7, i) }); say(hash::len(big)); say(hash::get(big, 21 * 7)); let fewer = hash::remove(hash::remove(big, 7), 1000); say(hash::len(fewer)); say(hash::contains_key(fewer, 7)); say(std::vec::sort(hash::keys(hash::insert(m, "two", 22)))); std::vec::sum(hash::values(hash::insert(m, "two", 22))) }
+use std::hash::{HashMap};
+fn get(m: &HashMap<Str, Int>, key: Str) -> Option<Int> { match(m.get(&key)) { Some(v) => Some(*v), None => None } }
+fn main() -> Int {
+    let mut m = HashMap::from([("one", 1), ("two", 2), ("three", 3)]);
+    say(get(&m, "two"));
+    say(get(&m, "four"));
+    let mut big = HashMap::new();
+    let mut i = 0;
+    while({ i < 60 }) { big.insert(i * 7, i); i = i + 1 };
+    say(big.len());
+    say(match(big.get(&(21 * 7))) { Some(v) => Some(*v), None => None });
+    big.remove(&7);
+    big.remove(&1000);
+    say(big.len());
+    say(big.contains_key(&7));
+    m.insert("two", 22);
+    say(std::vec::sort(m.keys()));
+    std::vec::sum(std::vec::map(m.into_entries(), { (_, v) => v }))
+}
 #### expect
 Ok(2)
 Err(())
@@ -6790,9 +6832,9 @@ fn main() -> Int { mark(A(1)) }
 error: 4:20: in `main`: `A` does not implement `Mark`
 #### case
 #### A hash map changed where it is, and what a key stands for looked at where it is.
-use std::hash::{HashMap, new, get};
+use std::hash::{HashMap};
 fn main() -> Int {
-    let mut m = new();
+    let mut m = HashMap::new();
     m.insert("one", 1); m.insert("two", 2); m.insert("three", 3);
     say(m.len());
     say(match(m.get(&"two")) { Some(r) => *r, None => 0 });
@@ -6801,7 +6843,7 @@ fn main() -> Int {
     say(m.insert("two", 22));
     say(m.len());
     say(match(m.get(&"two")) { Some(r) => *r, None => 0 });
-    say(get(m, "one"));
+    say(match(m.get(&"one")) { Some(r) => Some(*r), None => None });
     0 }
 #### expect
 3
@@ -7129,9 +7171,9 @@ fn main() -> Result<Int, Str> {
 #### expect
 Err("changed")
 #### case
-use std::hash::{HashMap, new};
+use std::hash::{HashMap};
 fn main() -> Int {
-    let mut m = new();
+    let mut m = HashMap::new();
     m.insert("a", 1);
     m.insert("b", 2);
     match(HashMap::get_mut(&mut m, &"b")) { Some(v) => *v = *v + 40;, None => () };
@@ -7599,10 +7641,10 @@ true
 0
 #### case
 #### Library conformance S33: float no ord hash.
-use std::hash::{HashMap, new};
-fn main() -> Int { let mut m = new(); HashMap::insert(&mut m, 1.5, 1); 0 }
+use std::hash::{HashMap};
+fn main() -> Int { let mut m = HashMap::new(); HashMap::insert(&mut m, 1.5, 1); 0 }
 #### expect
-error: 2:39: in `main`: `f64` does not implement `std::hash::Hash`
+error: 2:48: in `main`: `f64` does not implement `std::hash::Hash`
 #### case
 #### Library conformance S36: utf8 bad.
 use alloc::string::{String};

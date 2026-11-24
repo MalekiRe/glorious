@@ -2,7 +2,7 @@
 // specification has it (26.2). The order found is the order the nodes and
 // what they lead to are given in, never a table's.
 
-use std::hash::{Hash, HashMap};
+use std::hash::{Hash, HashMap, HashSet};
 use std::slice::{Slice};
 use std::budget::{StepBudget, BudgetExceeded};
 use std::vec::{Vec};
@@ -22,18 +22,18 @@ fn stacked<N>(stack: &mut Vec<N>, more: &mut Vec<N>) where N: Use<[0, *]> {
     match(Vec::pop(more)) { Some(last) => Vec::push(stack, last); tail stacked(stack, more), None => () }
 }
 
-fn reach<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, stack: &mut Vec<N>, seen: HashMap<N, ()>, out: &mut Vec<N>, budget: &mut StepBudget)
+fn reach<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, stack: &mut Vec<N>, seen: &mut HashSet<N>, out: &mut Vec<N>, budget: &mut StepBudget)
     -> Result<(), BudgetExceeded> where N: Use<[0, *]> {
     match(Vec::pop(stack)) {
         None => Ok(()),
         Some(node) => match(StepBudget::charge(budget, 1)) {
             Err(e) => Err(e),
             Ok(_) =>
-                if(std::hash::contains_key(seen, node)) { tail reach(graph, stack, seen, out, budget) } else {
+                if(HashSet::insert(seen, node)) {
                     stacked(stack, &mut successors(graph, node));
-                    Vec::push(out, node);
-                    tail reach(graph, stack, std::hash::insert(seen, node, ()), out, budget)
-                }
+                    Vec::push(out, node)
+                } else { () };
+                tail reach(graph, stack, seen, out, budget)
         }
     }
 }
@@ -45,7 +45,8 @@ pub fn reachable<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, start: N, budget: 
     let mut stack = Vec::new();
     Vec::push(&mut stack, start);
     let mut out = Vec::new();
-    match(reach(graph, &mut stack, std::hash::new(), &mut out, budget)) { Ok(_) => Ok(out), Err(e) => Err(e) }
+    let mut seen = HashSet::new();
+    match(reach(graph, &mut stack, &mut seen, &mut out, budget)) { Ok(_) => Ok(out), Err(e) => Err(e) }
 }
 
 // The nodes on the way from one of them to the end of the way.
@@ -62,27 +63,32 @@ fn way_from<N: Eq>(way: &Vec<N>, node: N, i: Int, found: Bool, out: &mut Vec<N>)
 // nodes done with, each after all it leads to. (A node is being looked at,
 // `1`, or done with, `2`; one met again while being looked at is on a way
 // that comes back to itself.)
-fn visit_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: &Vec<N>, i: Int, state: HashMap<N, Int>, done: &mut Vec<N>, way: &mut Vec<N>, budget: &mut StepBudget)
-    -> Result<HashMap<N, Int>, GraphError<N>> where N: Use<[0, *]> {
-    if(i >= Vec::len(nodes)) { Ok(state) } else {
+fn visit_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: &Vec<N>, i: Int, state: &mut HashMap<N, Int>, done: &mut Vec<N>, way: &mut Vec<N>, budget: &mut StepBudget)
+    -> Result<(), GraphError<N>> where N: Use<[0, *]> {
+    if(i >= Vec::len(nodes)) { Ok(()) } else {
         let node = nodes[i];
         match(StepBudget::charge(budget, 1)) {
             Err(e) => Err(GraphError::Limit(e)),
-            Ok(_) => match(std::hash::get(state, node)) {
+            Ok(_) => match(state_of(&*state, node)) {
                 Some(2) => visit_each(graph, nodes, i + 1, state, done, way, budget),
                 Some(_) => let mut found = Vec::new(); way_from(&*way, node, 0, false, &mut found); Err(GraphError::Cycle(Cycle { nodes: found })),
                 None =>
                     let next = successors(graph, node);
                     Vec::push(way, node);
-                    let below = visit_each(graph, &next, 0, std::hash::insert(state, node, 1), done, way, budget);
+                    std::value::discard(HashMap::insert(state, node, 1));
+                    let below = visit_each(graph, &next, 0, state, done, way, budget);
                     std::value::discard(Vec::pop(way));
                     match(below) {
-                        Ok(after) => Vec::push(done, node); visit_each(graph, nodes, i + 1, std::hash::insert(after, node, 2), done, way, budget),
+                        Ok(_) => Vec::push(done, node); std::value::discard(HashMap::insert(state, node, 2)); visit_each(graph, nodes, i + 1, state, done, way, budget),
                         Err(e) => Err(e)
                     }
             }
         }
     }
+}
+
+fn state_of<N: Eq + Hash>(state: &HashMap<N, Int>, node: N) -> Option<Int> where N: Use<[0, *]> {
+    match(HashMap::get(state, &node)) { Some(n) => Some(*n), None => None }
 }
 
 fn copied<'a, N>(nodes: &Slice<'a, N>, i: Int, out: &mut Vec<N>) where N: Use<[0, *]> {
@@ -97,7 +103,8 @@ pub fn topological_order<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes:
     copied(&nodes, 0, &mut given);
     let mut done = Vec::new();
     let mut way = Vec::new();
-    match(visit_each(graph, &given, 0, std::hash::new(), &mut done, &mut way, budget)) {
+    let mut state = HashMap::new();
+    match(visit_each(graph, &given, 0, &mut state, &mut done, &mut way, budget)) {
         Ok(_) => Vec::reverse(&mut done); Ok(done),
         Err(e) => Err(e)
     }
@@ -107,10 +114,10 @@ pub fn topological_order<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes:
 // seen, the earliest it can get back to, the nodes not yet in a group.
 struct Search<N> { seen: HashMap<N, Int>, low: HashMap<N, Int>, open: HashMap<N, Bool>, stack: Vec<N>, next: Int, groups: Vec<Vec<N>> }
 
-fn number<N: Eq + Hash>(m: HashMap<N, Int>, node: N) -> Int where N: Use<[0, *]> { match(std::hash::get(m, node)) { Some(n) => n, None => 0 - 1 } }
+fn number<N: Eq + Hash>(m: &HashMap<N, Int>, node: N) -> Int where N: Use<[0, *]> { match(HashMap::get(m, &node)) { Some(n) => *n, None => 0 - 1 } }
 
 fn lower<N: Eq + Hash>(s: &mut Search<N>, node: N, to: Int) where N: Use<[0, *]> {
-    if(to < number(s.low, node)) { s.low = std::hash::insert(s.low, node, to) } else { () }
+    if(to < number(&s.low, node)) { std::value::discard(HashMap::insert(&mut s.low, node, to)) } else { () }
 }
 
 // The nodes at the top of the stack down to one of them, as a group.
@@ -118,7 +125,7 @@ fn closed<N: Eq + Hash>(s: &mut Search<N>, root: N, group: &mut Vec<N>) where N:
     match(Vec::pop(&mut s.stack)) {
         None => (),
         Some(node) =>
-            s.open = std::hash::insert(s.open, node, false);
+            std::value::discard(HashMap::insert(&mut s.open, node, false));
             Vec::push(group, node);
             if(node == root) { () } else { tail closed(s, root, group) }
     }
@@ -127,9 +134,9 @@ fn closed<N: Eq + Hash>(s: &mut Search<N>, root: N, group: &mut Vec<N>) where N:
 // A node seen for the first time: numbered, and not yet in a group.
 fn entered<N: Eq + Hash>(s: &mut Search<N>, node: N) where N: Use<[0, *]> {
     let at = s.next;
-    s.seen = std::hash::insert(s.seen, node, at);
-    s.low = std::hash::insert(s.low, node, at);
-    s.open = std::hash::insert(s.open, node, true);
+    std::value::discard(HashMap::insert(&mut s.seen, node, at));
+    std::value::discard(HashMap::insert(&mut s.low, node, at));
+    std::value::discard(HashMap::insert(&mut s.open, node, true));
     Vec::push(&mut s.stack, node);
     s.next = at + 1
 }
@@ -144,7 +151,7 @@ fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nod
     -> Result<(), BudgetExceeded> where N: Use<[0, *]> {
     if(i >= Vec::len(nodes)) { Ok(()) } else {
         let to = nodes[i];
-        let first = number(s.seen, to);
+        let first = number(&s.seen, to);
         if(first < 0) {
             match(StepBudget::charge(budget, 1)) {
                 Err(e) => Err(e),
@@ -154,8 +161,8 @@ fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nod
                     match(search_each(graph, Some(to), &next, 0, s, budget)) {
                         Err(e) => Err(e),
                         Ok(_) =>
-                            let reached = number(s.low, to);
-                            if(reached == number(s.seen, to)) {
+                            let reached = number(&s.low, to);
+                            if(reached == number(&s.seen, to)) {
                                 let mut group = Vec::new();
                                 closed(s, to, &mut group);
                                 Vec::push(&mut s.groups, group)
@@ -165,7 +172,7 @@ fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nod
                     }
             }
         } else {
-            let still = match(std::hash::get(s.open, to)) { Some(open) => open, None => false };
+            let still = match(HashMap::get(&s.open, &to)) { Some(open) => *open, None => false };
             if(still) { lowered(s, from, first) } else { () };
             search_each(graph, from, nodes, i + 1, s, budget)
         }
@@ -177,7 +184,7 @@ fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nod
 // any group that leads to it.
 pub fn strongly_connected_components<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: Slice<'a, N>, budget: &mut StepBudget)
     -> Result<Vec<Vec<N>>, BudgetExceeded> where N: Use<[0, *]> {
-    let mut s = Search { seen: std::hash::new(), low: std::hash::new(), open: std::hash::new(), stack: Vec::new(), next: 0, groups: Vec::new() };
+    let mut s = Search { seen: HashMap::new(), low: HashMap::new(), open: HashMap::new(), stack: Vec::new(), next: 0, groups: Vec::new() };
     let mut given = Vec::new();
     copied(&nodes, 0, &mut given);
     match(search_each(graph, None, &given, 0, &mut s, budget)) {

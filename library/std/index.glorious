@@ -204,18 +204,18 @@ pub enum InternOutcome<Tag, T> { Inserted(Id<Tag>), Existing { id: Id<Tag>, unus
 pub struct Interner<Tag, T> { values: Vec<T>, places: HashMap<T, Int> }
 
 impl<Tag, T> Interner<Tag, T> where T: Eq + Hash {
-    pub fn new() -> Self where T: Use<[0, *]> { Self { values: Vec::new(), places: std::hash::new() } }
+    pub fn new() -> Self where T: Use<[0, *]> { Self { values: Vec::new(), places: HashMap::new() } }
     pub fn len(i: &Self) -> Int { Vec::len(&i.values) }
     pub fn find(i: &Self, item: T) -> Option<Id<Tag>> where T: Use<[0, *]>, Tag: Use<[1, 1]> {
-        match(std::hash::get(i.places, item)) { Some(n) => Some(numbered(n)), None => None }
+        match(HashMap::get(&i.places, &item)) { Some(n) => Some(numbered(*n)), None => None }
     }
     pub fn intern(i: &mut Self, item: T) -> Result<InternOutcome<Tag, T>, Rejected<T, IndexOverflow>> where T: Use<[0, *]>, Tag: Use<[1, 1]> {
-        match(std::hash::get(i.places, item)) {
-            Some(n) => Ok(InternOutcome::Existing { id: numbered(n), unused: item }),
+        match(HashMap::get(&i.places, &item)) {
+            Some(n) => Ok(InternOutcome::Existing { id: numbered(*n), unused: item }),
             None => let n = Vec::len(&i.values);
                 if(n > 4294967295) { Err(Rejected { value: item, error: IndexOverflow }) } else {
                     Vec::push(&mut i.values, item);
-                    i.places = std::hash::insert(i.places, item, n);
+                    std::value::discard(HashMap::insert(&mut i.places, item, n));
                     Ok(InternOutcome::Inserted(numbered(n)))
                 }
         }

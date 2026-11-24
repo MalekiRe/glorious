@@ -7674,6 +7674,34 @@ middle function's constant; seconds):
 An edit is twice as quick as Zig's quickest; a fresh build between its two
 backends. Jai is not at hand to measure.
 
+## `HashMap` as Rust's alone, over `Vec`
+
+`std::hash` kept, beside `HashMap`'s functions that change it where it is,
+free functions (`hash::new`, `insert`, `get`, `remove`, `from`, `keys`,
+`values`, `entries`, `fold_map`) that gave a new map and left the old one
+usable, each `insert` copying a bucket array. They are gone: a map is
+changed where it is, as Rust's is, and one whose earlier versions are kept
+is `std::map`'s tree. The buckets are a `Vec<Vec<(K, V)>>`; `from` takes
+anything `ToVec` of pairs, a key given twice standing for the later;
+`keys`, `into_entries` and `HashSet::into_vec` give `Vec`s. `std::graph`
+and `Interner` change their maps where they are.
+
+Two checker faults this showed:
+
+- A dot call on a variable, `v.push(x)`, where a function of the name in
+  scope takes the value whole (the prelude's `push`, `len`, `get`) and the
+  type's own takes a reference, was borrowed by the checker but counted as
+  the variable given away (`givenAway`), so `v.push(1); v.len()` on a `Vec`
+  was refused as two uses. The dot calls the type's own function will
+  borrow for are now taken as borrows when the variable is declared
+  (`dotBorrows`).
+- Checked again callees first after a refusal, a function's dot call of a
+  type's own function of the function's own name (`fn get(m: &HashMap<..>)
+  { m.get(&k) }`) took the function itself, which has no type yet then, and
+  said that refusal instead of the program's. How each function of the
+  group being checked takes its first argument is now known from its
+  signature (`St.groupFirst`).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

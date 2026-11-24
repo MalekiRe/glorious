@@ -752,6 +752,10 @@ structure St where
   /-- The functions of the group whose signatures are written whole: each
   call of one inside the group is at lifetimes of its own. -/
   groupSigned : List String := []
+  /-- How each function of the group being checked takes its first argument,
+  where its signature writes it: `0` whole, `1` by a shared reference, `2` by
+  a `&mut` one (`receiverKinds`, before the function has a type). -/
+  groupFirst : List (String × Nat) := []
   pending : Array Pending := #[]
   /-- Field reads whose subject was not yet known: subject, index, field type,
   where the read is, and the read's node where it has one (else 0): one of

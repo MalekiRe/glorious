@@ -563,7 +563,11 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   -- of one in the group is at lifetimes of its own, its signature saying
   -- how they are related, as a caller's is.)
   let signed := (decls.filter fun d => !d.annots.isEmpty && d.annots.all Option.isSome && d.ret.isSome).map (·.name)
-  modify fun s => { s with group := group, groupSigned := signed }
+  let first := decls.filterMap fun d => d.annots.head?.bind id |>.map fun
+    | .ref true _ _ => (d.name, 2)
+    | .ref false _ _ => (d.name, 1)
+    | _ => (d.name, 0)
+  modify fun s => { s with group := group, groupSigned := signed, groupFirst := first }
   let mut defs : List (String × Ty) := []
   let mut reused : List (String × Ty) := []
   for d in decls do
@@ -626,7 +630,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   let lateDrops ← once (← get).drops
   let lateStays ← once (← get).stays
   modify fun s =>
-    { s with group := [], groupSigned := [], dups := #[], lateDups := s.lateDups ++ late, drops := #[],
+    { s with group := [], groupSigned := [], groupFirst := [], dups := #[], lateDups := s.lateDups ++ late, drops := #[],
              lateDrops := s.lateDrops ++ lateDrops, stays := #[],
              lateStays := s.lateStays ++ lateStays }
 

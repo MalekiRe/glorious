@@ -702,6 +702,8 @@ partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
   let first := fun (name : String) => (do
     match (← get).fns[name]? with
     | none =>
+      -- (One of the group being checked: as its signature writes it.)
+      if let some k := (← get).groupFirst.lookup name then return some k
       -- (A trait's function: as its first parameter is written.)
       match (← get).methods[name]? with
       | some sig =>
@@ -728,6 +730,32 @@ partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
   let b ← first g
   set saved
   pure (a, b)
+
+/-- The dot calls on a variable `x` of type `t` that the function of `t`'s
+own takes by reference where the one in scope takes it whole
+(`inferDotAltCall`): each receiver's node, and whether it is borrowed for
+writing. The variable is borrowed there, not given away. -/
+partial def dotBorrows (b : Flat.Body) (x : String) (t : Ty) (rest : List Flat.StmtId) : M (List (Flat.ExprId × Bool)) := do
+  let some h ← headName 8 t | return []
+  let rec calls (fuel : Nat) (e : Flat.ExprId) : List (Flat.ExprId × Nat × String) :=
+    match fuel with
+    | 0 => []
+    | fuel + 1 =>
+      let here := match b.expr e with
+        | .call id f args =>
+          match b.bare? f, args[0]? with
+          | some name, some a => if b.bare? a == some x then [(a, id, name)] else []
+          | _, _ => []
+        | _ => []
+      here ++ (b.children e).flatMap (calls fuel)
+  let found := rest.flatMap fun s => (b.stmtExprs s).toList.flatMap (calls 256)
+  found.filterMapM fun (a, call, name) => do
+    let some alts := dotAltsOf (← get).modules call | return none
+    let some alt := alts.find? (·.startsWith (h ++ "::")) | return none
+    if alt == name then return none
+    match ← receiverKinds name alt with
+    | (some 0, some k) => pure (if k != 0 then some (a, k == 2) else none)
+    | _ => pure none
 
 /-- `x.f.g` where `x` is a mutable variable that holds no reference: the
 name, the path of fields, and the identity of the last read. -/
@@ -1748,7 +1776,11 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
   -- (A value made where a dot call is made on it, named to be borrowed for
   -- the function the resolver took, whose type's own function of the name
   -- takes it whole: given to that one, `wholeReceiver`.)
-  let given := b.givenAway x rest || (← wholeReceiver x t)
+  -- (Its dot calls the function of its type's own borrows it for are not
+  -- uses that give it away, `dotBorrows`.)
+  let seen := (← dotBorrows b x t rest).foldl (fun (bb : Flat.Body) (a, uniq) =>
+    { bb with exprs := bb.exprs.set! a (.ref uniq x) }) b
+  let given := seen.givenAway x rest || (← wholeReceiver x t)
   modify fun s =>
     { s with
       cells := s.cells.push (brand, x, t)
