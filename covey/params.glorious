@@ -19,14 +19,16 @@ mod ecs;
 use ecs::{App, Entity, Mut, Query, Single, Has, ResMut, chain};
 use core::value::{Default, discard};
 
+use std::vec::{Vec};
+
 struct Update
 struct Position(Int)
 struct Shield(Int)
 struct Stunned
 struct Tag
-struct Seen { singles: Int, at: [Int] }
+struct Seen { singles: Int, at: Vec<Int> }
 
-impl Default for Seen { fn default() -> Seen { Seen { singles: 0, at: [] } } }
+impl Default for Seen { fn default() -> Seen { Seen { singles: 0, at: Vec::new() } } }
 
 // Shields charge unless stunned; those without one still match.
 fn charge(query: &mut Query<(&Position, Option<&mut Shield>, Has<Stunned>)>) {
@@ -41,7 +43,7 @@ fn charge(query: &mut Query<(&Position, Option<&mut Shield>, Has<Stunned>)>) {
 // Run only while exactly one entity has a `Tag` and a position.
 fn lone(single: &mut Single<(Entity, &Position), (ecs::With<Tag>,)>, seen: ResMut<Seen>) {
     seen.singles = seen.singles + 1;
-    match(single.get_mut()) { Some(got) => let (_, p) = got; push_at(&mut seen.at, p.0), None => () }
+    match(single.get_mut()) { Some(got) => let (_, p) = got; Vec::push(&mut seen.at, p.0), None => () }
 }
 
 fn shield_of<S, L>(app: &App<S, L>, entity: Entity) -> Int where S: ecs::Get<Shield> {

@@ -47,6 +47,8 @@ use core::option::{is_some, is_none};
 use ecs::{App, Entity, Commands, Requires, Plugin, OnAdd, OnInsert};
 use core::value::Default;
 
+use std::vec::{Vec};
+
 struct Update
 struct Pos(Int)
 impl Default for Pos { fn default() -> Pos { Pos(0) } }
@@ -73,13 +75,13 @@ fn add_pos(t: &OnAdd<Pos>) { say("add pos") }
 fn insert_bird(t: &OnInsert<Bird>) { say("insert bird") }
 fn insert_mass(t: &OnInsert<Mass>) { if(len_at(&t.entities) == 2) { say("insert 2 mass") } else { say("insert mass") } }
 
-struct Done([Entity])
+struct Done(Vec<Entity>)
 fn spawn_birds<S>(commands: &mut Commands<S>, done: &mut Done)
     where S: ecs::Get<Bird>, S: ecs::Get<Vel>, S: ecs::Get<Pos>, S: ecs::Get<Mass>, S: ecs::Columns, S: ecs::Unlinks<S> {
     let spawned = commands.spawn((Bird,));
     let target = commands.spawn((Vel(3),));
     commands.insert(target, (Bird,));
-    done.0 = [spawned, target]
+    done.0 = Vec::from_array([spawned, target])
 }
 
 struct Flock
@@ -126,14 +128,14 @@ fn main() -> Int {
     // Spawned with `Pos` and `Mass`: their hooks run then, not again.
     let placed = app.spawn_bundle((Pos(1), Mass(1)));
     discard(app.insert(placed, Bird));
-    discard(app.spawn_batch([(Bird,), (Bird,)]));
+    discard(app.spawn_batch(Vec::from_array([(Bird,), (Bird,)])));
     say("--");
 
     let mut asked = App::new().register<Bird>().register<Pos>().register<Vel>().register<Mass>()
-        .insert_resource(Done([]))
+        .insert_resource(Done(Vec::new()))
         .add_systems(Update, spawn_birds).build();
     asked.emit(&Update);
-    let made = match(asked.world.resource<Done>()) { Some(d) => d.0, None => [] };
+    let made = match(asked.world.resource<Done>()) { Some(d) => clone(&d.0), None => Vec::new() };
     say(pos_of(asked.world.get<Pos>(made[0])));
     say(match(asked.world.get<Vel>(made[1])) { Some(v) => v.0, None => 0 - 1 });
     say(match(asked.world.get<Mass>(made[1])) { Some(m) => m.0, None => 0 - 1 });

@@ -9,9 +9,10 @@ use std::thread::{Sender, Receiver, channel, send, try_recv};
 use std::text::{join, starts_with, contains, split, trim, parse_int};
 use ecs::{App, World, Entity, StepReport, SystemInfo, Dispatch, Fires, Requests, Listed, Columns};
 use reflected::{Edits, describe_component, set_field};
+use std::vec::{Vec};
 
 // JSON: what requests and replies are written in.
-pub enum Json { JNull, JBool(Bool), JNum(Int), JStr(Str), JArr([Json]), JObj([(Str, Json)]) }
+pub enum Json { JNull, JBool(Bool), JNum(Int), JStr(Str), JArr(Vec<Json>), JObj(Vec<(Str, Json)>) }
 
 fn jat(cs: &Vec<char>, i: Int) -> char { if(i < len_at(cs)) { cs[i] } else { '\u{0}' } }
 fn jskip(cs: &Vec<char>, i: Int) -> Int { if(std::char::is_space(jat(cs, i))) { jskip(cs, i + 1) } else { i } }
@@ -34,19 +35,19 @@ fn jvalue(cs: &Vec<char>, i: Int) -> (Json, Int) {
     let c = jat(cs, i);
     if(if(c == '[') { true } else { c == '{' }) {
         let close = if(c == '[') { ']' } else { '}' };
-        let mut items = [];
-        let mut fields = [];
+        let mut items = Vec::new();
+        let mut fields = Vec::new();
         let mut j = jskip(cs, i + 1);
         while({ if(j < len_at(cs)) { jat(cs, j) != close } else { false } }) {
             if(c == '{') {
                 let (key, k) = jstring(cs, j);
                 let k = jskip(cs, k);
                 let (v, k2) = jvalue(cs, k + 1);
-                push_at(&mut fields, (key, v));
+                Vec::push(&mut fields, (key, v));
                 j = jskip(cs, k2)
             } else {
                 let (v, k) = jvalue(cs, j);
-                push_at(&mut items, v);
+                Vec::push(&mut items, v);
                 j = jskip(cs, k)
             };
             if(jat(cs, j) == ',') { j = jskip(cs, j + 1) } else { () }
@@ -70,7 +71,7 @@ pub fn parse_json(text: Str) -> Json { let cs = chars(text); let (v, _) = jvalue
 fn jquote(t: Str) -> Str {
     "\"" ++ std::text::concat(std::vec::map(chars(t), fn(c: char) -> Str { if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else if(c == '\n') { "\\n" } else { show(c) } })) ++ "\""
 }
-fn jitems(vs: &[Json]) -> Str { let mut out = []; let mut i = 0; while({ i < len_at(vs) }) { push_at(&mut out, written(&vs[i])); i = i + 1 }; join(out, ",") }
+fn jitems(vs: &Vec<Json>) -> Str { let mut out = Vec::new(); let mut i = 0; while({ i < len_at(vs) }) { Vec::push(&mut out, written(&vs[i])); i = i + 1 }; join(out, ",") }
 // A JSON value written.
 pub fn written(v: &Json) -> Str {
     match(v) {
@@ -80,9 +81,9 @@ pub fn written(v: &Json) -> Str {
         JStr(t) => jquote(*t),
         JArr(vs) => "[" ++ jitems(vs) ++ "]",
         JObj(fs) =>
-            let mut out = [];
+            let mut out = Vec::new();
             let mut i = 0;
-            while({ i < len_at(fs) }) { let pair = &fs[i]; push_at(&mut out, jquote(pair.0) ++ ":" ++ written(&pair.1)); i = i + 1 };
+            while({ i < len_at(fs) }) { let pair = &fs[i]; Vec::push(&mut out, jquote(pair.0) ++ ":" ++ written(&pair.1)); i = i + 1 };
             "{" ++ join(out, ",") ++ "}"
     }
 }
@@ -90,7 +91,7 @@ pub fn written(v: &Json) -> Str {
 pub fn field<'a>(v: &'a Json, name: Str) -> Option<&'a Json> {
     match(v) { JObj(fs) => field_in(fs, name), _ => None }
 }
-fn field_in<'a>(fs: &'a [(Str, Json)], name: Str) -> Option<&'a Json> {
+fn field_in<'a>(fs: &'a Vec<(Str, Json)>, name: Str) -> Option<&'a Json> {
     let mut found: Option<&'a Json> = None;
     let mut i = 0;
     while({ i < len_at(fs) }) { let pair = &fs[i]; if(pair.0 == name) { found = Some(&pair.1) } else { () }; i = i + 1 };
@@ -98,7 +99,7 @@ fn field_in<'a>(fs: &'a [(Str, Json)], name: Str) -> Option<&'a Json> {
 }
 fn text_of(v: Option<&Json>) -> Str { match(v) { Some(j) => match(j) { JStr(t) => *t, JNum(n) => show(*n), _ => "" }, None => "" } }
 fn num_of(v: Option<&Json>, otherwise: Int) -> Int { match(v) { Some(j) => match(j) { JNum(n) => *n, JStr(t) => match(parse_int(*t)) { Some(n) => n, None => otherwise }, _ => otherwise }, None => otherwise } }
-pub fn object(fields: [(Str, Json)]) -> Json { JObj(fields) }
+pub fn object(fields: Vec<(Str, Json)>) -> Json { JObj(fields) }
 
 // What a described value is written as: `Hp(44)`, `Pos { x: 1 }`.
 pub fn value_text(d: &Described) -> Str {
@@ -110,22 +111,22 @@ pub fn value_text(d: &Described) -> Str {
         CharValue(c) => "'" ++ show(*c) ++ "'",
         TextValue(t) => jquote(*t),
         StructValue(name, fs) =>
-            let mut parts = [];
+            let mut parts = Vec::new();
             let mut placed = true;
             let mut i = 0;
             while({ i < len_at(fs) }) {
                 let pair = &fs[i];
                 if(match(parse_int(pair.0)) { Some(_) => false, None => true }) { placed = false } else { () };
-                push_at(&mut parts, (pair.0, value_text(&pair.1)));
+                Vec::push(&mut parts, (pair.0, value_text(&pair.1)));
                 i = i + 1
             };
             if(len_at(&parts) == 0) { *name }
-            else if(placed) { *name ++ "(" ++ join(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (_, v) = p; v }), ", ") ++ ")" }
-            else { *name ++ " { " ++ join(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (k, v) = p; k ++ ": " ++ v }), ", ") ++ " }" },
+            else if(placed) { *name ++ "(" ++ join(std::vec::map(&parts, fn(p: (Str, Str)) -> Str { let (_, v) = p; v }), ", ") ++ ")" }
+            else { *name ++ " { " ++ join(std::vec::map(&parts, fn(p: (Str, Str)) -> Str { let (k, v) = p; k ++ ": " ++ v }), ", ") ++ " }" },
         ListValue(vs) =>
-            let mut out = [];
+            let mut out = Vec::new();
             let mut i = 0;
-            while({ i < len_at(vs) }) { push_at(&mut out, value_text(&vs[i])); i = i + 1 };
+            while({ i < len_at(vs) }) { Vec::push(&mut out, value_text(&vs[i])); i = i + 1 };
             "[" ++ join(out, ", ") ++ "]",
         OpaqueValue(n) => *n
     }
@@ -140,7 +141,7 @@ fn number_in(d: &Described) -> Option<Int> {
 }
 // Whether `n` meets a condition written `< 48`, `>= 3`, `== 1`.
 fn meets(n: Int, condition: Str) -> Bool {
-    let parts = std::vec::Vec::into_array(std::text::words(condition));
+    let parts = (std::text::words(condition));
     if(len_at(&parts) < 2) { false } else {
         match(parse_int(parts[1])) {
             Some(m) =>
@@ -166,8 +167,8 @@ impl Client {
     // A tool called with its arguments.
     pub fn call(client: &mut Self, tool: Str, arguments: Json) -> Receiver<Str> {
         client.next = client.next + 1;
-        let request = object([("jsonrpc", JStr("2.0")), ("id", JNum(client.next + 100)), ("method", JStr("tools/call")),
-            ("params", object([("name", JStr(tool)), ("arguments", arguments)]))]);
+        let request = object(Vec::from_array([("jsonrpc", JStr("2.0")), ("id", JNum(client.next + 100)), ("method", JStr("tools/call")),
+            ("params", object(Vec::from_array([("name", JStr(tool)), ("arguments", arguments)])))]));
         client.send(written(&request))
     }
 }
@@ -176,9 +177,9 @@ impl Client {
 // has emitted, and what each entity's components were at each.
 pub struct Session<S, L> {
     requests: Receiver<(Str, Sender<Str>)>,
-    labels: [Str], emits: [fn(&mut App<S, L>) -> ()], steps: [fn(&mut App<S, L>) -> StepReport],
+    labels: Vec<Str>, emits: Vec<fn(&mut App<S, L>) -> ()>, steps: Vec<fn(&mut App<S, L>) -> StepReport>,
     frame: Int, paused: Bool,
-    recorded: [(Int, Entity, Str, Described)]
+    recorded: Vec<(Int, Entity, Str, Described)>
 }
 // The names of systems, in order.
 fn system_names(infos: &std::vec::Vec<SystemInfo>) -> std::vec::Vec<Str> {
@@ -189,14 +190,14 @@ fn system_names(infos: &std::vec::Vec<SystemInfo>) -> std::vec::Vec<Str> {
 }
 pub fn session_channel<S, L>() -> (Session<S, L>, Client) {
     let (tx, rx) = channel();
-    (Session { requests: rx, labels: [], emits: [], steps: [], frame: 0, paused: false, recorded: [] }, Client { requests: tx, next: 0 })
+    (Session { requests: rx, labels: Vec::new(), emits: Vec::new(), steps: Vec::new(), frame: 0, paused: false, recorded: Vec::new() }, Client { requests: tx, next: 0 })
 }
-fn tool_names() -> [Str] { ["overview", "entity", "explain", "history", "emit", "step", "what_if", "why_not", "asm", "pause", "resume"] }
-fn reply_to(id: Json, result: Json) -> Str { written(&object([("jsonrpc", JStr("2.0")), ("id", id), ("result", result)])) }
+fn tool_names() -> Vec<Str> { Vec::from_array(["overview", "entity", "explain", "history", "emit", "step", "what_if", "why_not", "asm", "pause", "resume"]) }
+fn reply_to(id: Json, result: Json) -> Str { written(&object(Vec::from_array([("jsonrpc", JStr("2.0")), ("id", id), ("result", result)]))) }
 fn tool_reply(id: Json, text: Str, error: Bool) -> Str {
-    reply_to(id, object([("content", JArr([object([("type", JStr("text")), ("text", JStr(text))])])), ("isError", JBool(error))]))
+    reply_to(id, object(Vec::from_array([("content", JArr(Vec::from_array([object(Vec::from_array([("type", JStr("text")), ("text", JStr(text))]))]))), ("isError", JBool(error))])))
 }
-fn place_of(labels: &[Str], name: Str) -> Int {
+fn place_of(labels: &Vec<Str>, name: Str) -> Int {
     let mut at = 0 - 1;
     let mut i = 0;
     while({ i < len_at(labels) }) { if(labels[i] == name) { at = i } else { () }; i = i + 1 };
@@ -219,9 +220,9 @@ fn entity_named<S>(world: &World<S>, text: Str) -> Option<Entity> {
 impl<S, L> Session<S, L> {
     // A label the tools may emit or step, by its name.
     pub fn label<E>(session: &mut Self, name: Str, event: E) where L: Dispatch<E, S>, S: Fires<S, L>, S: Requests<S, L>, E: Use<[0, *]> {
-        push_at(&mut session.labels, name);
-        push_at(&mut session.emits, fn(app: &mut App<S, L>) { let ev = event; app.emit(&ev) });
-        push_at(&mut session.steps, fn(app: &mut App<S, L>) -> StepReport { let ev = event; app.step(&ev) })
+        Vec::push(&mut session.labels, name);
+        Vec::push(&mut session.emits, fn(app: &mut App<S, L>) { let ev = event; app.emit(&ev) });
+        Vec::push(&mut session.steps, fn(app: &mut App<S, L>) -> StepReport { let ev = event; app.step(&ev) })
     }
     // This frame's values of each entity's components, kept.
     fn record(session: &mut Self, app: &App<S, L>) where S: Edits<S> {
@@ -231,7 +232,7 @@ impl<S, L> Session<S, L> {
         while({ i < len_at(&all) }) {
             let mut k = 0;
             while({ k < len_at(&names) }) {
-                match(describe_component(&app.world, all[i], names[k])) { Some(d) => push_at(&mut session.recorded, (session.frame, all[i], names[k], d)), None => () };
+                match(describe_component(&app.world, all[i], names[k])) { Some(d) => Vec::push(&mut session.recorded, (session.frame, all[i], names[k], d)), None => () };
                 k = k + 1
             };
             i = i + 1
@@ -255,10 +256,10 @@ impl<S, L> Session<S, L> {
             Some(id) =>
                 let id = match(id) { JNum(n) => JNum(*n), JStr(t) => JStr(*t), _ => JNull };
                 if(method == "initialize") {
-                    Some(reply_to(id, object([("protocolVersion", JStr("2025-06-18")), ("capabilities", object([("tools", object([]))])),
-                        ("serverInfo", object([("name", JStr("covey")), ("version", JStr("0.1"))]))])))
+                    Some(reply_to(id, object(Vec::from_array([("protocolVersion", JStr("2025-06-18")), ("capabilities", object(Vec::from_array([("tools", object(Vec::new()))]))),
+                        ("serverInfo", object(Vec::from_array([("name", JStr("covey")), ("version", JStr("0.1"))])))]))))
                 } else if(method == "tools/list") {
-                    Some(reply_to(id, object([("tools", JArr(std::vec::Vec::into_array(std::vec::map(tool_names(), fn(n: Str) -> Json { object([("name", JStr(n)), ("inputSchema", object([("type", JStr("object"))]))]) }))))])))
+                    Some(reply_to(id, object(Vec::from_array([("tools", JArr((std::vec::map(tool_names(), fn(n: Str) -> Json { object(Vec::from_array([("name", JStr(n)), ("inputSchema", object(Vec::from_array([("type", JStr("object"))])))])) }))))]))))
                 } else if(method == "tools/call") {
                     let tool = match(field(&request, "params")) { Some(p) => text_of(field(p, "name")), None => "" };
                     let args = match(field(&request, "params")) { Some(p) => match(field(p, "arguments")) { Some(a) => written(a), None => "{}" }, None => "{}" };
@@ -267,7 +268,7 @@ impl<S, L> Session<S, L> {
                         Err(e) => Some(tool_reply(id, e, true))
                     }
                 } else {
-                    Some(written(&object([("jsonrpc", JStr("2.0")), ("id", id), ("error", object([("code", JNum(0 - 32601)), ("message", JStr("no method `" ++ method ++ "`"))]))])))
+                    Some(written(&object(Vec::from_array([("jsonrpc", JStr("2.0")), ("id", id), ("error", object(Vec::from_array([("code", JNum(0 - 32601)), ("message", JStr("no method `" ++ method ++ "`"))])))]))))
                 }
         }
     }
@@ -313,10 +314,10 @@ impl<S, L> Session<S, L> {
             match(entity_named(&app.world, id)) {
                 Some(e) =>
                     let names = app.world.component_names();
-                    let mut lines = ["entity " ++ id];
+                    let mut lines = Vec::from_array(["entity " ++ id]);
                     let mut k = 0;
                     while({ k < len_at(&names) }) {
-                        match(describe_component(&app.world, e, names[k])) { Some(d) => push_at(&mut lines, names[k] ++ " = " ++ value_text(&d)), None => () };
+                        match(describe_component(&app.world, e, names[k])) { Some(d) => Vec::push(&mut lines, names[k] ++ " = " ++ value_text(&d)), None => () };
                         k = k + 1
                     };
                     Ok(join(lines, "\n")),
@@ -326,19 +327,19 @@ impl<S, L> Session<S, L> {
         else if(name == "explain") {
             let component = text_of(field(&args, "component"));
             let infos = app.system_infos();
-            let mut lines = [];
+            let mut lines = Vec::new();
             let mut i = 0;
             while({ i < len_at(&infos) }) {
                 let info = &infos[i];
                 if(std::vec::contains(info.writes(), component)) {
                     let reads = info.reads();
-                    push_at(&mut lines, "`" ++ component ++ "` is written by `" ++ info.name ++ "`; reads: " ++ (if(len_at(&reads) == 0) { "-" } else { join(clone(&reads), ", ") }));
+                    Vec::push(&mut lines, "`" ++ component ++ "` is written by `" ++ info.name ++ "`; reads: " ++ (if(len_at(&reads) == 0) { "-" } else { join(clone(&reads), ", ") }));
                     let mut r = 0;
                     while({ r < len_at(&reads) }) {
                         let mut j = 0;
                         while({ j < len_at(&infos) }) {
                             let other = &infos[j];
-                            if(std::vec::contains(other.writes(), reads[r])) { push_at(&mut lines, "  `" ++ reads[r] ++ "` is written by `" ++ other.name ++ "`; reads: " ++ (if(len_at(&other.reads()) == 0) { "-" } else { join(other.reads(), ", ") })) } else { () };
+                            if(std::vec::contains(other.writes(), reads[r])) { Vec::push(&mut lines, "  `" ++ reads[r] ++ "` is written by `" ++ other.name ++ "`; reads: " ++ (if(len_at(&other.reads()) == 0) { "-" } else { join(other.reads(), ", ") })) } else { () };
                             j = j + 1
                         };
                         r = r + 1
@@ -371,7 +372,7 @@ impl<S, L> Session<S, L> {
                 // (A copy of the world to go back to; the edits made, the
                 // frames run, what came of it said, and the world put back.)
                 let saved = app.world.snapshot();
-                let mut edited = [];
+                let mut edited = Vec::new();
                 match(field(&args, "edits")) {
                     Some(list) => match(list) {
                         JArr(edits) =>
@@ -379,7 +380,7 @@ impl<S, L> Session<S, L> {
                             while({ k < len_at(edits) }) {
                                 let edit = &edits[k];
                                 match(entity_named(&app.world, text_of(field(edit, "entity")))) {
-                                    Some(e) => discard(set_field(&mut app.world, e, text_of(field(edit, "component")), text_of(field(edit, "field")), text_of(field(edit, "value")))); push_at(&mut edited, e),
+                                    Some(e) => discard(set_field(&mut app.world, e, text_of(field(edit, "component")), text_of(field(edit, "field")), text_of(field(edit, "value")))); Vec::push(&mut edited, e),
                                     None => ()
                                 };
                                 k = k + 1
@@ -391,12 +392,12 @@ impl<S, L> Session<S, L> {
                 let mut k = 0;
                 while({ k < frames }) { let f = session.emits[at]; f(app); k = k + 1 };
                 let names = app.world.component_names();
-                let mut lines = ["after " ++ show(frames) ++ " frame(s) of `" ++ label ++ "`:"];
+                let mut lines = Vec::from_array(["after " ++ show(frames) ++ " frame(s) of `" ++ label ++ "`:"]);
                 let mut i = 0;
                 while({ i < len_at(&edited) }) {
                     let mut n = 0;
                     while({ n < len_at(&names) }) {
-                        match(describe_component(&app.world, edited[i], names[n])) { Some(d) => push_at(&mut lines, names[n] ++ ": " ++ value_text(&d)), None => () };
+                        match(describe_component(&app.world, edited[i], names[n])) { Some(d) => Vec::push(&mut lines, names[n] ++ ": " ++ value_text(&d)), None => () };
                         n = n + 1
                     };
                     i = i + 1

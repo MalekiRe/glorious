@@ -50,6 +50,8 @@ use ecs::{App, World, Entity, Query, Single, Added, Changed, With, Or, chain, pa
 use core::value::Default;
 use std::vec::{map, sort};
 
+use std::vec::{Vec};
+
 struct Update
 struct Value(Int)
 struct Tag
@@ -57,10 +59,10 @@ struct Gate
 struct Count(Int)
 struct Other(Int)
 
-fn values(q: &mut Query<(&Value,), (Changed<Value>,)>) -> [Int] {
-    let mut out = [];
-    q.for_each() { (v,) => out = push(out, v.0); };
-    std::vec::Vec::into_array(sort(out))
+fn values(q: &mut Query<(&Value,), (Changed<Value>,)>) -> Vec<Int> {
+    let mut out = Vec::new();
+    q.for_each() { (v,) => Vec::push(&mut out, v.0); };
+    (sort(out))
 }
 
 // `skipped_single_and_conditions_do_not_consume_pending_changes`
@@ -83,8 +85,8 @@ fn skipped() {
 
 // `row_filters_compose_and_single_counts_only_matching_rows`
 fn changed_or_tagged(q: &mut Query<(&Value,), (Or<(Changed<Value>, With<Tag>)>,)>) {
-    let mut out = [];
-    q.for_each() { (v,) => out = push(out, v.0); };
+    let mut out = Vec::new();
+    q.for_each() { (v,) => Vec::push(&mut out, v.0); };
     say(sort(out))
 }
 fn bump(single: &mut Single<(&mut Value,), (Changed<Value>,)>) {
@@ -119,13 +121,13 @@ fn replaced() {
     discard(app.world.spawn_bundle((Tag,)));
     discard(app.world.spawn_bundle((Value(2),)));
     app.emit(&Update);
-    say(match(app.world.resource<Count>()) { Some(c) => [c.0 / 10, c.0 % 10], None => [] })
+    say(match(app.world.resource<Count>()) { Some(c) => Vec::from_array([c.0 / 10, c.0 % 10]), None => Vec::new() })
 }
 
 // `cached_matches_follow_new_tables_growth_and_repopulated_empty_tables`
 fn all_values(q: &mut Query<(&Value,), ()>) {
-    let mut out = [];
-    q.for_each() { (v,) => out = push(out, v.0); };
+    let mut out = Vec::new();
+    q.for_each() { (v,) => Vec::push(&mut out, v.0); };
     let n = len_at(&out);
     if(n > 3) { say(n) } else { say(sort(out)) }
 }
@@ -137,8 +139,8 @@ fn cached() {
     discard(app.world.despawn(original));
     app.emit(&Update);
     let mut i = 2;
-    let mut batch = [];
-    while({ i < 34 }) { batch = push(batch, (Value(i),)); i = i + 1 };
+    let mut batch = Vec::new();
+    while({ i < 34 }) { Vec::push(&mut batch, (Value(i),)); i = i + 1 };
     discard(app.world.spawn_batch(batch));
     discard(app.world.spawn_bundle((Value(34), Tag)));
     discard(app.world.spawn_bundle((Gate,)));

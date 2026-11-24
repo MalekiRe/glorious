@@ -33,10 +33,12 @@ mod ecs;
 use ecs::{App, World, Entity, Query, Single, Local, With, chain, parallel, run_if};
 use std::thread::{AtomicInt, load, fetch_add};
 
+use std::vec::{Vec};
+
 struct Update
 struct Position(Int)
 struct Velocity(Int)
-struct Log([Int])
+struct Log(Vec<Int>)
 struct Enabled(Bool)
 struct Tag
 
@@ -45,7 +47,7 @@ fn update(calls: &mut Local<Int>, p: &mut Single<(&mut Position,), ()>, v: &mut 
     let by = match(v.get_mut()) { Some((v,)) => v.0, None => 0 };
     match(p.get_mut()) { Some((mut p,)) => p.0 = p.0 + by;, None => () };
     let n = calls.0;
-    match(log.get_mut()) { Some((mut l,)) => push_at(&mut l.0, n);, None => () }
+    match(log.get_mut()) { Some((mut l,)) => Vec::push(&mut l.0, n);, None => () }
 }
 fn condition(calls: &mut Local<Int>, enabled: &mut Single<(&Enabled,), (With<Tag>,)>) -> Bool {
     calls.0 = calls.0 + 1;
@@ -55,7 +57,7 @@ fn condition(calls: &mut Local<Int>, enabled: &mut Single<(&Enabled,), (With<Tag
 fn record(calls: &mut Local<Int>, log: &mut Single<(&mut Log,), ()>) {
     calls.0 = calls.0 + 1;
     let n = calls.0;
-    match(log.get_mut()) { Some((mut l,)) => push_at(&mut l.0, n);, None => () }
+    match(log.get_mut()) { Some((mut l,)) => Vec::push(&mut l.0, n);, None => () }
 }
 fn bump(p: &mut Single<(&mut Position,), ()>) { match(p.get_mut()) { Some((mut p,)) => p.0 = p.0 + 10;, None => () } }
 fn faster(q: &mut Query<(&mut Velocity,), ()>) { q.for_each() { (mut v,) => v.0 = v.0 + 1; } }
@@ -72,7 +74,7 @@ fn main() -> Int {
     let mut app = App::new().register<Position>().register<Velocity>().register<Log>()
         .add_systems(Update, (update, fn() { let s = seen; discard(fetch_add(&s, 1)) }).chain())
         .build();
-    let log = app.world.spawn_bundle((Log([]),));
+    let log = app.world.spawn_bundle((Log(Vec::new()),));
     app.emit(&Update);
     let p = app.world.spawn_bundle((Position(1),));
     app.emit(&Update);
@@ -103,7 +105,7 @@ fn main() -> Int {
     let mut app = App::new().register<Log>().register<Enabled>().register<Tag>()
         .add_systems(Update, (record, record).chain().run_if(condition))
         .build();
-    let log = app.world.spawn_bundle((Log([]),));
+    let log = app.world.spawn_bundle((Log(Vec::new()),));
     app.emit(&Update);
     let enabled = app.world.spawn_bundle((Enabled(true),));
     app.emit(&Update);

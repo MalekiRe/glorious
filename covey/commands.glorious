@@ -11,11 +11,13 @@ mod ecs;
 
 use ecs::{App, World, Entity, Column, Commands, chain};
 
+use std::vec::{Vec};
+
 struct Update
 struct Spawner
 struct Value(Int)
 struct Link(Entity)
-struct Seen([Int])
+struct Seen(Vec<Int>)
 
 fn spawn_pair<S>(spawners: &Column<Spawner>, commands: &mut Commands<S>) {
     let child = commands.spawn((Value(1),));
@@ -25,7 +27,7 @@ fn spawn_pair<S>(spawners: &Column<Spawner>, commands: &mut Commands<S>) {
 
 // Runs in the same emit: the spawns are not applied yet.
 fn look(values: &Column<Value>, seen: &mut Seen) {
-    push_at(&mut seen.0, len_at(&values.dense))
+    Vec::push(&mut seen.0, len_at(&values.dense))
 }
 
 fn main() -> Int {
@@ -33,7 +35,7 @@ fn main() -> Int {
         .register<Value>()
         .register<Link>()
         .register<Spawner>()
-        .insert_resource(Seen([]))
+        .insert_resource(Seen(Vec::new()))
         .add_systems(Update, (spawn_pair, look).chain())
         .build();
     app.world.spawn_bundle((Spawner,));

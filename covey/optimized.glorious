@@ -44,6 +44,8 @@ mod ecs;
 use ecs::{App, World, Entity, Query, Changed, With, Without, Or, Sparse, Summarized, ExecutionMode};
 use std::vec::sort;
 
+use std::vec::{Vec};
+
 struct Update
 struct Tag(Int)
 struct Number(Int)
@@ -52,17 +54,17 @@ struct Label(Str)
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 
 fn changed_numbers(q: &mut Query<(&Number,), (Changed<Number>,)>) {
-    let mut out = [];
-    q.for_each() { (n,) => out = push(out, n.0); };
+    let mut out = Vec::new();
+    q.for_each() { (n,) => Vec::push(&mut out, n.0); };
     say(sort(out))
 }
 fn tagged_or_changed(q: &mut Query<(&Number,), (Or<(With<Tag>, Changed<Number>)>,)>) { say(q.count()) }
 
 fn main() -> Int {
     let mut world = App::new().register<Number>().register<Tag>().build().into_world();
-    let mut batch = [];
+    let mut batch = Vec::new();
     let mut i = 0;
-    while({ i < 12 }) { batch = push(batch, (Number(i),)); i = i + 1 };
+    while({ i < 12 }) { Vec::push(&mut batch, (Number(i),)); i = i + 1 };
     let entities = world.spawn_batch(batch);
     let mut i = 3;
     while({ i < 7 }) { discard(world.insert(entities[i], Tag(1))); i = i + 1 };
@@ -71,9 +73,9 @@ fn main() -> Int {
     say("--");
 
     let mut world = App::new().register<Number>().register<Tag>().storage<Sparse<Tag>>().build().into_world();
-    let mut batch = [];
+    let mut batch = Vec::new();
     let mut i = 0;
-    while({ i < 32 }) { batch = push(batch, (Number(i),)); i = i + 1 };
+    while({ i < 32 }) { Vec::push(&mut batch, (Number(i),)); i = i + 1 };
     let entities = world.spawn_batch(batch);
     let mut kept = true;
     let mut i = 0;
@@ -91,8 +93,8 @@ fn main() -> Int {
     flag(if(fresh.index == stale.index) { fresh.generation != stale.generation } else { true });
     flag(world.contains(stale));
     say(match(world.get<Number>(fresh)) { Some(n) => n.0, None => 0 });
-    let mut values = [];
-    world.query<(&Number,)>().for_each() { (n,) => values = push(values, n.0); };
+    let mut values = Vec::new();
+    world.query<(&Number,)>().for_each() { (n,) => Vec::push(&mut values, n.0); };
     flag(len_at(&values) == 32);
     say("--");
 
@@ -117,9 +119,9 @@ fn main() -> Int {
         .with_execution_mode(ExecutionMode::Serial)
         .add_systems(Update, changed_numbers)
         .build();
-    let mut batch = [];
+    let mut batch = Vec::new();
     let mut i = 0;
-    while({ i < 6 }) { batch = push(batch, (Number(i),)); i = i + 1 };
+    while({ i < 6 }) { Vec::push(&mut batch, (Number(i),)); i = i + 1 };
     let entities = app.world.spawn_batch(batch);
     app.emit(&Update);
     app.emit(&Update);
@@ -136,9 +138,9 @@ fn main() -> Int {
         .storage<(Summarized<Number>, Sparse<Tag>)>()
         .add_systems(Update, tagged_or_changed)
         .build();
-    let mut batch = [];
+    let mut batch = Vec::new();
     let mut i = 0;
-    while({ i < 6 }) { batch = push(batch, (Number(i),)); i = i + 1 };
+    while({ i < 6 }) { Vec::push(&mut batch, (Number(i),)); i = i + 1 };
     let entities = app.world.spawn_batch(batch);
     discard(app.world.insert(entities[1], Tag(1)));
     discard(app.world.insert(entities[4], Tag(4)));

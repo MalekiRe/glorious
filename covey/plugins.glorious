@@ -33,6 +33,7 @@ mod ecs;
 use ecs::{App, World, Entity, Commands, Query, Local, With, Changed, Plugin, Sparse, Summarized, ChildOf, OnAdd, AsyncWorld, Bridge, Schedule,
           exclusive, parallel, keep};
 use std::vec::sort;
+use std::vec::{Vec};
 
 struct Update
 struct Never
@@ -119,8 +120,8 @@ fn main() -> Int {
     app.emit(&Update);
     app.emit(&Never);
     app.emit(&Update);
-    let mut movers = [];
-    app.world.query<(&Pos, &Vel)>().for_each() { p, v => movers = push(movers, (p.0, v.0)); };
+    let mut movers = Vec::new();
+    app.world.query<(&Pos, &Vel)>().for_each() { p, v => Vec::push(&mut movers, (p.0, v.0)); };
     say(sort(movers));
     say(match(app.world.get<Spawned>(counter)) { Some(s) => s.0, None => 0 });
     say("--");

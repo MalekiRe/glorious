@@ -24,6 +24,8 @@ mod ecs;
 use ecs::{App, World, Entity, Query, Single, With, Without, Or, exclusive, chain};
 use std::vec::sort;
 
+use std::vec::{Vec};
+
 struct Update
 struct Position(Int)
 struct Tag
@@ -31,10 +33,10 @@ struct Other
 struct Global
 struct Value(Int)
 
-fn shown(values: [Int]) -> Str { std::text::join(std::vec::map(sort(values), fn(v: Int) -> Str { show(v) }), " ") }
+fn shown(values: Vec<Int>) -> Str { std::text::join(std::vec::map(sort(values), fn(v: Int) -> Str { show(v) }), " ") }
 fn values<F, S>(world: &mut World<S>) -> Str where S: ecs::Get<Position>, S: ecs::Hidden<(&Position,), F>, F: ecs::Only<S> {
-    let mut out = [];
-    world.query_filtered<(&Position,), F>().for_each() { (p,) => out = push(out, p.0); };
+    let mut out = Vec::new();
+    world.query_filtered<(&Position,), F>().for_each() { (p,) => Vec::push(&mut out, p.0); };
     shown(out)
 }
 

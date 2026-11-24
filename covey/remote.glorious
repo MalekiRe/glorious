@@ -73,6 +73,8 @@ use core::iter::{into_iter, next};
 use ecs::{App, World, Entity, Commands, Query, Single, With, Remote, BridgeError, Schedule, sync_point, waits, parallel, chain};
 use std::thread::{scope, Scope, Threads, join, yield_now, AtomicInt, load, store, fetch_add};
 
+use std::vec::{Vec};
+
 struct Update
 struct Net
 // (An envelope point: what its bridges ask is done when the emit ends.)
@@ -137,12 +139,12 @@ fn main() -> Int {
         let flight = Flight { now: (AtomicInt::new(0)), most: (AtomicInt::new(0)) };
         scope(fn(s: &Scope) / {Threads} {
             let mut side = 0;
-            let mut workers = [];
+            let mut workers = Vec::new();
             while({ side < 2 }) {
                 let mine = remote.share();
                 let f = Flight { now: std::thread::share(&flight.now), most: std::thread::share(&flight.most) };
                 let k = case;
-                workers = push(workers, s.spawn({
+                Vec::push(&mut workers, s.spawn({
                     let mut m = mine;
                     let g = f;
                     if(k == 0) { discard(m.bridge(Net, fn(q: &mut Query<(&mut A,), ()>) { let h = g; enter(&h) })) }
@@ -330,13 +332,13 @@ fn main() -> Int {
     let finished = AtomicInt::new(0);
     let right = AtomicInt::new(0);
     scope(fn(s: &Scope) / {Threads} {
-        let mut workers = [];
+        let mut workers = Vec::new();
         let mut k = 0;
         while({ k < 4 }) {
             let mine = remote.share();
             let f = std::thread::share(&finished);
             let r = std::thread::share(&right);
-            workers = push(workers, s.spawn({
+            Vec::push(&mut workers, s.spawn({
                 let m = mine;
                 let ff = f;
                 let rr = r;

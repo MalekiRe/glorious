@@ -10,6 +10,8 @@ mod ecs;
 
 use ecs::{App, World, Entity, Query};
 
+use std::vec::{Vec};
+
 struct Position(Int)
 struct Velocity(Int)
 struct Update
@@ -17,25 +19,25 @@ struct Update
 fn integrate(query: &mut Query<(&mut Position, &Velocity), ()>) { query.for_each() { mut position, velocity => position.0 = position.0 + velocity.0; } }
 
 // What the loop means: add, and say when each was changed.
-fn ideal(positions: &mut [Int], velocities: &[Int], changed: &mut [Int], tick: Int) {
+fn ideal(positions: &mut Vec<Int>, velocities: &Vec<Int>, changed: &mut Vec<Int>, tick: Int) {
     let mut i = 0;
     while({ i < len_at(positions) }) { positions[i] = positions[i] + velocities[i]; changed[i] = tick; i = i + 1 }
 }
 
 fn main() -> Int {
     let n = 256;
-    let mut positions = [];
-    let mut velocities = [];
-    let mut changed = [];
+    let mut positions = Vec::new();
+    let mut velocities = Vec::new();
+    let mut changed = Vec::new();
     let mut i = 0;
-    while({ i < n }) { push_at(&mut positions, i); push_at(&mut velocities, 1); push_at(&mut changed, 0); i = i + 1 };
+    while({ i < n }) { Vec::push(&mut positions, i); Vec::push(&mut velocities, 1); Vec::push(&mut changed, 0); i = i + 1 };
     let mut tick = 0;
     while({ tick < 10 }) { ideal(&mut positions, &velocities, &mut changed, tick); tick = tick + 1 };
 
     let mut app = App::new().register<Position>().register<Velocity>().add_systems(Update, integrate).build();
-    let mut es = [];
+    let mut es = Vec::new();
     let mut k = 0;
-    while({ k < n }) { push_at(&mut es, app.world.spawn_bundle((Position(k), Velocity(1)))); k = k + 1 };
+    while({ k < n }) { Vec::push(&mut es, app.world.spawn_bundle((Position(k), Velocity(1)))); k = k + 1 };
     let mut f = 0;
     while({ f < 10 }) { app.emit(&Update); f = f + 1 };
     let mut agree = true;

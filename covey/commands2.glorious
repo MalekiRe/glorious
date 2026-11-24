@@ -22,6 +22,8 @@ mod ecs;
 
 use ecs::{App, World, Entity, Commands, Query, parallel};
 
+use std::vec::{Vec};
+
 struct Update
 struct Value(Int)
 struct Link(Entity)
@@ -51,9 +53,9 @@ fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 fn main() -> Int {
     let mut app = App::new().register<Value>().add_systems(Update, parallel((first, second))).build();
     app.emit(&Update);
-    let mut values = [];
+    let mut values = Vec::new();
     let mut lowest = 1000;
-    app.world.query<(&Value,)>().for_each() { (v,) => values = push(values, v.0); if(v.0 < lowest) { lowest = v.0 }; };
+    app.world.query<(&Value,)>().for_each() { (v,) => Vec::push(&mut values, v.0); if(v.0 < lowest) { lowest = v.0 }; };
     say(len_at(&values));
     say(lowest);
     say(fold(values, 0, fn(sum: Int, v: Int) -> Int { sum + v }));

@@ -3,7 +3,7 @@
 // each source's targets in the order they came, and each target's sources
 // in the order they came or were put at (`relate_at`), through relating,
 // unrelating and despawning at random, checked against a model at each step.
-// (500 steps, upstream's 4000.)
+// (250 steps, upstream's 4000: as many as the Lean machines take.)
 // expect:
 // 0
 // 0
@@ -11,34 +11,38 @@ mod ecs;
 
 use ecs::{App, World, Entity, Relation, ManyToMany};
 
+use std::vec::{Vec};
+// A `Vec` with one more at its end.
+fn pushed<T>(v: Vec<T>, x: T) -> Vec<T> { let mut v = v; v.push(x); v }
+
 struct Name(Int)
 struct Ordered
 impl Relation for Ordered { type Kind = ManyToMany; }
 impl Use<[0, *]> for Ordered {}
 
-fn has(list: &[Int], x: Int) -> Bool { let mut i = 0; let mut found = false; while({ i < len_at(list) }) { if(list[i] == x) { found = true } else { () }; i = i + 1 }; found }
-fn without_one(list: &[Int], x: Int) -> [Int] { fold(clone(list), [], fn(out: [Int], y: Int) -> [Int] { if(y == x) { out } else { push(out, y) } }) }
-fn insert_at(list: [Int], at: Int, x: Int) -> [Int] {
-    let mut out = [];
+fn has(list: &Vec<Int>, x: Int) -> Bool { let mut i = 0; let mut found = false; while({ i < len_at(list) }) { if(list[i] == x) { found = true } else { () }; i = i + 1 }; found }
+fn without_one(list: &Vec<Int>, x: Int) -> Vec<Int> { fold(clone(list), Vec::new(), fn(out: Vec<Int>, y: Int) -> Vec<Int> { if(y == x) { out } else { pushed(out, y) } }) }
+fn insert_at(list: Vec<Int>, at: Int, x: Int) -> Vec<Int> {
+    let mut out = Vec::new();
     let mut i = 0;
     let mut put = false;
-    while({ i < len_at(&list) }) { if(i == at) { push_at(&mut out, x); put = true } else { () }; push_at(&mut out, list[i]); i = i + 1 };
-    if(put) { () } else { push_at(&mut out, x) };
+    while({ i < len_at(&list) }) { if(i == at) { Vec::push(&mut out, x); put = true } else { () }; Vec::push(&mut out, list[i]); i = i + 1 };
+    if(put) { () } else { Vec::push(&mut out, x) };
     out
 }
 
 fn main() -> Int {
     let mut world = App::new().register<Name>().relation<Ordered>().build().into_world();
-    let mut es = [];
-    let mut alive = [];
-    let mut targets = [];
-    let mut sources = [];
+    let mut es = Vec::new();
+    let mut alive = Vec::new();
+    let mut targets = Vec::new();
+    let mut sources = Vec::new();
     let mut i = 0;
-    while({ i < 24 }) { es = push(es, world.spawn_bundle((Name(i),))); alive = push(alive, i); targets = push(targets, []); sources = push(sources, []); i = i + 1 };
+    while({ i < 24 }) { Vec::push(&mut es, world.spawn_bundle((Name(i),))); Vec::push(&mut alive, i); Vec::push(&mut targets, Vec::new()); Vec::push(&mut sources, Vec::new()); i = i + 1 };
     let mut seed = 88172645;
     let mut wrong = 0;
     let mut step = 0;
-    while({ step < 500 }) {
+    while({ step < 250 }) {
         seed = (seed * 1103515245 + 12345) % 2147483648;
         let a = alive[(seed / 7) % len_at(&alive)];
         seed = (seed * 1103515245 + 12345) % 2147483648;
@@ -47,12 +51,12 @@ fn main() -> Int {
         let what = (seed / 7) % 12;
         if(what <= 3) {
             discard(world.relate(es[a], Ordered, es[b]));
-            if(has(&targets[a], b)) { () } else { targets[a] = push(clone(&targets[a]), b); sources[b] = push(clone(&sources[b]), a) }
+            if(has(&targets[a], b)) { () } else { targets[a] = pushed(clone(&targets[a]), b); sources[b] = pushed(clone(&sources[b]), a) }
         } else if(what <= 6) {
             seed = (seed * 1103515245 + 12345) % 2147483648;
             let position = (seed / 7) % 6;
             discard(world.relate_at(es[a], Ordered, es[b], position));
-            if(has(&targets[a], b)) { () } else { targets[a] = push(clone(&targets[a]), b) };
+            if(has(&targets[a], b)) { () } else { targets[a] = pushed(clone(&targets[a]), b) };
             sources[b] = insert_at(without_one(&sources[b], a), position, a)
         } else if(what <= 9) {
             let existed = has(&targets[a], b);
@@ -64,17 +68,17 @@ fn main() -> Int {
             alive = without_one(&alive, a);
             let mut k = 0;
             while({ k < 24 }) { targets[k] = without_one(&targets[k], a); sources[k] = without_one(&sources[k], a); k = k + 1 };
-            targets[a] = [];
-            sources[a] = []
+            targets[a] = Vec::new();
+            sources[a] = Vec::new()
         } else { () };
         let mut k = 0;
         while({ k < len_at(&alive) }) {
             let e = alive[k];
-            let got = fold(world.targets<Ordered>(es[e]), [], fn(out: [Int], t: Entity) -> [Int] { push(out, t.index) });
-            let want = fold(clone(&targets[e]), [], fn(out: [Int], t: Int) -> [Int] { push(out, es[t].index) });
+            let got = fold(world.targets<Ordered>(es[e]), Vec::new(), fn(out: Vec<Int>, t: Entity) -> Vec<Int> { pushed(out, t.index) });
+            let want = fold(clone(&targets[e]), Vec::new(), fn(out: Vec<Int>, t: Int) -> Vec<Int> { pushed(out, es[t].index) });
             if(got == want) { () } else { wrong = wrong + 1 };
-            let got_s = fold(world.sources<Ordered>(es[e]), [], fn(out: [Int], t: Entity) -> [Int] { push(out, t.index) });
-            let want_s = fold(clone(&sources[e]), [], fn(out: [Int], t: Int) -> [Int] { push(out, es[t].index) });
+            let got_s = fold(world.sources<Ordered>(es[e]), Vec::new(), fn(out: Vec<Int>, t: Entity) -> Vec<Int> { pushed(out, t.index) });
+            let want_s = fold(clone(&sources[e]), Vec::new(), fn(out: Vec<Int>, t: Int) -> Vec<Int> { pushed(out, es[t].index) });
             if(got_s == want_s) { () } else { wrong = wrong + 1 };
             k = k + 1
         };

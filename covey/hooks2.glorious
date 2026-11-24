@@ -22,6 +22,8 @@ use core::option::{is_some, is_none};
 
 use ecs::{App, World, Entity, Commands, Query, OnAdd};
 
+use std::vec::{Vec};
+
 struct Update
 struct Health(Int)
 struct Marker
@@ -47,8 +49,8 @@ fn main() -> Int {
     let direct = app.spawn_bundle((Health(1),));
     flag(is_some(app.world.get<Marker>(direct)));
     app.emit(&Update);
-    let mut seen = [];
-    app.world.query<(&Health, &Marker)>().for_each() { h, _ => seen = push(seen, h.0); };
+    let mut seen = Vec::new();
+    app.world.query<(&Health, &Marker)>().for_each() { h, _ => Vec::push(&mut seen, h.0); };
     say(sort(seen));
 
     let mut world = App::new().register<Health>().register<Marker>().build().into_world();

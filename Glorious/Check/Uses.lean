@@ -939,7 +939,7 @@ def pathUsesWith (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body)
       -- What the body yields leaves the region being counted.
       ns := (n + (← escapes ctx 8 v)) :: ns
     pure (ctx.fold ns)
-  match count.run { fuel := 20000 } with
+  match count.run { fuel := 200000 } with
   | some (n, s) => (some n, s.followed)
   -- (Not finished: what it would have read is not known.)
   | none => (none, #["*"])
@@ -961,7 +961,7 @@ def usesBeforeProbeWith (ctx : ACtx) (outer : List String) (x : String) (b : Fla
         if holdsProbe v then
           worst := max worst (n + (← escapes { ctx with lenient := true } 8 v))
     pure worst
-  match count.run { fuel := 20000 } with
+  match count.run { fuel := 200000 } with
   | some (n, s) => (some n, s.followed)
   | none => (none, #["*"])
 

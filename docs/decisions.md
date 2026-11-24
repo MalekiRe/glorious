@@ -7800,6 +7800,28 @@ Not done: a method call on a plain `let` whose type's own function borrows
 it, where a function of the name in scope takes it whole (`let v = ..;
 v.len(); eat(v)`), counts as a use of it; `let mut v` is not.
 
+## The suite in parts: the Rust VM every time, the Lean machines in turn
+
+Every program is compiled and run on the Rust VM (its x86-64 backend) every
+run, and what it gives held to what it should; the Lean machines, the
+reference semantics, are slow (the ECS examples, 80 to 110 s each there).
+`GLORIOUS_SLOW=n`: of the examples the Lean machines took over 30 s with
+the last time they ran them (`library/selftest-slow`, by text), one in
+every `n`, another part each run (`library/selftest-slow-part`), is run on
+them; the others on the VM alone, and where the compiler refuses one, what
+it says is still held to what it should. With `GLORIOUS_COVEY=n` too, a
+quick run (`GLORIOUS_COVEY=4 GLORIOUS_SLOW=4`) took 52 to 58 s against 125
+s for all; the whole suite, every program on every machine, runs before a
+push. What is left of a quick run's time is compiling the ECS programs, each
+on its own, side by side on every core.
+
+Tried and undone: the ECS examples compiled after the whole library, the
+first alone, what it kept of `ecs` where every other started (with the
+library modules each names, what comes before `ecs` differs from program to
+program, and `ecs` is checked anew for each, 25 s apiece on its own). A
+quick run took no less, and eight ECS programs then ran out of steps on the
+Lean machines.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

@@ -18,6 +18,8 @@ mod ecs;
 
 use ecs::{App, World, Entity, Relation, OneToMany, From, Linked, to};
 
+use std::vec::{Vec};
+
 struct Name(Int)
 struct Child
 impl Relation for Child { type Kind = OneToMany; }
@@ -25,11 +27,11 @@ impl Linked for Child { const LINKED: Bool = true; }
 impl Eq for Child { fn ==(a: Child, b: Child) -> Bool { true } }
 impl Clone for Child { fn clone(c: &Child) -> Child { Child } }
 
-fn names<S>(world: &mut World<S>, parent: Entity) -> [Int]
+fn names<S>(world: &mut World<S>, parent: Entity) -> Vec<Int>
     where S: ecs::Get<Name>, S: ecs::Get<ecs::Sources<Child>>, S: ecs::Hidden<(From<Child, &Name>,), ()>, S: ecs::Hidden<&Name, ()> {
     match(world.query<(From<Child, &Name>,)>().get_mut(parent)) {
-        Some((kids,)) => let mut out = []; let mut i = 0; while({ i < len_at(&kids) }) { out = push(out, kids[i].0); i = i + 1 }; out,
-        None => []
+        Some((kids,)) => let mut out = Vec::new(); let mut i = 0; while({ i < len_at(&kids) }) { Vec::push(&mut out, kids[i].0); i = i + 1 }; out,
+        None => Vec::new()
     }
 }
 
@@ -37,9 +39,9 @@ fn main() -> Int {
     let mut world = App::new().relation<Child>().register<Name>().build().into_world();
     let root = world.spawn_bundle((Name(100),));
     let other = world.spawn_bundle((Name(200),));
-    let mut kids = [];
+    let mut kids = Vec::new();
     let mut i = 0;
-    while({ i < 5 }) { kids = push(kids, world.spawn_bundle((Name(i), Child.to(root)))); i = i + 1 };
+    while({ i < 5 }) { Vec::push(&mut kids, world.spawn_bundle((Name(i), Child.to(root)))); i = i + 1 };
     say(names(&mut world, root));
     discard(world.despawn(kids[1]));
     say(names(&mut world, root));

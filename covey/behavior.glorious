@@ -49,25 +49,29 @@ use std::vec::range;
 use ecs::{App, World, Entity, Query};
 use std::thread::{Shared, Mutex, lock};
 
+use std::vec::{Vec};
+// A `Vec` with one more at its end.
+fn pushed<T>(v: Vec<T>, x: T) -> Vec<T> { let mut v = v; v.push(x); v }
+
 struct Position(Int)
 struct Velocity(Int)
 struct Tag
 
-struct Owned { id: Int, drops: Mutex<[Int]> }
+struct Owned { id: Int, drops: Mutex<Vec<Int>> }
 impl Drop for Owned {
-    fn drop(o: &mut Owned) { lock(&o.drops, fn(d: &mut [Int]) { d[o.id] = d[o.id] + 1 }) }
+    fn drop(o: &mut Owned) { lock(&o.drops, fn(d: &mut Vec<Int>) { d[o.id] = d[o.id] + 1 }) }
 }
 
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 fn owned_id(r: &Owned) -> Int { r.id }
 fn id_of(o: &Option<Owned>) -> Int { match(o) { Some(r) => owned_id(r), None => 0 - 1 } }
-fn counted(drops: &Mutex<[Int]>, at: Int) -> Int { lock(&*drops, fn(d: &mut [Int]) -> Int { d[at] }) }
+fn counted(drops: &Mutex<Vec<Int>>, at: Int) -> Int { lock(&*drops, fn(d: &mut Vec<Int>) -> Int { d[at] }) }
 
 fn main() -> Int {
     let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().build().into_world();
-    let mut entities = [];
+    let mut entities = Vec::new();
     let mut i = 0;
-    while({ i < 96 }) { entities = push(entities, world.spawn_bundle(())); i = i + 1 };
+    while({ i < 96 }) { Vec::push(&mut entities, world.spawn_bundle(())); i = i + 1 };
     let mut i = 0;
     while({ i < 96 }) {
         let e = entities[i];
@@ -124,14 +128,14 @@ fn main() -> Int {
     say(match(second.get<Int>(b)) { Some(n) => *n, None => 0 });
     say("--");
 
-    let drops = (Mutex::new(fold(range(0, 65), [], fn(out: [Int], i: Int) -> [Int] { push(out, 0) })));
+    let drops = (Mutex::new(fold(range(0, 65), Vec::new(), fn(out: Vec<Int>, i: Int) -> Vec<Int> { pushed(out, 0) })));
     let mut world = App::new().register<Owned>().register<Tag>().build().into_world();
-    let mut owned = [];
+    let mut owned = Vec::new();
     let mut id = 0;
     while({ id < 64 }) {
         let e = world.spawn_bundle(());
         discard(world.insert(e, Owned { id: id, drops: std::thread::share(&drops) }));
-        owned = push(owned, e);
+        Vec::push(&mut owned, e);
         id = id + 1
     };
     let mut i = 0;
@@ -163,4 +167,4 @@ fn main() -> Int {
 }
 
 fn not_b(b: Bool) -> Bool { if(b) { false } else { true } }
-fn map_entities<S>(world: &World<S>) -> [Int] { fold(ecs::entities(world), [], fn(out: [Int], e: Entity) -> [Int] { push(out, e.index) }) }
+fn map_entities<S>(world: &World<S>) -> Vec<Int> { fold(ecs::entities(world), Vec::new(), fn(out: Vec<Int>, e: Entity) -> Vec<Int> { pushed(out, e.index) }) }

@@ -16,6 +16,8 @@ mod ecs;
 use ecs::{App, World, Entity, Query, Single, Relation, OneToMany, Relates, Relinked, to};
 use std::vec::sort;
 
+use std::vec::{Vec};
+
 struct Update
 struct Name(Int)
 struct DockedAt { berth: Int }
@@ -24,19 +26,19 @@ struct InSquad
 impl Relation for InSquad { type Kind = OneToMany; }
 impl Eq for InSquad { fn ==(a: InSquad, b: InSquad) -> Bool { true } }
 impl Clone for InSquad { fn clone(s: &InSquad) -> InSquad { InSquad } }
-struct Seen([Str])
+struct Seen(Vec<Str>)
 
 fn watch(docked: &mut Query<(&Name,), (Relinked<DockedAt>,)>, squads: &mut Query<(&Name,), (Relinked<InSquad>,)>, seen: &mut Single<(&mut Seen,), ()>) {
-    let mut all = [];
-    docked.for_each() { (n,) => all = push(all, n.0); };
-    squads.for_each() { (n,) => all = push(all, n.0 + 100); };
+    let mut all = Vec::new();
+    docked.for_each() { (n,) => Vec::push(&mut all, n.0); };
+    squads.for_each() { (n,) => Vec::push(&mut all, n.0 + 100); };
     let line = std::text::join(std::vec::map(sort(all), fn(v: Int) -> Str { show(v) }), " ");
-    match(seen.get_mut()) { Some((mut s,)) => push_at(&mut s.0, line);, None => () }
+    match(seen.get_mut()) { Some((mut s,)) => Vec::push(&mut s.0, line);, None => () }
 }
 
 fn main() -> Int {
     let mut app = App::new().register<Name>().register<Seen>().relation<DockedAt>().relation<InSquad>().add_systems(Update, watch).build();
-    let seen = app.world.spawn_bundle((Seen([]),));
+    let seen = app.world.spawn_bundle((Seen(Vec::new()),));
     let a = app.world.spawn_bundle((Name(10),));
     let b = app.world.spawn_bundle((Name(11),));
     let ship0 = app.world.spawn_bundle((Name(1), DockedAt { berth: 0 }.to(a)));
@@ -53,7 +55,7 @@ fn main() -> Int {
     app.emit(&Update);
     discard(app.world.despawn(b));
     app.emit(&Update);
-    let lines = match(app.world.get<Seen>(seen)) { Some(s) => clone(&s.0), None => [] };
+    let lines = match(app.world.get<Seen>(seen)) { Some(s) => clone(&s.0), None => Vec::new() };
     let mut i = 0;
     while({ i < len_at(&lines) }) { say(lines[i]); i = i + 1 };
     0

@@ -47,6 +47,8 @@ use ecs::{App, World, Entity, Query, Single, Local, With, Without, Plugin, Spars
 
 mod first { pub struct Event(pub Int) }
 mod second { pub struct Event(pub Int) }
+use std::vec::{Vec};
+
 struct Unhandled
 
 // `specialization_filters_types_preserving_order_and_captures`
@@ -76,8 +78,8 @@ struct Tag
 struct Marker
 fn bump_wide(q: &mut Query<(&mut Wide,), ()>) { q.for_each() { (mut v,) => v.0 = v.0 + 1; } }
 fn tag_new<S>(world: &mut World<S>) where S: ecs::Get<Wide>, S: ecs::Get<Tag>, S: ecs::Columns, S: ecs::Hidden<(Entity,), (ecs::With<Wide>, ecs::Without<Tag>)> {
-    let mut untagged = [];
-    world.query_filtered<(Entity,), (With<Wide>, Without<Tag>)>().for_each() { (e,) => untagged = push(untagged, e); };
+    let mut untagged = Vec::new();
+    world.query_filtered<(Entity,), (With<Wide>, Without<Tag>)>().for_each() { (e,) => Vec::push(&mut untagged, e); };
     let mut i = 0;
     while({ i < len_at(&untagged) }) { discard(world.insert(untagged[i], Tag)); i = i + 1 }
 }

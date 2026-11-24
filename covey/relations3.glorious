@@ -33,6 +33,10 @@ use ecs::{App, World, Entity, Commands, Query, Single, Relation, OneToMany, Many
 use std::vec::sort;
 use core::option::is_none;
 
+use std::vec::{Vec};
+// A `Vec` with one more at its end.
+fn pushed<T>(v: Vec<T>, x: T) -> Vec<T> { let mut v = v; v.push(x); v }
+
 struct Update
 struct Name(Int)
 struct DockedAt { berth: Int }
@@ -44,8 +48,8 @@ struct Likes
 impl Relation for Likes { type Kind = ManyToMany; }
 impl Use<[0, *]> for Likes {}
 
-fn names<S>(world: &World<S>, es: Vec<Entity>) -> [Int] where S: ecs::Get<Name> {
-    std::vec::Vec::into_array(sort(fold(es, [], fn(out: [Int], e: Entity) -> [Int] { match(world.get<Name>(e)) { Some(n) => push(out, n.0), None => out } })))
+fn names<S>(world: &World<S>, es: Vec<Entity>) -> Vec<Int> where S: ecs::Get<Name> {
+    (sort(fold(es, Vec::new(), fn(out: Vec<Int>, e: Entity) -> Vec<Int> { match(world.get<Name>(e)) { Some(n) => pushed(out, n.0), None => out } })))
 }
 fn flag(b: Bool) { say(if(b) { 1 } else { 0 }) }
 fn docked<S>(world: &World<S>, ship: Entity) -> Str where S: ecs::Get<Relates<DockedAt>>, S: ecs::Get<Name> {
@@ -97,7 +101,7 @@ fn main() -> Int {
     discard(app.world.spawn_bundle((Station(station),)));
     app.emit(&Update);
     flag(app.world.contains(station));
-    let ships = fold(ecs::entities(&app.world), [], fn(out: [Entity], e: Entity) -> [Entity] { match(app.world.get<Name>(e)) { Some(_) => push(out, e), None => out } });
+    let ships = fold(ecs::entities(&app.world), Vec::new(), fn(out: Vec<Entity>, e: Entity) -> Vec<Entity> { match(app.world.get<Name>(e)) { Some(_) => pushed(out, e), None => out } });
     say(len_at(&ships));
     let mut i = 0;
     while({ i < len_at(&ships) }) {

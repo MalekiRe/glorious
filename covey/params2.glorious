@@ -24,6 +24,8 @@ mod ecs;
 
 use ecs::{App, World, Entity, Query};
 
+use std::vec::{Vec};
+
 struct Update
 struct Position(Int)
 struct Velocity(Int)
@@ -67,12 +69,12 @@ fn main() -> Int {
     say("--");
 
     let mut app = App::new().register<Position>().register<Velocity>().register<Tag>().add_systems(Update, grow).build();
-    let mut es = [];
+    let mut es = Vec::new();
     let mut i = 0;
     while({ i < 10 }) {
         let e = app.world.spawn_bundle((Position(i), Velocity(i * 10)));
         if(i % 2 == 0) { discard(app.world.insert(e, Tag)) };
-        es = push(es, e);
+        Vec::push(&mut es, e);
         i = i + 1
     };
     app.emit(&Update);

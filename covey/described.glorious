@@ -12,6 +12,8 @@
 // 7
 // no component `Nothing` in this world
 // 0
+use std::vec::{Vec};
+
 pub mod ecs;
 mod reflected;
 

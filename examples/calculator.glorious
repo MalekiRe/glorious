@@ -17,6 +17,10 @@ use std::parse::{Cursor};
 use std::source::{SourceMap, SourceId};
 use std::map::{Map};
 
+use std::vec::{Vec};
+// A `Vec` with one more at its end.
+fn pushed<T>(v: Vec<T>, x: T) -> Vec<T> { let mut v = v; v.push(x); v }
+
 enum Token { Num(Int), Name(Str), Plus, Minus, Star, Slash, Open, Close, Let, Equals }
 
 // A token and where it starts.
@@ -52,23 +56,23 @@ fn word(chars: &Vec<char>, at: Int, out: Str) -> (Str, Int) {
     }
 }
 
-fn tokens(chars: &Vec<char>, at: Int, out: [Spot]) -> [Spot] / {Fail} {
+fn tokens(chars: &Vec<char>, at: Int, out: Vec<Spot>) -> Vec<Spot> / {Fail} {
     match(element(chars, at)) {
         None => out,
         Some(c) =>
             let ch = *c;
             if(ch == ' ') { tail tokens(chars, at + 1, out) } else {
-                if(is_digit(ch)) { match(number(chars, at, 0)) { (n, end) => tokens(chars, end, push(out, Spot { token: Token::Num(n), at: at })) } } else {
+                if(is_digit(ch)) { match(number(chars, at, 0)) { (n, end) => tokens(chars, end, pushed(out, Spot { token: Token::Num(n), at: at })) } } else {
                     if(is_letter(ch)) {
                         match(word(chars, at, "")) { (w, end) =>
-                            tokens(chars, end, push(out, Spot { token: if(w == "let") { Token::Let } else { Token::Name(w) }, at: at })) }
+                            tokens(chars, end, pushed(out, Spot { token: if(w == "let") { Token::Let } else { Token::Name(w) }, at: at })) }
                     } else {
                         let simple = match(ch) {
                             '+' => Token::Plus, '-' => Token::Minus, '*' => Token::Star, '/' => Token::Slash,
                             '(' => Token::Open, ')' => Token::Close, '=' => Token::Equals,
                             _ => fail("a character that means nothing here", at)
                         };
-                        tokens(chars, at + 1, push(out, Spot { token: simple, at: at }))
+                        tokens(chars, at + 1, pushed(out, Spot { token: simple, at: at }))
                     }
                 }
             }
@@ -158,8 +162,8 @@ fn worked_out(text: Str, sources: &SourceMap, id: SourceId) -> Str {
     let chars = chars(text);
     let end = len_at(&chars);
     handle {
-        let spots = tokens(&chars, 0, []);
-        let mut c = Cursor::new(Slice::of(&spots));
+        let spots = tokens(&chars, 0, Vec::new());
+        let mut c = Cursor::new(spots.as_slice());
         let tree = expr(&mut c, end);
         if(not Cursor::is_done(&c)) { fail("nothing more", here(&c, end)) } else { show(eval(tree, std::map::new())) }
     }() {

@@ -33,6 +33,8 @@ mod ecs;
 use ecs::{App, World, Entity, Query, Single, Relation, OneToMany, ManyToMany, Relates, Related, To, From, to};
 use std::vec::sort;
 
+use std::vec::{Vec};
+
 struct Update
 struct Name(Int)
 struct Fuel(Int)
@@ -45,7 +47,7 @@ struct Tagged
 impl Relation for Tagged { type Kind = ManyToMany; }
 impl ecs::Fragmenting for Tagged {}
 impl Use<[0, *]> for Tagged {}
-struct Log([(Int, Int)], Int)
+struct Log(Vec<(Int, Int)>, Int)
 
 fn fill_squads(members: &mut Query<(&Name, To<InSquad, (&mut Fuel,)>)>) {
     members.for_each() { name, squad => match(squad) { Some((mut fuel,)) => fuel.0 = fuel.0 + name.0;, None => () }; }
@@ -57,26 +59,26 @@ fn fill_members(squads: &mut Query<(From<InSquad, &mut Fuel>,), (ecs::With<Name>
     }
 }
 
-fn lines(all: [(Int, Str)]) -> [Str] {
-    let mut keys = [];
+fn lines(all: Vec<(Int, Str)>) -> Vec<Str> {
+    let mut keys = Vec::new();
     let mut i = 0;
-    while({ i < len_at(&all) }) { keys = push(keys, all[i].0); i = i + 1 };
-    let keys = std::vec::Vec::into_array(sort(keys));
-    let mut out = [];
+    while({ i < len_at(&all) }) { Vec::push(&mut keys, all[i].0); i = i + 1 };
+    let keys = sort(&keys);
+    let mut out = Vec::new();
     let mut k = 0;
     while({ k < len_at(&keys) }) {
         let mut j = 0;
-        while({ j < len_at(&all) }) { if(all[j].0 == keys[k]) { out = push(out, show(keys[k]) ++ " " ++ all[j].1) } else { () }; j = j + 1 };
+        while({ j < len_at(&all) }) { if(all[j].0 == keys[k]) { Vec::push(&mut out, show(keys[k]) ++ " " ++ all[j].1) } else { () }; j = j + 1 };
         k = k + 1
     };
     out
 }
-fn say_all(xs: [Str]) { let mut i = 0; while({ i < len_at(&xs) }) { say(xs[i]); i = i + 1 } }
+fn say_all(xs: Vec<Str>) { let mut i = 0; while({ i < len_at(&xs) }) { say(xs[i]); i = i + 1 } }
 fn fuel<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Fuel> { match(world.get<Fuel>(e)) { Some(f) => f.0, None => 0 - 1 } }
 
 fn watch(members: &mut Query<(&Name, To<InSquad, (&Name,)>), (Related<InSquad>,)>, trees: &mut Query<(&Name, From<InSquad, From<InSquad, Entity>>)>, log: &mut Single<(&mut Log,), ()>) {
-    let mut seen = [];
-    members.for_each() { name, squad => seen = push(seen, (name.0, match(squad) { Some((s,)) => s.0, None => 0 - 1 })); };
+    let mut seen = Vec::new();
+    members.for_each() { name, squad => Vec::push(&mut seen, (name.0, match(squad) { Some((s,)) => s.0, None => 0 - 1 })); };
     let mut below = 0;
     trees.for_each() { name, children =>
         if(name.0 == 0) {
@@ -103,24 +105,24 @@ fn main() -> Int {
     say(show(fuel(&app.world, alpha)) ++ " " ++ show(fuel(&app.world, beta)));
     say(show(fuel(&app.world, m1)) ++ " " ++ show(fuel(&app.world, m2)) ++ " " ++ show(fuel(&app.world, m3)));
 
-    let mut rows = [];
+    let mut rows = Vec::new();
     app.world.query<(&Name, To<InSquad, (&Name,)>, From<InSquad, &Name>)>().for_each() { n, to, from =>
         let t = match(to) { Some((t,)) => t.0, None => 0 - 1 };
-        let mut fs = [];
+        let mut fs = Vec::new();
         let mut i = 0;
-        while({ i < len_at(&from) }) { fs = push(fs, from[i].0); i = i + 1 };
-        rows = push(rows, (n.0, show(t) ++ " " ++ show(sort(fs))));
+        while({ i < len_at(&from) }) { Vec::push(&mut fs, from[i].0); i = i + 1 };
+        Vec::push(&mut rows, (n.0, show(t) ++ " " ++ show(sort(fs))));
     };
     say_all(lines(rows));
-    let mut tags = [];
+    let mut tags = Vec::new();
     app.world.query<(&Name, To<Tagged, &Name>, From<Tagged, &Name>)>().for_each() { n, to, from =>
-        let mut ts = [];
+        let mut ts = Vec::new();
         let mut i = 0;
-        while({ i < len_at(&to) }) { ts = push(ts, to[i].0); i = i + 1 };
-        let mut fs = [];
+        while({ i < len_at(&to) }) { Vec::push(&mut ts, to[i].0); i = i + 1 };
+        let mut fs = Vec::new();
         let mut k = 0;
-        while({ k < len_at(&from) }) { fs = push(fs, from[k].0); k = k + 1 };
-        tags = push(tags, (n.0, show(sort(ts)) ++ " " ++ show(sort(fs))));
+        while({ k < len_at(&from) }) { Vec::push(&mut fs, from[k].0); k = k + 1 };
+        Vec::push(&mut tags, (n.0, show(sort(ts)) ++ " " ++ show(sort(fs))));
     };
     say_all(lines(tags));
     say("--");
@@ -131,17 +133,17 @@ fn main() -> Int {
     let leaf = app.world.spawn_bundle((Name(2),));
     discard(app.world.relate(mid, InSquad, top));
     discard(app.world.relate(leaf, InSquad, mid));
-    let log = app.world.spawn_bundle((Log([], 0),));
+    let log = app.world.spawn_bundle((Log(Vec::new(), 0),));
     app.emit(&Update);
     match(app.world.get<Log>(log)) {
         Some(l) =>
-            let mut firsts = [];
+            let mut firsts = Vec::new();
             let mut i = 0;
-            while({ i < len_at(&l.0) }) { firsts = push(firsts, l.0[i].0 * 100 + l.0[i].1); i = i + 1 };
-            let sorted = std::vec::Vec::into_array(sort(firsts));
-            let mut shown = [];
+            while({ i < len_at(&l.0) }) { Vec::push(&mut firsts, l.0[i].0 * 100 + l.0[i].1); i = i + 1 };
+            let sorted = (sort(firsts));
+            let mut shown = Vec::new();
             let mut k = 0;
-            while({ k < len_at(&sorted) }) { shown = push(shown, "(" ++ show(sorted[k] / 100) ++ ", " ++ show(sorted[k] % 100) ++ ")"); k = k + 1 };
+            while({ k < len_at(&sorted) }) { Vec::push(&mut shown, "(" ++ show(sorted[k] / 100) ++ ", " ++ show(sorted[k] % 100) ++ ")"); k = k + 1 };
             say("[" ++ std::text::join(shown, ", ") ++ "]");
             say(l.1),
         None => ()

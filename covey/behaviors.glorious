@@ -63,6 +63,8 @@ mod ecs;
 use ecs::{App, World, Entity, Commands, Query, Disabled, Behavior, Cx, Bridge, Schedule, Inbox, Instances, on, on_either, with, wait_for, me};
 use std::thread::{Shared, AtomicInt, spawn_detached, join};
 
+use std::vec::{Vec};
+
 struct Frame
 struct Press(Int)
 struct Release
@@ -180,9 +182,9 @@ fn main() -> Int {
     // `a_delivery_polls_exactly_the_awaiting_behavior`
     let mut app = App::new().register<Counter>().register<Count>().insert_resource(Polls(0))
         .add_behaviors().add_inbox<Press>().add_inbox<Release>().add_behavior<Counter, Frame>().build();
-    let mut buttons = [];
+    let mut buttons = Vec::new();
     let mut i = 0;
-    while({ i < 1000 }) { buttons = push(buttons, app.world.spawn_bundle((Counter, Count(0)))); i = i + 1 };
+    while({ i < 1000 }) { Vec::push(&mut buttons, app.world.spawn_bundle((Counter, Count(0)))); i = i + 1 };
     app.emit(&Frame);
     say(polls(&mut app.world));
     let mut i = 0;

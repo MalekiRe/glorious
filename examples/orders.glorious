@@ -33,7 +33,7 @@ impl Drop for Ledger { fn drop(l: &mut Ledger) { say("closed " ++ l.name ++ " af
 
 fn record(ledger: &mut Ledger, text: Str) { say(text); ledger.lines = ledger.lines + 1; }
 
-fn totals(orders: &[Order], i: Int, so_far: Map<Str, Int>) -> Map<Str, Int> {
+fn totals(orders: &Vec<Order>, i: Int, so_far: Map<Str, Int>) -> Map<Str, Int> {
     match(element(orders, i)) {
         None => so_far,
         Some(order) =>
@@ -42,16 +42,16 @@ fn totals(orders: &[Order], i: Int, so_far: Map<Str, Int>) -> Map<Str, Int> {
     }
 }
 
-fn largest<T: Priced>(items: &[T], i: Int, best: Int) -> Int {
+fn largest<T: Priced>(items: &Vec<T>, i: Int, best: Int) -> Int {
     match(element(items, i)) { Some(item) => largest(items, i + 1, if(total(item) > best) { total(item) } else { best }), None => best }
 }
 
 fn main() -> Int {
-    let orders = [
+    let orders = Vec::from_array([
         Order { customer: "ada", item: "pen", cents: 120, count: 3 },
         Order { customer: "bo", item: "ink", cents: 450, count: 1 },
         Order { customer: "ada", item: "pad", cents: 275, count: 2 }
-    ];
+    ]);
     let mut ledger = Ledger { name: "march", lines: 0 };
     let by_customer = totals(&orders, 0, std::map::new());
     let names = std::map::keys(by_customer);
@@ -60,7 +60,7 @@ fn main() -> Int {
         let cents = match(std::map::get(by_customer, name)) { Some(c) => c, None => 0 };
         record(&mut ledger, name ++ ": " ++ shown(Money(cents)));
         n + 1 });
-    let big = collect(&mut map(filter(into_iter([120 * 3, 450, 275 * 2]), { (c) => *c >= 400 }), { (c) => shown(Money(c)) }));
+    let big = collect(&mut map(filter(into_iter(Vec::from_array([120 * 3, 450, 275 * 2])), { (c) => *c >= 400 }), { (c) => shown(Money(c)) }));
     say(big);
     say(shown(Money(largest(&orders, 0, 0)) + Money(5)));
     written

@@ -10,6 +10,8 @@ mod ecs;
 
 use ecs::{App, World, Entity, Query, Single, Local, With, parallel, chain, run_if};
 
+use std::vec::{Vec};
+
 struct Position(Int)
 struct Velocity(Int)
 struct Health(Int)
@@ -48,9 +50,9 @@ fn main() -> Int {
         .add_systems(Update, run_if((parallel((integrate, decay)), validate).chain(), running))
         .build();
     let global = app.world.spawn_bundle((Global, Time(1), Ticks(0), Running(true)));
-    let mut entities = [];
+    let mut entities = Vec::new();
     let mut speed = 1;
-    while({ speed <= 32 }) { push_at(&mut entities, app.world.spawn_bundle((Position(0), Velocity(speed), Health(100), Active))); speed = speed + 1 };
+    while({ speed <= 32 }) { Vec::push(&mut entities, app.world.spawn_bundle((Position(0), Velocity(speed), Health(100), Active))); speed = speed + 1 };
     let inactive = app.world.spawn_bundle((Position(50), Velocity(3), Health(100)));
     let mut k = 0;
     while({ k < 10 }) { app.emit(&Update); k = k + 1 };

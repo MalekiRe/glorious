@@ -29,6 +29,8 @@ mod ecs;
 use ecs::{App, World, Entity, Relation, OneToMany, OneToOne, Relates, To, From, to};
 use std::vec::sort;
 
+use std::vec::{Vec};
+
 struct Name(Int)
 struct Fuel(Int)
 struct DockedAt { berth: Int }
@@ -38,21 +40,21 @@ impl Relation for Partner { type Kind = OneToOne; }
 impl Eq for Partner { fn ==(a: Partner, b: Partner) -> Bool { true } }
 impl Clone for Partner { fn clone(p: &Partner) -> Partner { Partner } }
 
-fn lines(all: [(Int, Str)]) -> [Str] {
-    let mut keys = [];
+fn lines(all: Vec<(Int, Str)>) -> Vec<Str> {
+    let mut keys = Vec::new();
     let mut i = 0;
-    while({ i < len_at(&all) }) { keys = push(keys, all[i].0); i = i + 1 };
-    let keys = std::vec::Vec::into_array(sort(keys));
-    let mut out = [];
+    while({ i < len_at(&all) }) { Vec::push(&mut keys, all[i].0); i = i + 1 };
+    let keys = sort(&keys);
+    let mut out = Vec::new();
     let mut k = 0;
     while({ k < len_at(&keys) }) {
         let mut j = 0;
-        while({ j < len_at(&all) }) { if(all[j].0 == keys[k]) { out = push(out, show(keys[k]) ++ " " ++ all[j].1) } else { () }; j = j + 1 };
+        while({ j < len_at(&all) }) { if(all[j].0 == keys[k]) { Vec::push(&mut out, show(keys[k]) ++ " " ++ all[j].1) } else { () }; j = j + 1 };
         k = k + 1
     };
     out
 }
-fn say_all(xs: [Str]) { let mut i = 0; while({ i < len_at(&xs) }) { say(xs[i]); i = i + 1 } }
+fn say_all(xs: Vec<Str>) { let mut i = 0; while({ i < len_at(&xs) }) { say(xs[i]); i = i + 1 } }
 fn fuel<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Fuel> { match(world.get<Fuel>(e)) { Some(f) => f.0, None => 0 - 1 } }
 
 fn main() -> Int {
@@ -69,19 +71,19 @@ fn main() -> Int {
     let bare = world.spawn_bundle(());
     discard(world.spawn_bundle((Name(4), DockedAt { berth: 0 }.to(bare))));
 
-    let mut docked = [];
+    let mut docked = Vec::new();
     world.query<(&Name, &Relates<DockedAt>, To<DockedAt, (&Name,)>)>().for_each() { n, d, s =>
         let target = match(s) { Some((t,)) => t.0, None => 0 - 1 };
-        docked = push(docked, (n.0, show(d.relation.berth) ++ " " ++ show(target)));
+        Vec::push(&mut docked, (n.0, show(d.relation.berth) ++ " " ++ show(target)));
     };
     say_all(lines(docked));
 
-    let mut crews = [];
+    let mut crews = Vec::new();
     world.query<(&Name, From<DockedAt, &Name>)>().for_each() { n, s =>
-        let mut names = [];
+        let mut names = Vec::new();
         let mut i = 0;
-        while({ i < len_at(&s) }) { names = push(names, s[i].0); i = i + 1 };
-        crews = push(crews, (n.0, show(sort(names))));
+        while({ i < len_at(&s) }) { Vec::push(&mut names, s[i].0); i = i + 1 };
+        Vec::push(&mut crews, (n.0, show(sort(names))));
     };
     say_all(lines(crews));
 
@@ -101,9 +103,9 @@ fn main() -> Int {
     world.query<(&Name, To<Partner, (&mut Fuel,)>)>().for_each() { name, partner =>
         match(partner) { Some((mut p,)) => p.0 = name.0;, None => () };
     };
-    let mut back = [];
+    let mut back = Vec::new();
     world.query<(&Name, From<Partner, &Fuel>)>().for_each() { n, p =>
-        if(len_at(&p) > 0) { back = push(back, (n.0, show(p[0].0))) } else { () };
+        if(len_at(&p) > 0) { Vec::push(&mut back, (n.0, show(p[0].0))) } else { () };
     };
     say_all(lines(back));
     0

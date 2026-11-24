@@ -21,6 +21,8 @@ mod ecs;
 use ecs::{App, World, Single, Local, ready, node, parallel, run_if, waits};
 use std::thread::{AtomicInt, fetch_add, load, store, yield_now, Threads, Mutex, lock};
 
+use std::vec::{Vec};
+
 struct Update
 struct Prefix
 struct Fork
@@ -63,25 +65,25 @@ fn main() -> Int {
     say("--");
 
     let total = AtomicInt::new(0);
-    let visits: Mutex<[Int]> = Mutex::new([]);
+    let visits: Mutex<Vec<Int>> = Mutex::new(Vec::new());
     let mut app = App::new().register<Gate>()
         .add_systems(Update, ready((
             node(Fork, parallel((
                 fn(local: &mut Local<Int>) { let t = total; local.0 = local.0 + 1; discard(fetch_add(&t, local.0)) },
                 fn(local: &mut Local<Int>) { let t = total; local.0 = local.0 + 1; discard(fetch_add(&t, local.0)) }
             )).run_if(gate_open)),
-            node(Join, fn() { let t = total; let v = visits; let n = load(&t); lock(&v, fn(list: &mut [Int]) { push_at(list, n) }) }).after(Fork)
+            node(Join, fn() { let t = total; let v = visits; let n = load(&t); lock(&v, fn(list: &mut Vec<Int>) { Vec::push(list, n) }) }).after(Fork)
         )))
         .build();
     let gate = app.world.spawn_bundle((Gate(true),));
-    let enabled = [true, false, false, true];
+    let enabled = Vec::from_array([true, false, false, true]);
     let mut k = 0;
     while({ k < 4 }) {
         match(app.world.get_mut<Gate>(gate)) { Some(mut g) => g.0 = enabled[k];, None => () };
         app.emit(&Update);
         k = k + 1
     };
-    say(lock(&visits, fn(list: &mut [Int]) -> Str { std::text::join(std::vec::map(clone(&*list), fn(n: Int) -> Str { show(n) }), " ") }));
+    say(lock(&visits, fn(list: &mut Vec<Int>) -> Str { std::text::join(std::vec::map(clone(&*list), fn(n: Int) -> Str { show(n) }), " ") }));
     say("--");
 
     let active = AtomicInt::new(0);

@@ -349,6 +349,11 @@ partial def textCodes (b : Body) (e : ExprId) : Option (List Nat) :=
 /-- Is the value a name holds used as it is, with no borrow of the name and
 nothing written to it after? -/
 def givenAway (b : Body) (x : String) (rest : List StmtId) : Bool :=
+  -- (Up to where the name is bound again, `let mut batch = ..` once more:
+  -- another variable from there, and what this one held is given away
+  -- before it.)
+  let upTo := rest.takeWhile (!b.bindsAgain x ·)
+  let rest := upTo ++ (rest.drop upTo.length).take 1
   let cleanups := b.defersStmts rest
   let late := cleanups.any fun d =>
     let v := b.nameUseStmt false x d
@@ -359,7 +364,7 @@ def givenAway (b : Body) (x : String) (rest : List StmtId) : Bool :=
   let (_, bad) := rest.foldl (fun (seen, bad) s =>
     let (seen', bad') := b.borrowAfterValueStmt x seen s
     (seen', bad || bad')) (false, false)
-  !u.rebound && (u.valued || u.valuedInside) && !bad
+  (u.valued || u.valuedInside) && !bad
 
 /-- Is a name used other than by reading a part of it? -/
 partial def usedWhole (b : Body) (x : String) (e : ExprId) : Bool :=

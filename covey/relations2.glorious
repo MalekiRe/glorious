@@ -60,6 +60,10 @@ use core::option::{is_some, is_none};
 use ecs::{App, World, Entity, Commands, Query, Relation, ChildOf, OneToOne, OneToMany, ManyToMany, Relates, Sources};
 use std::vec::sort;
 
+use std::vec::{Vec};
+// A `Vec` with one more at its end.
+fn pushed<T>(v: Vec<T>, x: T) -> Vec<T> { let mut v = v; v.push(x); v }
+
 struct Update
 struct Name(Int)
 struct Likes
@@ -73,8 +77,8 @@ impl Relation for Tagged { type Kind = ManyToMany; }
 struct Mount
 impl Relation for Mount { type Kind = OneToMany; }
 
-fn names<S>(world: &World<S>, es: Vec<Entity>) -> [Int] where S: ecs::Get<Name> {
-    std::vec::Vec::into_array(sort(fold(es, [], fn(out: [Int], e: Entity) -> [Int] { match(world.get<Name>(e)) { Some(n) => push(out, n.0), None => out } })))
+fn names<S>(world: &World<S>, es: Vec<Entity>) -> Vec<Int> where S: ecs::Get<Name> {
+    (sort(fold(es, Vec::new(), fn(out: Vec<Int>, e: Entity) -> Vec<Int> { match(world.get<Name>(e)) { Some(n) => pushed(out, n.0), None => out } })))
 }
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 
@@ -104,9 +108,9 @@ fn main() -> Int {
     let mut world = App::new().register<Name>().relation<ChildOf>().build().into_world();
     let root = world.spawn_bundle((Name(0),));
     let other = world.spawn_bundle((Name(1),));
-    let mut children = [];
+    let mut children = Vec::new();
     let mut i = 2;
-    while({ i < 6 }) { let child = world.spawn_bundle((Name(i),)); discard(world.relate(child, ChildOf, root)); children = push(children, child); i = i + 1 };
+    while({ i < 6 }) { let child = world.spawn_bundle((Name(i),)); discard(world.relate(child, ChildOf, root)); Vec::push(&mut children, child); i = i + 1 };
     let grandchild = world.spawn_bundle((Name(9),));
     discard(world.relate(grandchild, ChildOf, children[1]));
     say(len_at(&world.sources<ChildOf>(root)));
@@ -141,8 +145,8 @@ fn main() -> Int {
     let mut app = App::new().register<Name>().relation<ChildOf>().add_systems(Update, family).build();
     app.emit(&Update);
     let mut most = 0;
-    let mut roots = [];
-    app.world.query<(Entity, &Name)>().for_each() { e, n => if(n.0 == 0) { roots = push(roots, e) } else { () }; };
+    let mut roots = Vec::new();
+    app.world.query<(Entity, &Name)>().for_each() { e, n => if(n.0 == 0) { Vec::push(&mut roots, e) } else { () }; };
     let mut r = 0;
     while({ r < len_at(&roots) }) { most = len_at(&app.world.sources<ChildOf>(roots[r])); r = r + 1 };
     say(most);
@@ -151,9 +155,9 @@ fn main() -> Int {
     let mut world = App::new().register<Name>().relation<InSquad>().build().into_world();
     let alpha = world.spawn_bundle((Name(100),));
     let beta = world.spawn_bundle((Name(200),));
-    let mut members = [];
+    let mut members = Vec::new();
     let mut i = 0;
-    while({ i < 6 }) { let m = world.spawn_bundle((Name(i),)); discard(world.relate(m, InSquad, if(i % 2 == 0) { alpha } else { beta })); members = push(members, m); i = i + 1 };
+    while({ i < 6 }) { let m = world.spawn_bundle((Name(i),)); discard(world.relate(m, InSquad, if(i % 2 == 0) { alpha } else { beta })); Vec::push(&mut members, m); i = i + 1 };
     say(names(&world, world.sources<InSquad>(alpha)));
     say(names(&world, world.sources<InSquad>(beta)));
     discard(world.relate(members[0], InSquad, beta));
@@ -164,9 +168,9 @@ fn main() -> Int {
     let mut world = App::new().register<Name>().relation<Tagged>().build().into_world();
     let red = world.spawn_bundle((Name(100),));
     let blue = world.spawn_bundle((Name(200),));
-    let mut things = [];
+    let mut things = Vec::new();
     let mut i = 0;
-    while({ i < 4 }) { things = push(things, world.spawn_bundle((Name(i),))); i = i + 1 };
+    while({ i < 4 }) { Vec::push(&mut things, world.spawn_bundle((Name(i),))); i = i + 1 };
     discard(world.relate(things[0], Tagged, red));
     discard(world.relate(things[1], Tagged, red));
     discard(world.relate(things[1], Tagged, blue));
@@ -180,10 +184,10 @@ fn main() -> Int {
     say("--");
 
     let mut world = App::new().register<Name>().relation<ChildOf>().build().into_world();
-    let mut ns = [];
+    let mut ns = Vec::new();
     let mut i = 0;
-    while({ i < 7 }) { ns = push(ns, world.spawn_bundle((Name(i),))); i = i + 1 };
-    let links = [(1, 0), (2, 0), (3, 1), (4, 1), (5, 2), (6, 5)];
+    while({ i < 7 }) { Vec::push(&mut ns, world.spawn_bundle((Name(i),))); i = i + 1 };
+    let links = Vec::from_array([(1, 0), (2, 0), (3, 1), (4, 1), (5, 2), (6, 5)]);
     let mut i = 0;
     while({ i < len_at(&links) }) { let (child, parent) = links[i]; discard(world.relate(ns[child], ChildOf, ns[parent])); i = i + 1 };
     let order = world.descendants<ChildOf>(ns[0]);
@@ -196,9 +200,9 @@ fn main() -> Int {
     say("--");
 
     let mut world = App::new().register<Name>().relation<Mount>().build().into_world();
-    let mut ns = [];
+    let mut ns = Vec::new();
     let mut i = 0;
-    while({ i < 6 }) { ns = push(ns, world.spawn_bundle((Name(i),))); i = i + 1 };
+    while({ i < 6 }) { Vec::push(&mut ns, world.spawn_bundle((Name(i),))); i = i + 1 };
     discard(world.relate(ns[1], Mount, ns[0]));
     discard(world.relate(ns[2], Mount, ns[1]));
     discard(world.relate(ns[3], Mount, ns[0]));
@@ -217,6 +221,6 @@ fn main() -> Int {
     let mut world = App::new().register<Name>().relation<Likes>().build().into_world();
     let me = world.spawn_bundle((Name(0),));
     discard(world.relate(me, Likes, me));
-    flag(names(&world, world.targets<Likes>(me)) == [0]);
+    flag(names(&world, world.targets<Likes>(me)) == Vec::from_array([0]));
     0
 }

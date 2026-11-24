@@ -23,6 +23,8 @@
 // paused: the app waits for `resume`
 // resumed
 // 0
+use std::vec::{Vec};
+
 pub mod ecs;
 pub mod reflected;
 mod mcp;
@@ -57,7 +59,7 @@ fn reply_text(r: Receiver<Str>) -> Str {
     }
 }
 fn is_error(r: Receiver<Str>) -> Bool { match(try_recv(&r)) { Some(t) => contains(t, "\"isError\":true"), None => false } }
-fn args(pairs: [(Str, Str)]) -> Json { object(std::vec::Vec::into_array(std::vec::map(pairs, fn(p: (Str, Str)) -> (Str, Json) { let (k, v) = p; (k, JStr(v)) }))) }
+fn args(pairs: Vec<(Str, Str)>) -> Json { object((std::vec::map(pairs, fn(p: (Str, Str)) -> (Str, Json) { let (k, v) = p; (k, JStr(v)) }))) }
 fn shown(b: Bool) -> Str { if(b) { "true" } else { "false" } }
 
 fn main() -> Int {
@@ -72,21 +74,21 @@ fn main() -> Int {
     session.pump(&mut app);
     say(shown(match(try_recv(&init)) { Some(t) => contains(t, "\"serverInfo\""), None => false }));
     let tools = match(try_recv(&list)) { Some(t) => t, None => "" };
-    say(shown(std::vec::all(["overview", "explain", "history", "step", "what_if", "why_not", "asm"], fn(n: Str) -> Bool { contains(tools, "\"name\":\"" ++ n ++ "\"") })));
+    say(shown(std::vec::all(Vec::from_array(["overview", "explain", "history", "step", "what_if", "why_not", "asm"]), fn(n: Str) -> Bool { contains(tools, "\"name\":\"" ++ n ++ "\"") })));
     say(shown(match(try_recv(&none)) { Some(_) => false, None => true }));
 
-    let emitted = client.call("emit", object([("label", JStr("Update")), ("count", JNum(3))]));
+    let emitted = client.call("emit", object(Vec::from_array([("label", JStr("Update")), ("count", JNum(3))])));
     session.pump(&mut app);
     say(reply_text(emitted));
     say(match(app.world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 });
 
     let entity = show(e.index) ++ "v" ++ show(e.generation);
-    let overview = client.call("overview", args([]));
-    let shown_entity = client.call("entity", args([("id", entity)]));
-    let explained = client.call("explain", args([("entity", entity), ("component", "Hp")]));
-    let first = client.call("history", args([("component", "Hp"), ("condition", "< 48"), ("mode", "first")]));
-    let stepped = client.call("step", args([("label", "Update")]));
-    let missing = client.call("entity", args([("id", "999v0")]));
+    let overview = client.call("overview", args(Vec::new()));
+    let shown_entity = client.call("entity", args(Vec::from_array([("id", entity)])));
+    let explained = client.call("explain", args(Vec::from_array([("entity", entity), ("component", "Hp")])));
+    let first = client.call("history", args(Vec::from_array([("component", "Hp"), ("condition", "< 48"), ("mode", "first")])));
+    let stepped = client.call("step", args(Vec::from_array([("label", "Update")])));
+    let missing = client.call("entity", args(Vec::from_array([("id", "999v0")])));
     session.pump(&mut app);
     let overview = reply_text(overview);
     say(shown(starts_with(overview, "frame 3")));
@@ -99,8 +101,8 @@ fn main() -> Int {
     say(shown(is_error(missing)));
 
     // (With Damage raised, Hp drops further in the edited copy only.)
-    let what_if = client.call("what_if", object([("label", JStr("Update")), ("frames", JNum(1)),
-        ("edits", JArr([args([("entity", entity), ("component", "Damage"), ("field", "0"), ("value", "20")])]))]));
+    let what_if = client.call("what_if", object(Vec::from_array([("label", JStr("Update")), ("frames", JNum(1)),
+        ("edits", JArr(Vec::from_array([args(Vec::from_array([("entity", entity), ("component", "Damage"), ("field", "0"), ("value", "20")]))])))])));
     let before = match(app.world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 };
     session.pump(&mut app);
     let what_if = reply_text(what_if);
@@ -108,8 +110,8 @@ fn main() -> Int {
     say(shown(match(app.world.get<Hp>(e)) { Some(h) => h.0 == before, None => false }));
     say(shown(contains(what_if, "Hp: Hp(23)")));
 
-    let paused = client.call("pause", args([]));
-    let resumed = client.call("resume", args([]));
+    let paused = client.call("pause", args(Vec::new()));
+    let resumed = client.call("resume", args(Vec::new()));
     session.pump(&mut app);
     say(reply_text(paused));
     say(reply_text(resumed));

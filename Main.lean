@@ -192,6 +192,10 @@ the list's entries with their places, in the order they were gone through. -/
 def placed {α β : Type} [Inhabited β] (order : List (α × Nat)) (found : Array β) (n : Nat) : Array β :=
   (order.zip found.toList).foldl (fun acc ((_, i), b) => acc.set! i b) (Array.replicate n default)
 
+/-- How long, in milliseconds, a program's run on the Lean machines takes
+for it to be one `GLORIOUS_SLOW` runs on them in turn. -/
+def slowMs : Nat := 30000
+
 /-- How many programs the Rust VM is run on at a time. -/
 def vmJobs : IO Nat := do
   pure (((← IO.getEnv "GLORIOUS_JOBS").bind String.toNat?).getD 16)
@@ -736,17 +740,47 @@ def selftest (vm : Option String) : IO UInt32 := do
   -- (The examples first, and the long ones among them: the others, which
   -- are quick, fill in around them.)
   let order := (all.zipIdx.filter fun (_, i) => cases.length ≤ i) ++ (all.zipIdx.filter fun (_, i) => i < cases.length)
+  -- (`GLORIOUS_SLOW=n`: of the programs the Lean machines took long over
+  -- the last time they ran them, one in every `n`, another part each
+  -- time, is run on them: every one is so once in `n` runs. Each is still
+  -- compiled and run on the Rust VM, and what it gives held to what it
+  -- should; and every other program runs on all three each time.)
+  let slowFile := (← Target.libraryDir) / "selftest-slow"
+  let slowBefore : Std.HashMap UInt64 Nat :=
+    Std.HashMap.ofList ((← Store.load (α := List (UInt64 × Nat)) slowFile "slow").getD [])
+  let leanSkipped : Std.HashSet UInt64 ← match (← IO.getEnv "GLORIOUS_SLOW").bind String.toNat? with
+    | some n =>
+      if n ≤ 1 then pure {} else do
+        -- (Of the examples: a test program's time is mostly waiting for
+        -- the others, all run side by side.)
+        let slow := ((examples.filterMap fun (c, _) =>
+          let h := hash c.src
+          if (slowBefore.getD h 0) ≥ slowMs then some h else none).toArray.qsort (· < ·)).toList
+        let file := (← Target.libraryDir) / "selftest-slow-part"
+        let part := ((← (do pure (some (← IO.FS.readFile file))) <|> pure none).bind (·.trimAscii.toString.toNat?)).getD 0 % n
+        IO.FS.createDirAll (← Target.libraryDir)
+        IO.FS.writeFile file (toString ((part + 1) % n))
+        let skipped := slow.zipIdx.filterMap fun (h, k) => if k % n == part then none else some h
+        IO.eprintln s!"slow on the Lean machines: part {part + 1} of {n} ({slow.length - skipped.length} of {slow.length} run on them)"
+        pure (Std.HashSet.ofList skipped)
+    | none => pure {}
+  let onLean := fun (i : Nat) (c : Case) => i < quick.length && !leanSkipped.contains (hash c.src)
   let run := fun (((c, files), i) : (Case × List (List String × String)) × Nat) =>
     -- (An example is compiled as the command compiles a file.)
-    outcome (i < quick.length) c files (cases.length ≤ i && i < quick.length)
+    outcome (onLean i c) c files (cases.length ≤ i && i < quick.length)
       (known := knownBefore.getD (hash c.src) [])
-  let found ← if times then do
-      let timed ← sideBySideTimed order run
-      let slow := ((order.zip timed.toList).toArray.qsort fun a b => a.2.2 > b.2.2).toList.take 8
-      for (((c, _), _), (_, ms)) in slow do
-        IO.eprintln s!"{ms} ms: {((c.src.take 100).toString.replace "\n" " ")}"
-      pure (placed order (timed.map (·.1)) all.length)
-    else do pure (placed order (← sideBySide order run) all.length)
+  let timed ← sideBySideTimed order run
+  if times then
+    let slow := ((order.zip timed.toList).toArray.qsort fun a b => a.2.2 > b.2.2).toList.take 8
+    for (((c, _), _), (_, ms)) in slow do
+      IO.eprintln s!"{ms} ms: {((c.src.take 100).toString.replace "\n" " ")}"
+  let found := placed order (timed.map (·.1)) all.length
+  -- (How long each run on the Lean machines took, kept for the next run;
+  -- of one not run on them, what was kept before.)
+  -- (Of the programs not in this run, what was kept before stays.)
+  let slowNow := (order.zip timed.toList).foldl (fun (m : Std.HashMap UInt64 Nat) (((c, _), i), (_, ms)) =>
+    if onLean i c then m.insert (hash c.src) ms else m) slowBefore
+  Store.save slowFile "slow" slowNow.toList
   lap "programs compiled and run on the Lean machines"
   Store.save knownFile "known" ((all.zip found.toList).filterMap fun ((c, _), o) =>
     if o.places.isEmpty then none else some (hash c.src, o.places))
@@ -755,9 +789,15 @@ def selftest (vm : Option String) : IO UInt32 := do
   let mut failures : Array (Nat × String) := #[]
   for ((c, _), i) in all.zipIdx do
     let got := (found[i]?.map (·.lean)).getD ""
-    if i < quick.length then
+    if onLean i c then
       if !expectMatches c.expect got then
         failures := failures.push (2 * i, s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n")
+    else if i < quick.length then
+      -- (One not run on the Lean machines this time: what the compiler
+      -- said, where it refused it, is still held to what it should be.)
+      if let some e := found[i]?.bind (·.error) then
+        if !expectMatches c.expect s!"error: {e}" then
+          failures := failures.push (2 * i, s!"compiler: expected\n{c.expect}\ngot\nerror: {e}\nfor\n{c.src}\n")
     else if let some e := found[i]?.bind (·.error) then
       failures := failures.push (2 * i, s!"does not compile: {e}\nfor\n{c.src}\n")
   for (c, i) in foreignCases.zipIdx do
@@ -813,6 +853,7 @@ def selftest (vm : Option String) : IO UInt32 := do
     IO.eprintln said
   let ran := all.length + (if vm.isSome then foreignCases.length else 0)
   let machines := if vm.isSome then "Core, Lean bytecode and Rust VM" else "Core and Lean bytecode"
+  let machines := if leanSkipped.isEmpty then machines else s!"{machines} ({leanSkipped.size} slow ones on the Rust VM alone)"
   IO.println s!"{ran} programs ({examples.length} examples) on {machines}, and {Checks.all.length} checks: {failures.size} failures"
   let count := fun (f : Outcome → Bool) => (found.filter f).size
   let scopes := found.foldl (fun n o => n + o.lent) 0

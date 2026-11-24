@@ -13,6 +13,10 @@ mod ecs;
 
 use ecs::{App, World, Entity, ChildOf, To, From, Has, Disabled, Relation, OneToMany};
 
+use std::vec::{Vec};
+// A `Vec` with one more at its end.
+fn pushed<T>(v: Vec<T>, x: T) -> Vec<T> { let mut v = v; v.push(x); v }
+
 struct Hp(Int)
 struct InSquad
 impl Relation for InSquad { type Kind = OneToMany; }
@@ -34,7 +38,7 @@ fn main() -> Int {
     say(match(app.world.query<(To<ChildOf, (&Hp, Has<Disabled>)>,)>().get_mut(a)) { Some((Some((h, _)),)) => h.0, _ => 0 - 1 });
     say(match(app.world.query<(To<InSquad, (&Hp,)>,)>().get_mut(a)) { Some((Some((h,)),)) => h.0, _ => 0 - 1 });
     say(match(app.world.query<(To<InSquad, (&Hp, Has<Disabled>)>,)>().get_mut(a)) { Some((Some((h, _)),)) => h.0, _ => 0 - 1 });
-    let children = match(app.world.query<(From<ChildOf, &Hp>,)>().get_mut(shown)) { Some((hs,)) => fold(hs, [], fn(out: [Int], h: &Hp) -> [Int] { push(out, h.0) }), None => [] };
+    let children = match(app.world.query<(From<ChildOf, &Hp>,)>().get_mut(shown)) { Some((hs,)) => fold(hs, Vec::new(), fn(out: Vec<Int>, h: &Hp) -> Vec<Int> { pushed(out, h.0) }), None => Vec::new() };
     say(children);
     0
 }

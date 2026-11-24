@@ -13,17 +13,19 @@ mod ecs;
 
 use ecs::{App, Local, Single, chain};
 
+use std::vec::{Vec};
+
 struct Update
-struct Log([Int])
+struct Log(Vec<Int>)
 
 fn record(local: &mut Local<Int>, log: &mut Single<(&mut Log,)>) {
     local.0 = local.0 + 1;
-    match(log.get_mut()) { Some((mut log,)) => push_at(&mut log.0, local.0), None => () }
+    match(log.get_mut()) { Some((mut log,)) => Vec::push(&mut log.0, local.0), None => () }
 }
 
 fn main() -> Int {
     let mut app = App::new().register<Log>().add_systems(Update, (record, record).chain()).build();
-    let log = app.world.spawn_bundle((Log([]),));
+    let log = app.world.spawn_bundle((Log(Vec::new()),));
     app.emit(&Update);
     app.emit(&Update);
     app.emit(&Update);

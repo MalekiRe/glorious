@@ -28,13 +28,15 @@ mod ecs;
 
 use ecs::{App, World, Entity, Query, Single, Local, With, Without, chain, parallel, run_if};
 
+use std::vec::{Vec};
+
 struct Update
 struct Global
 struct Value(Int)
 struct Step(Int)
 struct Position(Int)
 struct Velocity(Int)
-struct Log([Int])
+struct Log(Vec<Int>)
 struct Enabled(Bool)
 
 fn triple(value: &mut Single<(&mut Value,), (With<Global>,)>) { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 * 3;, None => () } }
@@ -62,7 +64,7 @@ fn every_other(calls: &mut Local<Int>, enabled: &mut Single<(&Enabled,), ()>, qu
 fn record(calls: &mut Local<Int>, log: &mut Single<(&mut Log,), ()>) {
     calls.0 = calls.0 + 1;
     let n = calls.0;
-    match(log.get_mut()) { Some((mut l,)) => push_at(&mut l.0, n);, None => () }
+    match(log.get_mut()) { Some((mut l,)) => Vec::push(&mut l.0, n);, None => () }
 }
 
 fn value<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Value> { match(world.get<Value>(e)) { Some(v) => v.0, None => 0 - 1 } }
@@ -102,7 +104,7 @@ fn main() -> Int {
 
     let mut app = App::new().register<Log>().register<Enabled>().register<Value>()
         .add_systems(Update, (record, (record, record).chain()).run_if(every_other)).build();
-    let global = app.world.spawn_bundle((Log([]), Enabled(true)));
+    let global = app.world.spawn_bundle((Log(Vec::new()), Enabled(true)));
     let entity = app.world.spawn_bundle((Value(1),));
     app.emit(&Update);
     say(logged(&app.world, global));
