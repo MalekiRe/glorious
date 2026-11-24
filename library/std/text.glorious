@@ -169,41 +169,5 @@ fn decode_one<A>(bytes: &A, end: Int, code: Int, out: Str) -> Option<Str> where 
     match(char(code)) { Some(c) => tail decode(bytes, end, StrChar(c, out)), None => None }
 }
 
-// An owned text that grows where it is, in the shape the library
-// specification gives it (13): its bytes, which are UTF-8, in a `Vec` of
-// them, in memory it allocates and frees.
-pub struct String { bytes: Vec<u8> }
-
-impl String {
-    pub fn new() -> Self { Self { bytes: Vec::new() } }
-    // Of borrowed text, its bytes copied.
-    pub fn from_str(text: &str) -> Self { let mut s = String::new(); String::push_str(&mut s, text); s }
-    // Of a `Str`, its characters as UTF-8.
-    pub fn from_text(text: Str) -> Self { Self { bytes: utf8(text) } }
-    pub fn from_utf8(bytes: Vec<u8>) -> Result<Self, Vec<u8>> {
-        let ok = match(from_utf8(&bytes)) { Some(_) => true, None => false };
-        if(ok) { Ok(Self { bytes: bytes }) } else { Err(bytes) }
-    }
-    pub fn into_bytes(value: Self) -> Vec<u8> { match(value) { String { bytes } => bytes } }
-    // The text as a value of its own.
-    pub fn to_str(value: &Self) -> Str {
-        match(from_utf8(&value.bytes)) { Some(text) => text, None => "" }
-    }
-    // How many bytes.
-    pub fn len(value: &Self) -> Int { Vec::len(&value.bytes) }
-    pub fn is_empty(value: &Self) -> Bool { Vec::len(&value.bytes) == 0 }
-    // Borrowed text's bytes put after these.
-    pub fn push_str(value: &mut Self, text: &str) {
-        let mut i = 0;
-        while({ i < text.len() }) { Vec::push(&mut value.bytes, text.byte(i)); i = i + 1 }
-    }
-    // A `Str`'s characters, as UTF-8, put after these.
-    pub fn push_text(value: &mut Self, text: Str) { Vec::append(&mut value.bytes, utf8(text)) }
-    pub fn push(value: &mut Self, c: char) { String::push_text(value, show(c)) }
-    pub fn clear(value: &mut Self) { Vec::clear(&mut value.bytes) }
-    // The text, borrowed where it is.
-    pub fn as_str<'a>(value: &'a Self) -> &'a str {
-        unsafe { str_at(ptr_mut_address(Vec::as_mut_ptr(&value.bytes)), Vec::len(&value.bytes)) }
-    }
-}
-impl Show for String { fn fmt(s: &String) -> Str { String::to_str(s) } }
+// `String` is the prelude's (`prelude/string.glorious`), named here again.
+pub use prelude::{String};

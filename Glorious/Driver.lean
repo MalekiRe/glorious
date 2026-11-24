@@ -720,6 +720,9 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
     let (prelude, _) ← readPrelude.get
     let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (prelude)).1 []
     let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases resolved.items).1).1
+    -- (Compacted, as a program's are before they are checked: what the
+    -- check records of an expression is by its place in the body.)
+    let all := all.map Syntax.Item.compact
     return (all.length, ← Check.checkFirst all resolved.info drop)
   let (prelude, items, _, _, _) ← parseProgram "// std" []
   let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (prelude)).1 (Syntax.Flat.promoteItems (items)).1
@@ -732,7 +735,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   let all := match all.getLast? with
     | some ((.fieldNames m [""] [])) => if m == Syntax.unitMark then all.dropLast else all
     | _ => all
-  pure (all.length, ← Check.checkFirst (withoutUnitMarksFlat all) resolved.info drop)
+  pure (all.length, ← Check.checkFirst ((withoutUnitMarksFlat all).map Syntax.Item.compact) resolved.info drop)
 
 /-- Each of those, checked once in a process. -/
 def checkedPrelude : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => checkFirstPart false false

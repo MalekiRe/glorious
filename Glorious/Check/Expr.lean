@@ -536,7 +536,13 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
       for bd in (← get).bounds do
         if ← defaultTraitArgs bd.trait bd.ty bd.args (known := true) (only := some v) then break
     if let some fits ← literalAt p n a then return fits.map fun e => s!"{what}: {e}"
-  -- A text written where `&str` is wanted is one.
+  -- A text written where `&str` is wanted is one. (So is one wanted where a
+  -- trait's argument is, every implementation of which for the type it is
+  -- asked of takes `&str` there: `owned + "more"`.)
+  if (b.textCodes a).isSome then
+    if let .var v ← find p then
+      if ← textWantedAt v then
+        unify p (← resolveType [] false (.name "StrRef" [.name "'static" []]))
   if ← textAt p a then return none
   -- A block where what is wanted is known and is no callable: it is run
   -- there, and is its value (5.4).

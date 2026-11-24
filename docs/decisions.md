@@ -7967,6 +7967,36 @@ What follows from every program now having a type with a `drop`:
   `Use<[0, 1]>`: `cancel` gives it up without calling it.
 - Aliases are written out in what bounds say (`Output = Bool`).
 
+## `String`, `Display`, `Debug` and `Formatter` in the prelude
+
+`library/prelude/string.glorious`: `String` (its bytes a `Vec<u8>`;
+`String::from("abc")`, `push_str`, `push`, `as_str`, `from_utf8` checking
+the bytes), `String + &str` (`impl<'a> Add<&'a str> for String`), a
+`&String` that is a `&str` where one is wanted (`coerce string_as_str`);
+`Display` and `Debug`, both with `fmt(&Self, &mut Formatter)`; `Formatter`
+(`write_str(&str)`, `quoted`, `display`, `debug`), `format`,
+`format_debug` and `to_string`. Every scalar, `char`, `&str`, `String`,
+`()` and truth has both; a `Vec`, a slice, a `[T; N]`, a tuple and a
+`Result` have `Debug`, with Rust's quoting (`["a", "b"]`). `std::fmt` and
+`std::text` name them again. `Show`, `Str` and `++` are still there;
+`Formatter::write_text` takes a `Str` until they go.
+
+What it took of the compiler:
+
+- A text written where a trait's argument is wanted, every implementation
+  of which for the type it is asked of takes `&str` there, is a `&str`
+  (`textWantedAt`): `owned + " more"`.
+- An implementation whose trait arguments name its own lifetimes is
+  generic, the only one for its type (`impl<'a> Add<&'a str> for String`).
+- The prelude and library are compacted before they are checked once for
+  every program, as a program's items are: the checker's records of an
+  expression are by its place in the body, and literals the prelude
+  passed as `&str` were otherwise not written in.
+- The literals the checker found of a type are written in after its
+  decisions (`decidedProgram`): it found them in the body read again with
+  those.
+- Scalars, `f64` and `f32` are `Clone`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

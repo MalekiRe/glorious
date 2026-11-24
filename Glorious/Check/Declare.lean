@@ -657,7 +657,8 @@ def declareImpl (params : List String) (tr head : String) (args : List String) (
   -- An implementation that gives its trait arguments made of its own
   -- type parameters is for the type at all of them: it is the only one
   -- of the trait for the type.
-  let generic := targs.any fun t => !(freeTys t).isEmpty
+  -- (Or of its own lifetimes, `impl<'a> Add<&'a str> for String`.)
+  let generic := targs.any fun t => !(freeTys t).isEmpty || !(freeCaps t).isEmpty
   -- The conditions kept apart, in the implementation's type parameters.
   let mut extra : List (String × List Ty × Ty) := []
   -- (What a trait leaves to implementations, of the implementation's own

@@ -63,9 +63,9 @@ impl Eq for Str {
 // What can be written as text, looked at where it is: nothing of it is
 // copied or taken. `show(x)` writes what it is given; `show(&x)` what `x` is.
 trait Show { fn fmt(&Self) -> Str }
-fn show<T>(value: T) -> Str where T: Show { let held = value; fmt(&held) }
-impl<'a, T> Show for &'a T where T: Show { fn fmt(r: &&'a T) -> Str { fmt(*r) } }
-impl<'a, T> Show for &'a mut T where T: Show { fn fmt(r: &&'a mut T) -> Str { fmt(&**r) } }
+fn show<T>(value: T) -> Str where T: Show { let held = value; Show::fmt(&held) }
+impl<'a, T> Show for &'a T where T: Show { fn fmt(r: &&'a T) -> Str { Show::fmt(*r) } }
+impl<'a, T> Show for &'a mut T where T: Show { fn fmt(r: &&'a mut T) -> Str { Show::fmt(&**r) } }
 impl Show for Str { fn fmt(text: &Str) -> Str { *text } }
 impl Show for char { fn fmt(c: &char) -> Str { StrChar(*c, StrEnd) } }
 
@@ -176,16 +176,16 @@ impl Show for Int { fn fmt(n: &Int) -> Str { show_whole(*n) } }
 // A tuple and a `Result` as text, if their parts are. Truth is `Ok(())`.
 impl Show for () { fn fmt(u: &()) -> Str { "()" } }
 impl<A, B> Show for (A, B) where A: Show, B: Show {
-    fn fmt(p: &(A, B)) -> Str { "(" ++ fmt(&(*p).0) ++ ", " ++ fmt(&(*p).1) ++ ")" }
+    fn fmt(p: &(A, B)) -> Str { "(" ++ Show::fmt(&(*p).0) ++ ", " ++ Show::fmt(&(*p).1) ++ ")" }
 }
 impl<A, B, C> Show for (A, B, C) where A: Show, B: Show, C: Show {
-    fn fmt(p: &(A, B, C)) -> Str { "(" ++ fmt(&(*p).0) ++ ", " ++ fmt(&(*p).1) ++ ", " ++ fmt(&(*p).2) ++ ")" }
+    fn fmt(p: &(A, B, C)) -> Str { "(" ++ Show::fmt(&(*p).0) ++ ", " ++ Show::fmt(&(*p).1) ++ ", " ++ Show::fmt(&(*p).2) ++ ")" }
 }
 impl<T, E> Show for Result<T, E> where T: Show, E: Show {
     fn fmt(r: &Result<T, E>) -> Str {
         match(r) {
-            Ok(value) => "Ok(" ++ fmt(value) ++ ")",
-            Err(error) => "Err(" ++ fmt(error) ++ ")"
+            Ok(value) => "Ok(" ++ Show::fmt(value) ++ ")",
+            Err(error) => "Err(" ++ Show::fmt(error) ++ ")"
         }
     }
 }
@@ -659,7 +659,7 @@ fn elements_text<A, T>(a: &A) -> Str where A: Indexed<Element = T>, T: Show { "[
 fn elements_from<A, T>(a: &A, n: Int, i: Int, text: Str) -> Str where A: Indexed<Element = T>, T: Show {
     match(int_lt(i, n)) {
         0 => text,
-        _ => tail elements_from(a, n, int_add(i, 1), match(i) { 0 => fmt(element_at(a, i)), _ => text ++ ", " ++ fmt(element_at(a, i)) })
+        _ => tail elements_from(a, n, int_add(i, 1), match(i) { 0 => Show::fmt(element_at(a, i)), _ => text ++ ", " ++ Show::fmt(element_at(a, i)) })
     }
 }
 
@@ -685,6 +685,8 @@ trait DerefMut { type Target; fn deref_mut(value: &mut Self) -> &mut Target }
 impl Clone for Int { fn clone(v: &Int) -> Int { *v } }
 impl Clone for Str { fn clone(v: &Str) -> Str { *v } }
 impl Clone for char { fn clone(v: &char) -> char { *v } }
+impl Clone for f64 { fn clone(v: &f64) -> f64 { *v } }
+impl Clone for f32 { fn clone(v: &f32) -> f32 { *v } }
 impl Clone for () { fn clone(v: &()) { () } }
 impl<A, B> Clone for (A, B) where A: Clone, B: Clone { fn clone(p: &(A, B)) -> (A, B) { (clone(&p.0), clone(&p.1)) } }
 impl<A, B, C> Clone for (A, B, C) where A: Clone, B: Clone, C: Clone {

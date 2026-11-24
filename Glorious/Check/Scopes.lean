@@ -345,6 +345,28 @@ def defaultTraitArgs (trait : String) (subject : Ty) (keyed : List Ty := []) (kn
       | _, _ => pure ()
   pure moved
 
+/-- Is a type not yet known an argument of a trait asked of a known type,
+every implementation of which for that type takes `&str` there? -/
+def textWantedAt (v : Nat) : M Bool := do
+  for bd in (← get).bounds do
+    let base := Syntax.traitBase bd.trait
+    let (self, args) ← if bd.args.isEmpty then subjectOf base bd.ty else pure (bd.ty, bd.args)
+    let some i ← args.zipIdx.findSomeM? (fun (a, i) => do
+        match ← find a with
+        | .var w => pure (if w == v then some i else none)
+        | _ => pure none) | continue
+    let some (head, _) ← headFor base (← find self) | continue
+    let impls ← implsOfHead base head
+    if impls.isEmpty then continue
+    let texts ← impls.allM fun im => do
+      match im.targs[i]? with
+      | some t => match ← find t with
+        | .con n _ => pure (Syntax.lastSegment n == "StrRef")
+        | _ => pure false
+      | none => pure false
+    if texts then return true
+  return false
+
 /-- What an implementation's type parameters are for a type it is asked of:
 each that is an argument of its head, that argument of the type; each that
 is only inside one (`impl<T> .. for Wrap<Option<T>>`), something to be found

@@ -925,19 +925,22 @@ are (`chosenRewrite`). Only the items it
 decided something in are written again: what is decided of an item changes
 that item alone. -/
 def decidedProgram (b : Blocks) (items : List Syntax.Item) : List Syntax.Item := Id.run do
-  let items := scalarLiterals b items
   let d := Decided.of b
   if d.calls.isEmpty && d.closures.isEmpty && d.fields.isEmpty && d.rests.isEmpty && d.owners.isEmpty then
-    return items
+    return scalarLiterals b items
   -- (What the `Decision`s are of, alone.)
   let decisions := Decided.of { b with dotChosen := {}, argsChosen := {} }
   let chosen := !b.dotChosen.isEmpty || !b.argsChosen.isEmpty
   let rw := chosenRewrite b
+  -- (The literals the checker found of a type, after the decisions: it
+  -- found them in the body read again with those, `x` of a body made
+  -- of more than was written.)
+  let items := items.map fun item =>
+    if !d.item item || !decisions.item item then item else
+    b.decided.foldl (fun item dec => Item.decide (decideBody dec) item) item
+  let items := scalarLiterals b items
   items.map fun item =>
     if !d.item item then item else
-    let item := if decisions.item item then
-        b.decided.foldl (fun item dec => Item.decide (decideBody dec) item) item
-      else item
     if chosen then item.mapBodies rw.body else item
 
 end Glorious.Elab
