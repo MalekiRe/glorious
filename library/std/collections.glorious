@@ -1,127 +1,115 @@
 // Queues and heaps: collections changed where they are, through a `&mut`
 // reference, in the shape the library specification gives them (16).
 
-use std::vec::{swap};
+use std::vec::{Vec};
 // (Where Rust keeps its maps and sets.)
 pub use std::hash::{HashMap, HashSet};
 
 // A queue with two ends. What is at the front is kept turned round, so that
-// both ends are the ends of an array: putting and taking at either end takes
+// both ends are the ends of a `Vec`: putting and taking at either end takes
 // time that does not grow with the queue, counted over many of them.
-pub struct VecDeque<T> { front: [T], back: [T] }
+pub struct VecDeque<T> { front: Vec<T>, back: Vec<T> }
 
-// The elements of one array onto another, last first.
-fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
-    match(pop(from)) {
-        Some((rest, last)) => tail turned(rest, push(onto, last)),
-        None => onto
+// The elements of one onto the other, last first.
+fn turned<T>(from: &mut Vec<T>, onto: &mut Vec<T>) where T: Use<[1, 1]> {
+    match(Vec::pop(from)) {
+        Some(last) => Vec::push(onto, last); tail turned(from, onto),
+        None => ()
     }
 }
 
 impl<T> VecDeque<T> {
-    pub fn new() -> Self { Self { front: [], back: [] } }
-    pub fn from_vec(items: [T]) -> Self where T: Use<[1, 1]> { Self { front: [], back: items } }
-    pub fn into_vec(value: Self) -> [T] where T: Use<[1, 1]> {
-        match(value) { VecDeque { front, back } => turned(turned(back, []), turned(front, [])) }
+    pub fn new() -> Self { Self { front: Vec::new(), back: Vec::new() } }
+    pub fn from_vec(items: Vec<T>) -> Self where T: Use<[1, 1]> { Self { front: Vec::new(), back: items } }
+    pub fn into_vec(value: Self) -> Vec<T> where T: Use<[1, 1]> {
+        match(value) { VecDeque { front, back } =>
+            let mut f = front;
+            let mut out = Vec::new();
+            turned(&mut f, &mut out);
+            Vec::append(&mut out, back);
+            out }
     }
-    pub fn len(value: &Self) -> Int { len_at(&value.front) + len_at(&value.back) }
+    pub fn len(value: &Self) -> Int { Vec::len(&value.front) + Vec::len(&value.back) }
     pub fn is_empty(value: &Self) -> Bool { VecDeque::len(value) == 0 }
-    pub fn push_back(value: &mut Self, item: T) where T: Use<[1, 1]> {
-        push_at(&mut value.back, item);
-    }
-    pub fn push_front(value: &mut Self, item: T) where T: Use<[1, 1]> {
-        push_at(&mut value.front, item);
-    }
+    pub fn push_back(value: &mut Self, item: T) where T: Use<[1, 1]> { Vec::push(&mut value.back, item) }
+    pub fn push_front(value: &mut Self, item: T) where T: Use<[1, 1]> { Vec::push(&mut value.front, item) }
     pub fn pop_front(value: &mut Self) -> Option<T> where T: Use<[1, 1]> {
         // With nothing kept at the front, what is at the back is turned
         // round to be it.
-        let front = &mut value.front;
-        let back = &mut value.back;
-        let ready = if(len_at(&*front) == 0) { turned(replace(back, []), []) } else { replace(front, []) };
-        match(pop(ready)) {
-            Some((rest, first)) => unsafe { restore_at(front, rest) }; Some(first),
-            None => None
-        }
+        if(Vec::len(&value.front) == 0) { turned(&mut value.back, &mut value.front) } else { () };
+        Vec::pop(&mut value.front)
     }
     pub fn pop_back(value: &mut Self) -> Option<T> where T: Use<[1, 1]> {
-        let front = &mut value.front;
-        let back = &mut value.back;
-        let ready = if(len_at(&*back) == 0) { turned(replace(front, []), []) } else { replace(back, []) };
-        match(pop(ready)) {
-            Some((rest, last)) => unsafe { restore_at(back, rest) }; Some(last),
-            None => None
-        }
+        if(Vec::len(&value.back) == 0) { turned(&mut value.front, &mut value.back) } else { () };
+        Vec::pop(&mut value.back)
     }
     // The element so far from the front, by reference.
     pub fn get<'a>(value: &'a Self, index: Int) -> Option<&'a T> where T: Use<[1, 1]> {
-        let ahead = len_at(&value.front);
-        if(index < ahead) { element(&value.front, ahead - 1 - index) } else { element(&value.back, index - ahead) }
+        let ahead = Vec::len(&value.front);
+        if(index < ahead) { Vec::get(&value.front, ahead - 1 - index) } else { Vec::get(&value.back, index - ahead) }
     }
     pub fn front<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { VecDeque::get(value, 0) }
     pub fn back<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { VecDeque::get(value, VecDeque::len(value) - 1) }
 }
 
 // A heap: the greatest element is the one taken. Its elements are compared
-// and moved by copying, so they are of a type used any number of times.
-pub struct BinaryHeap<T> { items: [T] }
+// by copying, so they are of a type used any number of times.
+pub struct BinaryHeap<T> { items: Vec<T> }
+
+fn at<T>(a: &Vec<T>, i: Int) -> T where T: Use<[0, *]> { *Vec::index(a, i) }
 
 // The element at `i` moved up to where nothing above it is smaller.
-fn risen<T>(a: [T], i: Int) -> [T] where T: Ord, T: Use<[0, *]> {
-    if(i == 0) { a } else {
+fn rise<T>(a: &mut Vec<T>, i: Int) where T: Ord, T: Use<[0, *]> {
+    if(i == 0) { () } else {
         let parent = (i - 1) / 2;
-        if(a[parent] < a[i]) { tail risen(swap(a, parent, i), parent) } else { a }
+        if(at(&*a, parent) < at(&*a, i)) { std::value::discard(Vec::swap(a, parent, i)); tail rise(a, parent) } else { () }
     }
 }
 
 // The element at `i` moved down to where nothing below it is greater.
-fn sunk<T>(a: [T], i: Int, n: Int) -> [T] where T: Ord, T: Use<[0, *]> {
+fn sink<T>(a: &mut Vec<T>, i: Int, n: Int) where T: Ord, T: Use<[0, *]> {
     let left = 2 * i + 1;
     let right = left + 1;
-    let over_left = if(left < n) { if(a[i] < a[left]) { left } else { i } } else { i };
-    let most = if(right < n) { if(a[over_left] < a[right]) { right } else { over_left } } else { over_left };
-    if(most == i) { a } else { tail sunk(swap(a, i, most), most, n) }
+    let over_left = if(left < n) { if(at(&*a, i) < at(&*a, left)) { left } else { i } } else { i };
+    let most = if(right < n) { if(at(&*a, over_left) < at(&*a, right)) { right } else { over_left } } else { over_left };
+    if(most == i) { () } else { std::value::discard(Vec::swap(a, i, most)); tail sink(a, most, n) }
 }
 
-fn heaped<T>(a: [T], i: Int) -> [T] where T: Ord, T: Use<[0, *]> {
-    if(i < 0) { a } else { let n = len(a); tail heaped(sunk(a, i, n), i - 1) }
-}
-
-fn drained<T>(a: [T], out: [T]) -> [T] where T: Ord, T: Use<[0, *]> {
-    let n = len(a);
-    if(n == 0) { out } else {
-        let top = a[0];
-        let moved = swap(a, 0, n - 1);
-        match(pop(moved)) {
-            Some((rest, _)) => tail drained(sunk(rest, 0, n - 1), push(out, top)),
-            None => out
-        }
-    }
+fn heapify<T>(a: &mut Vec<T>, i: Int) where T: Ord, T: Use<[0, *]> {
+    if(i < 0) { () } else { let n = Vec::len(&*a); sink(a, i, n); tail heapify(a, i - 1) }
 }
 
 impl<T> BinaryHeap<T> {
-    pub fn new() -> Self { Self { items: [] } }
-    pub fn from_vec(items: [T]) -> Self where T: Ord, T: Use<[0, *]> { let n = len(items); Self { items: heaped(items, n / 2) } }
-    pub fn into_vec(value: Self) -> [T] where T: Use<[1, 1]> { match(value) { BinaryHeap { items } => items } }
+    pub fn new() -> Self { Self { items: Vec::new() } }
+    pub fn from_vec(items: Vec<T>) -> Self where T: Ord, T: Use<[0, *]> {
+        let mut all = items;
+        let n = Vec::len(&all);
+        heapify(&mut all, n / 2);
+        Self { items: all }
+    }
+    pub fn into_vec(value: Self) -> Vec<T> where T: Use<[1, 1]> { match(value) { BinaryHeap { items } => items } }
     // Greatest first.
-    pub fn into_sorted_vec(value: Self) -> [T] where T: Ord, T: Use<[0, *]> { match(value) { BinaryHeap { items } => drained(items, []) } }
-    pub fn len(value: &Self) -> Int { len_at(&value.items) }
-    pub fn is_empty(value: &Self) -> Bool { len_at(&value.items) == 0 }
-    pub fn peek<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { element(&value.items, 0) }
+    pub fn into_sorted_vec(value: Self) -> Vec<T> where T: Ord, T: Use<[0, *]> {
+        let mut heap = value;
+        let mut out = Vec::new();
+        while({ BinaryHeap::len(&heap) > 0 }, { match(BinaryHeap::pop(&mut heap)) { Some(top) => Vec::push(&mut out, top), None => () } });
+        out
+    }
+    pub fn len(value: &Self) -> Int { Vec::len(&value.items) }
+    pub fn is_empty(value: &Self) -> Bool { Vec::len(&value.items) == 0 }
+    pub fn peek<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { Vec::get(&value.items, 0) }
     pub fn push(value: &mut Self, item: T) where T: Ord, T: Use<[0, *]> {
-        let items = &mut value.items;
-        let with = push(replace(items, []), item);
-        let n = len(with);
-        *items = risen(with, n - 1);
+        Vec::push(&mut value.items, item);
+        let n = Vec::len(&value.items);
+        rise(&mut value.items, n - 1)
     }
     pub fn pop(value: &mut Self) -> Option<T> where T: Ord, T: Use<[0, *]> {
-        let items = &mut value.items;
-        let all = replace(items, []);
-        let n = len(all);
+        let n = Vec::len(&value.items);
         if(n == 0) { None } else {
-            match(pop(swap(all, 0, n - 1))) {
-                Some((rest, top)) => *items = sunk(rest, 0, n - 1); Some(top),
-                None => None
-            }
+            std::value::discard(Vec::swap(&mut value.items, 0, n - 1));
+            let top = Vec::pop(&mut value.items);
+            sink(&mut value.items, 0, n - 1);
+            top
         }
     }
 }

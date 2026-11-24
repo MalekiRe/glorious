@@ -2,6 +2,7 @@
 // what to undo, as the library specification has them (25.2, 25.3). Amounts
 // are `Int`.
 
+use std::vec::{Vec};
 use std::value::{Rejected};
 pub use std::error::{MarkError};
 
@@ -77,41 +78,36 @@ pub effect RequestControl { poll() -> ControlSignal }
 
 // Records of what was done, to undo back to a mark. It does not know what
 // undoing one is: it gives the records back, the last made first.
-pub struct UndoLog<T> { records: [T] }
+pub struct UndoLog<T> { records: Vec<T> }
 pub struct UndoMark { length: Int }
 
-fn last_onto<T>(items: [T], count: Int, taken: [T]) -> ([T], [T]) where T: Use<[1, 1]> {
-    if(count <= 0) { (items, taken) } else {
-        match(pop(items)) {
-            Some((rest, last)) => tail last_onto(rest, count - 1, push(taken, last)),
-            None => ([], taken)
+// So many of the last records taken off, the last made first.
+fn last_onto<T>(items: &mut Vec<T>, count: Int, taken: &mut Vec<T>) where T: Use<[1, 1]> {
+    if(count <= 0) { () } else {
+        match(Vec::pop(items)) {
+            Some(last) => Vec::push(taken, last); tail last_onto(items, count - 1, taken),
+            None => ()
         }
     }
-}
-
-fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
-    match(pop(from)) { Some((rest, last)) => tail turned(rest, push(onto, last)), None => onto }
 }
 
 impl<T> UndoLog<T> {
-    pub fn new() -> Self { Self { records: [] } }
-    pub fn len(log: &Self) -> Int { len_at(&log.records) }
-    pub fn mark(log: &Self) -> UndoMark { UndoMark { length: len_at(&log.records) } }
-    pub fn push(log: &mut Self, item: T) where T: Use<[1, 1]> { push_at(&mut log.records, item); }
+    pub fn new() -> Self { Self { records: Vec::new() } }
+    pub fn len(log: &Self) -> Int { Vec::len(&log.records) }
+    pub fn mark(log: &Self) -> UndoMark { UndoMark { length: Vec::len(&log.records) } }
+    pub fn push(log: &mut Self, item: T) where T: Use<[1, 1]> { Vec::push(&mut log.records, item) }
     // The records since a mark, the last made first, for undoing.
-    pub fn rollback_take(log: &mut Self, mark: UndoMark) -> Result<[T], MarkError> where T: Use<[1, 1]> {
-        if(mark.length > len_at(&log.records)) { Err(MarkError::Stale) } else {
-            let count = len_at(&log.records) - mark.length;
-            let records = &mut log.records;
-            let none = [];
-            match(last_onto(replace(records, []), count, none)) {
-                (kept, taken) => unsafe { restore_at(records, kept) }; Ok(taken)
-            }
+    pub fn rollback_take(log: &mut Self, mark: UndoMark) -> Result<Vec<T>, MarkError> where T: Use<[1, 1]> {
+        if(mark.length > Vec::len(&log.records)) { Err(MarkError::Stale) } else {
+            let count = Vec::len(&log.records) - mark.length;
+            let mut taken = Vec::new();
+            last_onto(&mut log.records, count, &mut taken);
+            Ok(taken)
         }
     }
     // The same records in the order they were made: no longer needed.
-    pub fn commit(log: &mut Self, mark: UndoMark) -> Result<[T], MarkError> where T: Use<[1, 1]> {
-        match(UndoLog::rollback_take(log, mark)) { Ok(taken) => Ok(turned(taken, [])), Err(e) => Err(e) }
+    pub fn commit(log: &mut Self, mark: UndoMark) -> Result<Vec<T>, MarkError> where T: Use<[1, 1]> {
+        match(UndoLog::rollback_take(log, mark)) { Ok(taken) => let mut t = taken; Vec::reverse(&mut t); Ok(t), Err(e) => Err(e) }
     }
-    pub fn clear(log: &mut Self) where T: Use<[0, 1]> { log.records = []; }
+    pub fn clear(log: &mut Self) where T: Use<[0, 1]> { Vec::clear(&mut log.records) }
 }

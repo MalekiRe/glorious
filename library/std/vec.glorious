@@ -222,6 +222,17 @@ pub fn fold_pairs<A, T, U, V, e: EffectRow>(pairs: A, init: V, f: fn(V, T, U) ->
 // How long an array is (the prelude's `len`, of arrays alone).
 pub fn len_of<T>(a: [T]) -> Int where T: Use<[1, 1]> { len(a) }
 
+// What gives all its elements away, as a `Vec` of them (`Vec::from_array`).
+pub trait ToVec { type Elem; fn to_vec(Self) -> Vec<Elem> }
+impl<T> ToVec for Vec<T> { type Elem = T; fn to_vec(v: Vec<T>) -> Vec<T> { v } }
+impl<T> ToVec for [T] where T: Use<[1, 1]> { type Elem = T; fn to_vec(a: [T]) -> Vec<T> { of_array(a) } }
+impl<T, N> ToVec for [T; N] where T: Use<[1, 1]> { type Elem = T; fn to_vec(a: [T; N]) -> Vec<T> { of_array(fixed_to_array(a)) } }
+fn of_array<T>(items: [T]) -> Vec<T> where T: Use<[1, 1]> {
+    let mut v = Vec::new();
+    push_each(&mut v, turned(items, []));
+    v
+}
+
 // A growable array changed where it is, in the shape the library
 // specification gives it (15): functions of the type, `&mut Self` to change
 // one, `Option<&T>` to look at an element. Sizes and places are `Int`. Its
@@ -408,11 +419,8 @@ impl<T> Clone for Vec<T> where T: Clone, T: Use<[1, 1]> {
 impl<T> Vec<T> {
     pub fn new() -> Self { Self { at: ptr_mut_at(0usize), cap: 0, len: 0 } }
     pub fn with_capacity(capacity: Int) -> Self { let mut v = Vec::new(); reserve_total(&mut v, capacity); v }
-    pub fn from_array(items: [T]) -> Self where T: Use<[1, 1]> {
-        let mut v = Vec::new();
-        push_each(&mut v, turned(items, []));
-        v
-    }
+    // Of the elements of an array, a `[T; N]` or a `Vec`, given away.
+    pub fn from_array<A>(items: A) -> Self where A: ToVec<Elem = T> { to_vec(items) }
     pub fn into_array(value: Self) -> [T] where T: Use<[1, 1]> {
         let parts = parts_of(value);
         let v = Vec { at: parts.at, cap: 0, len: 0 };

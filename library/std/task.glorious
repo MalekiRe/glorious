@@ -2,6 +2,9 @@
 // and tasks that take turns. Nothing here runs two things at once.
 
 use std::generator::{Yield, yield, Coroutine, Generator, GeneratorStep, resume};
+use std::vec::{Vec, IntoIter, ToVec};
+use std::collections::{VecDeque};
+use std::iterator::{Iterator, next};
 
 // Work that was started: its result is had by waiting for it. A handle has
 // to be given to `join` or `cancel_task`: there is no letting it go.
@@ -37,50 +40,51 @@ pub fn run_inline<T, R>(body: fn() -> R / {Spawn<T>, TaskControl<T>}) -> R where
 // Giving way to the other tasks.
 pub fn yield_now() / {Yield<(), ()>} { yield(()) }
 
-fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
-    match(pop(from)) { Some((rest, last)) => tail turned(rest, push(onto, last)), None => onto }
-}
-
-// A result put among those done, kept in the order of the tasks' numbers.
-fn placed<T>(done: [(Int, T)], at: Int, result: T) -> [(Int, T)] where T: Use<[1, 1]> {
-    match(pop(done)) {
-        None => [(at, result)],
-        Some((rest, (i, r))) =>
-            if(i > at) { push(placed(rest, at, result), (i, r)) } else { push(push(rest, (i, r)), (at, result)) }
-    }
-}
-
-// (They are kept by how late each task was given, so the last of them is
-// the first given.)
-fn results<T>(done: [(Int, T)], out: [T]) -> [T] where T: Use<[1, 1]> {
-    match(pop(done)) { Some((rest, (_, r))) => tail results(rest, push(out, r)), None => out }
-}
-
 // One step of each task still going, the first given first; then again
 // with those that gave way, until none is left.
-fn turns<T>(waiting: [(Int, Coroutine<(), (), T>)], next: [(Int, Coroutine<(), (), T>)], done: [(Int, T)]) -> [(Int, T)] where T: Use<[1, 1]> {
-    match(pop(waiting)) {
-        Some((rest, (i, task))) => match(resume(task, ())) {
-            GeneratorStep::Yielded { value: _, rest: more } => turns(rest, push(next, (i, more)), done),
-            GeneratorStep::Complete(result) => turns(rest, next, placed(done, i, result))
+fn turns<T>(waiting: &mut VecDeque<(Int, Coroutine<(), (), T>)>, done: &mut Vec<(Int, T)>) where T: Use<[1, 1]> {
+    match(VecDeque::pop_front(waiting)) {
+        Some((i, task)) => match(resume(task, ())) {
+            GeneratorStep::Yielded { value: _, rest: more } => VecDeque::push_back(waiting, (i, more)); tail turns(waiting, done),
+            GeneratorStep::Complete(result) => Vec::push(done, (i, result)); tail turns(waiting, done)
         },
-        None => match(pop(next)) {
-            None => done,
-            Some((others, last)) => turns(turned(push(others, last), []), [], done)
-        }
+        None => ()
     }
 }
 
-// Each task with a number: the last given has nothing, the one before it
-// one. (Taken from the end, so the first given is the last put, and is then
-// the first taken off.)
-fn numbered<T>(tasks: [Coroutine<(), (), T>], out: [(Int, Coroutine<(), (), T>)], late: Int) -> [(Int, Coroutine<(), (), T>)] where T: Use<[1, 1]> {
-    match(pop(tasks)) { Some((rest, task)) => tail numbered(rest, push(out, (late, task)), late + 1), None => out }
+fn numbered<T>(tasks: &mut IntoIter<Coroutine<(), (), T>>, waiting: &mut VecDeque<(Int, Coroutine<(), (), T>)>, done: &mut Vec<(Int, T)>, i: Int) where T: Use<[1, 1]> {
+    match(next(tasks)) {
+        Some(task) => VecDeque::push_back(waiting, (i, task)); tail numbered(tasks, waiting, done, i + 1),
+        None => ()
+    }
 }
 
-// Tasks that take turns: each runs until it gives way with `yield_now` or
-// ends, then the next, round and round. What each made, in the order the
-// tasks were given.
-pub fn round_robin<T>(tasks: [Coroutine<(), (), T>]) -> [T] where T: Use<[1, 1]> {
-    results(turns(numbered(tasks, [], 0), [], []), [])
+// What the task numbered `k` made taken out of what was made, as they ended.
+fn numbered_at<T>(done: &Vec<(Int, T)>, k: Int, j: Int) -> Int {
+    if(j >= Vec::len(done)) { j } else { match(Vec::get(done, j)) { Some(pair) => if((*pair).0 == k) { j } else { tail numbered_at(done, k, j + 1) }, None => j } }
+}
+fn made<T>(done: &mut Vec<(Int, T)>, k: Int, n: Int, out: &mut Vec<T>) where T: Use<[1, 1]> {
+    if(k >= n) { () } else {
+        let at = numbered_at(&*done, k, 0);
+        match(Vec::swap_remove(done, at)) {
+            Some((_, r)) => Vec::push(out, r),
+            None => ()
+        };
+        tail made(done, k + 1, n, out)
+    }
+}
+
+// Tasks that take turns (an array, a `[T; N]` or a `Vec` of them): each runs
+// until it gives way with `yield_now` or ends, then the next, round and
+// round. What each made, in the order the tasks were given.
+pub fn round_robin<A, T>(tasks: A) -> Vec<T> where A: ToVec<Elem = Coroutine<(), (), T>>, T: Use<[1, 1]> {
+    let mut given = Vec::into_iter(Vec::from_array(tasks));
+    let mut waiting = VecDeque::new();
+    let mut done = Vec::new();
+    numbered(&mut given, &mut waiting, &mut done, 0);
+    turns(&mut waiting, &mut done);
+    let n = Vec::len(&done);
+    let mut out = Vec::new();
+    made(&mut done, 0, n, &mut out);
+    out
 }

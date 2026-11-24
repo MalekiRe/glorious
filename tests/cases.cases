@@ -6588,7 +6588,7 @@ fn main() -> Int {
     say(match(BinaryHeap::peek(&h)) { Some(r) => *r, None => 0 });
     say(BinaryHeap::pop(&mut h)); say(BinaryHeap::len(&h));
     say(BinaryHeap::into_sorted_vec(h));
-    say(BinaryHeap::into_sorted_vec(BinaryHeap::from_vec([3, 8, 2, 9, 4])));
+    say(BinaryHeap::into_sorted_vec(BinaryHeap::from_vec(std::vec::Vec::from_array([3, 8, 2, 9, 4]))));
     0 }
 #### expect
 3
@@ -9820,7 +9820,7 @@ fn main() -> Int {
     let mark = UndoLog::mark(&log);
     UndoLog::push(&mut log, "b");
     UndoLog::push(&mut log, "c");
-    say(match(UndoLog::rollback_take(&mut log, mark)) { Ok(records) => records, Err(_) => [] });
+    say(match(UndoLog::rollback_take(&mut log, mark)) { Ok(records) => records, Err(_) => std::vec::Vec::new() });
     UndoLog::len(&log)
 }
 
@@ -9884,7 +9884,7 @@ fn main() -> Int {
     let mark = UndoLog::mark(&log);
     UndoLog::push(&mut log, "b");
     UndoLog::push(&mut log, "c");
-    say(match(UndoLog::rollback_take(&mut log, mark)) { Ok(records) => records, Err(_) => [] });
+    say(match(UndoLog::rollback_take(&mut log, mark)) { Ok(records) => records, Err(_) => std::vec::Vec::new() });
     UndoLog::len(&log)
 }
 
