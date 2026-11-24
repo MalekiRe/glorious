@@ -26,8 +26,10 @@ pub unsafe fn as_ref<'a, T>(p: Ptr<T>) -> &'a T { transmute(p.at) }
 pub unsafe fn as_mut<'a, T>(p: PtrMut<T>) -> &'a mut T { transmute(p.at) }
 
 // The place of an array's element: `i` is within it.
-pub unsafe fn element<T>(p: Ptr<[T]>, i: Int) -> Ptr<T> { let xs: &[T] = as_ref(p); ptr(&xs[i]) }
-pub unsafe fn element_mut<T>(p: PtrMut<[T]>, i: Int) -> PtrMut<T> { let xs: &mut [T] = as_mut(p); ptr_mut(&mut xs[i]) }
+// (Of anything with elements one after another: an array, a `[T; N]`, a
+// `Vec`.)
+pub unsafe fn element<A, T>(p: Ptr<A>, i: Int) -> Ptr<T> where A: Indexed<Element = T> { let xs: &A = as_ref(p); ptr(element_at(xs, i)) }
+pub unsafe fn element_mut<A, T>(p: PtrMut<A>, i: Int) -> PtrMut<T> where A: Indexed<Element = T>, A: IndexedMut { let xs: &mut A = as_mut(p); ptr_mut(place_at(i, xs)) }
 
 // What is at the place, taken out, and what is put there with what was
 // there neither given back nor destroyed.

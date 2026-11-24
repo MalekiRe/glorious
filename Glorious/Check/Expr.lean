@@ -701,9 +701,16 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Flat.ExprId)
       | _ => pure a
     let found ← tryCatchThe Elab.Said (some <$> inferExpr scope amb a) fun e =>
       if e.passOn then throwThe Elab.Said e else pure none
-    -- (Its head read before what was found on the way is let go.)
+    -- (Its head read before what was found on the way is let go; what a
+    -- trait leaves to an implementation found first where it is one, the
+    -- element of `g[0]`.)
     let h ← match found with
-      | some ty => headName 8 ty
+      | some ty => do
+        match ← headName 8 ty with
+        | some h => pure (some h)
+        | none =>
+          if (← get).assocUses.isEmpty then pure none
+          else do settleAssocsAll; headName 8 ty
       | none => pure none
     set saved
     pure (h.bind fun h => alts.find? (·.startsWith (h ++ "::")))
@@ -1538,10 +1545,27 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
                   modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
                   return some (← inferCall scope amb (← pushE (.name none alt)) args call)
                 -- (A field of what a name points to, or of a mutable
-                -- variable: borrowed where it is.)
-                let borrowed ← match ← fieldThroughRef scope a with
-                  | some (x, path, fid) => pure (some (Expr.refField fid (k == 2) x path true))
-                  | none => pure ((cellField (← get).body scope a).map fun (x, path, fid) => Expr.refField fid (k == 2) x path false)
+                -- variable: borrowed where it is. An element read where it
+                -- is, `g[0].push(5)`: the element's place, borrowed.)
+                let body := (← get).body
+                let elementPlace : Option Expr := match body.expr a with
+                  | .deref r => match body.expr r with
+                    | .call cid g #[base, i] =>
+                      if (body.name? g).map (·.2) != some "element_at" then none else
+                      let base' : Option Expr := match body.expr base with
+                        | .ref _ x => some (.ref (k == 2) x)
+                        | .refField fid _ x path star => some (.refField fid (k == 2) x path star)
+                        | _ => none
+                      base'.map fun bs =>
+                        if k == 2 then Expr.call cid (.name none "place_at") [Flat.treeExpr body i, bs]
+                        else Expr.call cid (.name none "element_at") [bs, Flat.treeExpr body i]
+                    | _ => none
+                  | _ => none
+                let borrowed ← match elementPlace with
+                  | some e => pure (some e)
+                  | none => match ← fieldThroughRef scope a with
+                    | some (x, path, fid) => pure (some (Expr.refField fid (k == 2) x path true))
+                    | none => pure ((cellField (← get).body scope a).map fun (x, path, fid) => Expr.refField fid (k == 2) x path false)
                 if let some bt := borrowed then
                   modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
                                            argsChosen := ((call, 0), bt) :: s.argsChosen }

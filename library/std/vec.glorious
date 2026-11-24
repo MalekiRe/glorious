@@ -409,7 +409,7 @@ impl<T> Vec<T> {
     pub fn new() -> Self { Self { at: ptr_mut_at(0usize), cap: 0, len: 0 } }
     pub fn with_capacity(capacity: Int) -> Self { let mut v = Vec::new(); reserve_total(&mut v, capacity); v }
     // Of the elements of an array, a `[T; N]` or a `Vec`, given away.
-    pub fn from_array<A>(items: A) -> Self where A: ToVec<Elem = T> { to_vec(items) }
+    pub fn from_array<A>(items: A) -> Self where A: ToVec<Elem = T>, A: Use<[1, 1]> { to_vec(items) }
     pub fn into_array(value: Self) -> [T] where T: Use<[1, 1]> {
         let parts = parts_of(value);
         let v = Vec { at: parts.at, cap: 0, len: 0 };
@@ -592,7 +592,8 @@ impl<T> Vec<T> {
         while({ i < value.len and { not found } }) { if(*at_ref(value, i) == *item) { found = true } else { () }; i = i + 1 };
         found
     }
-    pub fn extend(value: &mut Self, more: [T]) where T: Use<[1, 1]> { push_each(value, turned(more, array_empty())) }
+    // (Of anything `ToVec`: a `Vec`, `[a, b]`.)
+    pub fn extend<A>(value: &mut Self, more: A) where A: ToVec<Elem = T>, T: Use<[1, 1]> { let mut rest = to_vec(more); Vec::append(value, rest) }
     // Only so many kept: the rest are let go.
     pub fn truncate(value: &mut Self, length: Int) {
         while({ value.len > length and { value.len > 0 } }) {

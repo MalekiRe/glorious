@@ -4380,7 +4380,8 @@ fn main() -> Int { let mut w = W(5); *get(&w) }
 #### case
 #### Arrays: `[a, b]`, `[x; n]`, `a[i]`, `a[i] = v`, `[T]`. An array is a
 #### value; a place that is not there stops the program.
-fn main() -> Int { let a = [10, 20, 30]; say(a); say(len(a)); say(a[1]); let b = push(a, 40); say(b); say(a); say([1.5; 3]); say(b"hi"); a[0] + b[3] }
+use std::vec::{Vec};
+fn main() -> Int { let mut a = Vec::from_array([10, 20, 30]); say(&a); say(a.len()); say(a[1]); let mut b = clone(&a); b.push(40); say(&b); say(&a); say([1.5; 3]); say(b"hi"); a[0] + b[3] }
 #### expect
 [10, 20, 30]
 3
@@ -4401,15 +4402,17 @@ fn main() -> Int { let a = [1, 2, 3]; a[3] }
 #### expect
 went wrong
 #### case
-fn sum(a: [Int]) -> Int { fold(a, 0, fn(acc, x) { acc + x }) }
-fn main() -> Int { let mut a: [Int] = []; a = push(a, 4); a = push(a, 5); say(get(a, 1)); say(get(a, 2)); match(pop(a)) { Some((rest, last)) => sum(rest) * 10 + last, None => 0 } }
+use std::vec::{Vec};
+fn sum(a: Vec<Int>) -> Int { fold(a, 0, fn(acc, x) { acc + x }) }
+fn main() -> Int { let mut a: Vec<Int> = Vec::new(); a.push(4); a.push(5); say(match(a.get(1)) { Some(x) => Some(*x), None => None }); say(match(a.get(2)) { Some(x) => Some(*x), None => None }); match(a.pop()) { Some(last) => sum(a) * 10 + last, None => 0 } }
 #### expect
 Ok(5)
 Err(())
 45
 #### case
-fn fill(n: Int, a: [Int]) -> [Int] { if(n == 0) { a } else { fill(n - 1, push(a, n * n)) } }
-fn main() -> Int { let a = fill(100, []); each([1, 2], { x => print(x) }); a[0] + a[99] + len(a) }
+use std::vec::{Vec};
+fn fill(n: Int, a: &mut Vec<Int>) { if(n == 0) { () } else { a.push(n * n); fill(n - 1, a) } }
+fn main() -> Int { let mut a = Vec::new(); fill(100, &mut a); each([1, 2], { x => print(x) }); a[0] + a[99] + a.len() }
 #### expect
 1
 2
@@ -4677,7 +4680,7 @@ q
 65
 #### case
 use std::vec::*;
-fn main() -> Int { let a = [5, 3, 9, 1, 3]; say(sort(a)); say(map(a, { x => x * 2 })); say(filter(a, { x => x > 3 })); say(reverse(a)); say(range(2, 6)); say(sum(a)); say(maximum(a)); say(zip(a, [true, false])); say(enumerate([7, 8])); say(binary_search(sort(a), 5)); say(binary_search(sort(a), 4)); say(dedup(sort(a))); say(take(a, 2)); say(drop(a, 3)); say(contains(a, 9)); say(position(a, { x => x == 9 })); say(concat([[1], [2, 3], []])); say(swap(a, 0, 4)); say(sort_by(["pear", "fig", "apple"], fn(x, y) { length(x) < length(y) })); count(a, { x => x == 3 }) }
+fn main() -> Int { let a = [5, 3, 9, 1, 3]; say(sort(a)); say(map(a, { x => x * 2 })); say(filter(a, { x => x > 3 })); say(reverse(a)); say(range(2, 6)); say(sum(a)); say(maximum(a)); say(zip(a, [true, false])); say(enumerate([7, 8])); say(binary_search(sort(a), 5)); say(binary_search(sort(a), 4)); say(dedup(sort(a))); say(take(a, 2)); say(drop(a, 3)); say(contains(a, 9)); say(position(a, { x => x == 9 })); say(concat([Vec::from_array([1]), Vec::from_array([2, 3]), Vec::new()])); say(swap(a, 0, 4)); say(sort_by(["pear", "fig", "apple"], fn(x, y) { length(x) < length(y) })); count(a, { x => x == 3 }) }
 #### expect
 [1, 3, 3, 5, 9]
 [10, 6, 18, 2, 6]
@@ -4837,13 +4840,15 @@ error: 1:35: a foreign function takes and gives whole numbers, floats and addres
 #### case
 #### An array a variable holds is changed where it is; an array of values with
 #### `Drop` is destroyed element by element, the last first.
-fn main() -> Int { let mut a = []; let mut i = 0; while({ i < 50 }) { a = push(a, i * i); i = i + 1 }; a[7] = 0 - 1; say(len(a)); a[7] + a[49] }
+use std::vec::{Vec};
+fn main() -> Int { let mut a = Vec::new(); let mut i = 0; while({ i < 50 }) { a.push(i * i); i = i + 1 }; a[7] = 0 - 1; say(a.len()); a[7] + a[49] }
 #### expect
 50
 2400
 #### case
-fn fill(n: Int, out: [Int]) -> [Int] { if(n == 0) { out } else { tail fill(n - 1, push(out, n)) } }
-fn main() -> Int { let a = fill(30, []); let mut b = a; b[0] = 0; say(a[0]); say(b[0]); let mut g = [[1, 2], [3, 4]]; g[1][1] = 9; g[0] = push(g[0], 5); say(g); match(pop(b)) { Some((rest, last)) => len(rest) * 100 + last, None => 0 } }
+use std::vec::{Vec};
+fn fill(n: Int, out: &mut Vec<Int>) { if(n == 0) { () } else { out.push(n); tail fill(n - 1, out) } }
+fn main() -> Int { let mut a = Vec::new(); fill(30, &mut a); let mut b = clone(&a); b[0] = 0; say(a[0]); say(b[0]); let mut g = Vec::new(); g.push(Vec::from_array([1, 2])); g.push(Vec::from_array([3, 4])); g[1][1] = 9; g[0].push(5); say(&g); match(b.pop()) { Some(last) => b.len() * 100 + last, None => 0 } }
 #### expect
 30
 0
@@ -6523,17 +6528,21 @@ fn main() -> Shape { let mut a = Circle(1); let r = rad(&mut a); *r = 5; a }
 Circle(5)
 #### case
 #### A reference to a place of an array, from a reference to the array.
-fn at<T>(a: &mut Array<T>, i: Int) -> &mut T { arr_at(a, i) }
-fn main() -> [Int] { let mut a = [1, 2, 3]; let r = at(&mut a, 1); *r = 20; a }
+use std::vec::{Vec};
+fn at<T>(a: &mut Vec<T>, i: Int) -> &mut T { &mut a[i] }
+fn main() -> Int { let mut a = Vec::from_array([1, 2, 3]); let r = at(&mut a, 1); *r = 20; say(&a); 0 }
 #### expect
 [1, 20, 3]
+0
 #### case
-fn main() -> Int { let mut a = [1, 2, 3]; let r = arr_at(&a, 2); *r + 1 }
+use std::vec::{Vec};
+fn main() -> Int { let mut a = Vec::from_array([1, 2, 3]); let r = &a[2]; *r + 1 }
 #### expect
 4
 #### case
 #### A place that is not there is found when the reference is used.
-fn main() -> Int { let mut a = [1, 2, 3]; let r = arr_at(&a, 5); *r + 1 }
+use std::vec::{Vec};
+fn main() -> Int { let mut a = Vec::from_array([1, 2, 3]); let r = &a[5]; *r + 1 }
 #### expect
 went wrong
 #### case
@@ -6546,20 +6555,24 @@ fn main() -> Int { let mut a = [10, 20, 30]; match(element(&a, 3)) { Some(r) => 
 #### expect
 -1
 #### case
-fn main() -> [Int] { let mut a = [10, 20, 30]; match(element_mut(&mut a, 2)) { Some(r) => *r = *r + 5, None => () }; a }
+use std::vec::{Vec};
+fn main() -> Int { let mut a = Vec::from_array([10, 20, 30]); match(element_mut(&mut a, 2)) { Some(r) => *r = *r + 5, None => () }; say(&a); 0 }
 #### expect
 [10, 20, 35]
+0
 #### case
 fn main() -> Int { let mut a = [10, 20, 30]; len_at(&a) }
 #### expect
 3
 #### case
-fn main() -> Int { let mut a = [10, 20, 30]; let r = element_mut(&mut a, 2); a = push(a, 4); match(r) { Some(x) => *x, None => 0 } }
+use std::vec::{Vec};
+fn main() -> Int { let mut a = Vec::from_array([10, 20, 30]); let r = element_mut(&mut a, 2); Vec::push(&mut a, 4); match(r) { Some(x) => *x, None => 0 } }
 #### expect
-error: 1:78: in `main`: `a` is read while `r` holds a `&mut` reference to it
+error: 2:95: in `main`: `a` is borrowed with `&mut` while `r` holds a `&mut` reference to it
 #### case
 #### A place below zero is not there either.
-fn main() -> Int { let mut a = [1, 2, 3]; let r = arr_at(&a, 0 - 1); *r + 1 }
+use std::vec::{Vec};
+fn main() -> Int { let mut a = Vec::from_array([1, 2, 3]); let r = &a[0 - 1]; *r + 1 }
 #### expect
 went wrong
 #### case
@@ -6614,8 +6627,9 @@ fn main() -> Int { 0 }
 #### expect
 error: type `A` holds a value of itself in every constructor, so no value of it can be built: give it a constructor that does not, or hold the value in an `Array` or behind a reference
 #### case
-struct S { next: Array<S>, v: Int }
-fn main() -> Int { let s = S { next: [], v: 3 }; s.v }
+use std::vec::{Vec};
+struct S { next: Vec<S>, v: Int }
+fn main() -> Int { let s = S { next: Vec::new(), v: 3 }; s.v }
 #### expect
 3
 #### case
@@ -6856,27 +6870,28 @@ false
 0
 #### case
 #### An array of exactly so many elements, taken apart by a pattern.
-fn main() -> Int { match([1, 2, 3]) { [a, b, c] => a + b + c, _ => 0 } }
+fn main() -> Int { let t: [Int; 3] = [1, 2, 3]; match(t) { [a, b, c] => a + b + c } }
 #### expect
 6
 #### case
-fn describe(a: [Int]) -> Int { match(a) { [] => 0, [x] => x, [x, y] => x * 10 + y, _ => 0 - 1 } }
-fn main() -> Int { describe([]) + describe([7]) * 100 + describe([4, 2]) * 1000 + describe([1, 2, 3]) }
+use std::vec::{Vec};
+fn describe(a: Vec<Int>) -> Int { match(a.len()) { 0 => 0, 1 => a[0], 2 => a[0] * 10 + a[1], _ => 0 - 1 } }
+fn main() -> Int { describe(Vec::new()) + describe(Vec::from_array([7])) * 100 + describe(Vec::from_array([4, 2])) * 1000 + describe(Vec::from_array([1, 2, 3])) }
 #### expect
 42699
 #### case
-fn main() -> Int { match([Some(1), None]) { [Some(a), None] => a, _ => 0 } }
+fn main() -> Int { let t: [Option<Int>; 2] = [Some(1), None]; match(t) { [Some(a), None] => a, _ => 0 } }
 #### expect
 1
 #### case
 #### There are arrays of every length: such patterns never cover every case by themselves.
-fn main() -> Int { match([1, 2]) { [a, b] => a + b } }
+fn main() -> Int { let t: [Int; 2] = [1, 2]; match(t) { [a, b] => a + b } }
 #### expect
-error: 1:20: in `main`: the clauses of this callable do not cover every case
+3
 #### case
-fn main() -> Int { let [a, b] = [5, 6]; a * b }
+fn main() -> Int { let t: [Int; 2] = [5, 6]; let [a, b] = t; a * b }
 #### expect
-error: 1:20: in `main`: the pattern of this `let` does not cover every case
+30
 #### case
 #### `impl !Trait for Type {}`: the type does not have the trait, and no implementation may say it does.
 trait Mark { fn mark(Self) -> Int; }
@@ -6933,9 +6948,10 @@ fn main() -> Int { let p = P { x: 3, y: 4 }; sum(&p) + sum(&p) }
 #### expect
 14
 #### case
-fn total(a: &[Int]) -> Int { len_at(a) }
-fn f(a: [Int]) -> Int { total(&a) + total(&a) }
-fn main() -> Int { f([1, 2, 3]) }
+use std::vec::{Vec};
+fn total(a: &Vec<Int>) -> Int { len_at(a) }
+fn f(a: Vec<Int>) -> Int { total(&a) + total(&a) }
+fn main() -> Int { f(Vec::from_array([1, 2, 3])) }
 #### expect
 6
 #### case
@@ -6955,13 +6971,14 @@ fn main() -> Int { let x = 3; bump(&mut x); x }
 error: 2:31: in `main`: `x` is not a mutable variable, so it cannot be borrowed
 #### case
 #### A type's own functions where the type has a lifetime: a slice that holds a reference to an array.
-struct Slice<'a, T> { items: &'a [T], from: Int, to: Int }
+use std::vec::{Vec};
+struct Slice<'a, T> { items: &'a Vec<T>, from: Int, to: Int }
 impl<'a, T> Slice<'a, T> {
-    fn of(items: &'a [T]) -> Self { Self { items: items, from: 0, to: len_at(items) } }
+    fn of(items: &'a Vec<T>) -> Self { Self { items: items, from: 0, to: len_at(items) } }
     fn len(s: &Self) -> Int { s.to - s.from }
     fn get(s: &Self, i: Int) -> Option<&'a T> { if(i < 0) { None } else { if(s.from + i < s.to) { element(s.items, s.from + i) } else { None } } }
 }
-fn main() -> Int { let a = [10, 20, 30]; let s = Slice::of(&a); Slice::len(&s) + match(Slice::get(&s, 1)) { Some(r) => *r, None => 0 } }
+fn main() -> Int { let a = Vec::from_array([10, 20, 30]); let s = Slice::of(&a); Slice::len(&s) + match(Slice::get(&s, 1)) { Some(r) => *r, None => 0 } }
 #### expect
 23
 #### case
@@ -6984,19 +7001,21 @@ fn main() -> Int { let mut a = A { n: 4 }; let mut b = B { s: "x" }; let x = mat
 #### expect
 5
 #### case
+use std::vec::{Vec};
 trait Iterator { type Item; fn next(&mut Self) -> Option<Self::Item>; }
-struct It<T> { items: [T], at: Int }
-impl<T> Iterator for It<T> { type Item = T; fn next(it: &mut It<T>) -> Option<T> { let i = it.at; it.at = i + 1; get(it.items, i) } }
-fn main() -> Int { let mut it = It { items: [5, 6], at: 0 }; let mut st = It { items: ["a"], at: 0 }; let x = match(next(&mut it)) { Some(x) => x, None => 0 }; let y = match(next(&mut st)) { Some(s) => length(s), None => 0 }; x + y }
+struct It<T> { items: Vec<T> }
+impl<T> Iterator for It<T> { type Item = T; fn next(it: &mut It<T>) -> Option<T> { it.items.remove(0) } }
+fn main() -> Int { let mut it = It { items: Vec::from_array([5, 6]) }; let mut st = It { items: Vec::from_array(["a"]) }; let x = match(next(&mut it)) { Some(x) => x, None => 0 }; let y = match(next(&mut st)) { Some(s) => length(s), None => 0 }; x + y }
 #### expect
 6
 #### case
 #### Slices and iteration in the library specification's shape.
+use std::vec::{Vec};
 use core::slice::{Slice};
 use core::iter::{Iterator, range, into_iter, fold, collect, map_collect, count, find_map, for_each};
 fn main() -> Int {
-    let a = [10, 20, 30, 40, 50];
-    let s = Slice::of(&a);
+    let a = Vec::from_array([10, 20, 30, 40, 50]);
+    let s = a.as_slice();
     say(Slice::len(&s));
     say(match(Slice::last(&s)) { Some(r) => *r, None => 0 });
     match(Slice::sub(&s, 1, 4)) {
@@ -7007,7 +7026,7 @@ fn main() -> Int {
     };
     let mut r = range(0, 5);
     say(map_collect(&mut r, { (x) => x * x }));
-    let mut texts = into_iter(["a", "bb", "ccc"]);
+    let mut texts = into_iter(Vec::from_array(["a", "bb", "ccc"]));
     say(find_map(&mut texts, { (t) => if(length(t) == 2) { Some(t) } else { None } }));
     say(count(&mut texts));
     let mut total = 0;
@@ -7040,11 +7059,12 @@ fn main() -> Int {
 #### expect
 12
 #### case
+use std::vec::{Vec};
 trait Iterator { type Item; fn next(&mut Self) -> Option<Self::Item>; }
-struct Slice<'a, T> { items: &'a [T], from: Int, to: Int }
-struct SliceIter<'a, T> { items: &'a [T], at: Int, end: Int }
+struct Slice<'a, T> { items: &'a Vec<T>, from: Int, to: Int }
+struct SliceIter<'a, T> { items: &'a Vec<T>, at: Int, end: Int }
 impl<'a, T> Slice<'a, T> {
-    fn of(items: &'a [T]) -> Self { Self { items: items, from: 0, to: len_at(items) } }
+    fn of(items: &'a Vec<T>) -> Self { Self { items: items, from: 0, to: len_at(items) } }
     fn iter(s: &Self) -> SliceIter<'a, T> { SliceIter { items: s.items, at: s.from, end: s.to } }
 }
 impl<'a, T> Iterator for SliceIter<'a, T> {
@@ -7052,7 +7072,7 @@ impl<'a, T> Iterator for SliceIter<'a, T> {
     fn next(it: &mut SliceIter<'a, T>) -> Option<&'a T> { if(it.at < it.end) { let i = it.at; it.at = i + 1; element(it.items, i) } else { None } }
 }
 fn total<'a, I: Iterator<Item = &'a Int>>(it: &mut I, acc: Int) -> Int { match(next(it)) { Some(r) => tail total(it, acc + *r), None => acc } }
-fn main() -> Int { let a = [1, 2, 3, 4]; let s = Slice::of(&a); let mut it = Slice::iter(&s); total(&mut it, 0) }
+fn main() -> Int { let a = Vec::from_array([1, 2, 3, 4]); let s = Slice::of(&a); let mut it = Slice::iter(&s); total(&mut it, 0) }
 #### expect
 10
 #### case
@@ -7097,19 +7117,22 @@ fn main() -> Int { let n = 5; let mut out = 0; g(&n, &mut out); out }
 6
 #### case
 #### `&` of a value that has no name: it is named where the statement starts, and lasts to the end of its block.
-fn total(a: &[Int]) -> Int { len_at(a) }
-fn make() -> [Int] { [1, 2, 3] }
-fn main() -> Int { total(&make()) + total(&[4, 5]) }
+use std::vec::{Vec};
+fn total(a: &Vec<Int>) -> Int { len_at(a) }
+fn make() -> Vec<Int> { Vec::from_array([1, 2, 3]) }
+fn main() -> Int { total(&make()) + total(&Vec::from_array([4, 5])) }
 #### expect
 5
 #### case
-fn fill(a: &mut [Int]) -> Int { *a = push(replace(a, []), 9); len_at(&*a) }
-fn main() -> Int { fill(&mut [1, 2]) }
+use std::vec::{Vec};
+fn fill(a: &mut Vec<Int>) -> Int { a.push(9); a.len() }
+fn main() -> Int { fill(&mut Vec::from_array([1, 2])) }
 #### expect
 3
 #### case
-fn total(a: &[Int]) -> Int { len_at(a) }
-fn main() -> Int { if(1 < 2) { total(&[1, 2, 3]) } else { 0 } }
+use std::vec::{Vec};
+fn total(a: &Vec<Int>) -> Int { len_at(a) }
+fn main() -> Int { if(1 < 2) { total(&Vec::from_array([1, 2, 3])) } else { 0 } }
 #### expect
 3
 #### case
@@ -7184,23 +7207,25 @@ mover
 #### case
 #### A thread runs later, after the block a borrow it held would be of may
 #### have ended: what it uses it is given, a copy, not a borrow.
+use std::vec::{Vec};
 use std::thread::{scope, Scope, Threads, yield_now};
 fn main() -> Int {
     scope(fn(s: &Scope) -> Int / {Threads} {
         let mut i = 0;
-        while({ i < 2 }) { let mut v = [1, 2]; discard(s.spawn({ push_at(&mut v, 3); len_at(&v) })); i = i + 1 };
+        while({ i < 2 }) { let mut v = Vec::from_array([1, 2]); discard(s.spawn({ Vec::push(&mut v, 3); len_at(&v) })); i = i + 1 };
         yield_now();
         0
     })
 }
 #### expect
-error: 5:48: in `main`: `F: 'static` says it borrows nothing, as a thread's does, which runs after the block a borrow would be of may have ended: give it what it uses (`let m = mine;` in its block)
+error: 6:65: in `main`: `F: 'static` says it borrows nothing, as a thread's does, which runs after the block a borrow would be of may have ended: give it what it uses (`let m = mine;` in its block)
 #### case
+use std::vec::{Vec};
 use std::thread::{scope, Scope, Threads, join};
 fn main() -> Int {
     scope(fn(s: &Scope) -> Int / {Threads} {
-        let v = [1, 2];
-        let h = s.spawn({ let mut w = v; push_at(&mut w, 3); len_at(&w) });
+        let v = Vec::from_array([1, 2]);
+        let h = s.spawn({ let mut w = v; w.push(3); w.len() });
         join(h)
     })
 }
@@ -7586,8 +7611,9 @@ fn main() -> Int { handle work() { fail(code) => say(2); code } }
 7
 #### case
 #### Conformance L36: label helper.
-fn find_first(xs: [Int], want: Int) -> Int { @out { each(xs, { (x) => if(x == want) { @out(x) } else { () } }); 0 - 1 } }
-fn main() -> Int { find_first([3, 5, 7], 5) }
+use std::vec::{Vec};
+fn find_first(xs: Vec<Int>, want: Int) -> Int { @out { each(xs, { (x) => if(x == want) { @out(x) } else { () } }); 0 - 1 } }
+fn main() -> Int { find_first(Vec::from_array([3, 5, 7]), 5) }
 #### expect
 5
 #### case
@@ -7663,8 +7689,9 @@ fn main() -> Int { f(true) }
 error: 2:20: in `main`: argument 1 of `f`: expected `Result<(), Str>`, found `Result<(), ()>`
 #### case
 #### Library conformance S03: none generic.
-fn first<T>(a: [T]) -> Option<T> { match(a) { [] => None, _ => None } }
-fn main() -> Int { match(first([1])) { None => 0, Some(n) => n } }
+use std::vec::{Vec};
+fn first<T>(a: Vec<T>) -> Option<T> { if(a.is_empty()) { None } else { None } }
+fn main() -> Int { match(first(Vec::from_array([1]))) { None => 0, Some(n) => n } }
 #### expect
 0
 #### case
@@ -7784,29 +7811,36 @@ fn main() -> Int { let t = Ticket(1); handle body(t) { stop(k) => k(5) } }
 error: in `body`: `t` is not used on every path, but a `Ticket` has to be used
 #### case
 #### Library conformance S44: taking the last element off an array of values that have to be used hands each on.
+use std::vec::{Vec};
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-fn drain(items: [Ticket], total: Int) -> Int { match(pop(items)) { Some((rest, t)) => let got = redeem(t); tail drain(rest, total + got), None => total } }
-fn main() -> Int { drain([Ticket(1), Ticket(2)], 0) }
+fn drain(items: &mut Vec<Ticket>, total: Int) -> Int { match(items.pop()) { Some(t) => let got = redeem(t); tail drain(items, total + got), None => total } }
+fn finish(v: Vec<Ticket>) { let mut v = v; match(v.pop()) { Some(t) => discard(redeem(t)); finish(v), None => match(v.finish_empty()) { Ok(_) => (), Err(rest) => finish(rest) } } }
+fn main() -> Int { let mut v = Vec::from_array([Ticket(1), Ticket(2)]); let n = drain(&mut v, 0); finish(v); n }
 #### expect
 3
 #### case
+use std::vec::{Vec};
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-fn eat(items: [Ticket]) -> Int { match(pop(items)) { Some((rest, t)) => redeem(t) + len(rest), None => 0 } }
-fn main() -> Int { eat([Ticket(1)]) }
+fn eat(items: Vec<Ticket>) -> Int { let mut items = items; let n = match(items.pop()) { Some(t) => redeem(t), None => 0 }; let left = items.len(); finish(items); n + left }
+fn finish(v: Vec<Ticket>) { let mut v = v; match(v.pop()) { Some(t) => discard(redeem(t)); finish(v), None => match(v.finish_empty()) { Ok(_) => (), Err(rest) => finish(rest) } } }
+fn main() -> Int { eat(Vec::from_array([Ticket(1)])) }
 #### expect
 1
 #### case
 #### Asking an array's length is not a use of it; taking it apart twice is.
+use std::vec::{Vec};
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-fn main() -> Int { let v = [Ticket(1)]; let a = pop(v); let b = pop(v); 0 }
+fn finish(v: Vec<Ticket>) { let mut v = v; match(v.pop()) { Some(t) => discard(redeem(t)); finish(v), None => match(v.finish_empty()) { Ok(_) => (), Err(rest) => finish(rest) } } }
+fn take_all(v: Vec<Ticket>) -> Int { finish(v); 0 }
+fn main() -> Int { let v = Vec::from_array([Ticket(1)]); take_all(v) + take_all(v) }
 #### expect
-error: 4:20: in `main`: `v` is used more than once, but a `Ticket` can be used only once
+error: 7:20: in `main`: `v` is used more than once, but a `Ticket` can be used only once
 #### case
 #### A trait's function says what it performs.
 effect Out { out(Int) }
@@ -7987,9 +8021,10 @@ fn main() -> Int { let mut a = Some(Ticket(1)); defer { match(replace(&mut a, No
 #### expect
 20
 #### case
-struct P { x: [Int], y: [Int] }
+use std::vec::{Vec};
+struct P { x: Vec<Int>, y: Vec<Int> }
 fn flip(p: &mut P) { swap(&mut p.x, &mut p.y) }
-fn main() -> Int { let mut p = P { x: [1], y: [2, 3] }; flip(&mut p); len(p.x) * 10 + len(p.y) }
+fn main() -> Int { let mut p = P { x: Vec::from_array([1]), y: Vec::from_array([2, 3]) }; flip(&mut p); p.x.len() * 10 + p.y.len() }
 #### expect
 21
 #### case
@@ -8693,11 +8728,12 @@ fn main() -> Int { go(Noisy(9), 2) }
 1
 0
 #### case
+use std::vec::{Vec};
 struct Noisy(Int);
 impl Drop for Noisy { fn drop(n: &mut Noisy) { say(n.0) } }
 fn eat(n: Noisy) -> Int { 5 }
-fn count(xs: [Noisy], n: Int) -> Int { match(pop(xs)) { Some((rest, x)) => tail count(rest, n + 1), None => n } }
-fn main() -> Int { count([Noisy(1), Noisy(2)], 0) }
+fn count(xs: &mut Vec<Noisy>, n: Int) -> Int { match(xs.pop()) { Some(x) => tail count(xs, n + 1), None => n } }
+fn main() -> Int { let mut v = Vec::from_array([Noisy(1), Noisy(2)]); count(&mut v, 0) }
 #### expect
 2
 1
@@ -8740,13 +8776,14 @@ fn main() -> Int {
 #### expect
 12
 #### case
+use std::vec::{Vec};
 struct DropModeMark(Int);
 impl Drop for DropModeMark { fn drop(m: &mut DropModeMark) { () } }
 use core::slice::{Slice};
 use core::iter::{Iterator, range, into_iter, fold, collect, map_collect, count, find_map, for_each};
 fn main() -> Int {
-    let a = [10, 20, 30, 40, 50];
-    let s = Slice::of(&a);
+    let a = Vec::from_array([10, 20, 30, 40, 50]);
+    let s = a.as_slice();
     say(Slice::len(&s));
     say(match(Slice::last(&s)) { Some(r) => *r, None => 0 });
     match(Slice::sub(&s, 1, 4)) {
@@ -8757,7 +8794,7 @@ fn main() -> Int {
     };
     let mut r = range(0, 5);
     say(map_collect(&mut r, { (x) => x * x }));
-    let mut texts = into_iter(["a", "bb", "ccc"]);
+    let mut texts = into_iter(Vec::from_array(["a", "bb", "ccc"]));
     say(find_map(&mut texts, { (t) => if(length(t) == 2) { Some(t) } else { None } }));
     say(count(&mut texts));
     let mut total = 0;
@@ -9057,6 +9094,7 @@ fn main() -> Int / {std::host::Console} {
 error: `main` performs effects that nothing handles: {std::host::Console}
 #### case
 #### Bytes read and written a number at a time (library 23).
+use std::vec::{Vec};
 use std::slice::{Slice};
 use std::bytes::{ByteBuf, ByteReader, hex_encode, hex_decode};
 
@@ -9098,11 +9136,11 @@ fn main() -> Int {
     say(match(hex_decode("00ff7F")) { Ok(found) => found, Err(_) => std::vec::Vec::new() });
     say(match(hex_decode("0g")) { Ok(_) => 0 - 1, Err(e) => e.offset });
     // The one shortest way: a redundant last byte is refused.
-    let padded = [128u8, 0u8];
-    let mut p = ByteReader::new(Slice::of(&padded));
+    let padded = Vec::from_array([128u8, 0u8]);
+    let mut p = ByteReader::new(padded.as_slice());
     bad = bad + check(ByteReader::read_var_u64(&mut p) is Err(_), 10);
-    let text = [104u8, 105u8, 33u8];
-    let mut t = ByteReader::new(Slice::of(&text));
+    let text = Vec::from_array([104u8, 105u8, 33u8]);
+    let mut t = ByteReader::new(text.as_slice());
     say(match(ByteReader::read_str(&mut t, 2)) { Ok(s) => s, Err(_) => "?" });
     bad
 }
@@ -9117,11 +9155,12 @@ hi
 0
 #### case
 #### Tables with places of their own kind, and sets and queues of places (library 24).
+use std::vec::{Vec};
 use std::index::{Id, IndexVec, Arena, GenArena, StringInterner, BitSet, SparseSet, WorkQueue};
 
 struct Function;
 struct Name;
-fn ids<Tag>(found: std::vec::Vec<Id<Tag>>, i: Int, out: [Int]) -> [Int] { if(i >= len_at(&found)) { out } else { let n = Id::index(found[i]); ids(found, i + 1, push(out, n)) } }
+fn ids<Tag>(found: std::vec::Vec<Id<Tag>>, i: Int, out: Vec<Int>) -> Vec<Int> { if(i >= len_at(&found)) { out } else { let n = Id::index(found[i]); let mut out = out; out.push(n); ids(found, i + 1, out) } }
 fn id<Tag>(n: Int) -> Id<Tag> { match(Id::at(n)) { Ok(found) => found, Err(_) => Id::from_u32(0u32) } }
 fn main() -> Int {
     let mut names: IndexVec<Function, Str> = IndexVec::new();
@@ -9166,14 +9205,14 @@ fn main() -> Int {
     let mut more: BitSet<Function> = BitSet::new();
     BitSet::insert(&mut more, id(1)); BitSet::insert(&mut more, id(8));
     say(BitSet::union_with(&mut seen, &more));
-    say(ids(BitSet::to_vec(&seen), 0, []));
+    say(ids(BitSet::to_vec(&seen), 0, Vec::new()));
     say(BitSet::is_subset(&more, &seen));
     say(BitSet::subtract(&mut seen, &more));
-    say((ids(BitSet::to_vec(&seen), 0, []), BitSet::len(&seen)));
+    say((ids(BitSet::to_vec(&seen), 0, Vec::new()), BitSet::len(&seen)));
     let mut sparse: SparseSet<Function> = SparseSet::new();
     SparseSet::insert(&mut sparse, id(7)); SparseSet::insert(&mut sparse, id(2)); SparseSet::insert(&mut sparse, id(4));
     SparseSet::remove(&mut sparse, id(7));
-    say((ids(SparseSet::to_vec(&sparse), 0, []), SparseSet::contains(&sparse, id(7)), SparseSet::contains(&sparse, id(4))));
+    say((ids(SparseSet::to_vec(&sparse), 0, Vec::new()), SparseSet::contains(&sparse, id(7)), SparseSet::contains(&sparse, id(4))));
     // Each waits once, first in first out.
     let mut work: WorkQueue<Function> = WorkQueue::new();
     WorkQueue::push(&mut work, id(3)); WorkQueue::push(&mut work, id(1)); say(WorkQueue::push(&mut work, id(3)));
@@ -9314,11 +9353,12 @@ fn main() -> Int { match(Pair::larger(Pair { a: Opaque(3), b: Opaque(8) })) { Op
 error: 6:20: in `main`: `Opaque` does not implement `Ord`
 #### case
 #### What is needed of a reference to a `T` is not needed of a `T`.
+use std::vec::{Vec};
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-fn both<T>(x: &mut [T], a: T, b: T) where T: Use<[0, 1]> { *x = push(replace(x, []), a); *x = push(replace(x, []), b); }
-fn main() -> Int { let mut xs = [1]; both(&mut xs, 2, 3); len(xs) }
+fn both<T>(x: &mut Vec<T>, a: T, b: T) where T: Use<[0, 1]> { x.push(a); x.push(b) }
+fn main() -> Int { let mut xs = Vec::from_array([1]); both(&mut xs, 2, 3); xs.len() }
 #### expect
 3
 #### case
@@ -9615,41 +9655,13 @@ fn main() -> Int { let mut f = Noisy { id: 6, hits: 0 }; poke(&mut f); say(55); 
 601
 1
 #### case
-#### An array written out of values that have to be used; pushing and popping through a reference.
+use std::vec::{Vec};
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-fn redeem_all(ts: std::vec::Vec<Ticket>, sum: Int) -> Int { let mut v = ts; match(std::vec::Vec::pop(&mut v)) { Some(t) => redeem_all(v, sum + redeem(t)), None => match(std::vec::Vec::finish_empty(v)) { Ok(_) => sum, Err(rest) => redeem_all(rest, sum) } } }
-fn taken_from<T>(items: [T], count: Int, taken: [T]) -> ([T], [T]) {
-    if(count <= 0) { (items, taken) } else {
-        match(pop(items)) {
-            Some((rest, last)) => tail taken_from(rest, count - 1, push(taken, last)),
-            None => ([], taken)
-        }
-    }
-}
-fn turned<T>(from: [T], onto: [T]) -> [T] {
-    match(pop(from)) { Some((rest, last)) => tail turned(rest, push(onto, last)), None => onto }
-}
-struct A<T> { items: [T] }
-fn roll<T>(a: &mut A<T>, length: Int) -> Result<[T], Int> {
-    if(length > len_at(&a.items)) { Err(1) } else {
-        let count = len_at(&a.items) - length;
-        let items = &mut a.items;
-        match(taken_from(replace(items, []), count, [])) {
-            (kept, taken) => restore_at(items, kept); Ok(turned(taken, []))
-        }
-    }
-}
-fn main() -> Int { match(taken_from([Ticket(1), Ticket(2)], 1, [])) { (a, b) => redeem_all(a, 0) + redeem_all(b, 0) } }
-#### expect
-error: 22:30: in `roll`: `restore_at` is unsafe: it can be named only in `unsafe { .. }` or in an `unsafe fn`
-#### case
-struct Ticket(Int);
-impl Use<[1, 1]> for Ticket {}
-fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-fn redeem_all(ts: [Ticket], sum: Int) -> Int { match(pop(ts)) { Some((rest, t)) => redeem_all(rest, sum + redeem(t)), None => sum } }
-fn main() -> Int { let mut ts: [Ticket] = []; push_at(&mut ts, Ticket(1)); push_at(&mut ts, Ticket(20)); push_at(&mut ts, Ticket(300)); let last = match(pop_at(&mut ts)) { Some(t) => redeem(t), None => 0 }; say(last); say(len_at(&ts)); redeem_all(ts, 0) }
+fn redeem_all(ts: &mut Vec<Ticket>, sum: Int) -> Int { match(ts.pop()) { Some(t) => redeem_all(ts, sum + redeem(t)), None => sum } }
+fn finish(v: Vec<Ticket>) { let mut v = v; match(v.pop()) { Some(t) => discard(redeem(t)); finish(v), None => match(v.finish_empty()) { Ok(_) => (), Err(rest) => finish(rest) } } }
+fn main() -> Int { let mut ts: Vec<Ticket> = Vec::new(); Vec::push(&mut ts, Ticket(1)); Vec::push(&mut ts, Ticket(20)); Vec::push(&mut ts, Ticket(300)); let last = match(Vec::pop(&mut ts)) { Some(t) => redeem(t), None => 0 }; say(last); say(len_at(&ts)); let n = redeem_all(&mut ts, 0); finish(ts); n }
 #### expect
 300
 2
@@ -9709,6 +9721,7 @@ fn main() -> Int { pr<(W<Global>, W<Tag>), Tag>() * 100 + wo<(W<Global>,), Tag>(
 #### `K::Got` in an implementation of a trait that leaves a `Got` too: of
 #### the trait written of `K` here (`K: KindOf<T>`, `K` found from `R`'s
 #### `Kind`), not the one implemented; and a field read of it once known.
+use std::vec::{Vec};
 trait Item { type Got<'a>; fn get<'a>(&'a Self) -> Got<'a> }
 trait KindOf<T> { type Got<'a>; fn get_by<'a>(&'a T) -> Got<'a> }
 trait Rel { type Kind; }
@@ -9719,14 +9732,14 @@ struct Lot
 impl Rel for Pair { type Kind = One; }
 impl Rel for Lot { type Kind = Many; }
 impl<T> KindOf<T> for One { type Got<'a> = &'a T; fn get_by<'a>(t: &'a T) -> &'a T { t } }
-impl<T> KindOf<T> for Many { type Got<'a> = [&'a T]; fn get_by<'a>(t: &'a T) -> [&'a T] { [t, t] } }
-struct Wrap<R, T> { value: T, rel: [R] }
+impl<T> KindOf<T> for Many { type Got<'a> = Vec<&'a T>; fn get_by<'a>(t: &'a T) -> Vec<&'a T> { Vec::from_array([t, t]) } }
+struct Wrap<R, T> { value: T, rel: Vec<R> }
 impl<R, T, K> Item for Wrap<R, T> where R: Rel<Kind = K>, K: KindOf<T> {
     type Got<'a> = K::Got<'a>;
     fn get<'a>(w: &'a Wrap<R, T>) -> K::Got<'a> { <K as KindOf<T>>::get_by(&w.value) }
 }
 fn main() -> Int {
-    let a: Wrap<Pair, (Int,)> = Wrap { value: (5,), rel: [] };
+    let a: Wrap<Pair, (Int,)> = Wrap { value: (5,), rel: Vec::new() };
     let x = a.get().0;
     x
 }
@@ -9879,9 +9892,10 @@ error: 3:48: in `main`: `describe_unchecked` is unsafe: it can be named only in 
 #### case
 #### Pointers: two places of one array written at once, through pointers
 #### (`std::ptr`); `transmute` only where it is unsafe to name.
+use std::vec::{Vec};
 use std::ptr::{ptr_mut, as_mut, element_mut};
 fn main() -> Int {
-    let mut xs = [1, 2, 3];
+    let mut xs = Vec::from_array([1, 2, 3]);
     let p = ptr_mut(&mut xs);
     let a = unsafe { as_mut(element_mut(p, 0)) };
     let b = unsafe { as_mut(element_mut(p, 2)) };
@@ -10064,27 +10078,28 @@ bang
 0
 #### case
 #### Reaching, ordering and grouping the nodes of a graph (library 26.2).
+use std::vec::{Vec};
 use std::graph::{Graph, GraphError, successors, reachable, topological_order, strongly_connected_components};
 use std::budget::{StepBudget};
 use std::slice::{Slice};
 
 // Each node leads to those listed at its place.
-struct Edges { to: [[Int]] }
+struct Edges { to: Vec<Vec<Int>> }
 impl Graph for Edges {
     type Node = Int;
-    fn successors(g: &Edges, node: Int) -> Vec<Int> { match(element(&g.to, node)) { Some(next) => Vec::from_array(*next), None => Vec::new() } }
+    fn successors(g: &Edges, node: Int) -> Vec<Int> { match(element(&g.to, node)) { Some(next) => clone(next), None => Vec::new() } }
 }
 fn main() -> Int {
     // 0 -> 1 -> 2 -> 0 is a circle; 2 -> 3 -> 4; 5 is apart.
-    let g = Edges { to: [[1], [2], [0, 3], [4], [], [4]] };
+    let g = Edges { to: Vec::from_array([Vec::from_array([1]), Vec::from_array([2]), Vec::from_array([0, 3]), Vec::from_array([4]), Vec::new(), Vec::from_array([4])]) };
     let mut budget = StepBudget::new(1000);
     say(match(reachable(&g, 3, &mut budget)) { Ok(found) => found, Err(_) => Vec::new() });
     say(match(reachable(&g, 0, &mut budget)) { Ok(found) => found, Err(_) => Vec::new() });
-    let tail_nodes = [5, 3];
-    say(match(topological_order(&g, Slice::of(&tail_nodes), &mut budget)) { Ok(order) => order, Err(_) => Vec::new() });
-    let all = [0, 5];
-    say(match(topological_order(&g, Slice::of(&all), &mut budget)) { Ok(_) => Vec::new(), Err(GraphError::Cycle(c)) => c.nodes, Err(GraphError::Limit(_)) => Vec::from_array([0 - 1]) });
-    say(match(strongly_connected_components(&g, Slice::of(&all), &mut budget)) { Ok(groups) => groups, Err(_) => Vec::new() });
+    let tail_nodes = Vec::from_array([5, 3]);
+    say(match(topological_order(&g, tail_nodes.as_slice(), &mut budget)) { Ok(order) => order, Err(_) => Vec::new() });
+    let all = Vec::from_array([0, 5]);
+    say(match(topological_order(&g, all.as_slice(), &mut budget)) { Ok(_) => Vec::new(), Err(GraphError::Cycle(c)) => c.nodes, Err(GraphError::Limit(_)) => Vec::from_array(Vec::from_array([0 - 1])) });
+    say(match(strongly_connected_components(&g, all.as_slice(), &mut budget)) { Ok(groups) => groups, Err(_) => Vec::new() });
     let mut small = StepBudget::new(2);
     say(match(reachable(&g, 0, &mut small)) { Ok(_) => 0 - 1, Err(e) => e.remaining });
     1000 - StepBudget::remaining(&budget)
@@ -10308,22 +10323,25 @@ fn main() -> Int { let p = (Ticket(4), 9); p.1 }
 error: 4:44: in `main`: taking one field of a value lets go of the rest, but a `Ticket` has to be used
 #### case
 #### Functions that call each other share the type parameters they name alike.
-fn count_even<T>(xs: [T], i: Int) -> Int where T: Use<[0, *]> { if(i >= len(xs)) { 0 } else { 1 + count_odd(xs, i + 1) } }
-fn count_odd<T>(xs: [T], i: Int) -> Int where T: Use<[0, *]> { if(i >= len(xs)) { 0 } else { count_even(xs, i + 1) } }
-fn main() -> Int { count_even(["a", "b", "c", "d", "e"], 0) * 10 + count_even([1, 2], 0) }
+use std::vec::{Vec};
+fn count_even<T>(xs: &Vec<T>, i: Int) -> Int where T: Use<[0, *]> { if(i >= xs.len()) { 0 } else { 1 + count_odd(xs, i + 1) } }
+fn count_odd<T>(xs: &Vec<T>, i: Int) -> Int where T: Use<[0, *]> { if(i >= xs.len()) { 0 } else { count_even(xs, i + 1) } }
+fn main() -> Int { count_even(&Vec::from_array(["a", "b", "c", "d", "e"]), 0) * 10 + count_even(&Vec::from_array([1, 2]), 0) }
 #### expect
 31
 #### case
-fn all_eq<T: Eq>(xs: [T], x: T, i: Int) -> Bool where T: Use<[0, *]> { if(i >= len(xs)) { true } else { if(xs[i] == x) { rest_eq(xs, x, i + 1) } else { false } } }
-fn rest_eq<T: Eq>(xs: [T], x: T, i: Int) -> Bool where T: Use<[0, *]> { all_eq(xs, x, i) }
-fn main() -> Int { if(all_eq([3, 3, 3], 3, 0)) { 1 } else { 0 } }
+use std::vec::{Vec};
+fn all_eq<T: Eq>(xs: &Vec<T>, x: T, i: Int) -> Bool where T: Use<[0, *]> { if(i >= xs.len()) { true } else { if(xs[i] == x) { rest_eq(xs, x, i + 1) } else { false } } }
+fn rest_eq<T: Eq>(xs: &Vec<T>, x: T, i: Int) -> Bool where T: Use<[0, *]> { all_eq(xs, x, i) }
+fn main() -> Int { if(all_eq(&Vec::from_array([3, 3, 3]), 3, 0)) { 1 } else { 0 } }
 #### expect
 1
 #### case
-enum Tree<T> { Node(T, [Tree<T>]) }
+use std::vec::{Vec};
+enum Tree<T> { Node(T, Vec<Tree<T>>) }
 fn size<T>(t: &Tree<T>) -> Int { match(t) { &Tree::Node(_, kids) => 1 + sizes(kids, 0) } }
-fn sizes<T>(kids: &[Tree<T>], i: Int) -> Int { match(element(kids, i)) { Some(kid) => size(kid) + sizes(kids, i + 1), None => 0 } }
-fn main() -> Int { let t = Tree::Node(1, [Tree::Node(2, []), Tree::Node(3, [Tree::Node(4, [])])]); size(&t) }
+fn sizes<T>(kids: &Vec<Tree<T>>, i: Int) -> Int { match(element(kids, i)) { Some(kid) => size(kid) + sizes(kids, i + 1), None => 0 } }
+fn main() -> Int { let t = Tree::Node(1, Vec::from_array([Tree::Node(2, Vec::new()), Tree::Node(3, Vec::from_array([Tree::Node(4, Vec::new())]))])); size(&t) }
 #### expect
 4
 #### case
@@ -10489,9 +10507,10 @@ fn main() -> Int { match(op_of(Token::Minus)) { Some(o) => apply(o, 9, 4), None 
 #### expect
 5
 #### case
-struct Cycle { nodes: [Int] }
+use std::vec::{Vec};
+struct Cycle { nodes: Vec<Int> }
 enum GraphError { Cycle(Cycle), Limit(Int) }
-fn main() -> Int { match(GraphError::Cycle(Cycle { nodes: [1, 2] })) { GraphError::Cycle(c) => len(c.nodes), GraphError::Limit(n) => n } }
+fn main() -> Int { match(GraphError::Cycle(Cycle { nodes: Vec::from_array([1, 2]) })) { GraphError::Cycle(c) => len(c.nodes), GraphError::Limit(n) => n } }
 #### expect
 2
 #### case
@@ -10687,6 +10706,7 @@ fn main() -> Int {
 424
 #### case
 #### Base64, with padding as the options say (library 23).
+use std::vec::{Vec};
 use std::bytes::{base64_encode, base64_decode, Base64Alphabet, Padding, Base64Options, Base64ErrorKind};
 use std::slice::{Slice};
 
@@ -10707,8 +10727,8 @@ fn main() -> Int {
     say(enc("foo", Base64Alphabet::Standard, Padding::Required));
     say(enc("foobar", Base64Alphabet::Standard, Padding::Forbidden));
     say(enc("fo", Base64Alphabet::Standard, Padding::Forbidden));
-    let odd = [251u8, 255u8];
-    say(base64_encode(Slice::of(&odd), Base64Options { alphabet: Base64Alphabet::UrlSafe, padding: Padding::Forbidden }));
+    let odd = Vec::from_array([251u8, 255u8]);
+    say(base64_encode(odd.as_slice(), Base64Options { alphabet: Base64Alphabet::UrlSafe, padding: Padding::Forbidden }));
     say(dec("Zm9vYmFy", Padding::Required));
     say(dec("Zm8=", Padding::Required));
     say(dec("Zm8", Padding::Required));
@@ -10740,7 +10760,7 @@ error at 0 length
 use std::stream::{Read, Write, MemoryCursor, read, write, flush, write_str, BufferWriter, BufferReader, FinishWriteFailure};
 use std::host::{IoError};
 // A writer that takes so many bytes and then fails.
-struct Full { taken: [u8], room: Int }
+struct Full { taken: std::vec::Vec<u8>, room: Int }
 impl Write for Full {
     type Effects = {};
     fn write(w: &mut Full, bytes: std::vec::Vec<u8>) -> Result<Int, IoError> {
@@ -10761,7 +10781,7 @@ fn main() -> Int {
     write(&mut out, std::vec::Vec::from_array([6u8]));
     say(match(BufferWriter::finish(out)) { Ok(inner) => MemoryCursor::into_inner(inner), Err(_) => std::vec::Vec::new() });
     // A writer that fills: what was not written comes back with it.
-    let mut small = BufferWriter::new(Full { taken: [], room: 3 }, 100);
+    let mut small = BufferWriter::new(Full { taken: std::vec::Vec::new(), room: 3 }, 100);
     write(&mut small, std::vec::Vec::from_array([1u8, 2u8, 3u8, 4u8, 5u8]));
     say(match(BufferWriter::finish(small)) { Ok(_) => std::vec::Vec::new(), Err(failure) => failure.pending });
     // Reading a little at a time from a reader asked rarely.
@@ -10807,12 +10827,13 @@ fn main() -> Int { let mut c = Counter { n: 4 }; bump(Some(&mut c)) * 10 + c.n }
 #### expect
 55
 #### case
+use std::vec::{Vec};
 use std::slice::{Slice};
 use std::parse::{Cursor};
 enum Token { Let, Num(Int) }
 struct Spot { token: Token, at: Int }
 fn first<'a>(c: &Cursor<'a, Spot>) -> Int { match(Cursor::peek(c)) { Some(&Spot { token: Token::Let, at }) => 1000 + *at, Some(&Spot { token: Token::Num(n), at: _ }) => *n, None => 0 - 1 } }
-fn main() -> Int { let spots = [Spot { token: Token::Num(42), at: 0 }, Spot { token: Token::Let, at: 3 }]; let c = Cursor::new(Slice::of(&spots)); first(&c) }
+fn main() -> Int { let spots = Vec::from_array([Spot { token: Token::Num(42), at: 0 }, Spot { token: Token::Let, at: 3 }]); let c = Cursor::new(spots.as_slice()); first(&c) }
 #### expect
 42
 #### case
@@ -10822,9 +10843,10 @@ fn main() -> Int { let a = A(3); let b = B(4); get(Some(&a)) + get(Some(&b)) + g
 #### expect
 11
 #### case
+use std::vec::{Vec};
 enum E { A(Int), B(Int) }
-fn total(xs: [&E], i: Int) -> Int { if(i >= len(xs)) { 0 } else { match(xs[i]) { &A(x) => *x, &B(y) => *y * 100 } + total(xs, i + 1) } }
-fn main() -> Int { let a = A(3); let b = B(4); total([&a, &b, &a], 0) }
+fn total(xs: &Vec<&E>, i: Int) -> Int { if(i >= xs.len()) { 0 } else { match(xs[i]) { &A(x) => *x, &B(y) => *y * 100 } + total(xs, i + 1) } }
+fn main() -> Int { let a = A(3); let b = B(4); total(&Vec::from_array([&a, &b, &a]), 0) }
 #### expect
 406
 #### case
@@ -11014,9 +11036,10 @@ fn main() -> Int { let mut s = S { xs: [1, 2, 3], n: 0 }; let x = bump(&mut s.xs
 #### expect
 3333
 #### case
-struct S { xs: [Int], n: Int }
-fn add(r: &mut [Int], v: Int) -> Int { *r = push(*r, v); len(*r) }
-fn main() -> Int { let mut s = S { xs: [1], n: 0 }; let a = add(&mut s.xs, 5) + len(s.xs) * 10; a + add(&mut s.xs, 6) * 100 + s.xs[2] * 1000 }
+use std::vec::{Vec};
+struct S { xs: Vec<Int>, n: Int }
+fn add(r: &mut Vec<Int>, v: Int) -> Int { r.push(v); r.len() }
+fn main() -> Int { let mut s = S { xs: Vec::from_array([1]), n: 0 }; let a = add(&mut s.xs, 5) + s.xs.len() * 10; a + add(&mut s.xs, 6) * 100 + s.xs[2] * 1000 }
 #### expect
 6322
 #### case
@@ -11025,10 +11048,11 @@ fn main() -> Int { let mut p = (1, 2); let x = bump(&mut p.0) + p.0 * 10 + bump(
 #### expect
 32322
 #### case
-struct Counter { n: Int, log: [Int] }
-impl Counter { fn tick(c: &mut Self) -> Int { c.n = c.n + 1; c.log = push(c.log, c.n); c.n } }
+use std::vec::{Vec};
+struct Counter { n: Int, log: Vec<Int> }
+impl Counter { fn tick(c: &mut Self) -> Int { c.n = c.n + 1; Vec::push(&mut c.log, c.n); c.n } }
 struct App { counter: Counter, name: Str }
-fn main() -> Int { let mut app = App { counter: Counter { n: 0, log: [] }, name: "x" }; let a = Counter::tick(&mut app.counter); let b = Counter::tick(&mut app.counter); a + b * 10 + app.counter.n * 100 + len(app.counter.log) * 1000 }
+fn main() -> Int { let mut app = App { counter: Counter { n: 0, log: Vec::new() }, name: "x" }; let a = Counter::tick(&mut app.counter); let b = Counter::tick(&mut app.counter); a + b * 10 + app.counter.n * 100 + app.counter.log.len() * 1000 }
 #### expect
 2221
 #### case
@@ -11037,8 +11061,9 @@ fn main() -> Int { let xs = [1, 2, 3]; get(&xs[1]) * 10 + get(&xs[2]) }
 #### expect
 23
 #### case
-fn at(r: &mut [Int], i: Int) -> &mut Int { &mut (*r)[i] }
-fn main() -> Int { let mut xs = [1, 2, 3]; *at(&mut xs, 1) = 40; xs[0] + xs[1] + xs[2] }
+use std::vec::{Vec};
+fn at(r: &mut Vec<Int>, i: Int) -> &mut Int { &mut (*r)[i] }
+fn main() -> Int { let mut xs = Vec::from_array([1, 2, 3]); *at(&mut xs, 1) = 40; xs[0] + xs[1] + xs[2] }
 #### expect
 44
 #### case
@@ -11144,7 +11169,7 @@ negative
 use std::vec::{Vec};
 struct P { x: Int }
 impl Clone for P { fn clone(p: &P) -> P { P { x: p.x + 1 } } }
-fn main() -> Int { let a = [1, 2, 3]; let b = clone(&a); let p = P { x: 3 }; let q = p.clone(); let mut v = Vec::new(); v.push(1); let w = v.clone(); v.push(2); len(b) + q.x * 10 + v.len() * 100 + w.len() * 1000 + match(clone(&Some(5))) { Some(n) => n, None => 0 } }
+fn main() -> Int { let a = Vec::from_array([1, 2, 3]); let b = clone(&a); let p = P { x: 3 }; let q = p.clone(); let mut v = Vec::new(); v.push(1); let w = v.clone(); v.push(2); len(b) + q.x * 10 + v.len() * 100 + w.len() * 1000 + match(clone(&Some(5))) { Some(n) => n, None => 0 } }
 #### expect
 1248
 #### case
@@ -11350,19 +11375,19 @@ use std::vec::{Vec};
 use std::iterator::{Iterator, fold};
 fn main() -> Int {
     let mut v = Vec::new();
-    v.extend([5, 1, 4, 2, 3]);
+    v.extend(Vec::from_array([5, 1, 4, 2, 3]));
     say(v.contains(&4));
     say(v.swap_remove(1));
-    say(Vec::into_array(v.clone()));
+    say(&v);
     v.retain({ x => *x > 2 });
-    say(Vec::into_array(v.clone()));
+    say(&v);
     let _ = v.rotate_left(1);
-    say(Vec::into_array(v.clone()));
+    say(&v);
     let _ = v.swap(0, 2);
-    say(Vec::into_array(v.clone()));
+    say(&v);
     v.resize(5, 0);
-    say(Vec::into_array(v.clone()));
-    match(v.split_off(3)) { Ok(back) => say(Vec::into_array(back)), Err(_) => () };
+    say(&v);
+    match(v.split_off(3)) { Ok(back) => say(&back), Err(_) => () };
     say(v.replace(0, 9));
     *v.index_mut(1) = 7;
     let mut it = v.into_iter();
@@ -11863,11 +11888,12 @@ fn main() -> Int { show(&1) }
 error: `Show` is implemented twice for `Int`
 #### case
 #### Modules that do not use each other are checked side by side and put together.
+use std::vec::{Vec};
 mod shapes {
   pub trait Area { fn area(&Self) -> Int }
   pub struct Sq { pub s: Int }
   impl Area for Sq { fn area(q: &Sq) -> Int { q.s * q.s } }
-  pub fn total<T: Area>(xs: &[T]) -> Int { let mut n = 0; let mut i = 0; while({ i < len_at(xs) }) { n = n + area(&xs[i]); i = i + 1 }; n }
+  pub fn total<T: Area>(xs: &Vec<T>) -> Int { let mut n = 0; let mut i = 0; while({ i < len_at(xs) }) { n = n + area(&xs[i]); i = i + 1 }; n }
 }
 mod names {
   pub trait Size { fn size(&Self) -> Int }
@@ -11878,7 +11904,7 @@ mod names {
 }
 use shapes::{Sq, total};
 use names::{Word, sizes};
-fn main() -> Int { total(&[Sq { s: 2 }, Sq { s: 3 }]) + sizes(&Word { n: 4 }, &Word { n: 5 }) + sizes(&1, &2) }
+fn main() -> Int { total(&Vec::from_array([Sq { s: 2 }, Sq { s: 3 }])) + sizes(&Word { n: 4 }, &Word { n: 5 }) + sizes(&1, &2) }
 #### expect
 225
 #### case
@@ -11906,11 +11932,12 @@ fn main() -> Int { let l = (On(Hit, []), (On(Up, 3), ())); up(&l) }
 #### case
 #### (A name borrowed and then bound again: the first is borrowed as it is,
 #### and a block's own binding of the name is not the one after it.)
-struct P { a: [Int], b: Int }
+use std::vec::{Vec};
+struct P { a: Vec<Int>, b: Int }
 fn main() -> Int {
-    let P { a, b } = P { a: [1, 2], b: 3 };
+    let P { a, b } = P { a: Vec::from_array([1, 2]), b: 3 };
     let n = len_at(&a);
-    let k = if(n == 2) { let a = [5]; len_at(&a) } else { 0 };
+    let k = if(n == 2) { let a = Vec::from_array([5]); len_at(&a) } else { 0 };
     let m = len_at(&a);
     let a = 9;
     n * 1000 + k * 100 + m * 10 + a + b
@@ -11933,14 +11960,15 @@ a
 #### case
 #### (Where a value is let go, numbered apart from where another module's
 #### are, though the modules are checked side by side.)
+use std::vec::{Vec};
 use core::iter::{into_iter, next};
 struct D { n: Int }
 impl Drop for D { fn drop(d: &mut D) { say(d.n) } }
-fn apply<S>(queue: [S]) -> Int {
+fn apply<S>(queue: Vec<S>) -> Int {
     let mut each = into_iter(queue);
     match(next(&mut each)) { Some(_) => 1, None => 0 }
 }
-fn main() -> Int { let d = D { n: 4 }; apply([d]) + apply([1, 2]) }
+fn main() -> Int { let d = D { n: 4 }; apply(Vec::from_array([d])) + apply(Vec::from_array([1, 2])) }
 #### expect
 4
 2
@@ -12044,27 +12072,28 @@ fn main() -> Int { let mut n = 0; if(n > 0) { n = 1 } else if(n == 0) { n = 5 } 
 #### (A value of a type a function is generic in, taken by a pattern and
 #### used after a loop: a loop is a call that comes back, not a path on
 #### which it is left unused.)
+use std::vec::{Vec};
 mod m {
 use core::iter::{into_iter, next};
-pub struct World<S> { pub columns: S, pub generations: [Int], pub free: [Int] }
-pub struct Commands<S> { pub queue: [fn(&mut World<S>) -> ()], pub next: Int, pub made: Int }
+pub struct World<S> { pub columns: S, pub generations: Vec<Int>, pub free: Vec<Int> }
+pub struct Commands<S> { pub queue: Vec<fn(&mut World<S>) -> ()>, pub next: Int, pub made: Int }
 impl<S> Commands<S> {
-    pub fn queue(commands: &mut Self, f: fn(&mut World<S>) -> ()) { push_at(&mut commands.queue, f) }
+    pub fn queue(commands: &mut Self, f: fn(&mut World<S>) -> ()) { Vec::push(&mut commands.queue, f) }
 }
 pub struct WQ<'w, S> { world: &'w mut World<S>, put_back: fn(&mut World<S>) -> () }
 impl<'w, S> Drop for WQ<'w, S> { fn drop(q: &mut WQ<'w, S>) { (q.put_back)(q.world) } }
 pub fn apply<S>(commands: Commands<S>, world: &mut World<S>) {
     let Commands { queue, next: _, made } = commands;
     let mut k = 0;
-    while({ k < made }) { push_at(&mut world.generations, 0); k = k + 1 };
+    while({ k < made }) { Vec::push(&mut world.generations, 0); k = k + 1 };
     let mut each = into_iter(queue);
     while({ match(next(&mut each)) { Some(f) => f(world); true, None => false } }) { () }
 }
 }
 use m::{World, Commands, apply};
 fn main() -> Int {
-    let mut w = World { columns: 5, generations: [], free: [] };
-    let mut c = Commands { queue: [], next: 0, made: 2 };
+    let mut w = World { columns: 5, generations: Vec::new(), free: Vec::new() };
+    let mut c = Commands { queue: Vec::new(), next: 0, made: 2 };
     c.queue(fn(w: &mut World<Int>) { w.columns = w.columns + 1 });
     apply(c, &mut w);
     w.columns + len_at(&w.generations)
@@ -12076,11 +12105,12 @@ fn main() -> Int {
 #### function that needs a trait where an implementation with a condition on
 #### its trait's argument is asked: the implementation's new variables are
 #### made what is asked, so what the function is given keeps its number.)
+use std::vec::{Vec};
 trait Col { fn n() -> Int }
 trait Get<T> { fn g() -> Int }
 impl Get<Int> for Int { fn g() -> Int { 4 } }
 impl Col for Int { fn n() -> Int { 3 } }
-struct Cmd<S> { s: [S] }
+struct Cmd<S> { s: Vec<S> }
 fn end<S>(c: &mut Cmd<S>) -> Int where S: Col { <S as Col>::n() }
 fn reap<S>(c: &mut Cmd<S>) -> Int where S: Col { end(c) }
 struct W<F> { f: F }
@@ -12095,7 +12125,7 @@ impl<S, L> App<S, L> {
 }
 fn plugin<T, U>(app: App<T, U>) -> App<T, (<fn(&mut Cmd<T>) -> Int as Into2<T>>::Out, U)> where T: Get<Int>, T: Col { app.on(reap) }
 fn main() -> Int {
-    let mut c = Cmd { s: [] };
+    let mut c = Cmd { s: Vec::new() };
     let a = plugin(App { s: 1, l: () });
     (a.l.0.f)(&mut c)
 }
@@ -12253,19 +12283,22 @@ fn main() -> Int { let mut w = W { n: 0 }; w.add(5); let a = A::new().twice().ad
 505
 #### case
 #### (An element of what a reference is to is borrowed through it.)
-fn first(r: &[Int]) -> Int { let e = &r[0]; *e }
-fn main() -> Int { first(&[7, 8]) }
+use std::vec::{Vec};
+fn first(r: &Vec<Int>) -> Int { let e = &r[0]; *e }
+fn main() -> Int { first(&Vec::from_array([7, 8])) }
 #### expect
 7
 #### case
-fn bump(a: &mut [Int]) { a[0] = a[0] + 1 }
-fn main() -> Int { let mut v = [1, 2]; bump(&mut v); bump(&mut v); v[0] + len(&v) }
+use std::vec::{Vec};
+fn bump(a: &mut Vec<Int>) { a[0] = a[0] + 1 }
+fn main() -> Int { let mut v = Vec::from_array([1, 2]); bump(&mut v); bump(&mut v); v[0] + len(&v) }
 #### expect
 5
 #### case
+use std::vec::{Vec};
 struct Item { qty: Int }
-fn bump(items: &mut [Item]) { items[1].qty = items[1].qty + 4 }
-fn main() -> Int { let mut v = [Item { qty: 1 }, Item { qty: 2 }]; bump(&mut v); v[0].qty = 10; v[0].qty + v[1].qty }
+fn bump(items: &mut Vec<Item>) { items[1].qty = items[1].qty + 4 }
+fn main() -> Int { let mut v = Vec::from_array([Item { qty: 1 }, Item { qty: 2 }]); bump(&mut v); v[0].qty = 10; v[0].qty + v[1].qty }
 #### expect
 16
 #### case
@@ -12367,14 +12400,16 @@ fn main() -> Int { let b = Box2 { v: 5, tag: 7 }; b.tag + b.v }
 7
 12
 #### case
-mod a { pub struct Holder(pub [Int]); impl Drop for Holder { fn drop(h: &mut Holder) { say(0) } } pub fn mk() -> Holder { Holder([1, 2]) } }
-fn main() -> Int { let h = a::mk(); let v = h.0; len(v) }
+use std::vec::{Vec};
+mod a { pub struct Holder(pub Vec<Int>); impl Drop for Holder { fn drop(h: &mut Holder) { say(0) } } pub fn mk() -> Holder { Holder(Vec::from_array([1, 2])) } }
+fn main() -> Int { let h = a::mk(); let n = len_at(&h.0); n }
 #### expect
 0
 2
 #### case
-mod a { pub struct Holder { pub items: [Int] } impl Drop for Holder { fn drop(h: &mut Holder) { say(0) } } pub fn mk() -> Holder { Holder { items: [1, 2] } } }
-fn main() -> Int { let h = a::mk(); let v = h.items; len(v) }
+use std::vec::{Vec};
+mod a { pub struct Holder { pub items: Vec<Int> } impl Drop for Holder { fn drop(h: &mut Holder) { say(0) } } pub fn mk() -> Holder { Holder { items: Vec::from_array([1, 2]) } } }
+fn main() -> Int { let h = a::mk(); let n = len_at(&h.items); n }
 #### expect
 0
 2
@@ -12528,7 +12563,8 @@ Ok(3)
 Ok(s)
 4
 #### case
-fn main() -> Int { let xs = fold([1, 2], [], { (acc, x) => push(acc, Some(x)) }); match(xs[1]) { Some(n) => n, None => 0 } }
+use std::vec::{Vec};
+fn main() -> Int { let xs = fold(Vec::from_array([1, 2]), Vec::new(), { (acc, x) => let mut acc = acc; acc.push(Some(x)); acc }); match(xs[1]) { Some(n) => n, None => 0 } }
 #### expect
 2
 #### case
@@ -12538,8 +12574,9 @@ fn main() -> Int { match(wrap("a")) { Some(s) => length(s), None => 0 } + match(
 3
 #### case
 #### Hand-checked: parts of a value taken one at a time, and what is left let go.
-struct P { a: [Int], b: [Int] }
-fn main() -> Int { let p = P { a: [1, 2], b: [3] }; let x = p.a; let y = p.b; len(x) * 10 + len(y) }
+use std::vec::{Vec};
+struct P { a: Vec<Int>, b: Vec<Int> }
+fn main() -> Int { let p = P { a: Vec::from_array([1, 2]), b: Vec::from_array([3]) }; let x = p.a; let y = p.b; len(x) * 10 + len(y) }
 #### expect
 21
 #### case
@@ -12626,9 +12663,10 @@ fn main() -> Int { handle (handle f() { a(k) => k(1) + 100 }) { b(k) => k(2) + 1
 #### expect
 1112
 #### case
+use std::vec::{Vec};
 effect Tell { tell(Int) }
 fn f() -> Int / {Tell} { tell(1); tell(2); 3 }
-fn main() -> Int { let mut log = []; let r = handle f() { tell(v, k) => log = push(log, v); k(()) }; r * 100 + log[0] * 10 + log[1] }
+fn main() -> Int { let mut log = Vec::new(); let r = handle f() { tell(v, k) => Vec::push(&mut log, v); k(()) }; r * 100 + log[0] * 10 + log[1] }
 #### expect
 312
 #### case
@@ -12647,8 +12685,9 @@ fn main() -> Int { let mut n = 0; handle f() { ask(k) => n = n + 1; let r = k(n)
 #### expect
 2012
 #### case
-fn find(xs: [Int], want: Int) -> Int { @out { let mut i = 0; while({ i < len(xs) }) { if(xs[i] == want) { @out(i) }; i = i + 1; }; 0 - 1 } }
-fn main() -> Int { find([5, 6, 7], 7) * 10 + find([5], 9) }
+use std::vec::{Vec};
+fn find(xs: &Vec<Int>, want: Int) -> Int { @out { let mut i = 0; while({ i < xs.len() }) { if(xs[i] == want) { @out(i) }; i = i + 1; }; 0 - 1 } }
+fn main() -> Int { find(&Vec::from_array([5, 6, 7]), 7) * 10 + find(&Vec::from_array([5]), 9) }
 #### expect
 19
 #### case
@@ -12747,8 +12786,9 @@ fn main() -> Int { let add5 = adder(5); let add7 = adder(7); add5(1) * 100 + add
 #### expect
 692
 #### case
-fn build(n: Int, acc: [Int]) -> [Int] { if(n == 0) { acc } else { build(n - 1, push(acc, n * n)) } }
-fn main() -> Int { let xs = build(4, []); xs[0] * 1000 + xs[1] * 100 + xs[2] * 10 + xs[3] }
+use std::vec::{Vec};
+fn build(n: Int, acc: Vec<Int>) -> Vec<Int> { if(n == 0) { acc } else { let mut acc = acc; acc.push(n * n); build(n - 1, acc) } }
+fn main() -> Int { let xs = build(4, Vec::new()); xs[0] * 1000 + xs[1] * 100 + xs[2] * 10 + xs[3] }
 #### expect
 16941
 #### case
@@ -12808,10 +12848,11 @@ fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4])
 3
 #### case
 #### `a[i] = v` writes the element where it is: what was there is destroyed, through a reference too.
+use std::vec::{Vec};
 struct T { name: Str }
 impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn put(xs: &mut [T]) { (*xs)[1] = T { name: "new" }; }
-fn main() -> Int { let mut xs = [T { name: "a" }, T { name: "b" }]; put(&mut xs); say("set"); len_at(&xs) }
+fn put(xs: &mut Vec<T>) { (*xs)[1] = T { name: "new" }; }
+fn main() -> Int { let mut xs = Vec::from_array([T { name: "a" }, T { name: "b" }]); put(&mut xs); say("set"); len_at(&xs) }
 #### expect
 drop b
 set
@@ -12977,14 +13018,14 @@ fn main() -> Int { let l = L { n: 4 }; apply({ p => p.n }, &l) }
 #### case
 #### `std::random`: the seeded generator against xoshiro256** worked out outside, a seed of zeros, numbers below a bound drawn without bias, a bound of nothing refused.
 use std::random::{SeededRng, RandomSource, RandomError, random_u64, random_below, fill};
-fn zeros(n: Int, out: [u8]) -> [u8] { if(n == 0) { out } else { zeros(n - 1, push(out, 0u8)) } }
+fn zeros(n: Int, out: std::vec::Vec<u8>) -> std::vec::Vec<u8> { if(n == 0) { out } else { let mut out = out; out.push(0u8); zeros(n - 1, out) } }
 fn shown(r: Result<u64, RandomError>) -> Str { match(r) { Ok(n) => show(n), Err(RandomError::InvalidRange) => "no such range", Err(_) => "failed" } }
 fn main() -> Int {
     let mut rng = SeededRng::from_seed([1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8, 32u8]);
     say(SeededRng::next_u64(&mut rng));
     say(SeededRng::next_u64(&mut rng));
     say(SeededRng::next_u64(&mut rng));
-    let mut nothing = SeededRng::from_seed(zeros(32, []));
+    let mut nothing = SeededRng::from_seed(zeros(32, std::vec::Vec::new()));
     say(SeededRng::next_u64(&mut nothing));
     let mut again = SeededRng::from_seed([1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8, 32u8]);
     say(shown(random_below(&mut again, 10u64)));
@@ -12992,7 +13033,7 @@ fn main() -> Int {
     say(shown(random_below(&mut again, 7u64)));
     say(shown(random_below(&mut again, 9223372036854775813u64)));
     say(shown(random_below(&mut again, 0u64)));
-    let bytes = match(fill(&mut again, 11)) { Ok(b) => len(b), Err(_) => 0 - 1 };
+    let bytes = match(fill(&mut again, 11)) { Ok(b) => b.len(), Err(_) => 0 - 1 };
     say(SeededRng::algorithm_version());
     bytes
 }
@@ -13086,30 +13127,35 @@ fn main() -> Int { let c = C { n: 1, xs: [4, 5] }; len_at(&c.xs) + c.n }
 #### expect
 3
 #### case
-struct C { n: Int, xs: [Int] }
+use std::vec::{Vec};
+struct C { n: Int, xs: Vec<Int> }
 fn f(c: C) -> Int { len_at(&c.xs) + c.n }
-fn main() -> Int { f(C { n: 1, xs: [4, 5] }) }
+fn main() -> Int { f(C { n: 1, xs: Vec::from_array([4, 5]) }) }
 #### expect
 3
 #### case
-struct C { n: Int, xs: [Int] }
-fn make() -> C { C { n: 1, xs: [4, 5] } }
+use std::vec::{Vec};
+struct C { n: Int, xs: Vec<Int> }
+fn make() -> C { C { n: 1, xs: Vec::from_array([4, 5]) } }
 fn main() -> Int { let c: C = make(); len_at(&c.xs) + c.n }
 #### expect
 3
 #### case
-struct C { n: Int, xs: [Int] }
-fn main() -> Int { let mut c = C { n: 1, xs: [4, 5] }; let r = &c; len_at(&r.xs) + r.n }
+use std::vec::{Vec};
+struct C { n: Int, xs: Vec<Int> }
+fn main() -> Int { let mut c = C { n: 1, xs: Vec::from_array([4, 5]) }; let r = &c; len_at(&r.xs) + r.n }
 #### expect
 3
 #### case
-struct C { n: Int, xs: [Int] }
-fn main() -> Int { match(Some(C { n: 1, xs: [4, 5] })) { Some(c) => len_at(&c.xs) + c.n, None => 0 } }
+use std::vec::{Vec};
+struct C { n: Int, xs: Vec<Int> }
+fn main() -> Int { match(Some(C { n: 1, xs: Vec::from_array([4, 5]) })) { Some(c) => len_at(&c.xs) + c.n, None => 0 } }
 #### expect
-error: 2:69: in `main`: `c` is neither a variable nor a reference, so no field of it can be borrowed here: say what it is where it is bound (`let c: Type = ..`), or bind it with `let mut`
+error: 3:86: in `main`: `c` is neither a variable nor a reference, so no field of it can be borrowed here: say what it is where it is bound (`let c: Type = ..`), or bind it with `let mut`
 #### case
-struct C { n: Int, xs: [Int] }
-fn make() -> C { C { n: 1, xs: [4, 5] } }
+use std::vec::{Vec};
+struct C { n: Int, xs: Vec<Int> }
+fn make() -> C { C { n: 1, xs: Vec::from_array([4, 5]) } }
 fn main() -> Int { let c = make(); len_at(&c.xs) + c.n }
 #### expect
 3
@@ -13120,30 +13166,33 @@ fn main() -> Int { let c = C { n: 1 }; bump(&mut c.n) }
 #### expect
 error: 3:40: in `main`: `c` is neither a variable nor a reference, so no field of it can be borrowed here: say what it is where it is bound (`let c: Type = ..`), or bind it with `let mut`
 #### case
-struct C { n: Int, xs: [Int] }
+use std::vec::{Vec};
+struct C { n: Int, xs: Vec<Int> }
 fn eat(c: C) -> Int { c.n }
-fn first(xs: &[Int]) -> &Int { &(*xs)[0] }
-fn main() -> Int { let c = C { n: 1, xs: [4, 5] }; let r = first(&c.xs); let n = eat(c); *r + n }
+fn first(xs: &Vec<Int>) -> &Int { &(*xs)[0] }
+fn main() -> Int { let c = C { n: 1, xs: Vec::from_array([4, 5]) }; let r = first(&c.xs); let n = eat(c); *r + n }
 #### expect
-5
+error: 5:91: in `main`: `c.xs` is given away while `r` holds a reference to it
 #### case
 #### A parameter with a `drop` that the function only borrows is destroyed when the function is done, once.
+use std::vec::{Vec};
 struct T { name: Str }
 impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-struct H { t: T, xs: [Int] }
+struct H { t: T, xs: Vec<Int> }
 fn size(h: &H) -> Int { len_at(&h.xs) }
 fn f(h: H) -> Int { size(&h) }
-fn main() -> Int { let n = f(H { t: T { name: "t" }, xs: [1, 2] }); say("after"); n }
+fn main() -> Int { let n = f(H { t: T { name: "t" }, xs: Vec::from_array([1, 2]) }); say("after"); n }
 #### expect
 drop t
 after
 2
 #### case
+use std::vec::{Vec};
 struct T { name: Str }
 impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-struct H { t: T, xs: [Int] }
+struct H { t: T, xs: Vec<Int> }
 fn f(h: H) -> Int { len_at(&h.xs) }
-fn main() -> Int { let n = f(H { t: T { name: "t" }, xs: [1, 2] }); say("after"); n }
+fn main() -> Int { let n = f(H { t: T { name: "t" }, xs: Vec::from_array([1, 2]) }); say("after"); n }
 #### expect
 drop t
 after
@@ -13188,12 +13237,13 @@ fn main() -> Int { let t = T { name: "t" }; let r = look(&t); let n = eat(t); le
 #### expect
 error: 5:63: in `main`: `t` is given away while `r` holds a reference to it
 #### case
-struct C { n: Int, xs: [Int] }
+use std::vec::{Vec};
+struct C { n: Int, xs: Vec<Int> }
 fn eat(c: C) -> Int { c.n }
 fn first(c: &C) -> &Int { &c.n }
-fn main() -> Int { let c = C { n: 1, xs: [4, 5] }; let r = first(&c); let n = eat(c); *r + n }
+fn main() -> Int { let c = C { n: 1, xs: Vec::from_array([4, 5]) }; let r = first(&c); let n = eat(c); *r + n }
 #### expect
-2
+error: 5:88: in `main`: `c` is given away while `r` holds a reference to it
 #### case
 #### Hand-checked: a value with `drop` bound each way a value can be, and let go each way one can.
 struct T { name: Str }
@@ -13418,9 +13468,10 @@ fn main() -> Int { let mut xs = [1, 2, 3]; xs[len(xs) - 1] = 9; xs[0] * 100 + xs
 #### expect
 129
 #### case
+use std::vec::{Vec};
 fn note(s: Str, n: Int) -> Int { say(s); n }
-fn set(i: Int, r: &mut [Int], v: Int) -> Int { (*r)[i] = v; v }
-fn main() -> Int { let mut xs = [1, 2, 3]; let n = note("a", 1) + set(note("b", 0), &mut xs, note("c", 7)) + note("d", xs[0]); n }
+fn set(i: Int, r: &mut Vec<Int>, v: Int) -> Int { (*r)[i] = v; v }
+fn main() -> Int { let mut xs = Vec::from_array([1, 2, 3]); let n = note("a", 1) + set(note("b", 0), &mut xs, note("c", 7)) + note("d", xs[0]); n }
 #### expect
 a
 b
@@ -13462,21 +13513,23 @@ fn main() -> Int { let mut a = Some(4); let seen = match(as_ref(&a)) { Some(r) =
 4
 #### case
 #### Instances of one effect, told apart by their type arguments: `Store<Int>` and `Store<Str>` are two effects, each handled by the nearest handler of exactly that one. A function about an instance of its caller's choosing is written out once for each choice.
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R, e: EffectRow>(first: [C], app: fn() -> R / {Store<C> | e}) -> R / e {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 fn main() -> Int {
-    store([1, 2], { store(["a"], { let ps = take<Int>(); let ns = take<Str>(); let n = ps[0] + len(ns); put(ps); put(ns); n }) })
+    store(Vec::from_array([1, 2]), { store(Vec::from_array(["a"]), { let mut ps = take<Int>(); let mut ns = take<Str>(); let n = ps[0] + ns.len(); put(ps); put(ns); n }) })
 }
 #### expect
 2
 #### case
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R, e: EffectRow>(first: [C], app: fn() -> R / {Store<C> | e}) -> R / e {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 fn each_mut<C>(f: for<'a> fn(&'a mut C)) / {Store<C>} {
     let mut column = take<C>();
@@ -13484,12 +13537,12 @@ fn each_mut<C>(f: for<'a> fn(&'a mut C)) / {Store<C>} {
     while({ i < len_at(&column) }) { f(&mut column[i]); i = i + 1 };
     put(column)
 }
-fn total() -> Int / {Store<Int>} { let c = take<Int>(); let n = fold(c, 0, { (acc, x) => acc + x }); put(c); n }
+fn total() -> Int / {Store<Int>} { let c = take<Int>(); let n = fold(&c, 0, { (acc, x) => acc + x }); put(c); n }
 fn main() -> Int {
-    store([1, 2, 3], { store(["a", "bc"], {
+    store(Vec::from_array([1, 2, 3]), { store(Vec::from_array(["a", "bc"]), {
         each_mut(fn(x: &mut Int) { *x = *x * 2; });
         each_mut(fn(s: &mut Str) { *s = *s ++ "!"; });
-        let names = take<Str>(); say(names[1]); put(names);
+        let mut names = take<Str>(); say(names[1]); put(names);
         total()
     }) })
 }
@@ -13497,74 +13550,81 @@ fn main() -> Int {
 bc!
 12
 #### case
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R, e: EffectRow>(first: [C], app: fn() -> R / {Store<C> | e}) -> R / e {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 fn main() -> Int {
-    store([1], { store(["a"], { put([7, 8]); put(["x", "y", "z"]); let a = take<Int>(); let b = take<Str>(); len(a) * 10 + len(b) }) })
+    store(Vec::from_array([1]), { store(Vec::from_array(["a"]), { let p: Vec<Int> = Vec::from_array([7, 8]); put(p); let q: Vec<Str> = Vec::from_array(["x", "y", "z"]); put(q); let a = take<Int>(); let b = take<Str>(); a.len() * 10 + b.len() }) })
 }
 #### expect
 23
 #### case
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R, e: EffectRow>(first: [C], app: fn() -> R / {Store<C> | e}) -> R / e {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
-fn main() -> Int { store([1], { store(["a"], { let a = take(); 0 }) }) }
+fn main() -> Int { store(Vec::from_array([1]), { store(Vec::from_array(["a"]), { let a = take(); 0 }) }) }
 #### expect
 0
 #### case
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R, e: EffectRow>(first: [C], app: fn() -> R / {Store<C> | e}) -> R / e {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
-fn main() -> Int / {Store} { store([1], { let b = take<Str>(); len(b) }) }
+fn main() -> Int / {Store} { store(Vec::from_array([1]), { let b = take<Str>(); len(b) }) }
 #### expect
 error: `main` performs effects that nothing handles: {Store<Str>}
 #### case
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R, e: EffectRow>(first: [C], app: fn() -> R / {Store<C> | e}) -> R / e {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
-fn main() -> Int { store([1], { store([5, 6], { let inner = take<Int>(); len(inner) }) }) }
+fn main() -> Int { store(Vec::from_array([1]), { store(Vec::from_array([5, 6]), { let inner = take<Int>(); len(inner) }) }) }
 #### expect
 2
 #### case
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R, e: EffectRow>(first: [C], app: fn() -> R / {Store<C> | e}) -> R / e {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 fn sizes<A, B>() -> Int / {Store<A>, Store<B>} { let a = take<A>(); let b = take<B>(); let n = len_at(&a) * 10 + len_at(&b); put(a); put(b); n }
-fn main() -> Int { store([1, 2], { store(["a"], { sizes<Int, Str>() * 100 + sizes<Str, Int>() }) }) }
+fn main() -> Int { store(Vec::from_array([1, 2]), { store(Vec::from_array(["a"]), { sizes<Int, Str>() * 100 + sizes<Str, Int>() }) }) }
 #### expect
 2112
 #### case
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R, e: EffectRow>(first: [C], app: fn() -> R / {Store<C> | e}) -> R / e {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 fn drain<C>(n: Int) -> Int / {Store<C>} { let c = take<C>(); let k = len_at(&c); put(c); if(n == 0) { k } else { drain<C>(n - 1) } }
-fn main() -> Int { store([1, 2], { store(["a"], { drain<Int>(3) * 10 + drain<Str>(2) }) }) }
+fn main() -> Int { store(Vec::from_array([1, 2]), { store(Vec::from_array(["a"]), { drain<Int>(3) * 10 + drain<Str>(2) }) }) }
 #### expect
 21
 #### case
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R, e: EffectRow>(first: [C], app: fn() -> R / {Store<C> | e}) -> R / e {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 effect Update { update() }
 struct Position(Int)
 struct Velocity(Int)
 fn integrate() / {Store<Position>, Store<Velocity>} {
-    let mut ps = take<Position>(); let vs = take<Velocity>();
+    let mut ps = take<Position>(); let mut vs = take<Velocity>();
     let mut i = 0;
     while({ i < len_at(&ps) }) { let Position(p) = ps[i]; let Velocity(v) = vs[i]; ps[i] = Position(p + v); i = i + 1 };
     put(ps); put(vs)
@@ -13573,19 +13633,20 @@ fn physics<R, e: EffectRow>(app: fn() -> R / {Update, Store<Position>, Store<Vel
     handle app() { update(k) => integrate(); update(); k(()) }
 }
 fn main() -> Int {
-    store([Position(0), Position(10)], { store([Velocity(1), Velocity(2)], {
-        handle physics({ update(); update(); update(); let ps = take<Position>(); let Position(a) = ps[0]; let Position(b) = ps[1]; put(ps); a * 100 + b }) { update(k) => k(()) }
+    store(Vec::from_array([Position(0), Position(10)]), { store(Vec::from_array([Velocity(1), Velocity(2)]), {
+        handle physics({ update(); update(); update(); let mut ps = take<Position>(); let Position(a) = ps[0]; let Position(b) = ps[1]; put(ps); a * 100 + b }) { update(k) => k(()) }
     }) })
 }
 #### expect
 316
 #### case
-effect Store<C> { take() -> [C], put([C]) }
-fn store<C, R>(first: [C], app: fn() -> R / {Store<C>}) -> R {
+use std::vec::{Vec};
+effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
+fn store<C, R>(first: Vec<C>, app: fn() -> R / {Store<C>}) -> R {
     let mut column = first;
-    handle app() { take(k) => k(replace(&mut column, [])), put(c, k) => column = c; k(()) }
+    handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
-fn main() -> Int { store([1, 2], { let ps = take<Int>(); let n = ps[0]; put(ps); n }) }
+fn main() -> Int { store(Vec::from_array([1, 2]), { let mut ps = take<Int>(); let n = ps[0]; put(ps); n }) }
 #### expect
 1
 #### case
@@ -13612,13 +13673,14 @@ fn main() -> Int {
 2
 7
 #### case
-effect Positions { take_p() -> [Int], put_p([Int]) }
+use std::vec::{Vec};
+effect Positions { take_p() -> Vec<Int>, put_p(Vec<Int>) }
 fn with_positions(app: fn() -> Int / {Positions}) -> Int {
-    let mut column = [1, 2, 3];
-    handle app() { take_p(k) => k(replace(&mut column, [])), put_p(c, k) => column = c; k(()) }
+    let mut column = Vec::from_array([1, 2, 3]);
+    handle app() { take_p(k) => k(replace(&mut column, Vec::new())), put_p(c, k) => column = c; k(()) }
 }
 fn bump() / {Positions} { let mut ps = take_p(); ps[0] = ps[0] + 10; put_p(ps) }
-fn main() -> Int { with_positions({ bump(); bump(); let ps = take_p(); let n = ps[0]; put_p(ps); n }) }
+fn main() -> Int { with_positions({ bump(); bump(); let mut ps = take_p(); let n = ps[0]; put_p(ps); n }) }
 #### expect
 21
 #### case
@@ -13756,10 +13818,11 @@ fn main() -> Int { let h = Holder { f: { n => n + 1 } }; h.f(4) }
 #### expect
 5
 #### case
-struct App { systems: [Int] }
-fn new_app() -> App { App { systems: [] } }
-fn add_system(app: App, s: Int) -> App { App { systems: push(app.systems, s) } }
-fn build(app: App) -> Int { len(app.systems) }
+use std::vec::{Vec};
+struct App { systems: Vec<Int> }
+fn new_app() -> App { App { systems: Vec::new() } }
+fn add_system(app: App, s: Int) -> App { let mut app = app; app.systems.push(s); app }
+fn build(app: App) -> Int { app.systems.len() }
 fn main() -> Int { new_app().add_system(1).add_system(2).add_system(3).build() }
 #### expect
 3
@@ -13856,27 +13919,29 @@ fn main() -> Int { <(Int, Int) as SameTy>::VALUE * 100 + <(Int, Str) as SameTy>:
 #### expect
 101
 #### case
-struct Column<T> { items: [T] }
+use std::vec::{Vec};
+struct Column<T> { items: Vec<T> }
 trait Get<T> { fn size(&Self) -> Int }
 impl<T, R> Get<T> for (Column<T>, R) { fn size(w: &(Column<T>, R)) -> Int { len_at(&w.0.items) } }
 impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> { fn size(w: &(Column<H>, R)) -> Int { <R as Get<T>>::size(&w.1) } }
 fn main() -> Int {
-    let world = (Column { items: [1, 2, 3] }, (Column { items: ["a"] }, ()));
+    let world = (Column { items: Vec::from_array([1, 2, 3]) }, (Column { items: Vec::from_array(["a"]) }, ()));
     <(Column<Int>, (Column<Str>, ())) as Get<Int>>::size(&world) * 10 + <(Column<Int>, (Column<Str>, ())) as Get<Str>>::size(&world)
 }
 #### expect
 31
 #### case
-struct Column<T> { items: [T] }
+use std::vec::{Vec};
+struct Column<T> { items: Vec<T> }
 trait Get<T> { fn column(&Self) -> &Column<T>; fn column_mut(&mut Self) -> &mut Column<T> }
 impl<T, R> Get<T> for (Column<T>, R) { fn column(w: &(Column<T>, R)) -> &Column<T> { &w.0 } fn column_mut(w: &mut (Column<T>, R)) -> &mut Column<T> { &mut w.0 } }
 impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> { fn column(w: &(Column<H>, R)) -> &Column<T> { <R as Get<T>>::column(&w.1) } fn column_mut(w: &mut (Column<H>, R)) -> &mut Column<T> { <R as Get<T>>::column_mut(&mut w.1) } }
 struct Position(Int)
 struct Velocity(Int)
 fn main() -> Int {
-    let mut world = (Column { items: [Position(1), Position(2)] }, (Column { items: [Velocity(10)] }, ()));
+    let mut world = (Column { items: Vec::from_array([Position(1), Position(2)]) }, (Column { items: Vec::from_array([Velocity(10)]) }, ()));
     let vs = <(Column<Position>, (Column<Velocity>, ())) as Get<Velocity>>::column_mut(&mut world);
-    push_at(&mut vs.items, Velocity(20));
+    Vec::push(&mut vs.items, Velocity(20));
     let ps = <(Column<Position>, (Column<Velocity>, ())) as Get<Position>>::column(&world);
     let n = len_at(&ps.items);
     let vs = <(Column<Position>, (Column<Velocity>, ())) as Get<Velocity>>::column(&world);
@@ -13885,7 +13950,8 @@ fn main() -> Int {
 #### expect
 22
 #### case
-struct Column<T> { items: [T] }
+use std::vec::{Vec};
+struct Column<T> { items: Vec<T> }
 trait Get<T> { fn column(&Self) -> &Column<T>; fn column_mut(&mut Self) -> &mut Column<T> }
 impl<T, R> Get<T> for (Column<T>, R) { fn column(w: &(Column<T>, R)) -> &Column<T> { &w.0 } fn column_mut(w: &mut (Column<T>, R)) -> &mut Column<T> { &mut w.0 } }
 impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> { fn column(w: &(Column<H>, R)) -> &Column<T> { <R as Get<T>>::column(&w.1) } fn column_mut(w: &mut (Column<H>, R)) -> &mut Column<T> { <R as Get<T>>::column_mut(&mut w.1) } }
@@ -13893,13 +13959,14 @@ struct Position(Int)
 struct Velocity(Int)
 fn count<T, W>(world: &W) -> Int where W: Get<T> { let c = <W as Get<T>>::column(world); len_at(&c.items) }
 fn main() -> Int {
-    let world = (Column { items: [Position(1), Position(2)] }, (Column { items: [Velocity(10)] }, ()));
+    let world = (Column { items: Vec::from_array([Position(1), Position(2)]) }, (Column { items: Vec::from_array([Velocity(10)]) }, ()));
     count<Position, (Column<Position>, (Column<Velocity>, ()))>(&world) * 10 + count<Velocity, (Column<Position>, (Column<Velocity>, ()))>(&world)
 }
 #### expect
 21
 #### case
-struct Column<T> { items: [T] }
+use std::vec::{Vec};
+struct Column<T> { items: Vec<T> }
 trait Get<T> { fn column(&Self) -> &Column<T>; fn column_mut(&mut Self) -> &mut Column<T> }
 impl<T, R> Get<T> for (Column<T>, R) { fn column(w: &(Column<T>, R)) -> &Column<T> { &w.0 } fn column_mut(w: &mut (Column<T>, R)) -> &mut Column<T> { &mut w.0 } }
 impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> { fn column(w: &(Column<H>, R)) -> &Column<T> { <R as Get<T>>::column(&w.1) } fn column_mut(w: &mut (Column<H>, R)) -> &mut Column<T> { <R as Get<T>>::column_mut(&mut w.1) } }
@@ -13907,12 +13974,12 @@ struct Position(Int)
 struct Velocity(Int)
 struct Health(Int)
 fn main() -> Int {
-    let world = (Column { items: [Position(1)] }, ());
+    let world = (Column { items: Vec::from_array([Position(1)]) }, ());
     let c = <(Column<Position>, ()) as Get<Health>>::column(&world);
     len_at(&c.items)
 }
 #### expect
-error: 10:5: in `main`: `()` does not implement `Get<Health>`, which `Get` of `(Column<Position>, ())` needs
+error: 11:5: in `main`: `()` does not implement `Get<Health>`, which `Get` of `(Column<Position>, ())` needs
 #### case
 trait Count { fn count(Self) -> Int; }
 impl<A> Count for Option<A> { fn count(o: Option<A>) -> Int { 1 } }
@@ -13978,10 +14045,11 @@ fn main() -> Int { let x = 5; depth(&x) + depth(x) }
 #### expect
 1
 #### case
-struct Column<T> { items: [T] }
-fn run1<A>(f: for<'a> fn(&'a mut Column<A>) -> (), start: [A]) -> Int { let mut a = Column { items: start }; f(&mut a); len_at(&a.items) }
-fn grow(c: &mut Column<Int>) { push_at(&mut c.items, 1) }
-fn main() -> Int { run1(grow, [5]) }
+use std::vec::{Vec};
+struct Column<T> { items: Vec<T> }
+fn run1<A>(f: for<'a> fn(&'a mut Column<A>) -> (), start: Vec<A>) -> Int { let mut a = Column { items: start }; f(&mut a); len_at(&a.items) }
+fn grow(c: &mut Column<Int>) { Vec::push(&mut c.items, 1) }
+fn main() -> Int { run1(grow, Vec::from_array([5])) }
 #### expect
 2
 #### case
@@ -13993,10 +14061,11 @@ fn main() -> Int { go(grow) }
 #### expect
 1
 #### case
-struct Column<T> { items: [T] }
+use std::vec::{Vec};
+struct Column<T> { items: Vec<T> }
 trait Sys { fn go(Self) -> Int }
-impl Sys for fn(&mut Column<Int>) -> () { fn go(f: fn(&mut Column<Int>) -> ()) -> Int { let mut a = Column { items: [5] }; f(&mut a); len_at(&a.items) } }
-fn grow(c: &mut Column<Int>) { push_at(&mut c.items, 1) }
+impl Sys for fn(&mut Column<Int>) -> () { fn go(f: fn(&mut Column<Int>) -> ()) -> Int { let mut a = Column { items: Vec::from_array([5]) }; f(&mut a); len_at(&a.items) } }
+fn grow(c: &mut Column<Int>) { Vec::push(&mut c.items, 1) }
 fn main() -> Int { go(grow) }
 #### expect
 2
@@ -14076,8 +14145,9 @@ fn main() -> Int { weight(Two(1, 2)) }
 #### expect
 error: 8:20: in `main`: `Int` does not implement `Never`, which `Apart` of `(Int, Int)` needs, which `Pairing` of `Two<Int, Int>` needs
 #### case
-struct Bag<T> { items: [T] }
-fn empty<T>(seed: Int) -> Bag<T> { Bag { items: [] } }
+use std::vec::{Vec};
+struct Bag<T> { items: Vec<T> }
+fn empty<T>(seed: Int) -> Bag<T> { Bag { items: Vec::new() } }
 fn widen<T, U>(bag: Bag<T>) -> Int { len(bag.items) }
 fn main() -> Int { let b: Bag<Int> = empty(0); b.widen<Int, Str>() + 3 }
 #### expect
@@ -14118,10 +14188,11 @@ fn main() -> Int { let c = Counter { n: 9 }; c.finish() }
 #### expect
 9
 #### case
+use std::vec::{Vec};
 trait Size { fn size(&Self) -> Int }
-struct Bag { items: [Int] }
+struct Bag { items: Vec<Int> }
 impl Size for Bag { fn size(b: &Bag) -> Int { len_at(&b.items) } }
-fn main() -> Int { let b = Bag { items: [1, 2, 3] }; b.size() }
+fn main() -> Int { let b = Bag { items: Vec::from_array([1, 2, 3]) }; b.size() }
 #### expect
 3
 #### case
@@ -14290,19 +14361,21 @@ fn main() -> Int { let (a, b) = two(Loud(1), Loud(2)); 100 }
 1
 100
 #### case
+use std::vec::{Vec};
 struct Loud(Int)
 impl Drop for Loud { fn drop(l: &mut Loud) { print(l.0) } }
-fn split<T>(a: [T]) -> ([T], T) { arr_pop(a, 0) }
-fn main() -> Int { let (a, b) = split([Loud(1), Loud(2)]); 100 }
+fn split<T>(a: Vec<T>) -> (Vec<T>, T) { let mut a = a; match(a.pop()) { Some(x) => (a, x), None => abort("empty") } }
+fn main() -> Int { let (a, b) = split(Vec::from_array([Loud(1), Loud(2)])); 100 }
 #### expect
 2
 1
 100
 #### case
+use std::vec::{Vec};
 struct Loud(Int)
 impl Drop for Loud { fn drop(l: &mut Loud) { print(l.0) } }
-fn split<T>(a: [T]) -> ([T], T) { arr_pop(a, 0) }
-fn main() -> Int { let (a, b) = split([Loud(1), Loud(2)]); len_at(&a) }
+fn split<T>(a: Vec<T>) -> (Vec<T>, T) { let mut a = a; match(a.pop()) { Some(x) => (a, x), None => abort("empty") } }
+fn main() -> Int { let (a, b) = split(Vec::from_array([Loud(1), Loud(2)])); len_at(&a) }
 #### expect
 1
 2
@@ -14393,7 +14466,8 @@ fn main() -> Int { let xs: [Int; 2] = [1, 2]; let ys = push(to_array(xs), 3); le
 #### expect
 3
 #### case
-fn main() -> Int { let xs = [0; 4]; let ys = push([1, 2], 3); len(xs) + len(ys) }
+use std::vec::{Vec};
+fn main() -> Int { let xs = [0; 4]; let mut ys = Vec::from_array([1, 2]); ys.push(3); len(xs) + ys.len() }
 #### expect
 7
 #### case
@@ -14423,7 +14497,8 @@ fn main() -> Int { let m = [[1, 2], [3, 4], [5, 6]]; m[2][1] + len(m) + len(m[0]
 #### expect
 11
 #### case
-fn main() -> Int { let m: [[Int; 2]] = [[1, 2], [3, 4]]; len(m) + len(m[0]) }
+use std::vec::{Vec};
+fn main() -> Int { let rows: [[Int; 2]; 2] = [[1, 2], [3, 4]]; let m = Vec::from_array(rows); m.len() + len(m[0]) }
 #### expect
 4
 #### case
@@ -14446,7 +14521,8 @@ fn main() -> Int { let inner: [Int; 2] = [1, 2]; let m: [[Int; 2]; 1] = [inner];
 #### expect
 2
 #### case
-fn main() -> Int { let m: [[Int; 2]] = push([], [1, 2]); len(m) }
+use std::vec::{Vec};
+fn main() -> Int { let mut m: Vec<[Int; 2]> = Vec::new(); m.push([1, 2]); m.len() }
 #### expect
 1
 #### case
@@ -14514,11 +14590,12 @@ fn main() -> Str { let g = grow; let l = look; describe(&g) ++ " " ++ describe(&
 changed read
 #### case
 #### A condition on a type made from an implementation's type parameters, `where (M, ()): Fetch<..>`, is what the implementation's functions are given: a system's parameters, each fetched by what it asks for, for any shape of parameter list.
-struct Col<T> { items: [T] }
+use std::vec::{Vec};
+struct Col<T> { items: Vec<T> }
 struct World { a: Col<Int>, b: Col<Str> }
 trait Get<T> { fn take(&mut Self) -> Col<T>; fn put(&mut Self, Col<T>); }
-impl Get<Int> for World { fn take(w: &mut World) -> Col<Int> { let c = w.a; w.a = Col { items: [] }; c } fn put(w: &mut World, c: Col<Int>) { w.a = c } }
-impl Get<Str> for World { fn take(w: &mut World) -> Col<Str> { let c = w.b; w.b = Col { items: [] }; c } fn put(w: &mut World, c: Col<Str>) { w.b = c } }
+impl Get<Int> for World { fn take(w: &mut World) -> Col<Int> { replace(&mut w.a, Col { items: Vec::new() }) } fn put(w: &mut World, c: Col<Int>) { w.a = c } }
+impl Get<Str> for World { fn take(w: &mut World) -> Col<Str> { replace(&mut w.b, Col { items: Vec::new() }) } fn put(w: &mut World, c: Col<Str>) { w.b = c } }
 
 // What a parameter of a system is, without the reference: which column, and whether to change it.
 struct Changed<A>(A)
@@ -14560,10 +14637,10 @@ impl<W, P, Q, MP, MQ> System<W> for fn(P, Q) -> () where P: Kind<Marker = MP>, Q
     fn run(f: &fn(P, Q) -> (), world: &mut W) { <(MP, (MQ, ())) as Fetch<W, (), fn(P, Q) -> ()>>::fetch(world, (), f) }
 }
 
-fn grow(ints: &mut Col<Int>) { push_at(&mut ints.items, 7) }
-fn both(ints: &mut Col<Int>, words: &Col<Str>) { push_at(&mut ints.items, len_at(&words.items)) }
+fn grow(ints: &mut Col<Int>) { Vec::push(&mut ints.items, 7) }
+fn both(ints: &mut Col<Int>, words: &Col<Str>) { Vec::push(&mut ints.items, len_at(&words.items)) }
 fn main() -> Int {
-    let mut world = World { a: Col { items: [1] }, b: Col { items: ["x", "y"] } };
+    let mut world = World { a: Col { items: Vec::from_array([1]) }, b: Col { items: Vec::from_array(["x", "y"]) } };
     let g = grow;
     run(&g, &mut world);
     let h = both;
@@ -14575,53 +14652,58 @@ fn main() -> Int {
 32
 #### case
 #### A family of types, one for each type it is asked at: the trait takes the parameter and leaves a type to its implementations. A function may ask for it at two types.
+use std::vec::{Vec};
 trait Family<T> { type Of; fn single(T) -> Of }
 struct Arrays
 struct Options
-impl<T> Family<T> for Arrays { type Of = [T]; fn single(x: T) -> [T] { [x] } }
+impl<T> Family<T> for Arrays { type Of = Vec<T>; fn single(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl<T> Family<T> for Options { type Of = Option<T>; fn single(x: T) -> Option<T> { Some(x) } }
 fn twice<F, A, B>(a: Int, b: Str) -> (A, B) where F: Family<Int, Of = A>, F: Family<Str, Of = B> { (<F as Family<Int>>::single(a), <F as Family<Str>>::single(b)) }
-fn main() -> Int { let p: ([Int], [Str]) = twice<Arrays>(3, "x"); let q: (Option<Int>, Option<Str>) = twice<Options>(4, "y"); len(p.0) + len(p.1) + match(q.0) { Some(n) => n, None => 0 } }
+fn main() -> Int { let p: (Vec<Int>, Vec<Str>) = twice<Arrays>(3, "x"); let q: (Option<Int>, Option<Str>) = twice<Options>(4, "y"); len(p.0) + len(p.1) + match(q.0) { Some(n) => n, None => 0 } }
 #### expect
 6
 #### case
+use std::vec::{Vec};
 trait Family<T> { type Of; fn single(T) -> Of }
 struct Arrays
 struct Options
-impl<T> Family<T> for Arrays { type Of = [T]; fn single(x: T) -> [T] { [x] } }
+impl<T> Family<T> for Arrays { type Of = Vec<T>; fn single(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl<T> Family<T> for Options { type Of = Option<T>; fn single(x: T) -> Option<T> { Some(x) } }
 fn both<F>(a: Int, b: Str) -> Int where F: Family<Int>, F: Family<Str> { let x = <F as Family<Int>>::single(a); let y = <F as Family<Str>>::single(b); 2 }
 fn main() -> Int { both<Arrays>(3, "x") }
 #### expect
 2
 #### case
+use std::vec::{Vec};
 trait Family<T> { type Of; fn single(T) -> Of }
 struct Arrays
 struct Options
-impl<T> Family<T> for Arrays { type Of = [T]; fn single(x: T) -> [T] { [x] } }
+impl<T> Family<T> for Arrays { type Of = Vec<T>; fn single(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl<T> Family<T> for Options { type Of = Option<T>; fn single(x: T) -> Option<T> { Some(x) } }
 fn make<F, T, A>(a: T) -> A where F: Family<T, Of = A> { <F as Family<T>>::single(a) }
-fn main() -> Int { let p: [Int] = make<Arrays>(3); let q: Option<Str> = make<Options>("s"); len(p) }
+fn main() -> Int { let p: Vec<Int> = make<Arrays>(3); let q: Option<Str> = make<Options>("s"); len(p) }
 #### expect
 1
 #### case
+use std::vec::{Vec};
 trait Family<T> { type Of; fn single(T) -> Of }
 struct Arrays
 struct Options
-impl<T> Family<T> for Arrays { type Of = [T]; fn single(x: T) -> [T] { [x] } }
+impl<T> Family<T> for Arrays { type Of = Vec<T>; fn single(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl<T> Family<T> for Options { type Of = Option<T>; fn single(x: T) -> Option<T> { Some(x) } }
 fn once<F, A>(a: Int) -> A where F: Family<Int, Of = A> { <F as Family<Int>>::single(a) }
-fn main() -> Int { let p: [Int] = once<Arrays>(3); len(p) }
+fn main() -> Int { let p: Vec<Int> = once<Arrays>(3); len(p) }
 #### expect
 1
 #### case
 #### `type Of<T>;` in a trait is not read: the message says what to write.
+use std::vec::{Vec};
 trait Family { type Of<T>; fn single<T>(T) -> Of<T> }
 struct Arrays
 struct Options
-impl Family for Arrays { type Of<T> = [T]; fn single<T>(x: T) -> [T] { [x] } }
+impl Family for Arrays { type Of<T> = Vec<T>; fn single<T>(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl Family for Options { type Of<T> = Option<T>; fn single<T>(x: T) -> Option<T> { Some(x) } }
-fn main() -> Int { let a: [Int] = <Arrays as Family>::single(3); let o: Option<Int> = <Options as Family>::single(4); len(a) + match(o) { Some(n) => n, None => 0 } }
+fn main() -> Int { let a: Vec<Int> = <Arrays as Family>::single(3); let o: Option<Int> = <Options as Family>::single(4); len(a) + match(o) { Some(n) => n, None => 0 } }
 #### expect
 5
 #### case
@@ -15044,10 +15126,11 @@ fn main() -> Int { let p = twice(1, "a"); let q = twice(2, 5); q.0 + q.1 + len(p
 11
 #### case
 #### A type a trait leaves to its implementations that takes types, `type Of<T>;`: an implementation says what it is at each, `type Of<T> = [T];`, and it is asked as `Of<T>` in the trait's functions and `F::Of<Int>` elsewhere.
+use std::vec::{Vec};
 trait Family { type Of<T>; fn single<T>(T) -> Of<T> }
 struct Arrays
 struct Options
-impl Family for Arrays { type Of<T> = [T]; fn single<T>(x: T) -> [T] { [x] } }
+impl Family for Arrays { type Of<T> = Vec<T>; fn single<T>(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl Family for Options { type Of<T> = Option<T>; fn single<T>(x: T) -> Option<T> { Some(x) } }
 fn both<F: Family>() -> (F::Of<Int>, F::Of<Str>) { (<F as Family>::single(1), <F as Family>::single("a")) }
 fn main() -> Int { let p = both<Arrays>(); let q = both<Options>(); len(p.0) + len(p.1) + match(q.0) { Some(n) => n, None => 0 } }
@@ -15061,10 +15144,11 @@ fn main() -> Int { match(<Opt as Functor>::map(Some(3), { n => n + 1 })) { Some(
 #### expect
 4
 #### case
+use std::vec::{Vec};
 trait Lending { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }
-struct Windows { data: [Int], at: Int }
+struct Windows { data: Vec<Int>, at: Int }
 impl Lending for Windows { type Item<'a> = &'a Int; fn next(w: &mut Windows) -> Option<&Int> { if(w.at < len_at(&w.data)) { w.at = w.at + 1; Some(&w.data[w.at - 1]) } else { None } } }
-fn main() -> Int { let mut w = Windows { data: [5, 6], at: 0 }; match(next(&mut w)) { Some(x) => *x, None => 0 } }
+fn main() -> Int { let mut w = Windows { data: Vec::from_array([5, 6]), at: 0 }; match(next(&mut w)) { Some(x) => *x, None => 0 } }
 #### expect
 5
 #### case
@@ -15075,9 +15159,10 @@ fn main() -> Int { 1 }
 #### expect
 error: 3:72: in `Family::single@Arrays`: the result of a clause: expected `[T]`, found `Result<T, ()>`
 #### case
+use std::vec::{Vec};
 trait Shelf { type Holding<T>; fn empty<T>() -> Holding<T>; fn put<T>(Holding<T>, T) -> Holding<T>; fn count<T>(&Holding<T>) -> Int }
 struct Rows
-impl Shelf for Rows { type Holding<T> = [T]; fn empty<T>() -> [T] { [] } fn put<T>(h: [T], x: T) -> [T] { push(h, x) } fn count<T>(h: &[T]) -> Int { len_at(h) } }
+impl Shelf for Rows { type Holding<T> = Vec<T>; fn empty<T>() -> Vec<T> { Vec::new() } fn put<T>(h: Vec<T>, x: T) -> Vec<T> { let mut h = h; h.push(x); h } fn count<T>(h: &Vec<T>) -> Int { len_at(h) } }
 fn fill<S: Shelf>() -> Int { let a = <S as Shelf>::put(<S as Shelf>::put(<S as Shelf>::empty(), 1), 2); let b = <S as Shelf>::put(<S as Shelf>::empty(), "x"); <S as Shelf>::count(&a) * 10 + <S as Shelf>::count(&b) }
 fn main() -> Int { fill<Rows>() }
 #### expect
@@ -15145,10 +15230,11 @@ fn main() -> Int { let mut c = Cell(2); match(leak(&mut c)) { Some(r) => *r = 9,
 #### expect
 9
 #### case
+use std::vec::{Vec};
 trait Lend { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }
-struct Words([Str])
+struct Words(Vec<Str>)
 impl Lend for Words { type Item<'a> = (Int, &'a Str); fn next(w: &mut Words) -> Option<(Int, &Str)> { Some((len_at(&(*w).0), &(*w).0[0])) } }
-fn main() -> Int { let mut w = Words(["hey"]); match(next(&mut w)) { Some(p) => p.0 + len(*(p.1)), None => 0 } }
+fn main() -> Int { let mut w = Words(Vec::from_array(["hey"])); match(next(&mut w)) { Some(p) => p.0 + len(*(p.1)), None => 0 } }
 #### expect
 4
 #### case
@@ -15390,20 +15476,22 @@ fn main() -> Int { count(join((1, 2, 3), (4, 5, 6))) }
 6
 #### case
 #### A trait's function hands back a borrow inside an Option: the implementation knows what it gives while its body is checked
-struct Col<T> { dense: [T], owners: [Int] }
+use std::vec::{Vec};
+struct Col<T> { dense: Vec<T>, owners: Vec<Int> }
 fn find<T>(c: &Col<T>, e: Int) -> Int { 0 }
 trait Item { type Store; type Got<'a>; fn at<'a>(&'a mut Store, Int) -> Option<Got<'a>> }
 struct W<T>(T)
 impl<T> Item for W<T> { type Store = Col<T>; type Got<'a> = &'a mut T;
     fn at<'a>(store: &'a mut Col<T>, e: Int) -> Option<&'a mut T> { let i = find(&*store, e); if(i >= 0) { Some(&mut store.dense[i]) } else { None } } }
-fn main() -> Int { let mut a = Col { dense: [1, 2], owners: [0, 1] }; match(<W<Int> as Item>::at(&mut a, 1)) { Some(x) => *x = 7, None => () }; a.dense[0] }
+fn main() -> Int { let mut a = Col { dense: Vec::from_array([1, 2]), owners: Vec::from_array([0, 1]) }; match(<W<Int> as Item>::at(&mut a, 1)) { Some(x) => *x = 7, None => () }; a.dense[0] }
 
 #### expect
 7
 #### case
 #### Query items over columns, with a lifetime GAT
 
-struct Col<T> { dense: [T], owners: [Int] }
+use std::vec::{Vec};
+struct Col<T> { dense: Vec<T>, owners: Vec<Int> }
 
 fn find<T>(c: &Col<T>, e: Int) -> Int {
     let mut i = 0;
@@ -15421,8 +15509,8 @@ impl<T> Item for R<T> { type Store = Col<T>; type Got<'a> = &'a T;
     fn at<'a>(store: &'a mut Col<T>, e: Int) -> Option<&'a T> { let i = find(&*store, e); if(i >= 0) { Some(&store.dense[i]) } else { None } } }
 
 fn main() -> Int {
-    let mut a = Col { dense: [1, 2, 3], owners: [0, 1, 2] };
-    let mut b = Col { dense: [10, 20], owners: [0, 2] };
+    let mut a = Col { dense: Vec::from_array([1, 2, 3]), owners: Vec::from_array([0, 1, 2]) };
+    let mut b = Col { dense: Vec::from_array([10, 20]), owners: Vec::from_array([0, 2]) };
     let mut total = 0;
     let mut e = 0;
     while({ e < 3 }) {
@@ -15541,32 +15629,35 @@ fn main() -> Int {
 #### case
 #### A callable read part by part, given a tuple of borrows, binds their region once it is known to be given them
 
-struct Box1 { v: [Int], w: [Int] }
+use std::vec::{Vec};
+struct Box1 { v: Vec<Int>, w: Vec<Int> }
 fn each_v(b: &mut Box1, f: for<'a> fn((&'a mut Int, &'a Int))) { f((&mut b.v[0], &b.w[0])) }
 fn movement(b: &mut Box1) { each_v(b, fn(x: (&mut Int, &Int)) { let (p, q) = x; *p = *p + *q }) }
-fn run_with(f: for<'a> fn(&'a mut Box1)) -> Int { let mut b = Box1 { v: [1], w: [5] }; f(&mut b); b.v[0] }
+fn run_with(f: for<'a> fn(&'a mut Box1)) -> Int { let mut b = Box1 { v: Vec::from_array([1]), w: Vec::from_array([5]) }; f(&mut b); b.v[0] }
 fn main() -> Int { run_with(movement) }
 
 #### expect
 6
 #### case
 #### An implementation's function writes the lifetime its trait names
-struct Col<T> { dense: [T], owners: [Int] }
+use std::vec::{Vec};
+struct Col<T> { dense: Vec<T>, owners: Vec<Int> }
 fn find<T>(c: &Col<T>, e: Int) -> Int { 0 }
 trait Item { type Store; type Got<'a>; fn at<'a>(&'a mut Store, Int) -> Option<Got<'a>> }
 struct W<T>(T)
 impl<T> Item for W<T> { type Store = Col<T>; type Got<'a> = &'a mut T;
     fn at<'a>(store: &'a mut Col<T>, e: Int) -> Option<&'a mut T> { let i = find(&*store, e); if(i >= 0) { Some(&mut store.dense[i]) } else { None } } }
-fn main() -> Int { let mut a = Col { dense: [1, 2], owners: [0, 1] }; match(<W<Int> as Item>::at(&mut a, 1)) { Some(x) => *x = 7, None => () }; a.dense[0] }
+fn main() -> Int { let mut a = Col { dense: Vec::from_array([1, 2]), owners: Vec::from_array([0, 1]) }; match(<W<Int> as Item>::at(&mut a, 1)) { Some(x) => *x = 7, None => () }; a.dense[0] }
 
 #### expect
 7
 #### case
 #### A borrow lent to a call that is also given a callable is not reported as not lent
 
-struct Box1 { v: [Int] }
+use std::vec::{Vec};
+struct Box1 { v: Vec<Int> }
 fn fold(b: &mut Box1, start: Int, f: for<'a> fn(Int, &'a Int) -> Int) -> Int { f(start, &b.v[0]) }
-fn main() -> Int { let mut b = Box1 { v: [3] }; fold(&mut b, 1, fn(s: Int, x: &Int) -> Int { s + *x }) }
+fn main() -> Int { let mut b = Box1 { v: Vec::from_array([3]) }; fold(&mut b, 1, fn(s: Int, x: &Int) -> Int { s + *x }) }
 
 #### expect
 4
@@ -15583,13 +15674,14 @@ fn f() -> Int { 1 }
 error: the program has no `main` function
 #### case
 #### `mut name` in a pattern: a parameter's, a `let`'s, a callable's, an arm's.
+use std::vec::{Vec};
 fn bump(mut x: Int) -> Int { x = x + 1; x }
-fn each(xs: [(Int, Int)], f: fn((Int, Int)) -> ()) { let mut i = 0; while({ i < len_at(&xs) }) { f(xs[i]); i = i + 1 } }
+fn each(xs: Vec<(Int, Int)>, f: fn((Int, Int)) -> ()) { let mut i = 0; while({ i < len_at(&xs) }) { f(xs[i]); i = i + 1 } }
 fn main() -> Int {
     let (mut a, b) = (1, 2);
     a = a + b;
     let mut s = 0;
-    each([(1, 2), (3, 4)], fn((mut p, q)) { p = p * q; s = s + p });
+    each(Vec::from_array([(1, 2), (3, 4)]), fn((mut p, q)) { p = p * q; s = s + p });
     let n = match(Some(3)) { Some(mut n) => n = n * 10; n, None => 0 };
     bump(a) + s + n
 }

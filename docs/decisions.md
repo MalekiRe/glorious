@@ -7772,6 +7772,34 @@ Vec's elements are read through library calls where arrays were machine
 operations: the ECS programs take 2-2.5 times the steps. An example is given
 500000 steps on the Lean machines (it was 200000).
 
+## The tests off growable arrays
+
+The test programs that used `[T]` as a value that grows, 143 of them, are
+written with `Vec` (`v.push(x)`, `v.pop()`, `v.len()`, a `&Vec<T>` where a
+list is read, `Vec::from_array([..])` where one is written), or with `[T;
+N]` where the length is the type's (a pattern of one is written with a
+`let t: [T; N]`, which reads the program's literals so). One that pinned an
+array's own intrinsic being unsafe (`restore_at`) is gone with it. Read with
+literals of a length their type says, 24 still fail: those of slice
+patterns (`[x, ..rest] =>`), which wait for `&[T]` as a slice; two of
+variadic tuples, which fail where the program uses the library (a spread
+written out in an implementation with conditions of how its parts are
+destroyed); and one holding a `Vec` while calling a callable of a `fn`
+type, which may jump to a label.
+
+Found on the way, and done: a method of an element, `g[0].push(5)`,
+borrows the element where it is (`place_at`), the element's type found
+first where a trait leaves it; a spread's length is read past the
+conditions of how its parts are destroyed (`spreadLength`); a byte string,
+`b"hi"`, numbers the empty array it begins with, so what that asks is asked
+at a call; `Scope::spawn` runs what it is given once; `Vec::extend` takes
+anything `ToVec`, and `Vec::from_array` uses what it is given;
+`std::ptr::element`/`element_mut` take anything with elements.
+
+Not done: a method call on a plain `let` whose type's own function borrows
+it, where a function of the name in scope takes it whole (`let v = ..;
+v.len(); eat(v)`), counts as a use of it; `let mut v` is not.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

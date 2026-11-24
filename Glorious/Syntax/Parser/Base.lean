@@ -312,7 +312,10 @@ def scalarLiteral (neg : Bool) : P (Option ExprId) := do
     let pushes := (List.range codes.length).map fun i =>
       if i < 1000 then 850000000000000000 + (base / 1000000) * 100000000000 + at_ * 1000 + i else 0
     let bytes ← codes.mapM fun (c : Nat) => tree (scalarValue "u8_of" (c : Int))
-    some <$> arrayValue bytes 0 pushes
+    -- (The empty array begun with numbered too: what it asks of the bytes'
+    -- type, how one is destroyed, is asked at it.)
+    let empty := 850000000000000000 + (base / 1000000) * 100000000000 + at_ * 1000 + 999
+    some <$> arrayValue bytes empty pushes
   | _ => pure none
 
 /-- A literal as a pattern: the value it is, to be compared with. -/

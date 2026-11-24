@@ -100,7 +100,7 @@ impl Scope {
     // borrows nothing (`F: 'static`): it runs later, after the block a borrow
     // would be of may have ended; what it uses it is given (`let m = mine;`
     // in its block), as a handle to something threads share is.
-    pub fn spawn<'s, T, F>(s: &'s Self, f: F) -> Handle<'s, T> where F: Fn<(), Output = T, Effects = {Threads}>, F: 'static {
+    pub fn spawn<'s, T, F>(s: &'s Self, f: F) -> Handle<'s, T> where F: Fn<(), Output = T, Effects = {Threads}>, F: 'static, F: Use<[1, 1]> {
         let cell = new_cell<Option<T>>(None);
         let queue = s.queue;
         push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });

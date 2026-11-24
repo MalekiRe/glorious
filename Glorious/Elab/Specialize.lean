@@ -117,7 +117,9 @@ def spreadLength (byId : Array (String × List Nat)) (i : Nat) : Nat → Option 
   | fuel + 1 =>
     match byId[i]? with
     | some (f, []) => if f.startsWith (implDictName "Spread" "") then some 0 else none
-    | some (f, [j]) =>
+    -- (The rest's `Spread` first; after it, how what is held is destroyed,
+    -- where the program asks that of the parts too.)
+    | some (f, j :: _) =>
       if f.startsWith (implDictName "Spread" "") then (spreadLength byId j fuel).map (· + 1) else none
     | _ => none
 
