@@ -5,7 +5,6 @@
 // A digest's bytes are a `[u8; 32]` (`from_bytes` says if what it is given
 // is not thirty-two); `hash64` over the `Hash` trait is not here.
 
-use std::slice::{Slice};
 use std::bytes::{hex_encode, hex_decode, HexError, HexErrorKind};
 use std::text::{utf8};
 use std::vec::{Vec};
@@ -18,8 +17,8 @@ fn byte(n: Int) -> u8 { to(bit_and(n, 255)) }
 fn le_onto(out: &mut Vec<u8>, n: Int, count: Int) {
     if(count == 0) { () } else { Vec::push(out, byte(n)); tail le_onto(out, shr(n, 8), count - 1) }
 }
-fn all_onto<'a>(out: &mut Vec<u8>, bytes: &Slice<'a, u8>, i: Int) {
-    match(Slice::get(bytes, i)) { Some(b) => Vec::push(out, *b); tail all_onto(out, bytes, i + 1), None => () }
+fn all_onto<'a>(out: &mut Vec<u8>, bytes: &'a [u8], i: Int) {
+    match(bytes.get(i)) { Some(b) => Vec::push(out, *b); tail all_onto(out, bytes, i + 1), None => () }
 }
 fn each_onto<A>(out: &mut Vec<u8>, bytes: &A, i: Int) where A: Indexed<Element = u8> {
     match(element(bytes, i)) { Some(b) => Vec::push(out, *b); tail each_onto(out, bytes, i + 1), None => () }
@@ -39,7 +38,7 @@ impl Hasher {
         value.high = low32(value.high * 435 + shr(product, 32) + shl(low32(shl(low, 8)), 0));
         value.low = low32(product);
     }
-    pub fn write<'a>(value: &mut Self, bytes: Slice<'a, u8>) { write_from(value, &bytes, 0) }
+    pub fn write<'a>(value: &mut Self, bytes: &'a [u8]) { write_from(value, bytes, 0) }
     pub fn write_u16(value: &mut Self, input: u16) { write_le(value, int(input), 2) }
     pub fn write_u32(value: &mut Self, input: u32) { write_le(value, int(input), 4) }
     pub fn write_u64(value: &mut Self, input: u64) { write_le(value, int(input), 8) }
@@ -49,8 +48,8 @@ impl Hasher {
         high * 4294967296u64 + low
     }
 }
-fn write_from<'a>(h: &mut Hasher, bytes: &Slice<'a, u8>, i: Int) {
-    match(Slice::get(bytes, i)) { Some(b) => Hasher::write_u8(h, *b); write_from(h, bytes, i + 1), None => () }
+fn write_from<'a>(h: &mut Hasher, bytes: &'a [u8], i: Int) {
+    match(bytes.get(i)) { Some(b) => Hasher::write_u8(h, *b); write_from(h, bytes, i + 1), None => () }
 }
 fn write_le(h: &mut Hasher, n: Int, count: Int) {
     if(count == 0) { () } else { Hasher::write_u8(h, byte(n)); write_le(h, shr(n, 8), count - 1) }
@@ -201,14 +200,14 @@ impl Digest256 {
 }
 impl Eq for Digest256 { fn ==(a: Digest256, b: Digest256) -> Bool { a.bytes == b.bytes } }
 
-pub fn blake3<'a>(bytes: Slice<'a, u8>) -> Digest256 { let mut all = Vec::new(); all_onto(&mut all, &bytes, 0); digest_of(&all) }
+pub fn blake3<'a>(bytes: &'a [u8]) -> Digest256 { let mut all = Vec::new(); all_onto(&mut all, bytes, 0); digest_of(&all) }
 
 // The same, a piece at a time: the pieces are kept and hashed at the end.
 pub struct Blake3 { bytes: Vec<u8> }
 
 impl Blake3 {
     pub fn new() -> Self { Self { bytes: Vec::new() } }
-    pub fn update<'a>(value: &mut Self, bytes: Slice<'a, u8>) { all_onto(&mut value.bytes, &bytes, 0) }
+    pub fn update<'a>(value: &mut Self, bytes: &'a [u8]) { all_onto(&mut value.bytes, bytes, 0) }
     pub fn finish(value: Self) -> Digest256 { digest_of(&value.bytes) }
 }
 
@@ -232,9 +231,9 @@ impl FingerprintWriter {
     pub fn tag(value: &mut Self, tag: u32) { le_onto(&mut value.bytes, int(tag), 4) }
     pub fn u32(value: &mut Self, input: u32) { le_onto(&mut value.bytes, int(input), 4) }
     pub fn u64(value: &mut Self, input: u64) { le_onto(&mut value.bytes, int(input), 8) }
-    pub fn bytes<'a>(value: &mut Self, bytes: Slice<'a, u8>) {
-        le_onto(&mut value.bytes, Slice::len(&bytes), 8);
-        all_onto(&mut value.bytes, &bytes, 0)
+    pub fn bytes<'a>(value: &mut Self, bytes: &'a [u8]) {
+        le_onto(&mut value.bytes, bytes.len(), 8);
+        all_onto(&mut value.bytes, bytes, 0)
     }
     pub fn text(value: &mut Self, text: Str) {
         let written = utf8(text);

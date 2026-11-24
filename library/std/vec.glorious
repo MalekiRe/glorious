@@ -238,22 +238,21 @@ fn of_array<T>(items: [T]) -> Vec<T> where T: Use<[1, 1]> {
 // one, `Option<&T>` to look at an element. Sizes and places are `Int`. Its
 // elements are in memory it allocates and frees, one after another, each laid
 // out as its type is; it holds room for `cap` of them, and `len` are there.
-use std::slice::{Slice, SliceIter};
 use std::iterator::{Iterator, IntoIterator};
 
 pub struct Vec<T> { at: *mut T, cap: Int, len: Int }
 
 // The elements of one array onto another, last first.
 fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
-    match(pop(from)) {
-        Some((rest, last)) => tail turned(rest, push(onto, last)),
+    match(array_pop(from)) {
+        Some((rest, last)) => tail turned(rest, array_push(onto, last)),
         None => onto
     }
 }
 
 // Each element of an array, last first, pushed.
 fn push_each<T>(v: &mut Vec<T>, reversed: [T]) where T: Use<[1, 1]> {
-    match(pop(reversed)) {
+    match(array_pop(reversed)) {
         Some((rest, x)) => Vec::push(v, x); push_each(v, rest),
         None => ()
     }
@@ -363,6 +362,12 @@ impl<T> Drop for Vec<T> {
 }
 
 // `v[i]`, and `v[i] = x`: a place that is not there stops the program.
+// A `&Vec<T>` is a `&[T]` wherever one is wanted, and a `&mut Vec<T>` a
+// `&mut [T]`, as Rust's are.
+coerce vec_slice
+fn vec_slice<'a, T>(v: &'a Vec<T>) -> &'a [T] where T: Use<[1, 1]> { Vec::as_slice(v) }
+coerce vec_slice_mut
+fn vec_slice_mut<'a, T>(v: &'a mut Vec<T>) -> &'a mut [T] where T: Use<[1, 1]> { Vec::as_mut_slice(v) }
 impl<T> Index for Vec<T> {
     type Elem = T;
     fn index(v: Vec<T>, i: Int) -> T { arr_get(Vec::into_array(v), i) }
@@ -603,11 +608,12 @@ impl<T> Vec<T> {
     }
     pub fn clear(value: &mut Self) { Vec::truncate(value, 0) }
     // The elements as a slice: looked at where they are.
-    pub fn as_slice<'a>(value: &'a Self) -> Slice<'a, T> where T: Use<[1, 1]> { Slice::of_memory(value, value.at, value.len) }
+    pub fn as_slice<'a>(value: &'a Self) -> &'a [T] where T: Use<[1, 1]> { unsafe { slice_at(value.at, value.len) } }
     // Its elements, borrowed where they are.
     pub fn as_elements<'a>(value: &'a Self) -> SliceRef<'a, T> { unsafe { slice_at(value.at, value.len) } }
     // The elements one after another, by reference.
-    pub fn iter<'a>(value: &'a Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { Slice::iter(&Vec::as_slice(value)) }
+    pub fn as_mut_slice<'a>(value: &'a mut Self) -> &'a mut [T] where T: Use<[1, 1]> { unsafe { slice_mut_at(value.at, value.len) } }
+    pub fn iter<'a>(value: &'a Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { Vec::as_slice(value).iter() }
 }
 
 // Of iterators and what gives its elements away (here, not in

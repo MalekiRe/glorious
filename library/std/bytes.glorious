@@ -2,7 +2,6 @@
 // has them (23). Places and lengths are `Int`.
 
 use std::vec::{Vec};
-use std::slice::{Slice};
 use std::text::{from_utf8};
 
 pub enum DecodeErrorKind { Truncated, Overflow, NonCanonical, InvalidTag, InvalidUtf8, LimitExceeded }
@@ -12,39 +11,39 @@ pub enum ByteWriteError { Range(RangeError), Reserve(ReserveError), InvalidAlign
 
 // A place in some bytes, read from front to back. A read that fails leaves
 // the place where it was.
-pub struct ByteReader<'a> { bytes: Slice<'a, u8>, at: Int }
+pub struct ByteReader<'a> { bytes: &'a [u8], at: Int }
 
 // Where a reader was, to go back to.
 pub struct ReaderMark { at: Int, length: Int }
 
 fn fails<T>(at: Int, kind: DecodeErrorKind) -> Result<T, DecodeError> where T: Use<[1, 1]> { Err(DecodeError { offset: at, kind: kind }) }
 
-fn byte_at<'a>(bytes: &Slice<'a, u8>, i: Int) -> Int {
-    match(Slice::get(bytes, i)) { Some(b) => int(*b), None => 0 }
+fn byte_at<'a>(bytes: &'a [u8], i: Int) -> Int {
+    match(bytes.get(i)) { Some(b) => int(*b), None => 0 }
 }
 
 fn wide(n: Int) -> u128 { to(n) }
 
 // The number so many bytes from a place are, the first the least.
-fn le_from<'a>(bytes: &Slice<'a, u8>, at: Int, width: Int) -> u128 {
+fn le_from<'a>(bytes: &'a [u8], at: Int, width: Int) -> u128 {
     if(width <= 0) { 0u128 } else { wide(byte_at(bytes, at)) + 256u128 * le_from(bytes, at + 1, width - 1) }
 }
 
 // And the first the greatest.
-fn be_from<'a>(bytes: &Slice<'a, u8>, at: Int, width: Int, so_far: u128) -> u128 {
+fn be_from<'a>(bytes: &'a [u8], at: Int, width: Int, so_far: u128) -> u128 {
     if(width <= 0) { so_far } else { tail be_from(bytes, at + 1, width - 1, so_far * 256u128 + wide(byte_at(bytes, at))) }
 }
 
 impl<'a> ByteReader<'a> {
-    pub fn new(bytes: Slice<'a, u8>) -> Self { Self { bytes: bytes, at: 0 } }
+    pub fn new(bytes: &'a [u8]) -> Self { Self { bytes: bytes, at: 0 } }
     pub fn position(r: &Self) -> Int { r.at }
-    pub fn remaining_len(r: &Self) -> Int { Slice::len(&r.bytes) - r.at }
-    pub fn remaining(r: &Self) -> Slice<'a, u8> {
-        match(Slice::sub(&r.bytes, r.at, Slice::len(&r.bytes))) { Some(rest) => rest, None => r.bytes }
+    pub fn remaining_len(r: &Self) -> Int { r.bytes.len() - r.at }
+    pub fn remaining(r: &Self) -> &'a [u8] {
+        match(r.bytes.sub(r.at, r.bytes.len())) { Some(rest) => rest, None => r.bytes }
     }
-    pub fn mark(r: &Self) -> ReaderMark { ReaderMark { at: r.at, length: Slice::len(&r.bytes) } }
+    pub fn mark(r: &Self) -> ReaderMark { ReaderMark { at: r.at, length: r.bytes.len() } }
     pub fn restore(r: &mut Self, mark: ReaderMark) -> Result<(), MarkError> {
-        if(mark.length != Slice::len(&r.bytes)) { Err(MarkError::WrongOwner) } else {
+        if(mark.length != r.bytes.len()) { Err(MarkError::WrongOwner) } else {
             if(mark.at > mark.length) { Err(MarkError::OutOfRange) } else { r.at = mark.at; Ok(()) }
         }
     }
@@ -52,38 +51,38 @@ impl<'a> ByteReader<'a> {
     fn step(r: &mut Self, width: Int) -> Result<Int, DecodeError> {
         let at = r.at;
         if(width < 0) { fails(at, DecodeErrorKind::Overflow) } else {
-            if(at + width > Slice::len(&r.bytes)) { fails(at, DecodeErrorKind::Truncated) } else { r.at = at + width; Ok(at) }
+            if(at + width > r.bytes.len()) { fails(at, DecodeErrorKind::Truncated) } else { r.at = at + width; Ok(at) }
         }
     }
     pub fn read_u8(r: &mut Self) -> Result<u8, DecodeError> {
-        match(ByteReader::step(r, 1)) { Ok(at) => Ok(u8(byte_at(&r.bytes, at))), Err(e) => Err(e) }
+        match(ByteReader::step(r, 1)) { Ok(at) => Ok(u8(byte_at(r.bytes, at))), Err(e) => Err(e) }
     }
     pub fn read_u16_le(r: &mut Self) -> Result<u16, DecodeError> {
-        match(ByteReader::step(r, 2)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 2))), Err(e) => Err(e) }
+        match(ByteReader::step(r, 2)) { Ok(at) => Ok(to(le_from(r.bytes, at, 2))), Err(e) => Err(e) }
     }
     pub fn read_u32_le(r: &mut Self) -> Result<u32, DecodeError> {
-        match(ByteReader::step(r, 4)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 4))), Err(e) => Err(e) }
+        match(ByteReader::step(r, 4)) { Ok(at) => Ok(to(le_from(r.bytes, at, 4))), Err(e) => Err(e) }
     }
     pub fn read_u64_le(r: &mut Self) -> Result<u64, DecodeError> {
-        match(ByteReader::step(r, 8)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 8))), Err(e) => Err(e) }
+        match(ByteReader::step(r, 8)) { Ok(at) => Ok(to(le_from(r.bytes, at, 8))), Err(e) => Err(e) }
     }
     pub fn read_u128_le(r: &mut Self) -> Result<u128, DecodeError> {
-        match(ByteReader::step(r, 16)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 16))), Err(e) => Err(e) }
+        match(ByteReader::step(r, 16)) { Ok(at) => Ok(to(le_from(r.bytes, at, 16))), Err(e) => Err(e) }
     }
     pub fn read_u16_be(r: &mut Self) -> Result<u16, DecodeError> {
-        match(ByteReader::step(r, 2)) { Ok(at) => Ok(to(be_from(&r.bytes, at, 2, 0u128))), Err(e) => Err(e) }
+        match(ByteReader::step(r, 2)) { Ok(at) => Ok(to(be_from(r.bytes, at, 2, 0u128))), Err(e) => Err(e) }
     }
     pub fn read_u32_be(r: &mut Self) -> Result<u32, DecodeError> {
-        match(ByteReader::step(r, 4)) { Ok(at) => Ok(to(be_from(&r.bytes, at, 4, 0u128))), Err(e) => Err(e) }
+        match(ByteReader::step(r, 4)) { Ok(at) => Ok(to(be_from(r.bytes, at, 4, 0u128))), Err(e) => Err(e) }
     }
     pub fn read_u64_be(r: &mut Self) -> Result<u64, DecodeError> {
-        match(ByteReader::step(r, 8)) { Ok(at) => Ok(to(be_from(&r.bytes, at, 8, 0u128))), Err(e) => Err(e) }
+        match(ByteReader::step(r, 8)) { Ok(at) => Ok(to(be_from(r.bytes, at, 8, 0u128))), Err(e) => Err(e) }
     }
     pub fn read_i64_le(r: &mut Self) -> Result<i64, DecodeError> {
         match(ByteReader::step(r, 8)) {
             Ok(at) => // (Two's complement: the upper half of what eight bytes can
                 // say is the numbers below nothing.)
-                let n: i128 = to(le_from(&r.bytes, at, 8));
+                let n: i128 = to(le_from(r.bytes, at, 8));
                 Ok(to(if(n >= 9223372036854775808i128) { n - 18446744073709551616i128 } else { n })),
             Err(e) => Err(e)
         }
@@ -93,14 +92,14 @@ impl<'a> ByteReader<'a> {
     // ten bytes at most.
     pub fn read_var_u64(r: &mut Self) -> Result<u64, DecodeError> {
         let start = r.at;
-        match(var_from(&r.bytes, start, 0u128, 1u128, 0)) {
+        match(var_from(r.bytes, start, 0u128, 1u128, 0)) {
             Ok((value, width)) => r.at = start + width; Ok(to(value)),
             Err(kind) => fails(start, kind)
         }
     }
-    pub fn read_exact(r: &mut Self, length: Int) -> Result<Slice<'a, u8>, DecodeError> {
+    pub fn read_exact(r: &mut Self, length: Int) -> Result<&'a [u8], DecodeError> {
         match(ByteReader::step(r, length)) {
-            Ok(at) => match(Slice::sub(&r.bytes, at, at + length)) { Some(found) => Ok(found), None => fails(at, DecodeErrorKind::Truncated) },
+            Ok(at) => match(r.bytes.sub(at, at + length)) { Some(found) => Ok(found), None => fails(at, DecodeErrorKind::Truncated) },
             Err(e) => Err(e)
         }
     }
@@ -108,7 +107,7 @@ impl<'a> ByteReader<'a> {
     pub fn read_str(r: &mut Self, length: Int) -> Result<Str, DecodeError> {
         let start = r.at;
         match(ByteReader::step(r, length)) {
-            Ok(at) => let mut text = Vec::new(); copied(&r.bytes, at, at + length, &mut text); match(from_utf8(text)) {
+            Ok(at) => let mut text = Vec::new(); copied(r.bytes, at, at + length, &mut text); match(from_utf8(text)) {
                 Some(text) => Ok(text),
                 None => r.at = start; fails(start, DecodeErrorKind::InvalidUtf8)
             },
@@ -128,12 +127,12 @@ impl<'a> ByteReader<'a> {
     }
 }
 
-fn copied<'a>(bytes: &Slice<'a, u8>, at: Int, end: Int, out: &mut Vec<u8>) {
+fn copied<'a>(bytes: &'a [u8], at: Int, end: Int, out: &mut Vec<u8>) {
     if(at >= end) { () } else { Vec::push(out, u8(byte_at(bytes, at))); tail copied(bytes, at + 1, end, out) }
 }
 
-fn var_from<'a>(bytes: &Slice<'a, u8>, at: Int, value: u128, scale: u128, width: Int) -> Result<(u128, Int), DecodeErrorKind> {
-    if(at >= Slice::len(bytes)) { Err(DecodeErrorKind::Truncated) } else {
+fn var_from<'a>(bytes: &'a [u8], at: Int, value: u128, scale: u128, width: Int) -> Result<(u128, Int), DecodeErrorKind> {
+    if(at >= bytes.len()) { Err(DecodeErrorKind::Truncated) } else {
         if(width >= 10) { Err(DecodeErrorKind::Overflow) } else {
             let b = byte_at(bytes, at);
             let next = value + wide(b % 128) * scale;
@@ -173,8 +172,8 @@ fn zeros_onto(out: &mut Vec<u8>, count: Int) {
     if(count <= 0) { () } else { Vec::push(out, 0u8); tail zeros_onto(out, count - 1) }
 }
 
-fn slice_onto<'a>(out: &mut Vec<u8>, bytes: &Slice<'a, u8>, at: Int) {
-    if(at >= Slice::len(bytes)) { () } else { Vec::push(out, u8(byte_at(bytes, at))); tail slice_onto(out, bytes, at + 1) }
+fn slice_onto<'a>(out: &mut Vec<u8>, bytes: &'a [u8], at: Int) {
+    if(at >= bytes.len()) { () } else { Vec::push(out, u8(byte_at(bytes, at))); tail slice_onto(out, bytes, at + 1) }
 }
 
 // The bytes from a place on written over by a number's, the least first.
@@ -193,12 +192,12 @@ impl ByteBuf {
         if(capacity < 0) { Err(ReserveError::CapacityOverflow) } else { Ok(Self { bytes: Vec::with_capacity(capacity) }) }
     }
     pub fn len(b: &Self) -> Int { Vec::len(&b.bytes) }
-    pub fn as_slice<'a>(b: &'a Self) -> Slice<'a, u8> { Vec::as_slice(&b.bytes) }
+    pub fn as_slice<'a>(b: &'a Self) -> &'a [u8] { Vec::as_slice(&b.bytes) }
     pub fn reserve(b: &mut Self, additional: Int) -> Result<(), ReserveError> {
         if(additional < 0) { Err(ReserveError::CapacityOverflow) } else { Ok(()) }
     }
     pub fn push(b: &mut Self, byte: u8) -> Result<(), ReserveError> { Vec::push(&mut b.bytes, byte); Ok(()) }
-    pub fn extend<'a>(b: &mut Self, bytes: Slice<'a, u8>) -> Result<(), ReserveError> { slice_onto(&mut b.bytes, &bytes, 0); Ok(()) }
+    pub fn extend<'a>(b: &mut Self, bytes: &'a [u8]) -> Result<(), ReserveError> { slice_onto(&mut b.bytes, bytes, 0); Ok(()) }
     pub fn write_u16_le(b: &mut Self, input: u16) -> Result<(), ReserveError> { le_onto(&mut b.bytes, to(input), 2); Ok(()) }
     pub fn write_u32_le(b: &mut Self, input: u32) -> Result<(), ReserveError> { le_onto(&mut b.bytes, to(input), 4); Ok(()) }
     pub fn write_u64_le(b: &mut Self, input: u64) -> Result<(), ReserveError> { le_onto(&mut b.bytes, to(input), 8); Ok(()) }
@@ -240,7 +239,7 @@ pub struct HexError { pub offset: Int, pub kind: HexErrorKind }
 fn hex_digit(n: Int) -> char { match(char(if(n < 10) { 48 + n } else { 87 + n })) { Some(c) => c, None => '0' } }
 
 // (From the last byte back: a text is built from its end.)
-fn hex_onto<'a>(bytes: &Slice<'a, u8>, at: Int, out: Str) -> Str {
+fn hex_onto<'a>(bytes: &'a [u8], at: Int, out: Str) -> Str {
     if(at <= 0) { out } else {
         let b = byte_at(bytes, at - 1);
         tail hex_onto(bytes, at - 1, StrChar(hex_digit(b / 16), StrChar(hex_digit(b % 16), out)))
@@ -248,7 +247,7 @@ fn hex_onto<'a>(bytes: &Slice<'a, u8>, at: Int, out: Str) -> Str {
 }
 
 // Bytes as text, two digits each, the letters small.
-pub fn hex_encode<'a>(bytes: Slice<'a, u8>) -> Str { hex_onto(&bytes, Slice::len(&bytes), "") }
+pub fn hex_encode<'a>(bytes: &'a [u8]) -> Str { hex_onto(bytes, bytes.len(), "") }
 
 fn hex_value(c: char) -> Option<Int> {
     let n = int(c);
@@ -317,8 +316,8 @@ fn value64(c: char, url: Bool) -> Option<Int> {
 
 // The digits of the bytes from a place on, three bytes to four digits; the
 // last one or two bytes to two or three.
-fn digits64<'a>(bytes: &Slice<'a, u8>, at: Int, out: &mut Vec<Int>) {
-    let left = Slice::len(bytes) - at;
+fn digits64<'a>(bytes: &'a [u8], at: Int, out: &mut Vec<Int>) {
+    let left = bytes.len() - at;
     if(left <= 0) { () } else {
         let a = byte_at(bytes, at);
         if(left == 1) { Vec::push(out, a / 4); Vec::push(out, (a % 4) * 16) } else {
@@ -340,9 +339,9 @@ fn text64(digits: &Vec<Int>, i: Int, url: Bool, out: Str) -> Str {
     }
 }
 
-pub fn base64_encode<'a>(bytes: Slice<'a, u8>, options: Base64Options) -> Str {
+pub fn base64_encode<'a>(bytes: &'a [u8], options: Base64Options) -> Str {
     let mut digits = Vec::new();
-    digits64(&bytes, 0, &mut digits);
+    digits64(bytes, 0, &mut digits);
     let n = Vec::len(&digits);
     let end = match(options.padding) { Padding::Required => padded(n, ""), Padding::Optional => padded(n, ""), Padding::Forbidden => "" };
     text64(&digits, n, is_url(&options), end)

@@ -646,6 +646,12 @@ partial def resolveType (ctx : Ctx) (generics : List String) : TypeExpr → R Ty
     if (lookupIn (ctx.of "str") .type "str").isSome then
       return .ref false (← resolveType ctx generics (.name "str" [])) life
     pure (.name (← resolveNamed ctx .type generics "StrRef").1 (life.toList.map (.name · [])))
+  -- `&'a [T]` and `&'a mut [T]`: elements borrowed, a slice, the prelude's
+  -- `SliceRef<'a, T>` and `SliceMut<'a, T>`: an address and a length.
+  | .ref uniq (.name "%prelude::Array" [t]) life => do
+    let name := if uniq then "SliceMut" else "SliceRef"
+    pure (.name (← resolveNamed ctx .type generics name).1
+      (life.toList.map (.name · []) ++ [← resolveType ctx generics t]))
   | .ref uniq t life => do pure (.ref uniq (← resolveType ctx generics t) life)
   | t => pure t
 
@@ -1475,16 +1481,23 @@ def resolve (prelude root : List Syntax.Item) (kept : Option UnitsKept := none) 
           -- `a[i]`, so that changing an array a variable holds can be done
           -- where the array is.
           out := out.push ((.fieldNames arrayMark
-            (array :: (named "push" .fn).toList ++ (named "Index" .trait).toList) []))
-    -- Where each coercion applies: in the module that declares it, and in
-    -- one that brings its function in with `use`.
+            (array :: (named "array_push" .fn).toList ++ (named "Index" .trait).toList) []))
+    -- Where each coercion applies: in the module that declares it, in one
+    -- that brings its function in with `use`, and in one that brings in
+    -- anything of a library module that declares one: `&Vec<T>` is a
+    -- `&[T]` wherever `Vec` is, as Rust's deref is.
     let coerced := (← get).coerced
     let mut applies : List (String × List String) := []
     for u in units do
       let scope ← scopeOf u.path
       let here := coerced.filterMap fun (home, g) =>
+        let library := match home.head? with
+          | some r => r == "std" || r == "core" || r == "alloc"
+          | none => false
+        let within := "::".intercalate home ++ "::"
         if home == u.path || home == preludePath
             || scope.any (fun b => b.rank ≤ 1 && b.entry.global == g && b.entry.kind == .fn)
+            || (library && scope.any (fun b => b.rank ≤ 1 && b.entry.global.startsWith within))
         then some g else none
       applies := applies ++ [(key u.path, here)]
     pure (out.toList, applies, unitsMade)

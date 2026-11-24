@@ -7,22 +7,23 @@
 // functions of `std::reflect`. A component kept `Immutable` is not set in
 // place: a new value is inserted instead.
 use std::reflect::{Reflect, Described, FieldInfo, describe_unchecked, set_field_unchecked, type_info_unchecked};
+use std::vec::{Vec};
 use ecs::{World, Column, Resource, Get, Writable, Visible, Entity, Mutability, Mutable, Immutable, Mut};
 
 // What each column of a world's store does, by its component's name.
 pub trait Edits<S> {
     fn describe_in(world: &World<S>, entity: Entity, name: Str) -> Option<Option<Described>>;
-    fn fields_in(name: Str) -> Option<[Str]>;
+    fn fields_in(name: Str) -> Option<Vec<Str>>;
     fn set_in(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Option<Result<Described, Str>>;
 }
 impl<S> Edits<S> for () {
     fn describe_in(world: &World<S>, entity: Entity, name: Str) -> Option<Option<Described>> { None }
-    fn fields_in(name: Str) -> Option<[Str]> { None }
+    fn fields_in(name: Str) -> Option<Vec<Str>> { None }
     fn set_in(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Option<Result<Described, Str>> { None }
 }
 impl<H, R, S> Edits<S> for (Resource<H>, R) where R: Edits<S> {
     fn describe_in(world: &World<S>, entity: Entity, name: Str) -> Option<Option<Described>> { <R as Edits<S>>::describe_in(world, entity, name) }
-    fn fields_in(name: Str) -> Option<[Str]> { <R as Edits<S>>::fields_in(name) }
+    fn fields_in(name: Str) -> Option<Vec<Str>> { <R as Edits<S>>::fields_in(name) }
     fn set_in(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Option<Result<Described, Str>> { <R as Edits<S>>::set_in(world, entity, name, path, text) }
 }
 // (A component's name: its type's.)
@@ -33,10 +34,16 @@ impl<H, R, S> Edits<S> for (Column<H>, R) where R: Edits<S>, S: Get<H>, H: Refle
             Some(match(world.get<H>(entity)) { Some(h) => Some(unsafe { describe_unchecked(h) }), None => None })
         } else { <R as Edits<S>>::describe_in(world, entity, name) }
     }
-    fn fields_in(name: Str) -> Option<[Str]> {
+    fn fields_in(name: Str) -> Option<Vec<Str>> {
         if(name_of<H>() == name) {
             let info = unsafe { type_info_unchecked<H>() };
-            Some(if(len_at(&info.variants) == 1) { fold(&info.variants[0].fields, [], fn(out: [Str], f: FieldInfo) -> [Str] { push(out, f.name) }) } else { [] })
+            let mut out = Vec::new();
+            if(len_at(&info.variants) == 1) {
+                let fields = &info.variants[0].fields;
+                let mut i = 0;
+                while({ i < len_at(fields) }) { out.push(fields[i].name); i = i + 1 }
+            };
+            Some(out)
         } else { <R as Edits<S>>::fields_in(name) }
     }
     fn set_in(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Option<Result<Described, Str>> {
@@ -73,7 +80,7 @@ pub fn describe_component<S>(world: &World<S>, entity: Entity, component: Str) -
     match(<S as Edits<S>>::describe_in(world, entity, component)) { Some(d) => d, None => None }
 }
 // The fields of a component by its name, which `set_field` sets.
-pub fn editable_fields<S>(world: &World<S>, component: Str) -> Option<[Str]> where S: Edits<S> { <S as Edits<S>>::fields_in(component) }
+pub fn editable_fields<S>(world: &World<S>, component: Str) -> Option<Vec<Str>> where S: Edits<S> { <S as Edits<S>>::fields_in(component) }
 // A field of an entity's component set from text: what it was set to.
 pub fn set_field<S>(world: &mut World<S>, entity: Entity, component: Str, path: Str, text: Str) -> Result<Described, Str> where S: Edits<S> {
     if(world.contains(entity)) {

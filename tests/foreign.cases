@@ -114,22 +114,23 @@ fn main() -> Int { unsafe {
 #### machines at once, sharing an atomic and a mutex; each increment is
 #### seen, and what each gave is joined.
 use std::thread::{spawn_os, join_os, AtomicInt, fetch_add, load, Mutex, lock, share};
+use std::vec::{Vec};
 fn sum_range(from: Int, to: Int) -> Int { let mut s = 0; let mut i = from; while({ i < to }) { s = s + i; i = i + 1 }; s }
 fn main() -> Int {
     let counter = AtomicInt::new(0);
     let total = Mutex::new(0);
-    let mut threads = [];
+    let mut threads = Vec::new();
     let mut k = 0;
     while({ k < 4 }) {
         let c = share(&counter);
         let m = share(&total);
         let from = k * 1000;
-        push_at(&mut threads, spawn_os(fn() -> Int { let c2 = c; let m2 = m; let mut i = 0; while({ i < 500 }) { lock(&m2, fn(n: &mut Int) { *n = *n + 1 }); i = i + 1 }; discard(fetch_add(&c2, 1)); sum_range(from, from + 1000) }));
+        threads.push(spawn_os(fn() -> Int { let c2 = c; let m2 = m; let mut i = 0; while({ i < 500 }) { lock(&m2, fn(n: &mut Int) { *n = *n + 1 }); i = i + 1 }; discard(fetch_add(&c2, 1)); sum_range(from, from + 1000) }));
         k = k + 1
     };
     let mut sum = 0;
     let mut ts = threads;
-    while({ len_at(&ts) > 0 }) { sum = sum + join_os(remove_at(&mut ts, 0)) };
+    while({ ts.len() > 0 }) { sum = sum + join_os(ts.remove(0).unwrap()) };
     say(sum);
     say(load(&counter));
     say(lock(&total, fn(n: &mut Int) -> Int { *n }));
@@ -320,7 +321,6 @@ fn main() -> Int {
 #### case
 #### Texts for C in memory of their own, C's truth value, and memory filled and copied (library 22.2, 22.4).
 use std::ffi::{CString, CStr, CStrError, NulError, c_bool_from_bool, bool_from_c_bool, null, ptr_is_null, ptr_add, ptr_write_bytes, ptr_copy, read_bytes, bytes_at, Layout, allocate, Allocation};
-use std::slice::{Slice};
 use std::value::{Rejected};
 extern "C" { fn strlen(s: usize) -> usize; fn toupper(c: i32) -> i32; }
 fn main() -> Int {
@@ -334,9 +334,9 @@ fn main() -> Int {
             // A zero inside is refused, and says where.
             say(match(CString::from_vec(std::vec::Vec::from_array([104u8, 0u8, 105u8]))) { Ok(made) => CString::release(made); 0 - 1, Err(Rejected { value, error }) => error.position * 10 + len_at(&value) });
             let raw = [111u8, 107u8, 0u8];
-            say(match(CStr::from_bytes_with_nul(Slice::of(&raw))) { Ok(view) => match(CStr::to_str(view)) { Some(s) => s, None => "?" }, Err(_) => "bad" });
+            say(match(CStr::from_bytes_with_nul(&raw)) { Ok(view) => match(CStr::to_str(view)) { Some(s) => s, None => "?" }, Err(_) => "bad" });
             let cut = [111u8, 107u8];
-            say(match(CStr::from_bytes_with_nul(Slice::of(&cut))) { Ok(_) => "ok", Err(CStrError::MissingTerminator) => "no zero", Err(_) => "bad" });
+            say(match(CStr::from_bytes_with_nul(&cut)) { Ok(_) => "ok", Err(CStrError::MissingTerminator) => "no zero", Err(_) => "bad" });
             say(bool_from_c_bool(c_bool_from_bool(true)));
             say(ptr_is_null(null()));
             // Memory filled, and copied along itself.

@@ -216,15 +216,32 @@ fn ptr_at<T>(address: usize) -> *const T { Ptr(address) }
 // alignment: as the type is laid out, which the program's types say.
 // (Of a `*mut T`: what its `T` is, the program's types say, where an
 // address made from it is a `*mut` of anything.)
-// Elements borrowed, one after another: so many `T`s from an address, there
-// for as long as `'a` (what `&'a [T]` is to be).
+// A slice, `&'a [T]`: so many `T`s one after another from an address,
+// borrowed for as long as `'a`. `&'a mut [T]` is a `SliceMut`, the same to
+// change them through.
 struct SliceRef<'a, T> { at: *mut T, len: Int, life: &'a () }
+struct SliceMut<'a, T> { at: *mut T, len: Int, life: &'a mut () }
 // So many `T`s from where a pointer points, borrowed for as long as the
 // caller says: the caller's to get right.
-unsafe fn slice_at<'a, T>(at: *mut T, len: Int) -> SliceRef<'a, T> { SliceRef { at: at, len: len, life: transmute(ptr_mut_address(at)) } }
-// All of a `[T; N]`'s elements, borrowed.
-fn fixed_slice<'a, T, N>(a: &'a [T; N]) -> SliceRef<'a, T> where N: Known {
-    unsafe { SliceRef { at: fixed_ptr(a), len: N::VALUE, life: transmute(a) } }
+unsafe fn slice_at<'a, T>(at: *mut T, len: Int) -> &'a [T] { SliceRef { at: at, len: len, life: transmute(ptr_mut_address(at)) } }
+unsafe fn slice_mut_at<'a, T>(at: *mut T, len: Int) -> &'a mut [T] { SliceMut { at: at, len: len, life: transmute(ptr_mut_address(at)) } }
+// All of a `[T; N]`'s elements, borrowed: a `&[T; N]` is a `&[T]` wherever
+// one is wanted, as in Rust.
+// (Its length from the array, not from `N`: a coercion is given no
+// trait.)
+coerce fixed_slice
+fn fixed_slice<'a, T, N>(a: &'a [T; N]) -> &'a [T] {
+    unsafe { SliceRef { at: fixed_ptr(a), len: fixed_len_at(a), life: transmute(a) } }
+}
+coerce fixed_slice_mut
+fn fixed_slice_mut<'a, T, N>(a: &'a mut [T; N]) -> &'a mut [T] {
+    unsafe { SliceMut { at: fixed_ptr(&*a), len: fixed_len_at(&*a), life: transmute(a) } }
+}
+// An array's elements as a slice, and by reference, as Rust's arrays have.
+impl<T, N> Fixed<T, N> {
+    fn as_slice<'a>(a: &'a Self) -> &'a [T] { fixed_slice(a) }
+    fn as_mut_slice<'a>(a: &'a mut Self) -> &'a mut [T] { fixed_slice_mut(a) }
+    fn iter<'a>(a: &'a Self) -> SliceIter<'a, T> { SliceIter { rest: fixed_slice(a) } }
 }
 impl<'a, T> SliceRef<'a, T> {
     fn len(s: &Self) -> Int { s.len }
@@ -236,8 +253,68 @@ impl<'a, T> SliceRef<'a, T> {
             _ => Some(unsafe { ptr_ref_at(s.at, slice_place(s.at, i)) })
         }
     }
+    fn first(s: &Self) -> Option<&'a T> { SliceRef::get(s, 0) }
+    fn last(s: &Self) -> Option<&'a T> { SliceRef::get(s, int_sub(s.len, 1)) }
+    // The elements from one place up to, not including, another, if both
+    // are places of it (`s.get(from..to)` in Rust).
+    fn sub(s: &Self, from: Int, to: Int) -> Option<&'a [T]> {
+        match(int_mul(int_mul(int_lt(-1, from), int_eq(int_lt(to, from), 0)), int_eq(int_lt(s.len, to), 0))) {
+            0 => None,
+            _ => Some(unsafe { slice_at(ptr_mut_at(slice_place(s.at, from)), int_sub(to, from)) })
+        }
+    }
+    // What is before a place, and what is from it on; the program stops
+    // where the place is past its end, as Rust's does.
+    fn split_at(s: &Self, mid: Int) -> (&'a [T], &'a [T]) {
+        match(int_mul(int_lt(-1, mid), int_eq(int_lt(s.len, mid), 0))) {
+            0 => abort("`split_at` of a place past a slice's end"),
+            _ => unsafe { (slice_at(s.at, mid), slice_at(ptr_mut_at(slice_place(s.at, mid)), int_sub(s.len, mid))) }
+        }
+    }
+    // The first element and the rest, if there is one.
+    fn split_first(s: &Self) -> Option<(&'a T, &'a [T])> {
+        match(int_lt(0, s.len)) {
+            0 => None,
+            _ => Some(unsafe { (ptr_ref_at(s.at, ptr_mut_address(s.at)), slice_at(ptr_mut_at(slice_place(s.at, 1)), int_sub(s.len, 1))) })
+        }
+    }
+    // Its elements by reference, first to last.
+    fn iter(s: &Self) -> SliceIter<'a, T> { SliceIter { rest: *s } }
     // Where its elements are.
     fn as_ptr(s: &Self) -> *mut T { s.at }
+}
+impl<'a, T> SliceMut<'a, T> {
+    fn len(s: &Self) -> Int { s.len }
+    fn is_empty(s: &Self) -> Bool { int_eq(s.len, 0) == 1 }
+    fn get(s: &Self, i: Int) -> Option<&T> {
+        match(int_mul(int_lt(-1, i), int_lt(i, s.len))) {
+            0 => None,
+            _ => Some(unsafe { ptr_ref_at(s.at, slice_place(s.at, i)) })
+        }
+    }
+    fn get_mut(s: &mut Self, i: Int) -> Option<&mut T> {
+        match(int_mul(int_lt(-1, i), int_lt(i, s.len))) {
+            0 => None,
+            _ => Some(unsafe { ptr_mut_ref_at(s.at, slice_place(s.at, i)) })
+        }
+    }
+    // The same elements, to read.
+    fn as_slice<'b>(s: &'b Self) -> &'b [T] { unsafe { slice_at(s.at, s.len) } }
+    fn as_ptr(s: &Self) -> *mut T { s.at }
+}
+// A slice's elements by reference, first to last (`Iterator` is
+// `std::iterator`'s).
+struct SliceIter<'a, T> { rest: &'a [T] }
+impl<'a, T> SliceIter<'a, T> {
+    // The next element, if there is one.
+    fn next_ref(it: &mut Self) -> Option<&'a T> {
+        match(it.rest.split_first()) {
+            Some((first, rest)) => it.rest = rest; Some(first),
+            None => None
+        }
+    }
+    // What is left.
+    fn as_slice(it: &Self) -> &'a [T] { it.rest }
 }
 // The address of the element at a place, from the first's.
 fn slice_place<T>(at: *mut T, i: Int) -> usize { usize_of(int_add(usize_bits(ptr_mut_address(at)), int_mul(i, usize_bits(size_of_at(at))))) }
@@ -251,6 +328,41 @@ impl<'a, T> Indexed for SliceRef<'a, T> {
     }
     fn size_at(s: &SliceRef<'a, T>) -> Int { s.len }
 }
+impl<'a, T> Indexed for SliceMut<'a, T> {
+    type Element = T;
+    fn element_at(s: &SliceMut<'a, T>, i: Int) -> &T {
+        match(int_mul(int_lt(-1, i), int_lt(i, s.len))) {
+            0 => abort("a place of a slice that is not there"),
+            _ => unsafe { ptr_ref_at(s.at, slice_place(s.at, i)) }
+        }
+    }
+    fn size_at(s: &SliceMut<'a, T>) -> Int { s.len }
+}
+impl<'a, T> IndexedMut for SliceMut<'a, T> {
+    fn place_at(i: Int, s: &mut SliceMut<'a, T>) -> &mut T {
+        match(int_mul(int_lt(-1, i), int_lt(i, s.len))) {
+            0 => abort("a place of a slice that is not there"),
+            _ => unsafe { ptr_mut_ref_at(s.at, slice_place(s.at, i)) }
+        }
+    }
+}
+// `s[i]` of a slice: the element, read where it is.
+impl<'a, T> Index for SliceRef<'a, T> {
+    type Elem = T;
+    fn index(s: SliceRef<'a, T>, i: Int) -> T { *element_at(&s, i) }
+    fn index_set(s: SliceRef<'a, T>, i: Int, v: T) -> SliceRef<'a, T> { abort("an element of a `&[T]` written: it is borrowed to read") }
+}
+impl<'a, T> Index for SliceMut<'a, T> {
+    type Elem = T;
+    fn index(s: SliceMut<'a, T>, i: Int) -> T { *element_at(&s, i) }
+    fn index_set(s: SliceMut<'a, T>, i: Int, v: T) -> SliceMut<'a, T> {
+        let mut s = s;
+        let _ = replace(place_at(i, &mut s), v);
+        s
+    }
+}
+impl<'a, T> Len for SliceRef<'a, T> { fn len(s: SliceRef<'a, T>) -> Int { s.len } }
+impl<'a, T> Len for SliceMut<'a, T> { fn len(s: SliceMut<'a, T>) -> Int { s.len } }
 
 // Text borrowed, `&'a str`: so many bytes of UTF-8 at an address, there for
 // as long as `'a`.
@@ -323,6 +435,7 @@ fn str_same(a: &StrRef, b: &StrRef, i: Int) -> Bool {
 #[intrinsic] unsafe fn ptr_mut_ref_at<'a, T>(base: *mut T, at: usize) -> &'a mut T;
 // Where a `[T; N]`'s elements are, one after another, in memory.
 #[intrinsic] unsafe fn fixed_ptr<T, N>(a: &[T; N]) -> *mut T;
+#[intrinsic] fn fixed_len_at<T, N>(a: &[T; N]) -> Int;
 fn ptr_mut_at<T>(address: usize) -> *mut T { PtrMut(address) }
 fn ptr_address<T>(p: *const T) -> usize { p.0 }
 fn ptr_mut_address<T>(p: *mut T) -> usize { p.0 }
@@ -371,7 +484,7 @@ fn repeat_onto<T>(x: T, n: Int, out: [T]) -> [T] where T: Use<[0, *]> {
     }
 }
 
-fn push<T>(a: [T], v: T) -> [T] where T: Use<[1, 1]> { arr_push(a, v) }
+fn array_push<T>(a: [T], v: T) -> [T] where T: Use<[1, 1]> { arr_push(a, v) }
 
 // Whole numbers as types, for how long a `[T; N]` is: the bits from the
 // lowest, `B1<B0<B1<Z>>>` for five. What number a type stands for is its
@@ -431,27 +544,52 @@ fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { fixe
 trait Literal<T, N> { fn of_items(Array<T>) -> Self }
 #[fallback] impl<T, N> Literal<T, N> for Array<T> { fn of_items(items: [T]) -> Array<T> { items } }
 impl<T, N> Literal<T, N> for Fixed<T, N> where N: Known { fn of_items(items: [T]) -> Fixed<T, N> { fixed_of(items, N::VALUE) } }
-// A `[T; N]` of the elements of an array of exactly `N`: a literal, where
-// every one is one.
-fn fixed_literal<N, T>(items: Array<T>) -> Fixed<T, N> where N: Known { fixed_of(items, N::VALUE) }
+// `[x; 4]`: four of `x`.
+fn fixed_repeat_of<N, T>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { fixed_of(array_repeat(x, N::VALUE), N::VALUE) }
 // `[]` of a length its type says, `[T; 0]`, however literals are read.
-fn no_elements<T>() -> [T; 0] { fixed_of(arr_new(), 0) }
+fn no_elements<T>() -> [T; 0] { fixed_make() }
 fn array_literal<N, T, A>(items: Array<T>) -> A where A: Literal<T, N> {
     <A as Literal<T, N>>::of_items(items)
 }
 
-// What `[first, ..rest]` in a pattern is read with: whether an array has so
-// many elements, and the array without its first or its last.
-enum ArrayRest<T> { RestFits(Array<T>), RestShort(Array<T>) }
-fn rest_fits<T>(a: Array<T>, n: Int) -> ArrayRest<T> where T: Use<[1, 1]> {
-    match(int_lt(arr_len_at(&a), n)) { 0 => RestFits(a), _ => RestShort(a) }
+// What `[first, ..rest]` in a pattern is read with: whether a slice (or an
+// array) has so many elements, or exactly so many, and what is left without
+// its first or its last. Of a `&[T]` an element is a `&T`, and the rest a
+// `&[T]`, as Rust binds them.
+enum ArrayRest<A> { RestFits(A), RestShort(A) }
+trait RestOf {
+    type Part;
+    fn rest_len(&Self) -> Int
+    fn rest_first(Self) -> (Part, Self)
+    fn rest_last(Self) -> (Self, Part)
 }
-fn rest_last<T>(a: Array<T>) -> (Array<T>, T) where T: Use<[1, 1]> { arr_pop(a, 0) }
-// Where no array comes: the clauses were shown to cover every shorter one.
-fn rest_unreached<T, R>(a: Array<T>) -> R where T: Use<[1, 1]>, R: Use<[1, 1]> { match(int_div(1, 0)) { _ => tail rest_unreached(a) } }
-fn rest_first<T>(a: Array<T>) -> (T, Array<T>) where T: Use<[1, 1]> {
-    let (turned, first) = arr_pop(rest_turn(a, arr_new()), 0);
-    (first, rest_turn(turned, arr_new()))
+fn rest_fits<A>(a: A, n: Int) -> ArrayRest<A> where A: RestOf {
+    match(int_lt(<A as RestOf>::rest_len(&a), n)) { 0 => RestFits(a), _ => RestShort(a) }
+}
+fn rest_exact<A>(a: A, n: Int) -> ArrayRest<A> where A: RestOf {
+    match(int_eq(<A as RestOf>::rest_len(&a), n)) { 1 => RestFits(a), _ => RestShort(a) }
+}
+// Where none comes: the clauses were shown to cover every shorter one.
+fn rest_unreached<A, R>(a: A) -> R where A: Use<[1, 1]>, R: Use<[1, 1]> { match(int_div(1, 0)) { _ => tail rest_unreached(a) } }
+impl<'a, T> RestOf for SliceRef<'a, T> {
+    type Part = &'a T;
+    fn rest_len(s: &SliceRef<'a, T>) -> Int { s.len }
+    fn rest_first(s: SliceRef<'a, T>) -> (&'a T, SliceRef<'a, T>) {
+        unsafe { (ptr_ref_at(s.at, ptr_mut_address(s.at)), slice_at(ptr_mut_at(slice_place(s.at, 1)), int_sub(s.len, 1))) }
+    }
+    fn rest_last(s: SliceRef<'a, T>) -> (SliceRef<'a, T>, &'a T) {
+        unsafe { (slice_at(s.at, int_sub(s.len, 1)), ptr_ref_at(s.at, slice_place(s.at, int_sub(s.len, 1)))) }
+    }
+}
+impl<'a, T> RestOf for SliceMut<'a, T> {
+    type Part = &'a mut T;
+    fn rest_len(s: &SliceMut<'a, T>) -> Int { s.len }
+    fn rest_first(s: SliceMut<'a, T>) -> (&'a mut T, SliceMut<'a, T>) {
+        unsafe { (ptr_mut_ref_at(s.at, ptr_mut_address(s.at)), slice_mut_at(ptr_mut_at(slice_place(s.at, 1)), int_sub(s.len, 1))) }
+    }
+    fn rest_last(s: SliceMut<'a, T>) -> (SliceMut<'a, T>, &'a mut T) {
+        unsafe { (slice_mut_at(s.at, int_sub(s.len, 1)), ptr_mut_ref_at(s.at, slice_place(s.at, int_sub(s.len, 1)))) }
+    }
 }
 fn rest_turn<T>(from: Array<T>, onto: Array<T>) -> Array<T> where T: Use<[1, 1]> {
     match(from) {
@@ -464,7 +602,7 @@ fn rest_turn_one<T>(popped: (Array<T>, T), onto: Array<T>) -> Array<T> where T: 
 }
 
 // The array without its last element, and that element; nothing if it is empty.
-fn pop<T>(a: [T]) -> Option<([T], T)> where T: Use<[1, 1]> {
+fn array_pop<T>(a: [T]) -> Option<([T], T)> where T: Use<[1, 1]> {
     match(a) {
         [] => None,
         some => Some(arr_pop(some, 0))
@@ -472,7 +610,7 @@ fn pop<T>(a: [T]) -> Option<([T], T)> where T: Use<[1, 1]> {
 }
 
 // The element at a place, if the place is there.
-fn get<T>(a: [T], i: Int) -> Option<T> {
+fn array_get<T>(a: [T], i: Int) -> Option<T> {
     match(int_mul(int_lt(-1, i), int_lt(i, arr_len(a, 0)))) {
         0 => None,
         _ => Some(arr_get(a, i))
@@ -563,13 +701,13 @@ unsafe fn restore_at<T>(a: &mut Array<T>, items: Array<T>) where T: Use<[1, 1]> 
 
 // An element added to the array a reference points to.
 fn push_at<T>(a: &mut Array<T>, x: T) where T: Use<[1, 1]> {
-    let more = push(replace(a, array_empty()), x);
+    let more = array_push(replace(a, array_empty()), x);
     unsafe { restore_at(a, more) }
 }
 
 // The last element taken off it, if it has one.
 fn pop_at<T>(a: &mut Array<T>) -> Option<T> where T: Use<[1, 1]> {
-    match(pop(replace(a, array_empty()))) {
+    match(array_pop(replace(a, array_empty()))) {
         Some((rest, last)) => unsafe { restore_at(a, rest) }; Some(last),
         None => None
     }
@@ -588,7 +726,7 @@ fn slice<A, T>(a: A, from: Int, to: Int) -> [T] where A: Indexed<Element = T>, T
 fn slice_onto<A, T>(a: &A, i: Int, to: Int, out: [T]) -> [T] where A: Indexed<Element = T>, T: Use<[0, *]> {
     match(int_lt(i, to)) {
         0 => out,
-        _ => tail slice_onto(a, int_add(i, 1), to, push(out, *element_at(a, i)))
+        _ => tail slice_onto(a, int_add(i, 1), to, array_push(out, *element_at(a, i)))
     }
 }
 

@@ -25,14 +25,21 @@ impl<T> Iterator for ArrayIter<T> {
     }
 }
 fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
-    match(pop(from)) {
-        Some((rest, last)) => tail turned(rest, push(onto, last)),
+    match(array_pop(from)) {
+        Some((rest, last)) => tail turned(rest, array_push(onto, last)),
         None => onto
     }
 }
 
+// A slice's elements by reference, first to last (`s.iter()`).
+impl<'a, T> Iterator for SliceIter<'a, T> {
+    type Item = &'a T;
+    fn next(it: &mut SliceIter<'a, T>) -> Option<&'a T> { SliceIter::next_ref(it) }
+}
+
 // What gives all its elements away, one after another, first to last.
 pub trait IntoIterator { type Iter; fn into_iter(Self) -> Iter }
+impl<'a, T> IntoIterator for &'a [T] { type Iter = SliceIter<'a, T>; fn into_iter(s: &'a [T]) -> SliceIter<'a, T> { s.iter() } }
 impl<T> IntoIterator for [T] where T: Use<[1, 1]> { type Iter = ArrayIter<T>; fn into_iter(a: [T]) -> ArrayIter<T> { ArrayIter { rest: turned(a, array_empty()) } } }
 impl<T, N> IntoIterator for [T; N] where T: Use<[1, 1]> { type Iter = ArrayIter<T>; fn into_iter(a: [T; N]) -> ArrayIter<T> { ArrayIter { rest: turned(fixed_to_array(a), array_empty()) } } }
 

@@ -43,7 +43,9 @@ fn main() -> Int {
     let mut app = App::new().register<Armor>().register<Hp>().build();
     let e = app.world.spawn_bundle((Armor { value: 3, tough: false }, Hp(1)));
     say(match(app.world.describe_component(e, "Armor")) { Some(d) => shown(d), None => "none" });
-    say(match(app.world.editable_fields("Armor")) { Some(fs) => fold(fs, "", fn(out: Str, f: Str) -> Str { if(out == "") { f } else { out ++ " " ++ f } }), None => "none" });
+    say(match(app.world.editable_fields("Armor")) {
+        Some(fs) => let mut out = ""; let mut i = 0; while({ i < fs.len() }) { out = if(out == "") { fs[i] } else { out ++ " " ++ fs[i] }; i = i + 1 }; out,
+        None => "none" });
     let before = app.world.tick();
     say(said(app.world.set_field(e, "Armor", "value", "200")));
     say(said(app.world.set_field(e, "Armor", "value", "300")));

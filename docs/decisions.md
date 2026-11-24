@@ -7825,6 +7825,52 @@ is largest. `timedM` now passes the state through the clock
 (`Trace.clock`, `Trace.span`) and holds nothing; a traced compile of an
 ECS program takes what an untraced one does, 3 s.
 
+## `&[T]` is a slice, and every literal a `[T; N]`
+
+`&'a [T]` is the prelude's `SliceRef<'a, T>` and `&'a mut [T]` its
+`SliceMut<'a, T>`: an address and a length, as `&str` is `StrRef`
+(`Modules.resolveType`; an implementation for `&[T]` is for `SliceRef`, its
+lifetime its own where none is written). A `&[T; N]` is a `&[T]` wherever
+one is wanted, and a `&Vec<T>` too, by coercions the library declares
+(`fixed_slice`, `fixed_slice_mut`, `vec_slice`, `vec_slice_mut`); a
+coercion of a library module applies wherever anything of the module is
+brought in, as Rust's deref does wherever `Vec` is. A coercion is given no
+trait, so a `[T; N]`'s length is read from it (`fixed_len_at`, its
+constructor's, as `arr_len_at` reads an array's). A slice's own functions are
+Rust's (`len`, `get`, `first`, `last`, `split_at`, `split_first`, `iter`,
+`get_mut`, `as_slice`) and `sub(from, to)` for `s.get(from..to)`; `s[i]`
+reads in place, and `xs[i] = v` of an `xs: &mut [T]` writes through it, the
+parameter held where it is written through as Rust's is without `mut`.
+
+Every literal of a program's own text is a `[T; N]`: `[a, b]` a `[T; 2]`,
+`[]` a `[T; 0]`, `[x; 4]` four of `x`, built as one constructor's fields
+(`fixed_make`), not from an array. The library's literals are arrays still,
+where its text does not say lengths, until it is off them.
+
+`[first, ..rest]` patterns are of slices: each element named is a
+reference, `rest` a slice, as Rust binds them (`RestOf`, `rest_fits`,
+`rest_first`, `rest_last`). Among clauses with such a pattern, one of
+exactly so many elements, `[x]` or `[]`, is of a slice too (`rest_exact`).
+An element's pattern that asks something of it (`[Box(n), ..]`, `[0]`) is
+matched through the reference, binding by reference, and where it does not
+match the clauses after are tried. A pattern of a value whose type is not
+known yet settles what traits leave to implementations first
+(`inferPat`), so that `Part` of `RestOf` is known before it is matched.
+
+The prelude's array `push`, `pop` and `get` are `array_push`, `array_pop`
+and `array_get` until arrays go: by their names a dot call `v.push(x)` of a
+`Vec` in a `while` was taken for the array's, which takes the value whole.
+`I::Item` in a function's own bounds (`J: Iterator<Item = I::Item>`) is of
+the trait written of `I` there, where another trait of the program leaves an
+`Item` too.
+
+Known defect, found here: a variadic implementation that builds `(h, ..r)`
+of a type a trait leaves (`R::Got<'a>`) inside a `match` arm, in a program
+that loads some of the library (`std::vec`, `std::hash`), is accepted and
+goes wrong, `match` given a dictionary it does not take (or its Core is
+refused); without the library it runs. The test of it keeps its columns in
+`[T; N]` meanwhile.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

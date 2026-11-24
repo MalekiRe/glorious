@@ -473,6 +473,10 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
       else emit (.perform info.id atoms)
     | .prim p n => do
       if isTail then throw s!"`tail` applies to calls, not to the intrinsic `{x}`"
+      -- (A `[T; N]` is its elements, built as one constructor's fields.)
+      if x == "fixed_make" then
+        let atoms ← elabArgs scope args
+        return ← emit (.let_ (.construct (fixedBase + atoms.length) atoms))
       if n != args.size then
         throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.size}"
       let atoms ← elabArgs scope args
@@ -501,6 +505,9 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
         -- of them and `n`.
         let built ← emit (.mem .tag atoms)
         emit (.let_ (.prim .intSub [built, .int arrayBase]))
+      else if x == "fixed_len_at" then
+        let built ← emit (.mem .tag atoms)
+        emit (.let_ (.prim .intSub [built, .int fixedBase]))
       else emit (.let_ (.prim p atoms))
     | .pack => do
       let atoms ← elabArgs scope args

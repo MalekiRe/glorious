@@ -3,7 +3,6 @@
 // what they lead to are given in, never a table's.
 
 use std::hash::{Hash, HashMap, HashSet};
-use std::slice::{Slice};
 use std::budget::{StepBudget, BudgetExceeded};
 use std::vec::{Vec};
 
@@ -91,16 +90,16 @@ fn state_of<N: Eq + Hash>(state: &HashMap<N, Int>, node: N) -> Option<Int> where
     match(HashMap::get(state, &node)) { Some(n) => Some(*n), None => None }
 }
 
-fn copied<'a, N>(nodes: &Slice<'a, N>, i: Int, out: &mut Vec<N>) where N: Use<[0, *]> {
-    match(Slice::get(nodes, i)) { Some(node) => Vec::push(out, *node); tail copied(nodes, i + 1, out), None => () }
+fn copied<'a, N>(nodes: &'a [N], i: Int, out: &mut Vec<N>) where N: Use<[0, *]> {
+    match(nodes.get(i)) { Some(node) => Vec::push(out, *node); tail copied(nodes, i + 1, out), None => () }
 }
 
 // The nodes that can be got to from those given, each before every node it
 // leads to; or nodes that lead round in a circle, where there are some.
-pub fn topological_order<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: Slice<'a, N>, budget: &mut StepBudget)
+pub fn topological_order<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: &'a [N], budget: &mut StepBudget)
     -> Result<Vec<N>, GraphError<N>> where N: Use<[0, *]> {
     let mut given = Vec::new();
-    copied(&nodes, 0, &mut given);
+    copied(nodes, 0, &mut given);
     let mut done = Vec::new();
     let mut way = Vec::new();
     let mut state = HashMap::new();
@@ -182,11 +181,11 @@ fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nod
 // The nodes that can be got to from those given, in groups: two nodes are
 // in one group when each can be got to from the other. A group comes before
 // any group that leads to it.
-pub fn strongly_connected_components<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: Slice<'a, N>, budget: &mut StepBudget)
+pub fn strongly_connected_components<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: &'a [N], budget: &mut StepBudget)
     -> Result<Vec<Vec<N>>, BudgetExceeded> where N: Use<[0, *]> {
     let mut s = Search { seen: HashMap::new(), low: HashMap::new(), open: HashMap::new(), stack: Vec::new(), next: 0, groups: Vec::new() };
     let mut given = Vec::new();
-    copied(&nodes, 0, &mut given);
+    copied(nodes, 0, &mut given);
     match(search_each(graph, None, &given, 0, &mut s, budget)) {
         Ok(_) => match(s) { Search { seen: _, low: _, open: _, stack: _, next: _, groups } => Ok(groups) },
         Err(e) => Err(e)

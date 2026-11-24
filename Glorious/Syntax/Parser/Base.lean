@@ -25,10 +25,6 @@ public section
 
 namespace Glorious.Syntax.Parse
 
-/-- (`GLORIOUS_FIXED_LITERALS`: every literal of a program's own text is a
-`[T; N]`, for finding what is to move from arrays.) -/
-initialize fixedLiterals : Bool ← do pure (← IO.getEnv "GLORIOUS_FIXED_LITERALS").isSome
-
 structure PCtx where
   toks : Array Token
   fix : Fixities
@@ -268,7 +264,7 @@ behind. -/
 def arrayValue (elements : List ExprId) (empty : Nat := 0) (pushes : List Nat := []) : P ExprId := do
   let mut acc ← mk (.call empty (← preludeFn "array_empty") #[])
   for (e, i) in elements.zipIdx do
-    acc ← mk (.call (pushes.getD i 0) (← preludeFn "push") #[acc, e])
+    acc ← mk (.call (pushes.getD i 0) (← preludeFn "array_push") #[acc, e])
   pure acc
 
 /-- `a[i]`, if this is one: the array and the place. -/
@@ -943,6 +939,11 @@ def acceptPub : P (Option Bool) := do
     return some (scope == "super")
   pure (some false)
 
+/-- Where the numbers of what an exact array pattern among patterns with a
+rest is read with start (`restClausesOf`): past any a token or a reflection
+has. -/
+def exactBase : Nat := 2000000000000
+
 /-- A pattern of a clause, as one for an array of exactly `j` elements taken
 as a tuple of them: nothing if the pattern is for no such array. -/
 def asTupleOf (j : Nat) : Pattern → Option Pattern
@@ -976,37 +977,76 @@ refuses if they do not cover every case. With that, `never` is not reached.
 
 The identities of the calls and callables this makes are those of the
 pattern's own tokens and the `=>` after it, which nothing else has. -/
-partial def restClausesOf (all : List Pattern) : List ClauseId → P (List ClauseId)
+partial def restClausesOf (all : List Pattern) (total : Nat) : List ClauseId → P (List ClauseId)
   | [] => pure []
   | c :: following => do
     let ⟨pats, body⟩ := (← getThe Flat.Body).clause c
     let some (.ctor name none args) := (match pats with | [p] => some p | _ => none)
-      | return c :: (← restClausesOf all following)
-    let some (k, id, line, col) := restPatParts name
-      | return c :: (← restClausesOf all following)
-    let rest := args[k]?.getD .wild
+      | return c :: (← restClausesOf all total following)
+    -- (An array pattern of exactly so many, among patterns with a rest: of
+    -- a slice too, which it takes if it has exactly so many. Its calls and
+    -- callables are known by numbers of their own, past any a token has,
+    -- from where the clauses end and its place among them.)
+    let exact := if (all.any fun p => match p with
+        | .ctor n none _ => (restPatParts n).isSome
+        | _ => false) then arrayPatLen name else none
+    let parts : Option (Nat × Nat × Nat × Nat) ← match restPatParts name, exact with
+      | some p, _ => pure (some p)
+      | none, some n =>
+        let place := total - following.length - 1
+        let id := exactBase + ((← read).base + (← get)) * 4096 + place * 256
+        pure (some (n, id, 0, 0))
+      | none, none => pure none
+    let some (k, id, line, col) := parts
+      | return c :: (← restClausesOf all total following)
+    let isExact := exact.isSome && (restPatParts name).isNone
+    let rest := if isExact then .wild else args[k]?.getD .wild
     let first := args.take k
-    let last := args.drop (k + 1)
+    let last := if isExact then [] else args.drop (k + 1)
     let count := first.length + last.length
     let named := fun (j : Nat) => s!"%rest{id}:{j}"
     let callPrelude := fun (id : Nat) (f : String) (args : Array ExprId) => do
       mk (.call id (← preludeFn f) args)
     -- Without an element named, the pattern is the array.
-    if count == 0 then return (← mkC [rest] body) :: (← restClausesOf all following)
+    if count == 0 && !isExact then return (← mkC [rest] body) :: (← restClausesOf all total following)
     -- (Each statement has a place of its own in the pattern: what it lets
     -- go of is known by it.)
-    let located := fun (col : Nat) (s : FStmt) => do mkS (.located line col (← mkS s))
+    let located := fun (col : Nat) (s : FStmt) => do
+      if line == 0 then mkS s else mkS (.located line col (← mkS s))
+    -- (Each element is named; one whose pattern asks something of it is
+    -- matched after, through the reference it is, as Rust's patterns of a
+    -- slice bind: where it does not match, the clauses after are tried.)
+    let simple := fun (p : Pattern) => match p with
+      | .wild | .var _ => true
+      | _ => false
+    let elem := fun (p : Pattern) (j : Nat) => if simple p then p else .var s!"%rest{id}:e{j}"
     let firsts ← first.zipIdx.toArray.mapM fun (p, j) => do
-      located (col + 1 + j) (.let_ (.tuple [p, .var (named (j + 1))])
+      located (col + 1 + j) (.let_ (.tuple [elem p j, .var (named (j + 1))])
         (← callPrelude (id + 4 + j) "rest_first" #[← mkName none (named j)]))
     -- (The last element comes off first.)
     let lasts ← last.reverse.zipIdx.toArray.mapM fun (p, j) => do
-      located (col + 1 + k + j) (.let_ (.tuple [.var (named (k + j + 1)), p])
+      located (col + 1 + k + j) (.let_ (.tuple [.var (named (k + j + 1)), elem p (k + j)])
         (← callPrelude (id + 4 + k + j) "rest_last" #[← mkName none (named (k + j))]))
     let whole := named count
+    let taken := s!"%rest{id}:whole"
+    let afterName := s!"%rest{id}:after"
+    let lastAt : List (Pattern × Nat) := last.reverse.zipIdx.map fun pj => (pj.1, k + pj.2)
+    let asking : List (Pattern × Nat) := (first.zipIdx ++ lastAt).filter fun pj => !simple pj.1
+    let matched ← if asking.isEmpty then pure body else do
+      let byRef := fun (p : Pattern) => match p with
+        | .ctor m none [_] => if m == byRefMark false || m == byRefMark true then p else .ctor (byRefMark false) none [p]
+        | _ => .ctor (byRefMark false) none [p]
+      let pats := asking.map fun (pj : Pattern × Nat) => byRef pj.1
+      let these ← mkC pats body
+      let others ← mkC (asking.map fun _ => Pattern.wild)
+        #[← mkS (.expr (← mk (.call 0 (← mkName none afterName) #[← mkName none taken])))]
+      let cl ← mk (.closure (2 * exactBase + id) #[these, others])
+      let given ← asking.toArray.mapM fun (pj : Pattern × Nat) => mkName none s!"%rest{id}:e{pj.2}"
+      pure #[← mkS (.expr (← mk (.call 0 cl given)))]
     let fits ← mkC [.ctor "RestFits" none [.var (named 0)]]
-      (firsts ++ lasts ++ #[← located (col + 1 + count) (.let_ rest (← mkName none whole))] ++ body)
-    let covered ← (List.range count).toArray.mapM fun j => do
+      (firsts ++ lasts ++ #[← located (col + 1 + count) (.let_ rest (← mkName none whole))] ++ matched)
+    -- (Of exactly so many, every other length is the clauses' after it.)
+    let covered ← if isExact then pure #[] else (List.range count).toArray.mapM fun j => do
       let clauses ← (all.filterMap (asTupleOf j)).toArray.mapM fun p => do
         mkC [p] #[← mkS (.expr (← mk (.tuple #[])))]
       -- (No clause for the length: a callable that covers nothing.)
@@ -1018,19 +1058,22 @@ partial def restClausesOf (all : List Pattern) : List ClauseId → P (List Claus
     let unreached ← mkC [.var never]
       (covered.push (← mkS (.expr (← callPrelude (id + 3) "rest_unreached" #[← mkName none never]))))
     let back := s!"%rest{id}:back"
-    let after ← mk (.closure (id + 2) ((← restClausesOf all following).toArray.push unreached))
+    let after ← mk (.closure (id + 2) ((← restClausesOf all total following).toArray.push unreached))
     let short ← mkC [.ctor "RestShort" none [.var back]]
-      #[← mkS (.expr (← mk (.call 0 after #[← mkName none back])))]
-    let taken := s!"%rest{id}:whole"
+      #[← mkS (.expr (← mk (.call 0 (← mkName none afterName) #[← mkName none back])))]
     let both ← mk (.closure (id + 1) #[fits, short])
-    let fitsCall ← callPrelude id "rest_fits" #[← mkName none taken, ← mk (.int count)]
-    pure [← mkC [.var taken] #[← mkS (.expr (← mk (.call 0 both #[fitsCall])))]]
+    let fitsCall ← callPrelude id (if isExact then "rest_exact" else "rest_fits") #[← mkName none taken, ← mk (.int count)]
+    -- (What it asks is known before the clauses are looked at: their
+    -- patterns are of what it is of.)
+    let asked := s!"%rest{id}:asked"
+    pure [← mkC [.var taken] #[← mkS (.let_ (.var afterName) after), ← mkS (.let_ (.var asked) fitsCall),
+      ← mkS (.expr (← mk (.call 0 both #[← mkName none asked])))]]
 
 def restClauses (clauses : List ClauseId) : P (List ClauseId) := do
   let b ← getThe Flat.Body
   let pats := clauses.filterMap fun c => match (b.clause c).pats with
     | [p] => some p
     | _ => none
-  restClausesOf pats clauses
+  restClausesOf pats clauses.length clauses
 
 end Glorious.Syntax.Parse

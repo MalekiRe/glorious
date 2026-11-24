@@ -1,13 +1,12 @@
 // A place in a row of things, and parsers tried from it, as the library
 // specification has them (26.1). Places are `Int`.
 
-use std::slice::{Slice};
 use std::budget::{BudgetExceeded, BudgetKind};
 use std::vec::{Vec};
 pub use std::error::{MarkError};
 
 // A row of things read from front to back.
-pub struct Cursor<'a, T> { input: Slice<'a, T>, at: Int }
+pub struct Cursor<'a, T> { input: &'a [T], at: Int }
 pub struct CursorMark { at: Int, length: Int }
 
 // What a parser found: something, nothing here (and it may be tried
@@ -16,19 +15,19 @@ pub enum ParseStep<T, E> { Matched(T), NoMatch, Failed(E) }
 pub enum ParseError<E> { User(E), NoProgress, Limit(BudgetExceeded) }
 
 impl<'a, T> Cursor<'a, T> {
-    pub fn new(input: Slice<'a, T>) -> Self where T: Use<[1, 1]> { Self { input: input, at: 0 } }
+    pub fn new(input: &'a [T]) -> Self where T: Use<[1, 1]> { Self { input: input, at: 0 } }
     pub fn position(c: &Self) -> Int { c.at }
-    pub fn is_done(c: &Self) -> Bool { c.at >= Slice::len(&c.input) }
-    pub fn remaining(c: &Self) -> Slice<'a, T> where T: Use<[1, 1]> {
-        match(Slice::sub(&c.input, c.at, Slice::len(&c.input))) { Some(rest) => rest, None => c.input }
+    pub fn is_done(c: &Self) -> Bool { c.at >= c.input.len() }
+    pub fn remaining(c: &Self) -> &'a [T] where T: Use<[1, 1]> {
+        match(c.input.sub(c.at, c.input.len())) { Some(rest) => rest, None => c.input }
     }
-    pub fn peek(c: &Self) -> Option<&'a T> where T: Use<[1, 1]> { Slice::get(&c.input, c.at) }
+    pub fn peek(c: &Self) -> Option<&'a T> where T: Use<[1, 1]> { c.input.get(c.at) }
     pub fn next(c: &mut Self) -> Option<&'a T> where T: Use<[1, 1]> {
-        match(Slice::get(&c.input, c.at)) { Some(item) => c.at = c.at + 1; Some(item), None => None }
+        match(c.input.get(c.at)) { Some(item) => c.at = c.at + 1; Some(item), None => None }
     }
-    pub fn mark(c: &Self) -> CursorMark { CursorMark { at: c.at, length: Slice::len(&c.input) } }
+    pub fn mark(c: &Self) -> CursorMark { CursorMark { at: c.at, length: c.input.len() } }
     pub fn restore(c: &mut Self, mark: CursorMark) -> Result<(), MarkError> {
-        if(mark.length != Slice::len(&c.input)) { Err(MarkError::WrongOwner) } else {
+        if(mark.length != c.input.len()) { Err(MarkError::WrongOwner) } else {
             if(mark.at > mark.length) { Err(MarkError::OutOfRange) } else { c.at = mark.at; Ok(()) }
         }
     }

@@ -3,7 +3,6 @@
 // specification has them (24). Places and lengths are `Int`.
 
 use std::value::{Rejected};
-use std::slice::{Slice};
 use std::hash::{Hash, HashMap};
 use std::vec::{Vec};
 pub use std::error::{MarkError, IndexOverflow};
@@ -41,7 +40,7 @@ impl<Tag, T> IndexVec<Tag, T> {
     }
     pub fn get<'a>(v: &'a Self, id: Id<Tag>) -> Option<&'a T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { Vec::get(&v.items, int(id.0)) }
     pub fn get_mut<'a>(v: &'a mut Self, id: Id<Tag>) -> Option<&'a mut T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { Vec::get_mut(&mut v.items, int(id.0)) }
-    pub fn as_slice<'a>(v: &'a Self) -> Slice<'a, T> where T: Use<[1, 1]> { Vec::as_slice(&v.items) }
+    pub fn as_slice<'a>(v: &'a Self) -> &'a [T] where T: Use<[1, 1]> { Vec::as_slice(&v.items) }
     pub fn into_vec(v: Self) -> Vec<T> where T: Use<[1, 1]> { match(v) { IndexVec { items } => items } }
 }
 

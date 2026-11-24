@@ -2,7 +2,6 @@
 // unsafe: an address is whatever a program says it is.
 
 use std::vec::{Vec};
-use std::slice::{Slice};
 use std::value::{Rejected};
 
 // C's names for its types, as they are on x86-64 Linux.
@@ -149,8 +148,8 @@ pub struct NulError { pub position: Int }
 pub enum CStrError { MissingTerminator, InteriorNul(NulError) }
 
 // The first zero among some bytes from a place on.
-fn first_zero<'a>(bytes: &Slice<'a, u8>, i: Int) -> Option<Int> {
-    match(Slice::get(bytes, i)) {
+fn first_zero<'a>(bytes: &'a [u8], i: Int) -> Option<Int> {
+    match(bytes.get(i)) {
         Some(b) => if(*b == 0u8) { Some(i) } else { tail first_zero(bytes, i + 1) },
         None => None
     }
@@ -163,35 +162,35 @@ fn zero_in<A>(bytes: &A, i: Int) -> Option<Int> where A: Indexed<Element = u8> {
     }
 }
 
-fn slice_bytes<'a>(bytes: &Slice<'a, u8>, i: Int, out: &mut Vec<u8>) {
-    match(Slice::get(bytes, i)) { Some(b) => Vec::push(out, *b); tail slice_bytes(bytes, i + 1, out), None => () }
+fn slice_bytes<'a>(bytes: &'a [u8], i: Int, out: &mut Vec<u8>) {
+    match(bytes.get(i)) { Some(b) => Vec::push(out, *b); tail slice_bytes(bytes, i + 1, out), None => () }
 }
 
 // Bytes that end in a zero and have no other: a text as C reads one, looked
 // at where it is.
-pub struct CStr<'a> { bytes: Slice<'a, u8> }
+pub struct CStr<'a> { bytes: &'a [u8] }
 
 impl<'a> CStr<'a> {
-    pub fn from_bytes_with_nul(value: Slice<'a, u8>) -> Result<Self, CStrError> {
-        match(first_zero(&value, 0)) {
+    pub fn from_bytes_with_nul(value: &'a [u8]) -> Result<Self, CStrError> {
+        match(first_zero(value, 0)) {
             None => Err(CStrError::MissingTerminator),
             Some(at) =>
-                if(at + 1 == Slice::len(&value)) { Ok(Self { bytes: value }) }
+                if(at + 1 == value.len()) { Ok(Self { bytes: value }) }
                 else { Err(CStrError::InteriorNul(NulError { position: at })) }
         }
     }
     // The bytes without the zero, and with it.
-    pub fn bytes(value: Self) -> Slice<'a, u8> {
+    pub fn bytes(value: Self) -> &'a [u8] {
         let all = value.bytes;
-        match(Slice::sub(&all, 0, Slice::len(&all) - 1)) { Some(found) => found, None => all }
+        match(all.sub(0, all.len() - 1)) { Some(found) => found, None => all }
     }
-    pub fn bytes_with_nul(value: Self) -> Slice<'a, u8> { value.bytes }
-    pub fn len(value: &Self) -> Int { Slice::len(&value.bytes) - 1 }
+    pub fn bytes_with_nul(value: Self) -> &'a [u8] { value.bytes }
+    pub fn len(value: &Self) -> Int { value.bytes.len() - 1 }
     // The text, if the bytes are UTF-8.
     pub fn to_str(value: Self) -> Option<Str> {
         let found = CStr::bytes(value);
         let mut out = Vec::new();
-        slice_bytes(&found, 0, &mut out);
+        slice_bytes(found, 0, &mut out);
         std::text::from_utf8(out)
     }
 }

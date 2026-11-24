@@ -31,6 +31,7 @@ use ecs::{App, World, Entity, Commands, Query, Single, Changed, With, Local, Asy
           bridge, until, bridge_world, keep, wait_until, parallel};
 use std::vec::sort;
 use std::thread::{Mutex, Shared, AtomicInt, spawn_detached, join};
+use std::vec::{Vec};
 
 struct Update
 struct Render
@@ -75,26 +76,26 @@ fn two_healths<S>(w: &mut World<S>) where S: ecs::Get<Health>, S: ecs::Columns {
     discard(w.spawn_bundle((Health(4),)));
     discard(w.spawn_bundle((Health(5),)))
 }
-fn healths(q: &mut Query<(&Health,), ()>) -> [Int] {
-    let mut out = [];
-    q.for_each() { (h,) => out = push(out, h.0); };
+fn healths(q: &mut Query<(&Health,), ()>) -> Vec<Int> {
+    let mut out = Vec::new();
+    q.for_each() { (h,) => Vec::push(&mut out, h.0); };
     out
 }
 fn locals<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Columns, S: ecs::Hidden<(&Health,), ()> {
     let mut world = world;
-    let mut local = [];
+    let mut local = Vec::new();
     bridge_world(&mut world, Update, two_healths);
     match(bridge(&mut world, Update, healths)) { Ok(hs) => local = hs, Err(_) => () };
-    say(sort(local));
+    say(sort(&local));
     say(fold(local, 0, fn(sum: Int, h: Int) -> Int { sum + h }));
     world
 }
 
 // `shared_state_keeps_locals_and_change_detection_between_bridges`
-fn counted(n: &mut Local<Int>, q: &mut Query<(&Health,), (Changed<Health>,)>) -> (Int, [Int]) {
+fn counted(n: &mut Local<Int>, q: &mut Query<(&Health,), (Changed<Health>,)>) -> (Int, Vec<Int>) {
     n.0 = n.0 + 1;
-    let mut seen = [];
-    q.for_each() { (h,) => seen = push(seen, h.0); };
+    let mut seen = Vec::new();
+    q.for_each() { (h,) => Vec::push(&mut seen, h.0); };
     (n.0, seen)
 }
 fn kept<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Hidden<(&Health,), (ecs::Changed<Health>,)> {

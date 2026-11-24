@@ -1,65 +1,7 @@
-// A stretch of an array, or of elements in memory one after another,
-// borrowed: nothing is copied, and an element is looked at where it is. The
-// shape the library specification gives a slice (14); places and lengths are
-// `Int`. (Of memory where `at` is not zero: `items` is then only what it is
-// borrowed from.)
+// Slices, `&'a [T]` and `&'a mut [T]`: the prelude's `SliceRef` and
+// `SliceMut`, so many elements one after another from an address, borrowed;
+// a `&[T; N]` and a `&Vec<T>` are one wherever one is wanted. Their
+// functions are their own (`len`, `get`, `first`, `last`, `sub`,
+// `split_at`, `split_first`, `iter`); iterating them is `std::iterator`'s.
 
-use std::iterator::{Iterator};
-
-// The element at a place: of the array, or where `at` is not zero, of memory.
-fn element_of<'a, T>(items: &'a [T], at: *mut T, i: Int) -> Option<&'a T> where T: Use<[1, 1]> {
-    if(ptr_mut_address(at) == 0usize) { element(items, i) }
-    else { Some(unsafe { ptr_ref_at(at, usize_of(usize_bits(ptr_mut_address(at)) + i * usize_bits(size_of_at(at)))) }) }
-}
-
-pub struct Slice<'a, T> { items: &'a [T], at: *mut T, from: Int, to: Int }
-
-impl<'a, T> Slice<'a, T> {
-    // The whole of an array.
-    pub fn of(items: &'a [T]) -> Self where T: Use<[1, 1]> { Self { items: items, at: ptr_mut_at(0usize), from: 0, to: len_at(items) } }
-    // So many elements in memory from an address, borrowed from `owner`.
-    pub fn of_memory<O>(owner: &'a O, at: *mut T, len: Int) -> Self {
-        Self { items: unsafe { transmute(owner) }, at: at, from: 0, to: len }
-    }
-    pub fn len(s: &Self) -> Int { s.to - s.from }
-    pub fn is_empty(s: &Self) -> Bool { s.to == s.from }
-    pub fn get(s: &Self, i: Int) -> Option<&'a T> where T: Use<[1, 1]> {
-        if(i < 0) { None } else {
-            if(s.from + i < s.to) { element_of(s.items, s.at, s.from + i) } else { None }
-        }
-    }
-    pub fn first(s: &Self) -> Option<&'a T> where T: Use<[1, 1]> { Slice::get(s, 0) }
-    pub fn last(s: &Self) -> Option<&'a T> where T: Use<[1, 1]> { Slice::get(s, s.to - s.from - 1) }
-    // The stretch from one place of this one up to, not including, another.
-    pub fn sub(s: &Self, from: Int, to: Int) -> Option<Slice<'a, T>> where T: Use<[1, 1]> {
-        if(from < 0) { None } else {
-            if(to < from) { None } else {
-                if(s.from + to > s.to) { None } else {
-                    Some(Slice { items: s.items, at: s.at, from: s.from + from, to: s.from + to })
-                }
-            }
-        }
-    }
-    // What is before a place, and what is from it on.
-    pub fn split_at(s: &Self, mid: Int) -> Option<(Slice<'a, T>, Slice<'a, T>)> where T: Use<[1, 1]> {
-        match(Slice::sub(s, 0, mid)) {
-            Some(before) => match(Slice::sub(s, mid, s.to - s.from)) {
-                Some(after) => Some((before, after)),
-                None => None
-            },
-            None => None
-        }
-    }
-    pub fn iter(s: &Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { SliceIter { items: s.items, base: s.at, at: s.from, end: s.to } }
-}
-
-// The elements of a slice by reference, first to last.
-pub struct SliceIter<'a, T> { items: &'a [T], base: *mut T, at: Int, end: Int }
-
-
-impl<'a, T> Iterator for SliceIter<'a, T> {
-    type Item = &'a T;
-    fn next(it: &mut SliceIter<'a, T>) -> Option<&'a T> {
-        if(it.at < it.end) { let i = it.at; it.at = i + 1; element_of(it.items, it.base, i) } else { None }
-    }
-}
+pub use std::iterator::{Iterator};

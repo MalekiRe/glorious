@@ -797,12 +797,17 @@ def heldStmts (held : List String) (body : List StmtId) : Build (List StmtId) :=
 /-- The names a clause binds that are only borrowed in it, or (of `values`)
 only borrowed by field, each kept in a variable of the same name where the
 clause starts (`Syntax.promoteHeld`). -/
-def promoteHeld (values : List String) (c : ClauseId) : Build ClauseId := do
+def promoteHeld (values : List String) (c : ClauseId) (slicesMut : List String := []) : Build ClauseId := do
   let b ← get
   let ⟨pats, body⟩ := b.clause c
   let body := body.toList
+  -- (A `&mut [T]` written through, `xs[i] = v`, and not given away: as
+  -- Rust's is written through without `mut`.)
+  let writtenThrough := fun (x : String) =>
+    let u := b.nameUseStmts false x body
+    slicesMut.contains x && u.changed && !u.valued && !u.valuedInside && !u.rebound
   let held := ((pats.flatMap patternNames).eraseDups).filter fun x =>
-    b.borrowedOnly x body || (values.contains x && b.fieldBorrowedOnly x body)
+    b.borrowedOnly x body || (values.contains x && b.fieldBorrowedOnly x body) || writtenThrough x
   if held.isEmpty then return c
   pushClause ⟨pats, ((← heldStmts held body) ++ body).toArray⟩
 
@@ -882,29 +887,39 @@ def promoteRewrite : FRewrite where
 
 /-- A clause made so, with `values` as its parameters whose written types
 are not references' (`Syntax.promoteClause`). -/
-def promoteClause (values : List String) (c : ClauseId) : Build ClauseId := do
+def promoteClause (values : List String) (c : ClauseId) (slicesMut : List String := []) : Build ClauseId := do
   let ⟨pats, body⟩ := (← get).clause c
   let body ← promoteRewrite.stmtList body.toList
-  promoteHeld values (← pushClause ⟨pats, body.toArray⟩)
+  promoteHeld values (← pushClause ⟨pats, body.toArray⟩) slicesMut
 
 /-- The parameters of a clause written with `annots` that are values (written
 with a type that is no reference's) and those that are references. -/
 def paramsOf (pats : List Pattern) (annots : List (Option TypeExpr)) : List String × List String :=
+  -- (A slice, `&[T]`, is a value: the prelude's `SliceRef`, an address and
+  -- a length; `xs[i] = v` of an `xs: &mut [T]` borrows it to write.)
+  let isRef := fun (t : TypeExpr) => match t with
+    | .ref _ (.name "%prelude::Array" _) _ => false
+    | .ref _ _ _ => true
+    | _ => false
   ((pats.zip annots).filterMap fun
-    | (.var _, some (.ref _ _ _)) => none
-    | (.var x, some _) => some x
+    | (.var x, some t) => if isRef t then none else some x
     | _ => none,
    (pats.zip annots).filterMap fun
-    | (.var x, some (.ref _ _ _)) => some x
+    | (.var x, some t) => if isRef t then some x else none
     | _ => none)
 
 /-- A clause of a function whose parameters are written with `annots`, made
 so (`promoteClause`). (One written with a reference's type, `list: &[T]`:
 `&list[0]` is the element through that reference, not through one to it.) -/
 def promoteFnClause (annots : List (Option TypeExpr)) (c : ClauseId) : Build ClauseId := do
-  let (values, refs) := paramsOf ((← get).clause c).pats annots
+  let pats := ((← get).clause c).pats
+  let (values, refs) := paramsOf pats annots
   let c ← if refs.isEmpty then pure c else (throughParamsRewrite refs).clause c
-  promoteClause values (← nameBorrowsClause c)
+  let slicesMut := (pats.zip annots).filterMap fun
+    | (.var x, some (.ref true (.name "%prelude::Array" _) _)) => some x
+    | (.var x, some (.name n _)) => if n.endsWith "SliceMut" then some x else none
+    | _ => none
+  promoteClause values (← nameBorrowsClause c) slicesMut
 
 /-- Each name a pattern binds with `mut` a variable of the same name where
 what the pattern is of starts: `Some(mut n) => n = n + 1` as `Some(n) => let

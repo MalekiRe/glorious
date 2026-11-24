@@ -430,19 +430,31 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
     advance
     -- Where the program has arrays of a fixed length, the literal is an
     -- array or one of exactly so many: whichever is wanted of it.
-    -- (A program's own literal, where every one is a `[T; N]`.)
-    let own := fixedLiterals && (← read).base ≥ 1000000 && (← read).path.head? != some "std"
+    -- (A program's own literal is a `[T; N]`: there is no growable array,
+    -- `[a, b]` is a `[T; 2]` and `[]` a `[T; 0]`, as in Rust. The library's
+    -- are while it moves off arrays.)
+    let own := (← read).base ≥ 1000000 && (← read).path.head? != some "std"
     let fixedOf := fun (value : ExprId) (n : Nat) => do
-      callOf 0 none instMark #[← mk (.call (numbered opened 800000) (← preludeFn (if own then "fixed_literal" else "array_literal")) #[value]),
+      callOf 0 none instMark #[← mk (.call (numbered opened 800000) (← preludeFn "array_literal") #[value]),
         ← tree (TypeExpr.tuple [numberType n]).asExpr]
+    -- (A program's own: its elements, as one `[T; N]`, built where it is.)
+    let made := fun (elements : Array ExprId) => do
+      mk (.call (numbered opened 800000) (← mkName none "fixed_make") elements)
     if ← acceptPunct "]" then
+      if own then return ← made #[]
       let value ← arrayValue [] empty
-      return ← if (← read).fixed || own then fixedOf value 0 else pure value
+      return ← if (← read).fixed then fixedOf value 0 else pure value
     let mut starts : Array Nat := #[numbered (← get) 700000]
     let first ← parseBinary 0 false
     if ← acceptPunct ";" then
       let count ← parseBinary 0 false
       expectPunct "]"
+      -- (`[x; 4]` of a program's own: four of `x`, a `[T; 4]`.)
+      if own then
+        if let .int n ← node count then
+          if n ≥ 0 then
+            return ← callOf 0 none instMark #[← mk (.call (numbered opened 900000) (← preludeFn "fixed_repeat_of") #[first]),
+              ← tree (TypeExpr.tuple [numberType n.toNat]).asExpr]
       return ← mk (.call (numbered opened 900000) (← preludeFn "array_repeat") #[first, count])
     let mut elements : Array ExprId := #[first]
     while ← acceptPunct "," do
@@ -450,8 +462,9 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
       starts := starts.push (numbered (← get) 700000)
       elements := elements.push (← parseBinary 0 false)
     expectPunct "]"
+    if own then return ← made elements
     let value ← arrayValue elements.toList empty starts.toList
-    if (← read).fixed || own then fixedOf value elements.size else pure value
+    if (← read).fixed then fixedOf value elements.size else pure value
   | .ident "tail" =>
     advance
     let e ← parsePostfix noBlock

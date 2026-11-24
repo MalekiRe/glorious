@@ -1108,6 +1108,9 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
     | "arr_new" =>
       checkArgs scope amb s!"intrinsic `{x}`" [] args call
       pure (array t)
+    | "fixed_make" =>
+      checkArgs scope amb "the array" (List.replicate args.size t) args call
+      pure (.con "Fixed" [t, lengthTy 64 args.size])
     | "arr_at" =>
       -- The reference to a place of an array, from a reference to the
       -- array: the same kind of reference, borrowing from the same things.
@@ -1156,6 +1159,9 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
     | "fixed_len" =>
       checkArgs scope amb s!"intrinsic `{x}`" [.con "Fixed" [t, ← freshTy]] args call
       mustDrop t "measuring a `[T; N]` lets go of it"
+      pure .int
+    | "fixed_len_at" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [.ref (← freshTy) (.con "Fixed" [t, ← freshTy]) (← freshCap)] args call
       pure .int
     | "fixed_at" =>
       let how ← freshTy
@@ -2016,6 +2022,16 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
 
 /-- Check a pattern against a type; the names it binds. -/
 partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
+  -- (A pattern that asks something of a value whose type is not known yet:
+  -- what traits leave to implementations is settled first, where it can
+  -- be. `let (Box(n), rest) = rest_first(s)` of a `&[Box]` is of `Part` of
+  -- `RestOf` for it, which is `&Box`: matched, the pattern reaches through
+  -- the reference, as Rust's do.)
+  match p with
+  | .wild | .var _ => pure ()
+  | _ =>
+    if let .var _ ← find t then
+      unless (← get).assocUses.isEmpty do settleAssocsAll
   -- (Where patterns only say which cases are taken, one that asks something
   -- of a value is met by a reference to one: the clauses reach through it.)
   if (← get).shapes then

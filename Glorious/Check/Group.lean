@@ -434,7 +434,9 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
       let candidates := (given.filterMap id).eraseDups.length + (given.filter Option.isNone).length
       if (refLives ret).any Option.isNone && candidates ≥ 2 then
         throw "it gives back a reference and is given more than one: say which the result lasts as long as, `fn f<'a>(x: &'a T, y: &U) -> &'a T`"
-  modify fun s => { s with rigidParams := rigid }
+  -- (What is written of its type parameters, from here on: `I::Item` in
+  -- `J: Iterator<Item = I::Item>` is of the trait written of `I`.)
+  modify fun s => { s with rigidParams := rigid, paramTraits := d.bounds.map fun b => (b.subject, b.trait, b.args) }
   -- `T: Trait<Item = Type>`: the type the trait leaves to `T`'s
   -- implementation is that one, in the body and for whoever calls.
   for b in d.bounds do

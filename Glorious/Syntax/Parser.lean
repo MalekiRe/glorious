@@ -30,6 +30,10 @@ private def constValue (ty : TypeExpr) : P (Flat.Body × Flat.ExprId) := valueOf
 private def valueFn : P Flat.Body := bodyOf do
   pure #[← mkC [] #[← mkS (.expr (← parseBinary 0 false))]]
 
+/-- The lifetime of an implementation for a slice that does not write one,
+`impl Tr for &mut [A]`: one of its own. -/
+def elidedLife : String := "'%elided"
+
 private partial def parseItem : P Item := do
   match ← peek with
   | .ident "effect" =>
@@ -325,9 +329,16 @@ private partial def parseItem : P Item := do
       -- `fn(..P) -> R`: for functions of every number of arguments.
       | .fn [.name s [ps]] r => if s == spreadParams then pure ("%Fn", [ps, r]) else pure ("(fn1)", [.name s [ps], r])
       | .fn ps r => pure (s!"(fn{ps.length})", ps ++ [r])
+      -- `impl<'a, T> Tr for &'a [T]`: for slices, the prelude's `SliceRef`
+      -- (as `&[T]` is wherever a type is written).
+      | .ref uniq (.name "%prelude::Array" [t]) life =>
+        pure (if uniq then "SliceMut" else "SliceRef", [.name (life.getD elidedLife) [], t])
       | .ref true t _ => pure ("(&mut)", [t])
       | .ref false t _ => pure ("(&)", [t])
       | _ => failAt "an implementation is for a type made with a name, a tuple, a function or a reference"
+    -- (A lifetime not written, `&mut [A]`: one of the implementation's own,
+    -- as any lifetime.)
+    let params := if written.any (fun t => match t with | .name n [] => n == elidedLife | _ => false) then params ++ [elidedLife] else params
     let mut names : Array String := #[]
     let mut fresh : Array String := #[]
     for (t, j) in written.zipIdx do

@@ -614,9 +614,9 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
     if mine.any r.names.contains then none
     else if r.tables.all fun (p, table) => p.isEmpty || tables.lookup p == some table then some r
     else none
-  -- Whether the program has arrays of a length their type says: then what
-  -- `[a, b, c]` is depends on what is wanted of it.
-  let fixed := ((src :: own.map (·.2)).any saysLength)
+  -- A program's own arrays are of a length their type says, `[T; N]`:
+  -- there is no growable array.
+  let fixed := true
   -- (Each group of its items as an earlier compile parsed it, where it is
   -- where it was, written alike: `itemsKept`.)
   let (items, _, itemsMade) ← Trace.timed "parse: the program's text" fun _ => Syntax.parseKept fix src (base := 1000000) (records := records) (tables := tables)

@@ -355,7 +355,12 @@ def prims : List (String × Prim × Nat) :=
    ("fixed_set", .fixed 3, 3), ("fixed_at", .fixed 2, 2), ("fixed_len", .fixed 4, 1),
    -- How many elements the array a reference points to has: the cell is
    -- asked, and nothing is read out of it.
-   ("arr_len_at", .arrLen, 1)]
+   ("arr_len_at", .arrLen, 1),
+   -- How many elements the `[T; N]` a reference points to has: its
+   -- constructor says, as an array's does.
+   ("fixed_len_at", .arrLen, 1),
+   -- `[a, b, c]`: a `[T; 3]` of them, as many as it is given.
+   ("fixed_make", .arrLen, 0)]
 
 /-- The names that take a scalar to the integer it is held as, and back. -/
 def casts : List String :=

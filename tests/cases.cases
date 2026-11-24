@@ -28,8 +28,8 @@ fn main() -> Int { let a = A { n: 1 }; first(&a) }
 #### case
 #### A field by number of an element that is a reference: read through it.
 struct P(Int)
-fn total(ps: [&P]) -> Int { let mut s = 0; let mut i = 0; while({ i < len_at(&ps) }) { s = s + ps[i].0; i = i + 1 }; s }
-fn main() -> Int { let a = P(2); let b = P(3); total([&a, &b]) }
+fn total(ps: &[&P]) -> Int { let mut s = 0; let mut i = 0; while({ i < ps.len() }) { s = s + ps[i].0; i = i + 1 }; s }
+fn main() -> Int { let a = P(2); let b = P(3); total(&[&a, &b]) }
 #### expect
 5
 #### case
@@ -7021,16 +7021,15 @@ fn main() -> Int { let mut it = It { items: Vec::from_array([5, 6]) }; let mut s
 #### case
 #### Slices and iteration in the library specification's shape.
 use std::vec::{Vec};
-use core::slice::{Slice};
 use core::iter::{Iterator, range, into_iter, fold, collect, map_collect, count, find_map, for_each};
 fn main() -> Int {
     let a = Vec::from_array([10, 20, 30, 40, 50]);
     let s = a.as_slice();
-    say(Slice::len(&s));
-    say(match(Slice::last(&s)) { Some(r) => *r, None => 0 });
-    match(Slice::sub(&s, 1, 4)) {
+    say(s.len());
+    say(match(s.last()) { Some(r) => *r, None => 0 });
+    match(s.sub(1, 4)) {
         Some(mid) =>
-            let mut it = Slice::iter(&mid);
+            let mut it = mid.iter();
             say(fold(&mut it, 0, { (acc, r) => acc + *r })),
         None => say(0 - 1)
     };
@@ -7043,7 +7042,7 @@ fn main() -> Int {
     let mut again = range(1, 4);
     for_each(&mut again, { (x) => total = total + x; });
     say(total);
-    let mut all = Slice::iter(&s);
+    let mut all = s.iter();
     say(count(&mut all));
     0 }
 #### expect
@@ -7058,13 +7057,12 @@ Ok(bb)
 0
 #### case
 use alloc::vec::{Vec};
-use core::slice::{Slice};
 use core::iter::{fold};
 fn main() -> Int {
     let mut v = Vec::new();
     Vec::push(&mut v, 3); Vec::push(&mut v, 4); Vec::push(&mut v, 5);
     let s = Vec::as_slice(&v);
-    let mut it = Slice::iter(&s);
+    let mut it = s.iter();
     fold(&mut it, 0, { (acc, r) => acc + *r }) }
 #### expect
 12
@@ -8775,13 +8773,12 @@ fn main() -> Int { f(Noisy(1), Noisy(2)) }
 struct DropModeMark(Int);
 impl Drop for DropModeMark { fn drop(m: &mut DropModeMark) { () } }
 use alloc::vec::{Vec};
-use core::slice::{Slice};
 use core::iter::{fold};
 fn main() -> Int {
     let mut v = Vec::new();
     Vec::push(&mut v, 3); Vec::push(&mut v, 4); Vec::push(&mut v, 5);
     let s = Vec::as_slice(&v);
-    let mut it = Slice::iter(&s);
+    let mut it = s.iter();
     fold(&mut it, 0, { (acc, r) => acc + *r }) }
 #### expect
 12
@@ -8789,16 +8786,15 @@ fn main() -> Int {
 use std::vec::{Vec};
 struct DropModeMark(Int);
 impl Drop for DropModeMark { fn drop(m: &mut DropModeMark) { () } }
-use core::slice::{Slice};
 use core::iter::{Iterator, range, into_iter, fold, collect, map_collect, count, find_map, for_each};
 fn main() -> Int {
     let a = Vec::from_array([10, 20, 30, 40, 50]);
     let s = a.as_slice();
-    say(Slice::len(&s));
-    say(match(Slice::last(&s)) { Some(r) => *r, None => 0 });
-    match(Slice::sub(&s, 1, 4)) {
+    say(s.len());
+    say(match(s.last()) { Some(r) => *r, None => 0 });
+    match(s.sub(1, 4)) {
         Some(mid) =>
-            let mut it = Slice::iter(&mid);
+            let mut it = mid.iter();
             say(fold(&mut it, 0, { (acc, r) => acc + *r })),
         None => say(0 - 1)
     };
@@ -8811,7 +8807,7 @@ fn main() -> Int {
     let mut again = range(1, 4);
     for_each(&mut again, { (x) => total = total + x; });
     say(total);
-    let mut all = Slice::iter(&s);
+    let mut all = s.iter();
     say(count(&mut all));
     0 }
 #### expect
@@ -9105,7 +9101,6 @@ error: `main` performs effects that nothing handles: {std::host::Console}
 #### case
 #### Bytes read and written a number at a time (library 23).
 use std::vec::{Vec};
-use std::slice::{Slice};
 use std::bytes::{ByteBuf, ByteReader, hex_encode, hex_decode};
 
 fn check(ok: Bool, n: Int) -> Int { if(ok) { 0 } else { say(n); 1 } }
@@ -9399,8 +9394,7 @@ error: in `lose`: `T: Use<[1, ..]>` says a `T` has to be used, but `x` is not us
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-use std::slice::{Slice};
-fn two<'a, T>(s: Slice<'a, T>) -> (Slice<'a, T>, Slice<'a, T>) where T: Use<[0, 1]> { (s, s) }
+fn two<'a, T>(s: &'a [T]) -> (&'a [T], &'a [T]) where T: Use<[0, 1]> { (s, s) }
 fn main() -> Int { 0 }
 #### expect
 0
@@ -10044,7 +10038,6 @@ error: 21:13: in `main`: `value` is not used on every path, but a `std::budget::
 #### case
 #### A cursor, and a parser tried and repeated up to a limit (library 26.1).
 use std::parse::{Cursor, ParseStep, ParseError, attempt, many};
-use std::slice::{Slice};
 
 fn digit<'a>(c: &mut Cursor<'a, char>) -> ParseStep<Int, Str> {
     match(Cursor::next(c)) {
@@ -10091,7 +10084,6 @@ bang
 use std::vec::{Vec};
 use std::graph::{Graph, GraphError, successors, reachable, topological_order, strongly_connected_components};
 use std::budget::{StepBudget};
-use std::slice::{Slice};
 
 // Each node leads to those listed at its place.
 struct Edges { to: Vec<Vec<Int>> }
@@ -10718,7 +10710,6 @@ fn main() -> Int {
 #### Base64, with padding as the options say (library 23).
 use std::vec::{Vec};
 use std::bytes::{base64_encode, base64_decode, Base64Alphabet, Padding, Base64Options, Base64ErrorKind};
-use std::slice::{Slice};
 
 fn enc(text: Str, alphabet: Base64Alphabet, padding: Padding) -> Str {
     let bytes = std::text::utf8(text);
@@ -10838,7 +10829,6 @@ fn main() -> Int { let mut c = Counter { n: 4 }; bump(Some(&mut c)) * 10 + c.n }
 55
 #### case
 use std::vec::{Vec};
-use std::slice::{Slice};
 use std::parse::{Cursor};
 enum Token { Let, Num(Int) }
 struct Spot { token: Token, at: Int }
@@ -12907,7 +12897,6 @@ fn main() -> Int { let mut xs = [1, 2, 3]; bump(&mut xs[len(xs) - 1]) * 10 + xs[
 #### case
 #### `std::fingerprint`, the part quick enough for the Lean machines: the 64-bit hash against its known values, a number written the least byte first, and digests refused for their length.
 use std::fingerprint::{Hasher, Digest256};
-use std::slice::{Slice};
 use std::text::{utf8};
 fn hash_text(text: Str) -> u64 { let mut h = Hasher::new(); let bytes = utf8(text); Hasher::write(&mut h, std::vec::Vec::as_slice(&bytes)); Hasher::finish(&h) }
 fn main() -> Int {
@@ -14063,10 +14052,11 @@ fn main() -> Int { run1(grow, Vec::from_array([5])) }
 #### expect
 2
 #### case
-struct Column<T> { items: [T] }
+use std::vec::{Vec};
+struct Column<T> { items: Vec<T> }
 trait Sys { fn go(Self) -> Int }
 impl<A> Sys for fn(&mut Column<A>) -> () { fn go(f: fn(&mut Column<A>) -> ()) -> Int { 1 } }
-fn grow(c: &mut Column<Int>) { push_at(&mut c.items, 1) }
+fn grow(c: &mut Column<Int>) { c.items.push(1) }
 fn main() -> Int { go(grow) }
 #### expect
 1
@@ -14080,15 +14070,15 @@ fn main() -> Int { go(grow) }
 #### expect
 2
 #### case
-struct Column<T> { items: [T] }
+struct Column<T> { items: [T; 2] }
 trait Get<T> { fn take(&mut Self) -> Column<T>; fn put(&mut Self, Column<T>) }
-impl<T, R> Get<T> for (Column<T>, R) {
-    fn take(w: &mut (Column<T>, R)) -> Column<T> { replace(&mut w.0, Column { items: [] }) }
-    fn put(w: &mut (Column<T>, R), c: Column<T>) { w.0 = c; }
+impl<T, R> Get<T> for (Option<Column<T>>, R) {
+    fn take(w: &mut (Option<Column<T>>, R)) -> Column<T> { match(replace(&mut w.0, None)) { Some(c) => c, None => abort("taken twice") } }
+    fn put(w: &mut (Option<Column<T>>, R), c: Column<T>) { w.0 = Some(c); }
 }
-impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> {
-    fn take(w: &mut (Column<H>, R)) -> Column<T> { <R as Get<T>>::take(&mut w.1) }
-    fn put(w: &mut (Column<H>, R), c: Column<T>) { <R as Get<T>>::put(&mut w.1, c) }
+impl<T, H, R> Get<T> for (Option<Column<H>>, R) where R: Get<T> {
+    fn take(w: &mut (Option<Column<H>>, R)) -> Column<T> { <R as Get<T>>::take(&mut w.1) }
+    fn put(w: &mut (Option<Column<H>>, R), c: Column<T>) { <R as Get<T>>::put(&mut w.1, c) }
 }
 trait System<W> { fn run(Self, &mut W) }
 impl<W, A> System<W> for fn(&mut Column<A>) -> () where W: Get<A> {
@@ -14123,9 +14113,9 @@ fn friction(velocities: &mut Column<Velocity>) {
     while({ i < len_at(&velocities.items) }) { let Velocity(v) = velocities.items[i]; velocities.items[i] = Velocity(v - 1); i = i + 1 }
 }
 fn main() -> Int {
-    let mut world = (Column { items: [Position(0), Position(100)] }, (Column { items: [Velocity(5), Velocity(7)] }, ()));
+    let mut world = (Some(Column { items: [Position(0), Position(100)] }), (Some(Column { items: [Velocity(5), Velocity(7)] }), ()));
     run(integrate, &mut world); run(friction, &mut world); run(integrate, &mut world);
-    let ps = <(Column<Position>, (Column<Velocity>, ())) as Get<Position>>::take(&mut world);
+    let ps = <(Option<Column<Position>>, (Option<Column<Velocity>>, ())) as Get<Position>>::take(&mut world);
     let Position(a) = ps.items[0]; let Position(b) = ps.items[1];
     a * 1000 + b
 }
@@ -14255,87 +14245,87 @@ fn main() -> Int { let mut c = Count { n: 0 }; sum2(&mut c) }
 #### expect
 6
 #### case
-#### `[first, ..rest]`: an array of at least so many elements, the others under a name or let go. A clause's whole pattern; the shorter arrays have to be other clauses'.
-fn sum(xs: [Int]) -> Int { match(xs) { [] => 0, [x, ..rest] => x + sum(rest) } }
-fn main() -> Int { sum([1, 2, 3, 4]) }
+#### `[first, ..rest]`: a slice of at least so many elements, each a reference, the others a slice under a name or left. A clause's whole pattern; the shorter slices have to be other clauses'.
+fn sum(xs: &[Int]) -> Int { match(xs) { [] => 0, [x, ..rest] => *x + sum(rest) } }
+fn main() -> Int { sum(&[1, 2, 3, 4]) }
 #### expect
 10
 #### case
-fn head(xs: [Int]) -> Int { match(xs) { [] => 0, [x, ..] => x } }
-fn main() -> Int { head([5, 6]) + head([]) }
+fn head(xs: &[Int]) -> Int { match(xs) { [] => 0, [x, ..] => *x } }
+fn main() -> Int { head(&[5, 6]) + head(&[]) }
 #### expect
 5
 #### case
-fn last(xs: [Int]) -> Int { match(xs) { [.., x] => x, _ => -1 } }
-fn main() -> Int { last([1, 2, 3]) * 10 + last([]) }
+fn last(xs: &[Int]) -> Int { match(xs) { [.., x] => *x, _ => -1 } }
+fn main() -> Int { last(&[1, 2, 3]) * 10 + last(&[]) }
 #### expect
 29
 #### case
-fn ends(xs: [Int]) -> Int { match(xs) { [a, ..middle, z] => a * 100 + z * 10 + len(middle), [only] => only, _ => 0 } }
-fn main() -> Int { ends([1, 2, 3, 4]) + ends([7]) + ends([]) }
+fn ends(xs: &[Int]) -> Int { match(xs) { [a, ..middle, z] => *a * 100 + *z * 10 + middle.len(), [only] => *only, _ => 0 } }
+fn main() -> Int { ends(&[1, 2, 3, 4]) + ends(&[7]) + ends(&[]) }
 #### expect
 149
 #### case
-fn f(xs: [Int]) -> Int { match(xs) { [a, b, c, ..] => 3, [a, ..] => 1, _ => 0 } }
-fn main() -> Int { f([1, 2, 3, 4]) * 100 + f([1, 2]) * 10 + f([]) }
+fn f(xs: &[Int]) -> Int { match(xs) { [a, b, c, ..] => 3, [a, ..] => 1, _ => 0 } }
+fn main() -> Int { f(&[1, 2, 3, 4]) * 100 + f(&[1, 2]) * 10 + f(&[]) }
 #### expect
 310
 #### case
-fn f(xs: [Int]) -> Int { match(xs) { [..all] => len(all) } }
-fn main() -> Int { f([1, 2, 3]) }
+fn f(xs: &[Int]) -> Int { match(xs) { [..all] => all.len() } }
+fn main() -> Int { f(&[1, 2, 3]) }
 #### expect
 3
 #### case
 struct Box(Int)
-fn first(xs: [Box]) -> Int { match(xs) { [Box(n), ..] => n, [] => 0 } }
-fn main() -> Int { first([Box(4), Box(5)]) }
+fn first(xs: &[Box]) -> Int { match(xs) { [Box(n), ..] => *n, [] => 0 } }
+fn main() -> Int { first(&[Box(4), Box(5)]) }
 #### expect
 4
 #### case
-fn head(xs: [Int]) -> Int { match(xs) { [x, ..] => x } }
-fn main() -> Int { head([5, 6]) }
+fn head(xs: &[Int]) -> Int { match(xs) { [x, ..] => *x } }
+fn main() -> Int { head(&[5, 6]) }
 #### expect
-error: 1:29: in `head`: the clauses of this callable do not cover every case
+error: 1:30: in `head`: the clauses of this callable do not cover every case
 #### case
-fn main() -> Int { let f = { [x, ..rest] => x + len(rest), [] => 0 }; f([4, 1, 1]) }
+fn main() -> Int { let a = [4, 1, 1]; let f = { [x, ..rest] => *x + rest.len(), [] => 0 }; f(a.as_slice()) }
 #### expect
 6
 #### case
-fn join(words: [Str]) -> Str { match(words) { [] => "", [w] => w, [w, ..more] => w ++ " " ++ join(more) } }
-fn main() -> Str { join(["a", "b", "c"]) }
+fn join(words: &[Str]) -> Str { match(words) { [] => "", [w] => *w, [w, ..more] => *w ++ " " ++ join(more) } }
+fn main() -> Str { join(&["a", "b", "c"]) }
 #### expect
 a b c
 #### case
-fn f(xs: [Int]) -> Int { match(xs) { [0] => 10, [x] => x, [a, b, ..] => a + b, [] => -1 } }
-fn main() -> Int { f([0]) + f([5]) + f([1, 2, 3]) + f([]) }
+fn f(xs: &[Int]) -> Int { match(xs) { [0] => 10, [x] => *x, [a, b, ..] => *a + *b, [] => -1 } }
+fn main() -> Int { f(&[0]) + f(&[5]) + f(&[1, 2, 3]) + f(&[]) }
 #### expect
 17
 #### case
-fn f(xs: [Int]) -> Int { match(xs) { [0] => 10, [a, b, ..] => a + b, [] => -1 } }
-fn main() -> Int { f([0]) }
+fn f(xs: &[Int]) -> Int { match(xs) { [0] => 10, [a, b, ..] => *a + *b, [] => -1 } }
+fn main() -> Int { f(&[0]) }
 #### expect
-error: 1:26: in `f`: the clauses of this callable do not cover every case
+error: 1:27: in `f`: the clauses of this callable do not cover every case
 #### case
-fn f(xs: Option<[Int]>) -> Int { match(xs) { Some([x, ..]) => x, _ => 0 } }
-fn main() -> Int { f(Some([4])) }
+fn f(xs: Option<&[Int]>) -> Int { match(xs) { Some([x, ..]) => *x, _ => 0 } }
+fn main() -> Int { f(Some(&[4])) }
 #### expect
-error: 1:34: in `f`: an array pattern with `..` is a whole clause's pattern, `[first, ..rest] => ..`: it is not read inside another pattern, nor where a function's parameters are
+error: 1:35: in `f`: an array pattern with `..` is a whole clause's pattern, `[first, ..rest] => ..`: it is not read inside another pattern, nor where a function's parameters are
 #### case
-fn f([x, ..rest]: [Int]) -> Int { x + len(rest) }
-fn main() -> Int { f([4, 5]) }
+fn f([x, ..rest]: &[Int]) -> Int { *x + rest.len() }
+fn main() -> Int { f(&[4, 5]) }
 #### expect
 error: in `f`: an array pattern with `..` is a whole clause's pattern, `[first, ..rest] => ..`: it is not read inside another pattern, nor where a function's parameters are
 #### case
-fn f(xs: [Int]) -> Int { match(xs) { [.., x, ..] => x, _ => 0 } }
-fn main() -> Int { f([4]) }
+fn f(xs: &[Int]) -> Int { match(xs) { [.., x, ..] => *x, _ => 0 } }
+fn main() -> Int { f(&[4]) }
 #### expect
-error: 1:46: an array pattern has one `..`, found `.`
+error: 1:47: an array pattern has one `..`, found `.`
 #### case
-#### What a rest pattern does not name is destroyed, each element once.
+#### A slice's elements are borrowed: matching takes nothing, and the array is destroyed, each element once, after the call.
 struct Loud(Int)
 impl Drop for Loud { fn drop(l: &mut Loud) { print(l.0) } }
-fn f(xs: [Loud]) -> Int { match(xs) { [a, ..] => 100, [] => 0 } }
-fn main() -> Int { f([Loud(7), Loud(8), Loud(9)]) }
+fn f(xs: &[Loud]) -> Int { match(xs) { [a, ..] => 100, [] => 0 } }
+fn main() -> Int { f(&[Loud(7), Loud(8), Loud(9)]) }
 #### expect
 9
 8
@@ -14344,8 +14334,8 @@ fn main() -> Int { f([Loud(7), Loud(8), Loud(9)]) }
 #### case
 struct Loud(Int)
 impl Drop for Loud { fn drop(l: &mut Loud) { print(l.0) } }
-fn f(xs: [Loud]) -> Int { match(xs) { [a, ..rest] => 100 + len_at(&rest), [] => 0 } }
-fn main() -> Int { f([Loud(7), Loud(8), Loud(9)]) }
+fn f(xs: &[Loud]) -> Int { match(xs) { [a, ..rest] => 100 + rest.len(), [] => 0 } }
+fn main() -> Int { f(&[Loud(7), Loud(8), Loud(9)]) }
 #### expect
 9
 8
@@ -14413,7 +14403,7 @@ fn main() -> Int { let a = Loud(1); let _ = a; 100 }
 1
 100
 #### case
-#### `[T; N]`: an array of exactly `N` elements. `N` is a type that stands for a number (`3`, or a parameter `const N: Int`); a literal is an array or one of exactly so many, whichever is wanted of it, and an array where nothing says.
+#### `[T; N]`: an array of exactly `N` elements. `N` is a type that stands for a number (`3`, or a parameter `const N: Int`); a literal is one of exactly so many: `[a, b]` is a `[T; 2]` and `[]` a `[T; 0]`.
 fn sum(xs: [Int; 3]) -> Int { xs[0] + xs[1] + xs[2] }
 fn main() -> Int { sum([1, 2, 3]) }
 #### expect
@@ -14422,7 +14412,7 @@ fn main() -> Int { sum([1, 2, 3]) }
 fn sum(xs: [Int; 3]) -> Int { xs[0] }
 fn main() -> Int { sum([1, 2]) }
 #### expect
-error: 2:20: in `main`: `Literal` for `Fixed`: expected `3`, found `2`
+error: 2:20: in `main`: argument 1 of `sum`: expected `[Int; 3]`, found `[Int; 2]`
 #### case
 fn count<T, const N: Int>(xs: [T; N]) -> Int { N }
 fn main() -> Int { count([7, 8, 9]) + count([1, 2, 3, 4, 5]) }
@@ -14470,11 +14460,7 @@ fn main() -> Int { dot([1, 2, 3], [4, 5, 6]) }
 fn dot<const N: Int>(a: [Int; N], b: [Int; N]) -> Int { 0 }
 fn main() -> Int { dot([1, 2, 3], [4, 5]) }
 #### expect
-error: 2:20: in `main`: `Literal` for `Fixed`: expected `3`, found `2`
-#### case
-fn main() -> Int { let xs: [Int; 2] = [1, 2]; let ys = push(to_array(xs), 3); len(ys) }
-#### expect
-3
+error: 2:20: in `main`: argument 2 of `dot`: expected `[Int; 3]`, found `[Int; 2]`
 #### case
 use std::vec::{Vec};
 fn main() -> Int { let xs = [0; 4]; let mut ys = Vec::from_array([1, 2]); ys.push(3); len(xs) + ys.len() }
@@ -14485,11 +14471,6 @@ fn sum(xs: [Int; 3]) -> Int { xs[0] }
 fn main() -> Int { let ys: [Int; 2] = [1, 2]; sum(ys) }
 #### expect
 error: 2:47: in `main`: argument 1 of `sum`: expected `[Int; 3]`, found `[Int; 2]`
-#### case
-fn sum(xs: [Int; 3]) -> Int { xs[0] }
-fn main() -> Int { let ys = push([1, 2], 3); sum(ys) }
-#### expect
-error: 2:46: in `main`: argument 1 of `sum`: expected `[Int; 3]`, found `[Int]`
 #### case
 trait Total { fn total(Self) -> Int }
 impl<const N: Int> Total for [Int; N] where N: Known {
@@ -14730,10 +14711,6 @@ right left
 fn main() -> Int { let xs: [Int; 3] = [1, 2, 3]; let [a, b] = xs; a + b }
 #### expect
 error: 1:50: in `main`: a tuple pattern: expected `(_, _)`, found `(Int, Int, Int)`
-#### case
-fn main() -> Int { let xs = push([1, 2], 3); let n: [Int; 1] = [0]; let [a, b, c] = xs; a }
-#### expect
-error: 1:69: in `main`: `[Int]` does not implement `Elements`
 #### case
 struct Loud(Int)
 impl Drop for Loud { fn drop(l: &mut Loud) { print(l.0) } }
@@ -15339,10 +15316,11 @@ fn main() -> Int { let w = wrap((1, "a", 3)); match(w.2) { Some(n) => n, None =>
 #### expect
 3
 #### case
-trait Texts { fn texts(Self) -> [Str] }
-impl Texts for () { fn texts(t: ()) -> [Str] { [] } }
-impl<H, ..R> Texts for (H, ..R) where H: Show, (..R): Texts { fn texts(t: (H, ..R)) -> [Str] { let (h, ..r) = t; let rest = texts((..r)); let mut out = [show(h)]; let mut i = 0; while({ i < len_at(&rest) }) { out = push(out, rest[i]); i = i + 1 }; out } }
-fn main() -> Int { let xs = texts((1, "b", 3)); print(xs[1]); len(xs) }
+use std::vec::{Vec};
+trait Texts { fn texts(Self) -> Vec<Str> }
+impl Texts for () { fn texts(t: ()) -> Vec<Str> { Vec::new() } }
+impl<H, ..R> Texts for (H, ..R) where H: Show, (..R): Texts { fn texts(t: (H, ..R)) -> Vec<Str> { let (h, ..r) = t; let rest = texts((..r)); let mut out = Vec::new(); out.push(show(h)); let mut i = 0; while({ i < rest.len() }) { out.push(rest[i]); i = i + 1 }; out } }
+fn main() -> Int { let xs = texts((1, "b", 3)); print(xs[1]); xs.len() }
 #### expect
 b
 3
@@ -15557,7 +15535,7 @@ fn main() -> Int { <(Int, Int, Int) as Size<Int>>::size(&5) }
 #### A query over columns as head and rest, its columns as nested pairs
 
 struct Entity { index: Int, generation: Int }
-struct Column<T> { dense: [T], owners: [Entity], slots: [Int] }
+struct Column<T> { dense: [T; 2], owners: [Entity; 2], slots: [Int; 2] }
 fn slot_of<T>(column: &Column<T>, entity: Entity) -> Int {
     if(entity.index < len_at(&column.slots)) {
         let at = column.slots[entity.index];
@@ -15608,7 +15586,7 @@ struct Position(Int)
 struct Velocity(Int)
 
 
-struct Query<Q, St = <Q as Item>::Store> { store: St, entities: [Entity] }
+struct Query<Q, St = <Q as Item>::Store> { store: St, entities: [Entity; 2] }
 
 fn each<Q>(query: &mut Query<Q>, f: for<'a> fn(Entity, Q::Got<'a>)) where Q: Item {
     let mut i = 0;
@@ -15627,7 +15605,7 @@ fn main() -> Int {
     let e0 = Entity { index: 0, generation: 0 };
     let e1 = Entity { index: 1, generation: 0 };
     let ps = Column { dense: [Position(1), Position(2)], owners: [e0, e1], slots: [0, 1] };
-    let vs = Column { dense: [Velocity(10)], owners: [e1], slots: [0 - 1, 0] };
+    let vs = Column { dense: [Velocity(10), Velocity(0)], owners: [e1, e1], slots: [0 - 1, 0] };
     let mut query: Query<(&mut Position, &Velocity)> = Query { store: (ps, (vs, ())), entities: [e0, e1] };
     movement(&mut query);
     movement(&mut query);
@@ -15717,10 +15695,10 @@ fn main() -> Int {
 111
 #### case
 #### Several patterns in a clause take one tuple apart; where a callable of two arguments is wanted, they are its arguments.
-fn each(xs: [(Int, Int)], f: fn((Int, Int)) -> ()) { let mut i = 0; while({ i < len_at(&xs) }) { f(xs[i]); i = i + 1 } }
+fn each(xs: &[(Int, Int)], f: fn((Int, Int)) -> ()) { let mut i = 0; while({ i < xs.len() }) { f(xs[i]); i = i + 1 } }
 fn main() -> Int {
     let mut s = 0;
-    each([(1, 2), (3, 4)]) { a, mut b => b = b + 1; s = s + a * b };
+    each(&[(1, 2), (3, 4)]) { a, mut b => b = b + 1; s = s + a * b };
     s
 }
 #### expect
