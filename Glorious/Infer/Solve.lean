@@ -27,6 +27,19 @@ structure Around where
   cancels : Array (ITy × IRow × Nat × Bool)
   pending : Array (ITy × IRow × Nat)
 
+/-- The type of a length written as a type (`B1<B0<Z>>` is five), as
+inference has a `[T; N]`'s: `lenBase + n` where the number is written out,
+and otherwise what `other` makes of it (a type parameter's unknown). -/
+partial def lengthTy (other : TypeExpr → M ITy) (t : TypeExpr) : M ITy := do
+  let rec number : TypeExpr → Option Nat
+    | .name "Z" [] => some 0
+    | .name "B0" [n] => (number n).map (2 * ·)
+    | .name "B1" [n] => (number n).map (2 * · + 1)
+    | _ => none
+  match number t with
+  | some n => pure (.data (lenBase + n) [])
+  | none => other t
+
 /-- A type a function writes of a parameter, as a type inference starts
 from: a declared type, a whole number, a tuple or a reference of such, each
 of its type parameters one unknown (`vars`); anything else an unknown. -/
@@ -38,6 +51,10 @@ partial def writtenTy (vars : List (String × ITy)) : TypeExpr → M ITy
     let s ← get
     if s.arrayType == some x then
       return .data arrayName (← args.mapM (writtenTy vars))
+    -- (A `[T; N]`: of the element's type and the length's.)
+    if x == "Fixed" then
+      if let [t, n] := args then
+        return .data fixedName [← writtenTy vars t, ← lengthTy (writtenTy vars) n]
     match s.typeNames.idxOf? x with
     | some id =>
       -- (Of a type with lifetimes, the regions are not said here.)
@@ -477,6 +494,18 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
     | .cast b into, [a] =>
       if into then do unify (← atomTy Γ a) .int; pure (.scalar b, none)
       else do unify (← atomTy Γ a) (.scalar b); pure (.int, none)
+    -- (A `[T; N]`: of its elements' type and its length, a type of its own.)
+    | .fixed 0, [a, .int n] =>
+      unify (← atomTy Γ a) array
+      pure (.data fixedName [t, .data (lenBase + n.toNat) []], none)
+    | .fixed op, a :: rest => do
+      let fixed := ITy.data fixedName [t, ← freshTy]
+      unify (← atomTy Γ a) fixed
+      match op, rest with
+      | 1, [] => pure (array, none)
+      | 2, [i] => do unify (← atomTy Γ i) .int; pure (t, none)
+      | 3, [i, v] => do unify (← atomTy Γ i) .int; unify (← atomTy Γ v) t; pure (fixed, none)
+      | _, _ => throw "an intrinsic of `[T; N]` is given what it does not take"
     | _, _ =>
       for a in args do
         unify (← atomTy Γ a) .int
@@ -484,6 +513,11 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
   | .construct tag args => do
     let ts ← args.mapM (atomTy Γ)
     if tag == 0 then pure (.tuple ts, none)
+    else if fixedBase ≤ tag then
+      let t ← freshTy
+      for s in ts do
+        unify s t
+      pure (.data fixedName [t, .data (lenBase + (tag - fixedBase)) []], none)
     else if arrayBase ≤ tag then
       let t ← freshTy
       for s in ts do
@@ -705,6 +739,12 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
         -- A field of one of a type's several constructors.
         accRgn self ρ
         match args with
+        -- (Into a `[T; N]`, at a place found when the program runs.)
+        | [_, ix, .int (-1)] =>
+          unify (← atomTy Γ ix) .int
+          let elem ← freshTy
+          unify t (.ref ρ (.data fixedName [elem, ← freshTy]))
+          pure (.ref ρ elem)
         | [_, .int i, .int built] =>
           if built ≤ 0 || arrayBase ≤ built.toNat then
             throw "a reference into a constructor's field names no constructor"

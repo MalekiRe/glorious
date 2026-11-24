@@ -162,7 +162,13 @@ enum Prim {
     ArrPop,
     /// A whole number seen as a scalar, or back: the value as it is.
     Cast,
+    /// A `[T; N]` made of an array of the length, and an array made of one.
+    FixedOf,
+    FixedToArray,
 }
+
+/// Where the constructors of `[T; N]` start (`Glorious.fixedBase`).
+const FIXED_BASE: u64 = 6917529027641081856;
 
 /// How a value is laid out in memory (`Glorious.Lay`).
 #[derive(Debug, Clone)]
@@ -402,6 +408,14 @@ impl Reader<'_> {
                 let _into = self.byte()?;
                 Ok(Prim::Cast)
             }
+            // `[T; N]`'s: read and written at a place as an array is.
+            46 => match self.nat()? {
+                0 => Ok(Prim::FixedOf),
+                1 => Ok(Prim::FixedToArray),
+                2 => Ok(Prim::ArrGet),
+                3 => Ok(Prim::ArrSet),
+                op => Err(format!("unknown intrinsic of `[T; N]` {op}")),
+            },
             t => Err(format!("unknown intrinsic {t}")),
         }
     }
@@ -1405,6 +1419,19 @@ impl Vm {
                     Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop => {
                         array_prim(*p, args)
                     }
+                    Prim::FixedOf | Prim::FixedToArray => {
+                        let mut args = args.into_iter();
+                        let Some(Value::Data(d)) = args.next() else { return wrong() };
+                        let n = d.fields.len();
+                        if let Prim::FixedOf = p {
+                            if !matches!(args.next(), Some(Value::Int(k)) if k == n as i128) {
+                                return wrong();
+                            }
+                        }
+                        let base = if let Prim::FixedOf = p { FIXED_BASE } else { ARRAY_BASE };
+                        let (_, fields) = fields_of(d);
+                        Ok(data(base + n as u64, fields))
+                    }
                     Prim::Cast => args.into_iter().next().ok_or(Stop::Wrong),
                     _ => prim(*p, &args),
                 }
@@ -1705,8 +1732,8 @@ impl Vm {
             {
                 let step = match rest {
                     [Value::Int(i)] if *i >= 0 => (0, usize::try_from(*i).unwrap_or(usize::MAX)),
-                    [Value::Int(i), Value::Int(built)] if *i >= 0 && *built >= 0 => {
-                        (*built as u64 + 1, usize::try_from(*i).unwrap_or(usize::MAX))
+                    [Value::Int(i), Value::Int(built)] if *i >= 0 && *built >= -1 => {
+                        ((*built + 1) as u64, usize::try_from(*i).unwrap_or(usize::MAX))
                     }
                     _ => return wrong(),
                 };
@@ -1738,6 +1765,13 @@ impl Vm {
                     _ => -1,
                 }))
             }
+            (MemOp::FocusL(l), [Value::Ref(a, _), Value::Int(i), Value::Int(-1)]) => match &*l {
+                Lay::Fields(_, fs) => {
+                    let (off, _) = fs.get(usize::try_from(*i).map_err(|_| Stop::Wrong)?).ok_or(Stop::Wrong)?;
+                    Ok(Value::Ref(*a + off, None))
+                }
+                _ => wrong(),
+            },
             (MemOp::FocusL(l), [Value::Ref(a, _), Value::Int(i)]) => match &*l {
                 Lay::Fields(_, fs) => {
                     let (off, _) = fs.get(usize::try_from(*i).map_err(|_| Stop::Wrong)?).ok_or(Stop::Wrong)?;
@@ -1832,12 +1866,13 @@ impl Vm {
             // A field of one of a type's several constructors: the step
             // says which, and leads nowhere in a value built by another.
             (MemOp::Focus, [Value::Ref(a, p), Value::Int(i), Value::Int(built)]) => {
-                if *i < 0 || *built < 0 {
+                // (`-1`: a place in a `[T; N]`, as in an array.)
+                if *i < 0 || *built < -1 {
                     return wrong();
                 }
                 let i = usize::try_from(*i).unwrap_or(usize::MAX);
                 let mut path = steps(p).to_vec();
-                path.push((*built as u64 + 1, i));
+                path.push(((*built + 1) as u64, i));
                 Ok(Value::Ref(*a, Some(path.into())))
             }
             (MemOp::Tag, [Value::Ref(a, p), ..]) => {
@@ -2285,7 +2320,8 @@ fn prim(p: Prim, args: &[Value]) -> Step<Value> {
         }
         Prim::Below => (0 <= a && a < b).then_some(a),
         // Of two integers these have no meaning.
-        Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop | Prim::Cast => None,
+        Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop | Prim::Cast
+        | Prim::FixedOf | Prim::FixedToArray => None,
     };
     result.map(Value::Int).ok_or(Stop::Wrong)
 }

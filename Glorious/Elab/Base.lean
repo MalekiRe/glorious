@@ -350,6 +350,9 @@ def prims : List (String × Prim × Nat) :=
    -- The reference to a place of an array, from a reference to the array:
    -- not an intrinsic of the machines either, but an operation on memory.
    ("arr_at", .arrLen, 2),
+   -- (Of `[T; N]`.)
+   ("fixed_of", .fixed 0, 2), ("fixed_to_array", .fixed 1, 1), ("fixed_get", .fixed 2, 2),
+   ("fixed_set", .fixed 3, 3), ("fixed_at", .fixed 2, 2),
    -- How many elements the array a reference points to has: the cell is
    -- asked, and nothing is read out of it.
    ("arr_len_at", .arrLen, 1)]

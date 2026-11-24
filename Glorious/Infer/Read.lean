@@ -594,6 +594,11 @@ partial def resolveType (typeNames params : List String) (locals : List (String 
       else if Syntax.isScalar x then pure (.scalar (Syntax.scalarBits x))
       else if (← get).arrayType == some x then
         pure (.data arrayName (← args.mapM (resolveType typeNames params locals)))
+      else if x == "Fixed" && args.length == 2 then
+        match args with
+        | [t, n] => pure (.data fixedName [← resolveType typeNames params locals t,
+            ← lengthTy (resolveType typeNames params locals) n])
+        | _ => freshTy
       else
         match typeNames.idxOf? x with
         | some id => do

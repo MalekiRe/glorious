@@ -343,22 +343,24 @@ impl<N> Known for B1<N> where N: Known { const VALUE: Int = int_add(int_mul(2, N
 
 // `[T; N]`: an array of exactly `N` elements.
 struct Fixed<T, N>(Array<T>)
+// (Built by the machines, as an array is, with the length in its type: the
+// field written here only says what it holds.)
 impl<T, N> Index for Fixed<T, N> {
     type Elem = T;
-    fn index(a: Fixed<T, N>, i: Int) -> T { arr_get(a.0, i) }
-    fn index_set(a: Fixed<T, N>, i: Int, v: T) -> Fixed<T, N> { Fixed(arr_set(a.0, i, v)) }
+    fn index(a: Fixed<T, N>, i: Int) -> T { fixed_get(a, i) }
+    fn index_set(a: Fixed<T, N>, i: Int, v: T) -> Fixed<T, N> { fixed_set(a, i, v) }
 }
 impl<T, N> Len for Fixed<T, N> where N: Known { fn len(a: Fixed<T, N>) -> Int { N::VALUE } }
 // Its elements as an array that can grow.
-fn to_array<T, N>(a: Fixed<T, N>) -> Array<T> { a.0 }
+fn to_array<T, N>(a: Fixed<T, N>) -> Array<T> { fixed_to_array(a) }
 // In memory, its elements one after another, as Rust lays out `[T; N]`.
 impl<T, N> Layout for Fixed<T, N> where T: Layout, N: Known {
     const SIZE: Int = int_mul(N::VALUE, size_of<T>());
     const ALIGN: Int = align_of<T>();
 }
 impl<T, N> Repr for Fixed<T, N> where T: Repr, T: Layout, N: Known {
-    unsafe fn repr_store(at: usize, value: Fixed<T, N>) { fixed_store(at, value.0, N::VALUE) }
-    unsafe fn repr_load(at: usize) -> Fixed<T, N> { Fixed(fixed_load(at, 0, N::VALUE, arr_new())) }
+    unsafe fn repr_store(at: usize, value: Fixed<T, N>) { fixed_store(at, fixed_to_array(value), N::VALUE) }
+    unsafe fn repr_load(at: usize) -> Fixed<T, N> { fixed_of(fixed_load(at, 0, N::VALUE, arr_new()), N::VALUE) }
 }
 // (The last of so many elements written after the others, and the rest.)
 unsafe fn fixed_store<T>(at: usize, items: [T], n: Int) where T: Repr, T: Layout {
@@ -379,13 +381,13 @@ unsafe fn fixed_load<T>(at: usize, i: Int, n: Int, out: [T]) -> [T] where T: Rep
     }
 }
 // `N` of one value.
-fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { Fixed(array_repeat(x, N::VALUE)) }
+fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { fixed_of(array_repeat(x, N::VALUE), N::VALUE) }
 
 // What `[a, b, c]` is in a program that has arrays of a fixed length: an
 // array, or one of exactly three. Where nothing says which, an array.
 trait Literal<T, N> { fn of_items(Array<T>) -> Self }
 #[fallback] impl<T, N> Literal<T, N> for Array<T> { fn of_items(items: [T]) -> Array<T> { items } }
-impl<T, N> Literal<T, N> for Fixed<T, N> { fn of_items(items: [T]) -> Fixed<T, N> { Fixed(items) } }
+impl<T, N> Literal<T, N> for Fixed<T, N> where N: Known { fn of_items(items: [T]) -> Fixed<T, N> { fixed_of(items, N::VALUE) } }
 fn array_literal<N, T, A>(items: Array<T>) -> A where A: Literal<T, N> {
     <A as Literal<T, N>>::of_items(items)
 }
@@ -458,12 +460,12 @@ impl<T> Indexed for Array<T> where T: Use<[1, 1]> {
     fn size_at(a: &Array<T>) -> Int { arr_len_at(a) }
 }
 impl<T> IndexedMut for Array<T> where T: Use<[1, 1]> { fn place_at(i: Int, a: &mut Array<T>) -> &mut <Array<T> as Indexed>::Element { arr_at(a, i) } }
-impl<T, N> Indexed for Fixed<T, N> {
+impl<T, N> Indexed for Fixed<T, N> where N: Known {
     type Element = T;
-    fn element_at(a: &Fixed<T, N>, i: Int) -> &T { arr_at(&a.0, i) }
-    fn size_at(a: &Fixed<T, N>) -> Int { arr_len_at(&a.0) }
+    fn element_at(a: &Fixed<T, N>, i: Int) -> &T { fixed_at(a, i) }
+    fn size_at(a: &Fixed<T, N>) -> Int { N::VALUE }
 }
-impl<T, N> IndexedMut for Fixed<T, N> { fn place_at(i: Int, a: &mut Fixed<T, N>) -> &mut <Fixed<T, N> as Indexed>::Element { arr_at(&mut a.0, i) } }
+impl<T, N> IndexedMut for Fixed<T, N> where N: Known { fn place_at(i: Int, a: &mut Fixed<T, N>) -> &mut <Fixed<T, N> as Indexed>::Element { fixed_at(a, i) } }
 // A reference to one is one: `a[i]` of an `a: &mut [T]` is of what it is to.
 impl<'a, A> Indexed for &'a A where A: Indexed {
     type Element = A::Element;

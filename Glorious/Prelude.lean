@@ -137,7 +137,7 @@ private def fixedElements : String :=
       | xs => s!"({", ".intercalate xs})"
     -- (The last element comes off first.)
     let pops := places.reverse.map fun i =>
-      s!"let (r{i}, x{i}) = arr_pop({if i + 1 == n then "a.0" else s!"r{i + 1}"}, 0); "
+      s!"let (r{i}, x{i}) = arr_pop({if i + 1 == n then "fixed_to_array(a)" else s!"r{i + 1}"}, 0); "
     s!"impl<T> Elements for Fixed<T, {number n}> \{
     type Each = {tuple (places.map fun _ => "T")};
     fn elements(a: Fixed<T, {number n}>) -> {tuple (places.map fun _ => "T")} \{ {String.join pops}{tuple (places.map fun i => s!"x{i}")} }

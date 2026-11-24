@@ -879,7 +879,10 @@ def argsFor (arity : Nat) (lifetimes : List Bool) : M (List ITy) :=
 
 /-- The type a constructor builds and its field types, at fresh type arguments. -/
 def instCtor (tag : Nat) : M (ITy × List ITy) := do
-  -- The constructor that builds an array of so many elements.
+  -- The constructor that builds a `[T; N]`, or an array, of so many elements.
+  if fixedBase ≤ tag then
+    let t ← freshTy
+    return (.data fixedName [t, .data (lenBase + (tag - fixedBase)) []], List.replicate (tag - fixedBase) t)
   if arrayBase ≤ tag then
     let t ← freshTy
     return (.data arrayName [t], List.replicate (tag - arrayBase) t)

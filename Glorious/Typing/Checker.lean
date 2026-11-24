@@ -210,9 +210,17 @@ theorem arrayFields_inst (tag : Nat) (args : List Ty) (θ : List Rgn) :
   | _ :: _ :: _ => rfl
 %proof-/
 
+/-- The field types of the constructor of a `[T; N]` (`fixedName` at the
+element's type and the length's type): `N` of the element's. -/
+def fixedFields (tag : Nat) : List Ty → Option (List Ty)
+  | [t, .data len []] =>
+    if lenBase ≤ len && tag == fixedBase + (len - lenBase) then some (List.replicate (len - lenBase) t) else none
+  | _ => none
+
 /-- The field types of a constructor of a declared type, or of the type of arrays. -/
 def Cert.fields (C : Cert) (tag name : Nat) (args : List Ty) : Option (List Ty) :=
-  if name = arrayName then arrayFields tag args
+  if name = fixedName then fixedFields tag args
+  else if name = arrayName then arrayFields tag args
   else (findData C.datas name args).bind (·.lookup tag)
 
 def dataDup (ds : List DataInst) (name : Nat) (args : List Ty) : Bool :=
@@ -228,7 +236,10 @@ def dupTy (C : Cert) : Ty → Bool
   | .int => true
   | .scalar _ => true
   | .tuple fs => dupTys C fs
-  | .data name args => if name = arrayName then dupTys C args else dataDup C.datas name args
+  | .data name args =>
+    if name = arrayName then dupTys C args
+    else if name = fixedName then (match args with | t :: _ => dupTy C t | [] => true)
+    else dataDup C.datas name args
   | .fn _ _ _ _ once _ _ => !once
   | .ref _ _ => true
   | .never => true
@@ -521,6 +532,10 @@ def fieldsOf (C : Cert) : Ty → Option (List Ty)
   | .data name args =>
     -- An array's fields are not all there is to read: it may have none.
     if name = arrayName then none
+    else if name = fixedName then
+      match args with
+      | [_, .data len []] => fixedFields (fixedBase + (len - lenBase)) args
+      | _ => none
     else
       match findData C.datas name args with
       | some ((_, Fs) :: rest) => if rest.all (fun c => c.2 == Fs) then some Fs else none
@@ -753,6 +768,7 @@ theorem closesFit_sound {Γ : TEnv} {fn : Nat} {captures : List Atom} {θ : List
 /-- The type of an array's elements, if this is the type of arrays of some. -/
 def arrayElem : Ty → Option Ty
   | .data name [t] => if name = arrayName then some t else none
+  | .data name [t, _] => if name = fixedName then some t else none
   | _ => none
 
 /-%proof (commented out while the machines become bytes)
@@ -895,6 +911,28 @@ def checkPrim (C : Cert) (Γ : TEnv) (p : Prim) (args : List Atom) (σ : Ty) : B
     match args with
     | [a] => if into then atomTy Γ a == some .int && σ == .scalar b else atomTy Γ a == some (.scalar b) && σ == .int
     | _ => false
+  -- `[T; N]`: made of an array of the length, made an array, read at a
+  -- place and written at one.
+  | .fixed op =>
+    match op, args with
+    | 0, [a, .int n] =>
+      match atomTy Γ a, σ with
+      | some A, .data name [t, .data len []] =>
+        name == fixedName && arrayElem A == some t && len == lenBase + n.toNat && dupOk C σ
+      | _, _ => false
+    | 1, [a] =>
+      match atomTy Γ a, arrayElem σ with
+      | some A, some t => arrayElem A == some t && σ == .data arrayName [t] && dupOk C σ
+      | _, _ => false
+    | 2, [a, i] =>
+      match atomTy Γ a with
+      | some T => arrayElem T == some σ && atomTy Γ i == some .int && dupOk C σ
+      | none => false
+    | 3, [a, i, v] =>
+      match arrayElem σ with
+      | some t => atomTy Γ a == some σ && atomTy Γ i == some .int && atomTy Γ v == some t && dupOk C σ
+      | none => false
+    | _, _ => false
   | _ =>
     match args with
     | [a, b] => atomTy Γ a == some .int && atomTy Γ b == some .int && σ == .int
@@ -1357,6 +1395,14 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
       | some (.ref r σ) =>
         match focusTy C Γ σ ix with
         | some σ' => regionOk C ϕ r && checkTm C ϕ (Γ ++ [.ref r σ']) body hs τ ε
+        | none => false
+      | _ => false
+    -- (A place in a `[T; N]` found when the program runs.)
+    | .focus, [a, ix, .int (-1)] =>
+      match atomTy Γ a with
+      | some (.ref r σ) =>
+        match arrayElem σ with
+        | some σ' => regionOk C ϕ r && atomTy Γ ix == some .int && checkTm C ϕ (Γ ++ [.ref r σ']) body hs τ ε
         | none => false
       | _ => false
     | .focus, [a, .int (.ofNat i), .int (.ofNat built)] =>

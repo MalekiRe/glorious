@@ -15689,3 +15689,17 @@ abcdé
 héllo
 abc
 1636
+#### case
+#### `[T; N]` is its elements inline, changed at a place found when the
+#### program runs; a function generic in the length is one for each length.
+fn total<N>(a: [Int; N]) -> Int where N: Known { let mut s = 0; let mut i = 0; while({ i < len(a) }) { s = s + a[i]; i = i + 1 }; s }
+fn main() -> Int {
+    let mut a: [Int; 3] = [1, 2, 3];
+    a[1] = 20;
+    let r = &mut a[2];
+    *r = 30;
+    let b: [Int; 2] = [100, 200];
+    total(a) * 1000 + total(b)
+}
+#### expect
+51300

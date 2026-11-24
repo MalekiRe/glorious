@@ -106,6 +106,7 @@ def prim : Bytes → Option (Prim × Bytes)
     match bs with
     | k :: bs => some (.cast b (k == 1), bs)
     | [] => none
+  | 46 :: bs => (nat bs).map fun (op, bs) => (.fixed op, bs)
   | _ => none
 
 def rhs : Bytes → Option (Rhs × Bytes)

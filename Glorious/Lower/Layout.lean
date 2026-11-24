@@ -58,6 +58,14 @@ partial def layOf (C : Cert) (seen : List (Nat × List Ty)) : Ty → Laid
     ⟨.fields 0 at_, alignUp size align, align⟩
   | .data name args =>
     if name == arrayName then ⟨.held, 24, 8⟩
+    -- (A `[T; N]`: its elements one after another, inline.)
+    else if name == fixedName then
+      match args with
+      | [t, .data len []] =>
+        let n := len - lenBase
+        let (at_, size, align) := placeFields 0 (List.replicate n (layOf C seen t))
+        ⟨.fields (fixedBase + n) at_, alignUp size align, align⟩
+      | _ => ⟨.held, 8, 8⟩
     else if name == anyName then ⟨.held, 8, 8⟩
     else if seen.contains (name, args) || holdsItself C name args then ⟨.held, 8, 8⟩
     else

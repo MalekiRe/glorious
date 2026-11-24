@@ -145,7 +145,23 @@ fn rhs(out: &mut Vec<u8>, r: &Rhs) {
         }
         Rhs::Prim(p, xs) => {
             out.push(1);
-            out.push(*p as u8);
+            match p {
+                // (Those written with what they are of.)
+                Prim::Cast => {
+                    out.push(45);
+                    int(out, 0);
+                    out.push(0);
+                }
+                Prim::FixedOf => {
+                    out.push(46);
+                    nat(out, 0);
+                }
+                Prim::FixedToArray => {
+                    out.push(46);
+                    nat(out, 1);
+                }
+                p => out.push(*p as u8),
+            }
             atoms(out, xs);
         }
         Rhs::Construct(tag, xs) => {

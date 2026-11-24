@@ -66,6 +66,14 @@ called, as one read from a shared cell): no type declares it, so it is held
 by the machine, whatever it is. -/
 def anyName : Nat := arrayName + 1
 
+/-- `[T; N]`: the constructor that builds one of `n` elements is
+`fixedBase + n`, as an array's is `arrayBase + n` (its values are built and
+read as arrays' are); its type is `fixedName` at the element's type and the
+length, the type `lenBase + n` for `n`. -/
+def fixedBase : Nat := 6917529027641081856
+def fixedName : Nat := arrayName + 2
+def lenBase : Nat := arrayName + 3
+
 /-- The locals of one activation, oldest first. -/
 abbrev Env := List Value
 
@@ -170,6 +178,10 @@ inductive Prim where
   /-- A whole number seen as a scalar of so many bits (`into`), or a scalar
   as the whole number it is held as: the value as it is, of another type. -/
   | cast (bits : Int) (into : Bool)
+  /-- Of `[T; N]`: `0` one made of an array of exactly the length given,
+  `1` an array made of one, `2` the element at a place, `3` one with
+  another element at a place. -/
+  | fixed (op : Nat)
   deriving Hashable, BEq
 
 /-- A computation that produces a value without transferring control. -/
@@ -441,6 +453,12 @@ def Prim.eval : Prim → List Value → Option Value
     match fields.getLast? with
     | some last => some (.data 0 [.data (tag - 1) fields.dropLast, last])
     | none => none
+  | .fixed 0, [.data _ fields, .int n] =>
+    if n == fields.length then some (.data (fixedBase + fields.length) fields) else none
+  | .fixed 1, [.data _ fields] => some (.data (arrayBase + fields.length) fields)
+  | .fixed 2, [.data _ fields, .int i] => if 0 ≤ i then fields[i.toNat]? else none
+  | .fixed 3, [.data tag fields, .int i, v] =>
+    if 0 ≤ i ∧ i.toNat < fields.length then some (.data tag (fields.set i.toNat v)) else none
   | _, _ => none
 
 def Atom.eval (ρ : Env) : Atom → Option Value

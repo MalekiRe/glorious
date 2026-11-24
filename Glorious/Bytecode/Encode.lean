@@ -84,6 +84,7 @@ def prim : Prim → Bytes
   | .arrPush => [43]
   | .arrPop => [44]
   | .cast b into => 45 :: int b ++ [if into then 1 else 0]
+  | .fixed op => 46 :: nat op
 
 def rhs : Rhs → Bytes
   | .atom a => 0 :: atom a

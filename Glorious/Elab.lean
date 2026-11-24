@@ -487,6 +487,15 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
             | _ => pure i
           emit (.mem .focus [r, at_])
         | _ => throw "intrinsic `arr_at` takes 2 arguments"
+      else if x == "fixed_at" then
+        -- (A place in a `[T; N]`: `-1` says so.)
+        match atoms with
+        | [r, i] =>
+          let at_ ← match i with
+            | .int _ => emit (.let_ (.atom i))
+            | _ => pure i
+          emit (.mem .focus [r, at_, .int (-1)])
+        | _ => throw "intrinsic `fixed_at` takes 2 arguments"
       else if x == "arr_len_at" then
         -- The constructor that builds an array of `n` elements is the first
         -- of them and `n`.

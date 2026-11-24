@@ -1063,6 +1063,29 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
     | "arr_pop" =>
       checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
       pure (.tuple [array t, t])
+    -- Of `[T; N]`: one of an array of exactly the length, an array of one,
+    -- the element at a place, one with another there, and a place in one.
+    | "fixed_of" =>
+      let n ← freshTy
+      checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
+      pure (.con "Fixed" [t, n])
+    | "fixed_to_array" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [.con "Fixed" [t, ← freshTy]] args call
+      pure (array t)
+    | "fixed_get" =>
+      checkArgs scope amb s!"intrinsic `{x}`" [.con "Fixed" [t, ← freshTy], .int] args call
+      mustDrop t "reading a place of a `[T; N]` lets go of the rest of it"
+      pure t
+    | "fixed_set" =>
+      let n ← freshTy
+      checkArgs scope amb s!"intrinsic `{x}`" [.con "Fixed" [t, n], .int, t] args call
+      mustDrop t "putting a value at a place of a `[T; N]` lets go of what was there"
+      pure (.con "Fixed" [t, n])
+    | "fixed_at" =>
+      let how ← freshTy
+      let cap ← freshCap
+      checkArgs scope amb s!"intrinsic `{x}`" [.ref how (.con "Fixed" [t, ← freshTy]) cap, .int] args call
+      pure (.ref how t cap)
     | _ => throw s!"`{x}`: an intrinsic not declared; this is a compiler defect"
   | .pack name => do
     let ts ← args.toList.mapM fun _ => freshTy

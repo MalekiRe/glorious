@@ -339,6 +339,10 @@ def MemOp.evalLaid (m : Memory) (held : Held) : MemOp → List Value → Option 
       pure (.int (tagAt (← heldAt m held a').2 rest), m, held)
     | some (a', l', _) => pure (.int ((l'.tagAt m a').map Int.ofNat |>.getD (-1)), m, held)
     | none => pure (.int (-1), m, held)
+  | .focusL (.fields _ fs), [.ref a b [], .int i, .int (-1)] => do
+    let (at_, _) ← fs[i.toNat]?
+    if i < 0 then none
+    pure (.ref (a + at_) b [], m, held)
   | .focusL (.fields _ fs), [.ref a b [], .int i] => do
     let (at_, _) ← fs[i.toNat]?
     if i < 0 then none
@@ -350,6 +354,8 @@ def MemOp.evalLaid (m : Memory) (held : Held) : MemOp → List Value → Option 
     pure (.ref (a + at_) b [], m, held)
   -- (Into a value the machine holds, or further into one.)
   | .focusL _, [.ref a b p, .int i] =>
+    if 0 ≤ i then some (.ref a b (p ++ [⟨none, i.toNat⟩]), m, held) else none
+  | .focusL _, [.ref a b p, .int i, .int (-1)] =>
     if 0 ≤ i then some (.ref a b (p ++ [⟨none, i.toNat⟩]), m, held) else none
   | .focusL _, [.ref a b p, .int i, .int built] =>
     if 0 ≤ i ∧ 0 ≤ built then some (.ref a b (p ++ [⟨some built.toNat, i.toNat⟩]), m, held) else none
@@ -379,6 +385,9 @@ def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells
   | .focus, [.ref a b p, .int i] =>
     if 0 ≤ i then some (.ref a b (p ++ [⟨none, i.toNat⟩]), cells) else none
   -- The field of one of several constructors: the step says which.
+  -- (A place in a `[T; N]` found when the program runs: as an array's.)
+  | .focus, [.ref a b p, .int i, .int (-1)] =>
+    if 0 ≤ i then some (.ref a b (p ++ [⟨none, i.toNat⟩]), cells) else none
   | .focus, [.ref a b p, .int i, .int built] =>
     if 0 ≤ i ∧ 0 ≤ built then some (.ref a b (p ++ [⟨some built.toNat, i.toNat⟩]), cells) else none
   | _, _ => none

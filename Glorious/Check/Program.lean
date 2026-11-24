@@ -925,7 +925,8 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
               (.con im.head ((List.range arity).map Traits.STy.var))).map (toDictE s.impls)
           else none
         let mut ctors : List (String × List (Option Elab.DictE)) := []
-        let isArray := some im.head == s.arrayType
+        -- (A `[T; N]` is destroyed as an array is: it is built as one.)
+        let isArray := some im.head == s.arrayType || im.head == "Fixed"
         if isArray then ctors := [("%each", [place 0])]
         else if im.head.startsWith "(tuple" then
           ctors := [("", (List.range arity).map place)]
