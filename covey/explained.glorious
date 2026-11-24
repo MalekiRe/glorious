@@ -31,13 +31,13 @@ fn ramp(q: &mut Query<(&mut Damage,), ()>) { q.for_each() { (mut d,) => d.0 = d.
 fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut hp => hp.0 = hp.0 - d.0; } }
 fn birds(q: &mut Query<(&Bird,), ()>) { () }
 
-fn id_of(infos: &[SystemInfo], name: Str) -> Int {
+fn id_of(infos: &Vec<SystemInfo>, name: Str) -> Int {
     let mut i = 0;
     let mut found = 0 - 1;
     while({ i < len_at(infos) }) { if(infos[i].name == name) { found = infos[i].id } else { () }; i = i + 1 };
     found
 }
-fn any_says(reasons: &Option<[Str]>, part: Str) -> Bool {
+fn any_says(reasons: &Option<std::vec::Vec<Str>>, part: Str) -> Bool {
     match(reasons) { Some(rs) => std::vec::any(clone(rs), fn(r: Str) -> Bool { std::text::contains(r, part) }), None => false }
 }
 fn shown(b: Bool) -> Str { if(b) { "true" } else { "false" } }

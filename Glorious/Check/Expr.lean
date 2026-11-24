@@ -253,11 +253,18 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
   | .fieldOf id e name => do
     if let some x := (← get).body.bare? e then derefAt scope id false x name
     if let some field ← inferFieldOfPlace scope e0 then return field
-    let subject ← inferExpr scope amb e
+    let subject ← peelTwice id (← inferExpr scope amb e)
     -- A field of what a reference is to, the reference given by what is
     -- written (`m.get().0`, `r.x`): read through it, which copies it, as a
     -- field of what a name holding one is to is.
     if let .ref _ inner _ ← find subject then
+      -- (What it is to not known yet, as what a trait leaves to an
+      -- implementation is until that is found, `a[i].f`: settled once it
+      -- is, `runProjections`.)
+      if let (.var _, none) := (← find inner, name.toNat?) then
+        let t ← freshTy
+        modify fun s => { s with namedReads := s.namedReads.push (subject, name, t, id, s.pos) }
+        return t
       let idx ← match name.toNat? with
         | some n => pure (some n)
         | none => fieldIndex inner name
@@ -497,6 +504,11 @@ where
   readThrough (x : String) (path : List (String × Option Nat)) (inner : Ty) (cap : Nat) : M Ty := do
     let (field, numbered, _, through) ← fieldAtThrough inner (path.map (·.1))
     noteFieldReads path numbered through
+    -- (What the reference is to is a reference too, `r.0` of an `r:
+    -- &&Name`: read through both.)
+    if through.any (·.1 == 0) then
+      if let some (_, some first) := path.head? then
+        modify fun s => { s with derefReads := s.derefReads.push (first + Syntax.derefTwice) }
     mustDup field "reading through a reference copies the value (`replace` takes it out instead)"
     use scope (.through cap s!"`{x}`" false numbered)
     pure field
@@ -860,8 +872,26 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       -- the call (`Flat.receiverExpr`), that is a reference already: the
       -- reference is given.)
       let a ← match b.expr a with
-        | .ref _ x =>
-          if i == 0 && call != 0 && x == s!"borrowed%{call}" then do
+        | .ref uniq x =>
+          -- (A variable that holds a reference, borrowed for a call that
+          -- takes a reference to what that one is to, `q.reach(0)` of a
+          -- `let mut q: &mut P`: what it holds, borrowed again, as Rust
+          -- borrows through it.)
+          let through ← match scope.lookup x, ← find p with
+            | some (.cell t _), .ref _ wantInner _ => do
+              match ← find t, ← find wantInner with
+              | .ref how _ _, .con .. =>
+                let holdsUniq := match ← find how with
+                  | .con "&mut" [] => true
+                  | _ => false
+                pure (i == 0 && call != 0 && (holdsUniq || !uniq))
+              | _, _ => pure false
+            | _, _ => pure false
+          if through then do
+            let given := Expr.reborrow uniq (.name none x)
+            modify fun s => { s with argsChosen := ((call, i), given) :: s.argsChosen }
+            flatIn given
+          else if i == 0 && call != 0 && x == s!"borrowed%{call}" then do
             let held := match scope.lookup x with
               | some (.val t _) => some t
               | some (.cell t _) => some t

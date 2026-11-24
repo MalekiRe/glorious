@@ -1810,7 +1810,9 @@ def unfieldRewrite (info : FieldInfo) : Flat.FRewrite where
       | some i => some (do
         let x' ← go.ex x
         -- Of what a reference points to, if the checker found it so.
-        if info.derefs.contains id then Flat.pushExpr (.proj (← Flat.pushExpr (.deref x')) i)
+        if info.derefs.contains (id + Syntax.derefTwice) then
+          Flat.pushExpr (.proj (← Flat.pushExpr (.deref (← Flat.pushExpr (.deref x')))) i)
+        else if info.derefs.contains id then Flat.pushExpr (.proj (← Flat.pushExpr (.deref x')) i)
         else Flat.pushExpr (.proj x' i))
       | none => none
     | .closure id clauses =>
@@ -1866,8 +1868,11 @@ def unfieldRewrite (info : FieldInfo) : Flat.FRewrite where
             match c with
             | some c =>
               if c.startsWith "*" then
-                let rest := (c.drop 1).toString
-                (.deref (.call 0 (.name none Syntax.focusMark) (acc.1 :: acc.2)),
+                -- (One `*` for each reference gone through.)
+                let stars := (c.toList.takeWhile (· == '*')).length
+                let rest := (c.drop stars).toString
+                let first := Expr.deref (.call 0 (.name none Syntax.focusMark) (acc.1 :: acc.2))
+                ((List.range (stars - 1)).foldl (fun e _ => Expr.deref e) first,
                   stepOf n (if rest.isEmpty then none else some rest))
               else (acc.1, acc.2 ++ stepOf n (some c))
             | none => (acc.1, acc.2 ++ stepOf n none)) (base, [])

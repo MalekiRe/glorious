@@ -73,7 +73,7 @@ fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut h
 fn some_hp(q: &mut Query<(&Hp,), ()>) -> Bool { q.count() > 0 }
 struct Dead
 fn watcher(alive: &mut Query<(&Hp,), (ecs::Without<Dead>,)>, hurt: &mut Query<(&Damage,), (ecs::Changed<Damage>,)>) { () }
-fn say_all(why: Option<[Str]>) {
+fn say_all(why: Option<Vec<Str>>) {
     match(why) { Some(reasons) => say(show(len_at(&reasons)) ++ ": " ++ std::text::join(reasons, "; ")), None => say("no such system") }
 }
 // A step as `kind flag`, or `done` where the pass is.
@@ -143,12 +143,12 @@ fn main() -> Int {
 
     let mut app = App::new().register<Hp>().register<Damage>().add_systems(Update, (ramp, apply_damage).chain()).build();
     let e = app.world.spawn_bundle((Hp(100), Damage(0)));
-    let mut snapshots = [];
+    let mut snapshots = std::vec::Vec::new();
     let mut i = 0;
-    while({ i < 4 }) { app.emit(&Update); snapshots = push(snapshots, app.world.snapshot()); i = i + 1 };
+    while({ i < 4 }) { app.emit(&Update); std::vec::Vec::push(&mut snapshots, app.world.snapshot()); i = i + 1 };
     say(hp_of(&app.world, e));
     // Back to the second frame.
-    app.world = remove_at(&mut snapshots, 1);
+    app.world = match(std::vec::Vec::remove(&mut snapshots, 1)) { Some(w) => w, None => abort("no second snapshot") };
     say(hp_of(&app.world, e));
     // Running on from there repeats what happened.
     app.emit(&Update);

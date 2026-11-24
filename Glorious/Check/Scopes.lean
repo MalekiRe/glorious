@@ -167,6 +167,15 @@ def fieldIndex (t : Ty) (step : String) : M (Option Nat) := do
     throw s!"the field `{step}` is read from a value whose type is not known here; annotate it"
   | t => throw s!"`{showTy (← zonk t)}` has no field `{step}`"
 
+/-- What a field is read through: a reference to a reference is read
+through both, the read noted so (`Syntax.derefTwice`). -/
+def peelTwice (id : Nat) (t : Ty) : M Ty := do
+  if let .ref _ inner _ ← find t then
+    if let .ref .. ← find inner then
+      modify fun s => { s with derefReads := s.derefReads.push (id + Syntax.derefTwice) }
+      return inner
+  return t
+
 /-- Settle the field reads that were waiting for their subject's type. When
 `final`, one that still cannot be settled is an error. -/
 partial def runProjections (final : Bool) : M Unit := do
@@ -175,6 +184,7 @@ partial def runProjections (final : Bool) : M Unit := do
   modify fun s => { s with namedReads := #[] }
   let mut unnamed : Array (Ty × String × Ty × Nat × String) := #[]
   for (subject, name, result, id, pos) in named do
+    let subject ← peelTwice id subject
     let unknown := match ← find subject with
       | .var _ => true
       | _ => false
@@ -193,6 +203,13 @@ partial def runProjections (final : Bool) : M Unit := do
             modify fun s => { s with fieldReads := s.fieldReads.push (id, idx), derefReads := s.derefReads.push id,
                                      dups := s.dups.push (t, pos ++ "reading through a reference copies the value (`replace` takes it out instead)") }
             continue
+      -- (What it is to not known yet, as what a trait leaves to an
+      -- implementation is until the implementation is found, `a[i].f`:
+      -- settled later.)
+      if !final then
+        if let .var _ ← find inner then
+          unnamed := unnamed.push (subject, name, result, id, pos)
+          continue
       match (← get).firstSaid with
       | some said => throwThe Elab.Said said
       | none => throw s!"{pos}the field `{name}` is read through a reference, and where it is read the type of what it is read from is not known: say what that is"
@@ -219,6 +236,7 @@ partial def runProjections (final : Bool) : M Unit := do
   for (subject, idx, result, pos, id) in waiting do
     -- (Of what turns out to be a reference, read where it has a node: what
     -- it is to has the field, read through it, which copies it.)
+    let subject ← if id != 0 then peelTwice id subject else pure subject
     let (subject, through) ← match ← find subject with
       | .ref _ inner _ => pure (if id != 0 then (inner, true) else (subject, false))
       | _ => pure (subject, false)
@@ -727,13 +745,14 @@ then its arguments, then each constructor's fields (once for each type,
 being gone through. Nothing in a reference, which is another's value, or in a
 type not yet known. -/
 partial def walkTy {α : Type} (atCon : String → M (Option α)) (atFn : List String → Nat → M (Option α))
-    (visiting : List String) (t : Ty) : M (Option α) := do
+    (visiting : List String) (t : Ty) (stop : String → M Bool := fun _ => pure false) : M (Option α) := do
   match ← find t with
-  | .tuple args => args.findSomeM? (walkTy atCon atFn visiting)
+  | .tuple args => args.findSomeM? (walkTy atCon atFn visiting · stop)
   | .fn _ _ _ _ cap => atFn visiting cap
   | .con name args => do
     if let some a ← atCon name then return some a
-    if let some a ← args.findSomeM? (walkTy atCon atFn visiting) then return some a
+    if ← stop name then return none
+    if let some a ← args.findSomeM? (walkTy atCon atFn visiting · stop) then return some a
     if visiting.contains name then return none
     match (← get).types[name]? with
     | none => pure none
@@ -741,7 +760,7 @@ partial def walkTy {α : Type} (atCon : String → M (Option α)) (atFn : List S
       decl.ctors.findSomeM? fun c => do
         match (← get).ctors[c]? with
         | none => pure none
-        | some sig => (sig.fieldsAt args).findSomeM? (walkTy atCon atFn (name :: visiting))
+        | some sig => (sig.fieldsAt args).findSomeM? (walkTy atCon atFn (name :: visiting) · stop)
   | _ => pure none
 
 /-- A declared type that says its values are used once. -/
@@ -749,6 +768,15 @@ def usedOnceDecl (name : String) : M (Option String) := do
   pure (match (← get).useDecls[name]? with
     | some (_, true) => some name
     | _ => none)
+
+/-- A declared type that says its values may be used any number of times,
+`impl Use<[_, *]>`: whatever it holds (`Mutex<Vec<T>>`, a handle), it is
+not looked into to see whether it is used once. (What it holds was checked
+against what it says, `checkUseDecls`.) -/
+def usedAnyNumber (name : String) : M Bool := do
+  pure (match (← get).useDecls[name]? with
+    | some (_, false) => true
+    | _ => false)
 
 /-- A declared type with a `drop` of its own. -/
 def dropDecl (name : String) : M (Option String) := do
@@ -773,7 +801,7 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
   let atCon := fun (name : String) => do
     pure ((← usedOnceDecl name) <|> (← dropDecl name))
   let atFn := fun (_ : List String) (cap : Nat) => do pure (if ← capOwnsOnce cap then some "" else none)
-  pure (← walkTy atCon atFn visiting t).isSome
+  pure (← walkTy atCon atFn visiting t usedAnyNumber).isSome
 
 end
 
@@ -806,7 +834,7 @@ def mustDup (t : Ty) (why : String) : M Unit :=
 /-- The declared type, if any, that makes a type one whose values are used
 only once. Only to say why. -/
 def onceBy (visiting : List String) (t : Ty) : M (Option String) :=
-  walkTy usedOnceDecl (fun _ _ => pure none) visiting t
+  walkTy usedOnceDecl (fun _ _ => pure none) visiting t usedAnyNumber
 
 /-- A type whose values have a `drop` of their own to run, or hold one that
 has: the name of the first such type found. A callable holds what it has

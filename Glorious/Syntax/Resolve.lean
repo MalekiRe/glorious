@@ -109,6 +109,10 @@ partial def givesReference : List Item → List String
       | _ => false
     if gives then name :: givesReference rest else givesReference rest
   | .impl _ _ _ _ _ methods :: rest => givesReference methods ++ givesReference rest
+  | .trait _ methods :: rest =>
+    methods.filterMap (fun (m, _, r) => match r with
+      | some (.ref ..) | some (.performs (.ref ..) _) => some m
+      | _ => none) ++ givesReference rest
   | _ :: rest => givesReference rest
 
 /-- The functions written to take a reference first, each with whether it is
@@ -352,7 +356,10 @@ def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : Expr
     | fuel + 1, .fieldOf fid inner field =>
       match b.expr inner with
       | .deref r => if isElement r then some (r, [field], fid) else none
-      | _ => (fieldsOfElement inner fuel).map fun (r, path, _) => (r, path ++ [field], fid)
+      -- (Read through the element's reference already, `receiverExpr`.)
+      | _ =>
+        if isElement inner then some (inner, [field], fid)
+        else (fieldsOfElement inner fuel).map fun (r, path, _) => (r, path ++ [field], fid)
     | _, _ => none
   if let some (r, path, fid) := fieldsOfElement a 64 then
     if fid != 0 then
@@ -362,12 +369,31 @@ def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : Expr
       let read ← pushExpr (.deref (← pushExpr (.call id (← pushExpr (.name none "element_at")) #[base, i])))
       return some (← pushExpr (.labelScope "%block" #[first, ← pushStmt (.expr read)]))
   let base ← match placeOf b known a 64, throughRefOf b known a 64 with
+    | none, none =>
+      -- (A name that holds a reference, `list: &Vec<T>`: through it.)
+      match b.expr a with
+      | .name none x => if known.lookup x == some 3 then pure (some a) else pure none
+      | _ =>
+        -- (A field of a name bound by a pattern, or to what a call gives,
+        -- which may be a reference: borrowed as `&x.f` is, through it if it
+        -- is one.)
+        let rec chain (e : ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
+          match fuel, b.expr e with
+          | fuel + 1, .fieldOf fid inner field =>
+            match b.expr inner with
+            | .name none x => some (x, [field], fid)
+            | _ => (chain inner fuel).map fun (x, path, _) => (x, path ++ [field], fid)
+          | _, _ => none
+        match chain a 64 with
+        | some (x, path, fid) =>
+          if fid != 0 && known.lookup x == some 0 then some <$> pushExpr (.refField fid false x path false)
+          else pure none
+        | none => pure none
     | some (x, [], _), _ => if known.lookup x == some 1 then some <$> pushExpr (.ref false x) else pure none
     | some (x, path, fid), _ =>
       if fid == 0 || known.lookup x != some 1 then pure none
       else some <$> pushExpr (.refField fid false x path false)
     | none, some (x, path, fid) => some <$> pushExpr (.refField fid false x path true)
-    | none, none => pure none
   match base with
   | some r => some <$> pushExpr (.deref (← pushExpr (.call id (← pushExpr (.name none "element_at")) #[r, i])))
   | none => pure none
@@ -393,7 +419,10 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
     match b.expr f, args.toList with
     -- `a[i]` of a mutable variable, or of a field of a value or of what a
     -- reference points to: the element read where it is, nothing copied.
-    | .name none "index", [a, i] =>
+    -- (Also where a variable of the program is named `index`: the call is
+    -- then still the prelude's, `%prelude::index`.)
+    | .name q "index", [a, i] =>
+      if q.isSome && q != some "%prelude" then plain () else
       match ← elementRead b known id a i with
       | some e => pure e
       | none => plain ()
@@ -482,6 +511,20 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
         pushExpr (.call id (← pushExpr (.name q name)) (#[given] ++ rest.toArray))
       | _ => plain ()
     | _, _ => plain ()
+  -- (`a[i].f`: the field read through the element's reference, the rest of
+  -- the element not copied.)
+  | .fieldOf fid inner field => do
+    let inner' ← receiverExpr taken known inner
+    let b ← get
+    match b.expr inner' with
+    | .deref r =>
+      match b.expr r with
+      | .call _ g _ =>
+        -- (By name: a numbered field, `.0`, is read of the element as it is.)
+        if (b.name? g).map (·.2) == some "element_at" && field.toNat?.isNone then pushExpr (.fieldOf fid r field)
+        else if inner' == inner then pure e else pushExpr (.fieldOf fid inner' field)
+      | _ => if inner' == inner then pure e else pushExpr (.fieldOf fid inner' field)
+    | _ => if inner' == inner then pure e else pushExpr (.fieldOf fid inner' field)
   | n => do
     let n' ← n.mapIds (receiverExpr taken known) (receiverClause taken known [])
       fun body => do pure (← receiverStmts taken known body.toList).toArray
@@ -512,8 +555,22 @@ partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (Strin
           | .ref _ _ => true
           | .refField .. => true
           | _ => false
+        -- (`let c = column(w)` of a function written to give a reference.)
+        -- (`<S as Get<T>>::column(w)` too; and `let r: &T = ..`.)
+        let givesRef : Bool := match b.expr value with
+          | .call _ f args =>
+            if b.bare? f == some ascribeMark then
+              match args[1]?.map b.expr with
+              | some (.call _ g _) => b.bare? g == some "%ty(ref)" || b.bare? g == some "%ty(refmut)"
+              | _ => false
+            else if b.bare? f == some instMark then
+              match args[0]?.map b.expr with
+              | some (.call _ g _) => ((b.name? g).map fun (_, n) => taken.contains (givesKey n)).getD false
+              | _ => false
+            else ((b.name? f).map fun (_, g) => taken.contains (givesKey g)).getD false
+          | _ => false
         let kind := match pat with
-          | .var _ => if elementRef then 3 else if b.valueLike value then 2 else 0
+          | .var _ => if elementRef || givesRef then 3 else if b.valueLike value then 2 else 0
           | _ => 0
         pure (← pushStmt (.let_ pat (← receiverExpr taken known value)), (patternNames pat).map (·, kind) ++ known)
       | _, .letMut x value => pure (← pushStmt (.letMut x (← receiverExpr taken known value)), (x, 1) :: known)

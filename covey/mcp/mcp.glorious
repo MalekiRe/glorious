@@ -180,6 +180,13 @@ pub struct Session<S, L> {
     frame: Int, paused: Bool,
     recorded: [(Int, Entity, Str, Described)]
 }
+// The names of systems, in order.
+fn system_names(infos: &std::vec::Vec<SystemInfo>) -> std::vec::Vec<Str> {
+    let mut out = std::vec::Vec::new();
+    let mut i = 0;
+    while({ i < len_at(infos) }) { std::vec::Vec::push(&mut out, infos[i].name); i = i + 1 };
+    out
+}
 pub fn session_channel<S, L>() -> (Session<S, L>, Client) {
     let (tx, rx) = channel();
     (Session { requests: rx, labels: [], emits: [], steps: [], frame: 0, paused: false, recorded: [] }, Client { requests: tx, next: 0 })
@@ -280,7 +287,7 @@ impl<S, L> Session<S, L> {
         else if(name == "overview") {
             let infos = app.system_infos();
             Ok("frame " ++ show(session.frame) ++ "\n" ++ show(len_at(&app.world.entities())) ++ " entities\ncomponents: " ++ join(app.world.component_names(), ", ")
-                ++ "\nsystems: " ++ join(std::vec::map(infos, fn(i: SystemInfo) -> Str { i.name }), ", ")
+                ++ "\nsystems: " ++ join(system_names(&infos), ", ")
                 ++ "\nlabels you can emit/step: " ++ join(clone(&session.labels), ", "))
         }
         else if(name == "emit") {

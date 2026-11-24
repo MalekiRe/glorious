@@ -760,6 +760,10 @@ structure St where
   that are borrowed for the type's own function (`dotBorrows`): each node,
   whether for writing, and the variable. Not uses of it that are counted. -/
   dotRefs : Array (Nat × Bool × String) := #[]
+  /-- The type parameters of the function being checked that it says may be
+  used any number of times, `T: Use<[_, *]>`: copied, so nothing of theirs
+  is destroyed. -/
+  copyParams : List String := []
   pending : Array Pending := #[]
   /-- Field reads whose subject was not yet known: subject, index, field type,
   where the read is, and the read's node where it has one (else 0): one of

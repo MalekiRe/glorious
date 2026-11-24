@@ -25,7 +25,7 @@ impl Fragmenting for InSquad {}
 impl Eq for InSquad { fn ==(a: InSquad, b: InSquad) -> Bool { true } }
 impl Clone for InSquad { fn clone(s: &InSquad) -> InSquad { InSquad } }
 
-fn names<S>(world: &World<S>, es: [Entity]) -> [Int] where S: ecs::Get<Name> {
+fn names<S>(world: &World<S>, es: Vec<Entity>) -> [Int] where S: ecs::Get<Name> {
     let mut out = [];
     let mut i = 0;
     while({ i < len_at(&es) }) { out = push(out, match(world.get<Name>(es[i])) { Some(n) => n.0, None => 0 - 1 }); i = i + 1 };

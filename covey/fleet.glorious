@@ -108,7 +108,7 @@ fn repair(pilots: &mut Query<(&Skill, To<Piloting, (&mut Hull,)>), ()>) {
 fn refuel(flagships: &mut Query<(&mut Fuel, From<InFleet, (&mut Fuel,)>), ()>) {
     flagships.for_each() { mut tank, fleet =>
         let mut i = 0;
-        let mut ships: [(ecs::Mut<'_, Fuel>,)] = fleet;
+        let mut ships: Vec<(ecs::Mut<'_, Fuel>,)> = fleet;
         while({ i < len_at(&ships) }) {
             let given = if(tank.0 < 10) { tank.0 } else { 10 };
             tank.0 = tank.0 - given;
@@ -137,10 +137,15 @@ fn harbor_log(moved: &mut Query<(&Name, &Relates<DockedAt>, To<DockedAt, (&Name,
 // Station rosters, two joins deep: docked ships, then each ship's pilot.
 fn rosters(stations: &mut Query<(&Name, &Cargo, From<DockedAt, (&Name, From<Piloting, (&Name,)>)>), ()>) {
     stations.for_each() { station, cargo, ships =>
-        let shown = std::vec::Vec::into_array(std::vec::map(ships, fn(s: (&Name, [(&Name,)])) -> Str {
-            let (ship, pilots) = s;
-            if(len_at(&pilots) > 0) { let (p,) = pilots[0]; ship.0 ++ " (" ++ p.0 ++ ")" } else { ship.0 ++ " (no pilot)" }
-        }));
+        let mut shown = [];
+        let mut i = 0;
+        while({ i < len_at(&ships) }) {
+            let entry = &ships[i];
+            let ship = entry.0;
+            let pilots = &entry.1;
+            push_at(&mut shown, if(len_at(pilots) > 0) { let (p,) = pilots[0]; ship.0 ++ " (" ++ p.0 ++ ")" } else { ship.0 ++ " (no pilot)" });
+            i = i + 1
+        };
         if(if(len_at(&shown) > 0) { true } else { cargo.0 > 0 }) { say("  " ++ station.0 ++ " holds " ++ show(cargo.0) ++ " cargo; docked: " ++ list(shown)) } else { () };
     }
 }
@@ -148,7 +153,7 @@ fn rosters(stations: &mut Query<(&Name, &Cargo, From<DockedAt, (&Name, From<Pilo
 fn politics(ships: &mut Query<(&Name, (To<Allied, (&Name,)>, From<Allied, (&Name,)>), From<Hunting, (&Name,)>), (With<Hull>,)>) {
     let mut lines = [];
     ships.for_each() { ship, (allies, allied_by), hunters =>
-        let names = fn(l: [(&Name,)]) -> [Str] { std::vec::Vec::into_array(std::vec::map(l, fn(x: (&Name,)) -> Str { let (n,) = x; n.0 })) };
+        let names = fn(l: std::vec::Vec<(&Name,)>) -> [Str] { std::vec::Vec::into_array(std::vec::map(l, fn(x: (&Name,)) -> Str { let (n,) = x; n.0 })) };
         push_at(&mut lines, "  " ++ ship.0 ++ ": allies " ++ list(std::vec::Vec::into_array(std::vec::sort(names(allies)))) ++ ", allied by " ++ list(std::vec::Vec::into_array(std::vec::sort(names(allied_by)))) ++ ", hunted by " ++ list(std::vec::Vec::into_array(std::vec::sort(names(hunters)))));
     };
     say_all(std::vec::Vec::into_array(std::vec::sort(lines)))

@@ -1101,6 +1101,31 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
     unless mine.isEmpty do
       modify fun st => { st with partReads := st.partReads.filter fun (owner, _, _, _, _, _) => owner != bid }
   let apart := !mine.isEmpty && !body.any (code.usedWholeStmt x)
+  -- Used whole too, where each part read is of a type that is copied, and
+  -- no part is read once the whole has been given away: reading those
+  -- parts takes nothing out of it, as Rust's reading of a `Copy` field
+  -- does not, and they are not uses of it (`request.point == name` and
+  -- then `push(&mut mine, request)`).
+  let copiedParts ← if apart || mine.isEmpty then pure false else
+    mine.allM fun (subject, idx, _, _) => do
+      match ← (try fieldType subject idx catch _ => pure none) with
+      | some ft =>
+        let ft ← zonk ft
+        modify fun st => { st with seen := {} }
+        pure ((freeTys ft).isEmpty && (freeCaps ft).isEmpty && !hasParam ft
+          && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone)
+      | none => pure false
+  let looked : Flat.Body := if !copiedParts then code else
+    (List.range code.exprs.size).foldl (fun (bb : Flat.Body) i =>
+      match bb.exprs[i]! with
+      | .fieldOf _ e _ | .proj e _ =>
+        if bb.bare? e == some x then { bb with exprs := bb.exprs.set! i (.ref false x) } else bb
+      | _ => bb) code
+  let readAfter := (body.foldl (fun (seen, bad) s =>
+    let (seen', bad') := looked.borrowAfterValueStmt x seen s
+    (seen', bad || bad')) (false, false)).2
+  let copiedParts := copiedParts && !readAfter
+  let code := if copiedParts then looked else code
   -- A value with a `drop` to run, of which only parts that can be used
   -- any number of times are read: reading them takes nothing out of it.
   -- It stays whole, and is destroyed when its block is left, as a name
@@ -1190,7 +1215,7 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
         if s.anyMust && !x.startsWith "%" then
           modify fun st =>
             { st with lowerChecks := st.lowerChecks.push (pos, x, ft, names.filter (· != x), ob, only) }
-  else
+  else if !copiedParts then
     -- Used as a whole too: each part read lets go of the rest of it.
     for (subject, idx, _, at_) in mine do
       modify fun st => { st with pos := at_ }
@@ -1425,7 +1450,15 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       | .fn .. => pure false
       | _ => pure true
     let library := libraryOwner s.owner
-    if free && !heldDrop && hasParam t && ownValue && s.ownItems && !library
+    -- (Not of a type parameter said to be copied, `E: Use<[0, *]>`, which
+    -- has nothing to destroy.)
+    -- (Nor of a type said to be used any number of times, `impl Use<[0, *]>
+    -- for Ptr<T>`, a handle: copied, it has nothing of its own to destroy.)
+    let copied ← match ← find t with
+      | .con n [] => pure (n.startsWith "'" && s.copyParams.contains (((n.drop 1).takeWhile (· != '@')).toString) || (← usedAnyNumber n))
+      | .con n _ => usedAnyNumber n
+      | _ => pure false
+    if free && !heldDrop && hasParam t && ownValue && s.ownItems && !library && !copied
         && (← tyMustUse roots [] t).isNone then
       unless s.flagged.contains pos || usesStmts b resumptive x body == 0 || usedFirst b quiet x body do
         if (← pathUses { ctx with handed := true, capturesOwned := true } names x b body) == some 0 then

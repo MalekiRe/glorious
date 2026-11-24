@@ -208,7 +208,9 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
     (defs reused : List (String × Ty)) : M (List (String × Ty) × List (String × Ty)) := do
   let mut defs := defs
   let mut reused := reused
-  modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [], assocMemo := {} }
+  modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [], assocMemo := {},
+                           copyParams := d.bounds.filterMap fun b =>
+                             if b.trait == "Use" && (b.quantity.any fun (_, hi) => hi.isNone) then some b.subject else none }
   -- The function's own type parameters stand for themselves while it is
   -- checked, and so do its lifetimes: each is no other.
   let mut rigid : List (String × Ty) := []

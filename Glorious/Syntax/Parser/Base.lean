@@ -424,7 +424,9 @@ partial def hoistExpr (h : Hoist) (e : ExprId) : P Hoist := do
         return h
       let h ← args.foldlM hoistExpr h
       return { h with seen := true }
-    let h ← hoistExpr h f
+    -- (A function named through a path, `Vec::push`: naming it computes
+    -- nothing.)
+    let h ← if let .name (some _) _ := ← node f then pure h else hoistExpr h f
     let h ← args.foldlM hoistExpr h
     pure { h with seen := true }
   | .tailCall _ f args =>

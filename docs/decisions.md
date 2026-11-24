@@ -7723,6 +7723,55 @@ through a reference to the field of the element, held for the read
 borrows for are not counted as uses of it (`St.dotRefs`): `v.push(x); v`
 was refused as two uses.
 
+## `covey/ecs` over `Vec`, and what Rust reads that the checker did not
+
+The ECS library `covey/ecs` keeps no growable array: every `[T]` is a
+`Vec<T>`, `[]` `Vec::new()`, a written list `Vec::from_array([..])`, a
+type's marker `[T; 0]`; a list given back with one more is `pushed(v, x)`,
+and `x = pushed(x, ..)` or `x = join_onto(x, ..)` is a push or `append` in
+place. Where a loop's body gave a variable away and put another back, it is
+taken with `replace` or `Vec::remove`. `spawn_batch` takes anything
+`ToVec`. The programs that use it give their own lists as `Vec`s where the
+library's are.
+
+What the conversion showed the checker did not do as Rust does, each now
+done:
+
+- `a[i].f` reads the field through the element's reference, not a copy of
+  the element (a named field; `receiverExpr`), and `a[i].f[j]`, `a[i][j]`
+  likewise; the element of `x.f` where `x` is a name bound by a pattern,
+  to what a function gives by reference (`let c = column(w)`, `<S as
+  Get<T>>::column(w)` too), or written with a reference's type, is read
+  through it (`elementRead`).
+- A field read through a reference to a reference, `r.0` of an `&&Name`,
+  goes through both (`Syntax.derefTwice`); it read a field of the reference
+  at run time.
+- A variable that holds a reference, borrowed for a call taking a
+  reference to what that is to, `q.reach(0)` of a `let mut q: &mut P`, is
+  borrowed through (`&mut **q`), not as `&mut &mut P`.
+- `a[index]` with a variable named `index` is the element read still.
+- A named field read through a reference to what is not known yet, as what
+  a trait leaves to an implementation is, waits for it.
+- Fields read of a value whose types are copied, before the value is given
+  away whole, are not uses of it (`request.point == name` and then
+  `push(request)`); a read after it is given away still is.
+- A type that says it may be used any number of times (`impl Use<[0, *]>`,
+  `Mutex<T>`, `PtrMut<T>`) is not looked into for what can be used only
+  once, and has nothing of its own to destroy; nor has a type parameter
+  said `Use<[_, *]>`.
+- A name bound again inside a callable or a block is another name there:
+  it does not make the outer one "bound again" after it.
+- A function named through a path, `Vec::push`, computes nothing: a borrow
+  through an expression may follow it in the statement.
+- `std::thread::lock`, `scope` and `spawn_unchecked` call what they are
+  given once (`F: Use<[1, 1]>`, as Rust's `FnOnce`), so it may give away
+  what it holds.
+- The Core machine, stuck on a field read, says which function it was in.
+
+Vec's elements are read through library calls where arrays were machine
+operations: the ECS programs take 2-2.5 times the steps. An example is given
+500000 steps on the Lean machines (it was 200000).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

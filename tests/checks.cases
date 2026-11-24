@@ -30,7 +30,7 @@ integer overflow: the result of an operation on (9223372036854775807, 1) does no
 #### case 15 diagnose
 fn main() -> Int { (1, 2).5 }
 #### expect
-`(1, 2)` does not have the field being read
+`(1, 2)` does not have the field being read (in `main`)
 #### case 16 diagnose
 fn f<T, U>(a: T, b: U) -> T { a }  fn main() -> Int { f(1) }
 #### expect

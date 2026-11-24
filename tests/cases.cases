@@ -4892,6 +4892,44 @@ fn main() -> Int { let mut n = 1; twice({ p => *p = *p * 3 }, &mut n); n }
 #### expect
 9
 #### case
+#### Rust's reads through references and places, each refused or gone wrong
+#### before: a field through a reference to a reference (`r.0` of an
+#### `&&Name`); `a[index]` with a variable named `index`; an element's named
+#### field through a reference held by a pattern; a method of a `&mut`
+#### held in a variable; a field of a pattern's reference indexed after a
+#### method call on it.
+use std::vec::{Vec};
+struct Name(Int)
+struct P { v: Vec<Bool>, n: Int }
+impl P { fn reach(p: &mut Self, id: Int) { p.n = id } }
+struct Pt { x: Int, tags: Vec<Int> }
+fn pick(o: Option<&mut P>) -> Int {
+    match(o) { Some(q) => q.reach(0); if(q.v[0]) { 1 } else { 0 }, None => 0 }
+}
+fn held(q: &mut P) -> Int { let mut q = q; q.reach(5); q.n }
+fn at(xs: &Vec<Int>, index: Int) -> Int { xs[index] }
+fn main() -> Int {
+    let a = Name(4);
+    let mut names = Vec::new(); Vec::push(&mut names, &a);
+    let r = &names[0];
+    say(r.0);
+    let mut pts = Vec::new(); Vec::push(&mut pts, Pt { x: 3, tags: Vec::new() });
+    let refs = match(Some(&pts)) { Some(ps) => ps[0].x, None => 0 };
+    say(refs);
+    let mut p = P { v: Vec::new(), n: 0 };
+    Vec::push(&mut p.v, true);
+    say(pick(Some(&mut p)));
+    say(held(&mut p));
+    let mut xs = Vec::new(); Vec::push(&mut xs, 7);
+    at(&xs, 0)
+}
+#### expect
+4
+3
+1
+5
+7
+#### case
 #### Elements read where they are through fields and other elements:
 #### `s.v[0]`, `s.v[0][0]`, `s.v[0].f[0]`, `&s.v[0].f` of a `let` copy no
 #### `Vec`; a `Vec` pushed onto by method and then given back whole.

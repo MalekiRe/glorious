@@ -146,9 +146,9 @@ def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few 
   | .error e => { lean := s!"error: {e}", error := some e }
   | .ok compiled =>
     let has := fun (f : Typing.Cert → Bool) => (compiled.cert.map f).getD false
-    -- (An example, a program as long as it needs, is given more steps on
-    -- bytecode.)
-    { lean := if run then evalCompiled compiled c.input (vmScale := if few then 200 else 20) else ""
+    -- (An example, a program as long as it needs, is given more steps, and
+    -- more again on bytecode.)
+    { lean := if run then evalCompiled compiled c.input (fuel := if few then 500000 else 200000) (vmScale := if few then 200 else 20) else ""
       lowered := compiled.lowered
       bytes := some (bytecodeBytes compiled)
       certified := compiled.cert.isSome, typed := compiled.types.get.isSome

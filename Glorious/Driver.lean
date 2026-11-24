@@ -1369,6 +1369,13 @@ def evalSource (src : String) (input : List Int := []) (fuel : Nat := 200000) : 
   | .error e => s!"error: {e}"
   | .ok c => evalCompiled c input fuel
 
+/-- Is `sub` this term or one it goes on to? -/
+partial def tmHas (t sub : Core.Tm) : Bool :=
+  t == sub || match t with
+    | .let_ _ b | .call _ _ b | .handle _ _ _ _ b | .perform _ _ b | .label _ b | .guard _ _ b
+    | .cancel _ b | .cell _ _ b | .cellL _ _ _ b | .lend _ _ _ _ _ b | .mem _ _ b | .host _ _ b => tmHas b sub
+    | _ => false
+
 /-- Why a Core configuration has no next step, in the program's own terms. This
 is a diagnosis for the user and is not part of the semantics. -/
 def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
@@ -1435,8 +1442,11 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
           | _ => s!"an arithmetic intrinsic is applied to ({shown vs})"
       | none => unbound
     | .place pl =>
+      -- (In the function whose code it is, where one is found.)
+      let within := (c.core.fns.toList.zipIdx.find? fun (f, _) => f.clauses.any (tmHas ·.body s.tm)).map
+        fun (_, k) => s!" (in `{fnName k}`)"
       match s.env[pl.var]? with
-      | some v => s!"`{showValue c.ctorNames v}` does not have the field being read"
+      | some v => s!"`{showValue c.ctorNames v}` does not have the field being read{within.getD ""}"
       | none => unbound
     | _ => unbound
   | .call f args _ | .tail f args => applied f (evalAtoms s.env args)

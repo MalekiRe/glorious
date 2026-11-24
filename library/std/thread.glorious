@@ -63,7 +63,8 @@ fn run_next(queue: Int) {
 }
 
 // A thread's computation, its waits handled by the scope's queue.
-fn run_thread(queue: Int, body: fn() -> () / {Threads}) {
+// (`body` is run once.)
+fn run_thread<B>(queue: Int, body: B) where B: Fn<(), Output = (), Effects = {Threads}>, B: Use<[1, 1]> {
     handle body() {
         _ => run_next(queue),
         block_until(ready, k) => push_waiting(queue, ready, { k(()) }); run_next(queue)
@@ -73,8 +74,9 @@ fn run_thread(queue: Int, body: fn() -> () / {Threads}) {
 fn always() -> Bool { true }
 
 // Run `f` with a scope in which it may spawn threads; each is done before
-// this returns.
-pub fn scope<R>(f: fn(&Scope) -> R / {Threads}) -> R {
+// this returns. (`f` is run once, as Rust's `FnOnce`: it may give away
+// what it holds.)
+pub fn scope<R, F>(f: F) -> R where F: for<'a> Fn<(&'a Scope,), Output = R, Effects = {Threads}>, F: Use<[1, 1]> {
     let queue = new_cell(Waiting { ready: Vec::new(), rest: Vec::new() });
     let result = new_cell<Option<R>>(None);
     let s = Scope { queue: queue };
@@ -140,7 +142,8 @@ pub fn wait_until(ready: fn() -> Bool) / {Threads} { block_until(ready) }
 // (`join_cell`), which nothing here sees, hence unsafe. (For a library that
 // joins every thread it spawns before what they borrow ends: covey's graph
 // of systems.) Its handle as the number of the cell its result goes in.
-pub unsafe fn spawn_unchecked<T>(s: &Scope, f: fn() -> T / {Threads}) -> Int {
+// (`f` is run once: it may give away what it holds.)
+pub unsafe fn spawn_unchecked<T, F>(s: &Scope, f: F) -> Int where F: Fn<(), Output = T, Effects = {Threads}>, F: Use<[1, 1]> {
     let cell = new_cell<Option<T>>(None);
     let queue = s.queue;
     push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });
@@ -210,7 +213,8 @@ impl<T> Mutex<T> {
 }
 impl<T> Share for Mutex<T> { fn share(m: &Mutex<T>) -> Mutex<T> { Mutex { cell: m.cell, none: fixed_of([], 0) } } }
 // Run `f` with the value: no other thread has it meanwhile.
-pub fn lock<T, R, F>(m: &Mutex<T>, f: F) -> R where F: for<'a> Fn<(&'a mut T,), Output = R>, F: Returns {
+// (`f` is called once, as Rust's `FnOnce`: it may give away what it holds.)
+pub fn lock<T, R, F>(m: &Mutex<T>, f: F) -> R where F: for<'a> Fn<(&'a mut T,), Output = R>, F: Returns, F: Use<[1, 1]> {
     let mut value = take_cell<T>(m.cell);
     let r = f(&mut value);
     put_cell(m.cell, value);

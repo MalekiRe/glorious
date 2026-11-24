@@ -931,14 +931,17 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let mut cur ← zonk ty
     let mut steps : Array (Option String × Nat) := #[]
     for (idx, said) in path.zip (chosen ++ path.map fun _ => none) do
-      -- (Past a reference a field before holds: the step is marked `*`,
-      -- and taken from what the reference points to.)
-      let past := match cur with
-        | .ref .. => !steps.isEmpty
-        | _ => false
-      if past then
-        if let .ref _ inner _ := cur then cur ← zonk inner
-      let mark := fun (c : Option String) => if past then some ("*" ++ c.getD "") else c
+      -- (Past a reference a field before holds, or what is reached through
+      -- is a reference to one: the step is marked `*` for each, and taken
+      -- from what the last points to.)
+      let mut past := 0
+      if !steps.isEmpty then
+        for _ in [0:8] do
+          if let .ref _ inner _ := cur then
+            cur ← zonk inner
+            past := past + 1
+      let mark := fun (c : Option String) =>
+        if past > 0 then some ("".pushn '*' past ++ c.getD "") else c
       match cur with
       | .tuple ts =>
         steps := steps.push (mark none, ts.length)

@@ -989,12 +989,19 @@ def partOf (name : String) : Option (String × Nat) :=
 
 /-- What a callable's uses are to the code it is written in. -/
 def NameUse.inside (u : NameUse) : NameUse :=
-  { u with valued := false, valuedInside := u.valued || u.valuedInside }
+  -- (A name bound again in a callable is another name there: this one is
+  -- still itself after it.)
+  { u with valued := false, valuedInside := u.valued || u.valuedInside, rebound := false }
 
 
 /-- The variable that says whether what a variable held has been given away,
 and the name the variable's cleanup is known by where it is one that asks. -/
 def movedFlag (x : String) : String := s!"%moved:{x}"
+
+/-- Added to a field read's identity among the reads through a reference
+(`derefReads`) where it is through two: a field of the element of a
+`Vec<&T>`, read through the element's reference, `names[0].0`. -/
+def derefTwice : Nat := 1152921504606846976
 def givenSite (x : String) : String := s!"%given:{x}"
 
 /-- The place of a field read by name before the type it is read from was

@@ -188,7 +188,8 @@ partial def nameUseExpr (b : Body) (noDefers : Bool) (x : String) (e : ExprId) :
   | .handle subject arms =>
     (NameUse.inside (arms.foldl (fun u c => u.or (b.nameUseClause noDefers x c)) ({} : NameUse))).or
       (b.nameUseExpr noDefers x subject)
-  | .labelScope _ body => b.nameUseStmts noDefers x body.toList
+  -- (A name bound again in a block is another name there, not after it.)
+  | .labelScope _ body => { b.nameUseStmts noDefers x body.toList with rebound := false }
   | _ => b.foldDirect (fun u e => u.or (b.nameUseExpr noDefers x e)) {} e
 
 partial def nameUseClause (b : Body) (noDefers : Bool) (x : String) (c : ClauseId) : NameUse :=
