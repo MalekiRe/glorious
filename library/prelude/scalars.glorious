@@ -472,14 +472,15 @@ fn get<T>(a: [T], i: Int) -> Option<T> {
     }
 }
 
-// How many elements the array a reference points to has.
-fn len_at<T>(a: &Array<T>) -> Int where T: Use<[1, 1]> { arr_len_at(a) }
+// How many elements what a reference points to has (an array, a `[T; N]`,
+// a `Vec`, a slice).
+fn len_at<A>(a: &A) -> Int where A: Indexed { size_at(a) }
 
 // The element at a place, by reference, if the place is there.
-fn element<T>(a: &Array<T>, i: Int) -> Option<&T> where T: Use<[1, 1]> {
-    match(int_mul(int_lt(-1, i), int_lt(i, arr_len_at(a)))) {
+fn element<A, T>(a: &A, i: Int) -> Option<&T> where A: Indexed<Element = T> {
+    match(int_mul(int_lt(-1, i), int_lt(i, size_at(a)))) {
         0 => None,
-        _ => Some(arr_at(a, i))
+        _ => Some(element_at(a, i))
     }
 }
 
@@ -539,10 +540,10 @@ impl<'a, A> Index for &'a mut A where A: Indexed {
 }
 
 // The same to write through.
-fn element_mut<T>(a: &mut Array<T>, i: Int) -> Option<&mut T> where T: Use<[1, 1]> {
-    match(int_mul(int_lt(-1, i), int_lt(i, arr_len_at(&*a)))) {
+fn element_mut<A, T>(a: &mut A, i: Int) -> Option<&mut T> where A: IndexedMut, A: Indexed<Element = T> {
+    match(int_mul(int_lt(-1, i), int_lt(i, size_at(&*a)))) {
         0 => None,
-        _ => Some(arr_at(a, i))
+        _ => Some(place_at(i, a))
     }
 }
 
