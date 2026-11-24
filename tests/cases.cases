@@ -12644,7 +12644,8 @@ fn main() -> Int { let mut v = Vec::new(); Vec::push(&mut v, 3); Vec::push(&mut 
 #### expect
 232
 #### case
-use std::iterator::{Iterator, next, into_iter, map, filter, fold, collect, take, range};
+use std::iterator::{Iterator, next, into_iter, map, filter, fold, take, range};
+use std::vec::{collect};
 fn main() -> Int { let evens = collect(&mut take(filter(range(1, 100), { (x) => *x % 2 == 0 }), 3)); say(evens); fold(&mut map(into_iter([1, 2, 3]), { (x) => x * x }), 0, { (a, x) => a + x }) }
 #### expect
 [2, 4, 6]
@@ -12659,7 +12660,8 @@ Err(())
 3
 #### case
 use std::generator::{Yield, yield, generator, iterate};
-use std::iterator::{take, collect};
+use std::iterator::{take};
+use std::vec::{collect};
 fn fib(a: Int, b: Int) -> () / {Yield<Int, ()>} { yield(a); fib(b, a + b) }
 fn main() -> Int { say(collect(&mut take(iterate(generator({ fib(0, 1) })), 8))); 0 }
 #### expect

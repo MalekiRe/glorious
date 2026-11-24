@@ -11,7 +11,8 @@
 // 2
 
 use std::generator::{Yield, yield, Coroutine, generator, iterate};
-use std::iterator::{Iterator, take, collect, next};
+use std::iterator::{Iterator, take, next};
+use std::vec::{collect};
 use std::vec::{Vec};
 
 trait Shape { fn area(&Self) -> Int; fn name(s: &Self) -> Str { "shape" } }

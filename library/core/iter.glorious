@@ -1,1 +1,2 @@
 pub use std::iterator::*;
+pub use std::vec::{collect, map_collect};

@@ -16,6 +16,14 @@ impl Iterator for Range<Int> {
     fn next(r: &mut Range<Int>) -> Option<Int> { if(r.start < r.end) { let v = r.start; r.start = v + 1; Some(v) } else { None } }
 }
 
+// The elements of an array, each given away, first to last.
+pub struct ArrayIter<T> { rest: [T] }
+impl<T> Iterator for ArrayIter<T> {
+    type Item = T;
+    fn next(it: &mut ArrayIter<T>) -> Option<T> {
+        pop_at(&mut it.rest)
+    }
+}
 fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
     match(pop(from)) {
         Some((rest, last)) => tail turned(rest, push(onto, last)),
@@ -23,15 +31,10 @@ fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
     }
 }
 
-// The elements of an array, each given away, first to last.
-pub struct IntoIter<T> { rest: [T] }
-pub fn into_iter<T>(items: [T]) -> IntoIter<T> where T: Use<[1, 1]> { IntoIter { rest: turned(items, []) } }
-impl<T> Iterator for IntoIter<T> {
-    type Item = T;
-    fn next(it: &mut IntoIter<T>) -> Option<T> {
-        pop_at(&mut it.rest)
-    }
-}
+// What gives all its elements away, one after another, first to last.
+pub trait IntoIterator { type Iter; fn into_iter(Self) -> Iter }
+impl<T> IntoIterator for [T] where T: Use<[1, 1]> { type Iter = ArrayIter<T>; fn into_iter(a: [T]) -> ArrayIter<T> { ArrayIter { rest: turned(a, []) } } }
+impl<T, N> IntoIterator for [T; N] where T: Use<[1, 1]> { type Iter = ArrayIter<T>; fn into_iter(a: [T; N]) -> ArrayIter<T> { ArrayIter { rest: turned(fixed_to_array(a), []) } } }
 
 // Every value, folded into one.
 pub fn fold<I: Iterator, A, e: EffectRow>(it: &mut I, acc: A, f: fn(A, I::Item) -> A / {| e}) -> A / {| e} where I: Use<[1, 1]>, A: Use<[1, 1]> {
@@ -55,24 +58,6 @@ fn count_from<I: Iterator>(it: &mut I, n: Int) -> Int where I: Use<[1, 1]> {
     match(next(it)) {
         Some(_) => tail count_from(it, n + 1),
         None => n
-    }
-}
-
-// The values left, as an array.
-pub fn collect<I: Iterator>(it: &mut I) -> [I::Item] where I: Use<[1, 1]> { collect_onto(it, []) }
-fn collect_onto<I: Iterator>(it: &mut I, out: [I::Item]) -> [I::Item] where I: Use<[1, 1]> {
-    match(next(it)) {
-        Some(x) => tail collect_onto(it, push(out, x)),
-        None => out
-    }
-}
-
-// What a function makes of each value, as an array.
-pub fn map_collect<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> B / {| e}) -> [B] / {| e} where I: Use<[1, 1]> { map_onto(it, f, []) }
-fn map_onto<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> B / {| e}, out: [B]) -> [B] / {| e} where I: Use<[1, 1]> {
-    match(next(it)) {
-        Some(x) => tail map_onto(it, f, push(out, f(x))),
-        None => out
     }
 }
 

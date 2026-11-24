@@ -133,7 +133,7 @@ pub fn len_of<T>(a: [T]) -> Int where T: Use<[1, 1]> { len(a) }
 // elements are in memory it allocates and frees, one after another, each laid
 // out as its type is; it holds room for `cap` of them, and `len` are there.
 use std::slice::{Slice, SliceIter};
-use std::iterator::{Iterator};
+use std::iterator::{Iterator, IntoIterator};
 
 pub struct Vec<T> { at: *mut T, cap: Int, len: Int }
 
@@ -513,3 +513,34 @@ impl<T> Vec<T> {
     // The elements one after another, by reference.
     pub fn iter<'a>(value: &'a Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { Slice::iter(&Vec::as_slice(value)) }
 }
+
+// Of iterators and what gives its elements away (here, not in
+// `std::iterator`, which this module uses).
+impl<T> IntoIterator for Vec<T> { type Iter = IntoIter<T>; fn into_iter(v: Vec<T>) -> IntoIter<T> { Vec::into_iter(v) } }
+
+// The values left, as a `Vec`.
+pub fn collect<I: Iterator>(it: &mut I) -> Vec<I::Item> where I: Use<[1, 1]> {
+    let mut out = Vec::new();
+    collect_onto(it, &mut out);
+    out
+}
+fn collect_onto<I: Iterator>(it: &mut I, out: &mut Vec<I::Item>) where I: Use<[1, 1]> {
+    match(Iterator::next(it)) {
+        Some(x) => Vec::push(out, x); tail collect_onto(it, out),
+        None => ()
+    }
+}
+
+// What a function makes of each value, as a `Vec`.
+pub fn map_collect<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> B / {| e}) -> Vec<B> / {| e} where I: Use<[1, 1]>, B: Use<[1, 1]> {
+    let mut out = Vec::new();
+    map_onto(it, f, &mut out);
+    out
+}
+fn map_onto<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> B / {| e}, out: &mut Vec<B>) / {| e} where I: Use<[1, 1]>, B: Use<[1, 1]> {
+    match(Iterator::next(it)) {
+        Some(x) => Vec::push(out, f(x)); tail map_onto(it, f, out),
+        None => ()
+    }
+}
+

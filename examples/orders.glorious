@@ -9,7 +9,8 @@
 // 2
 
 use std::vec::{Vec};
-use std::iterator::{Iterator, next, into_iter, map, filter, fold, collect};
+use std::iterator::{Iterator, next, into_iter, map, filter, fold};
+use std::vec::{collect};
 use std::map::{Map};
 use std::fmt::{Display, format};
 
