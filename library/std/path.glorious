@@ -12,9 +12,9 @@ pub enum PathComponent { Root, Current, Parent, Normal(Str) }
 pub enum PathError { InvalidEncoding, InvalidComponent, UnsupportedPrefix }
 
 // The names between the `/`s, those that are nothing left out.
-fn names(text: Str) -> [Str] { kept(split(text, '/'), 0, []) }
-fn kept(parts: [Str], i: Int, out: [Str]) -> [Str] {
-    if(i >= len(parts)) { out } else { tail kept(parts, i + 1, if(is_empty(parts[i])) { out } else { push(out, parts[i]) }) }
+fn names(text: Str) -> [Str] { let parts = split(text, '/'); kept(&parts, 0, []) }
+fn kept<A>(parts: &A, i: Int, out: [Str]) -> [Str] where A: Indexed<Element = Str> {
+    if(i >= size_at(parts)) { out } else { let part = *element_at(parts, i); tail kept(parts, i + 1, if(is_empty(part)) { out } else { push(out, part) }) }
 }
 
 fn component(name: Str) -> PathComponent {

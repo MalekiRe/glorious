@@ -38,21 +38,21 @@ fn is_digit(c: char) -> Bool { '0' <= c and { c <= '9' } }
 fn is_letter(c: char) -> Bool { ('a' <= c and { c <= 'z' }) or { c == '_' } }
 
 // The digits at the front of some characters as a number, and how many.
-fn number(chars: &[char], at: Int, value: Int) -> (Int, Int) {
+fn number(chars: &Vec<char>, at: Int, value: Int) -> (Int, Int) {
     match(element(chars, at)) {
         Some(c) => if(is_digit(*c)) { tail number(chars, at + 1, value * 10 + (int(*c) - int('0'))) } else { (value, at) },
         None => (value, at)
     }
 }
 
-fn word(chars: &[char], at: Int, out: Str) -> (Str, Int) {
+fn word(chars: &Vec<char>, at: Int, out: Str) -> (Str, Int) {
     match(element(chars, at)) {
         Some(c) => if(is_letter(*c)) { tail word(chars, at + 1, out ++ show(*c)) } else { (out, at) },
         None => (out, at)
     }
 }
 
-fn tokens(chars: &[char], at: Int, out: [Spot]) -> [Spot] / {Fail} {
+fn tokens(chars: &Vec<char>, at: Int, out: [Spot]) -> [Spot] / {Fail} {
     match(element(chars, at)) {
         None => out,
         Some(c) =>
@@ -156,7 +156,7 @@ fn calculate(text: Str) -> Str {
 
 fn worked_out(text: Str, sources: &SourceMap, id: SourceId) -> Str {
     let chars = chars(text);
-    let end = len(chars);
+    let end = len_at(&chars);
     handle {
         let spots = tokens(&chars, 0, []);
         let mut c = Cursor::new(Slice::of(&spots));

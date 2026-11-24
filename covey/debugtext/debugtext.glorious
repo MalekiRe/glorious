@@ -15,12 +15,12 @@ pub enum Value {
     VRaw(Str)
 }
 
-fn at(cs: &[char], i: Int) -> char { if(i < len_at(cs)) { cs[i] } else { '\u{0}' } }
-fn skip_space(cs: &[char], i: Int) -> Int { if(std::char::is_space(at(cs, i))) { skip_space(cs, i + 1) } else { i } }
+fn at(cs: &Vec<char>, i: Int) -> char { if(i < len_at(cs)) { cs[i] } else { '\u{0}' } }
+fn skip_space(cs: &Vec<char>, i: Int) -> Int { if(std::char::is_space(at(cs, i))) { skip_space(cs, i + 1) } else { i } }
 fn name_char(c: char) -> Bool { if(std::char::is_alphanumeric(c)) { true } else if(c == '_') { true } else { c == ':' } }
 
 // A whole number or a float, from `i`; and where it ends.
-fn number(cs: &[char], i: Int) -> (Value, Int) {
+fn number(cs: &Vec<char>, i: Int) -> (Value, Int) {
     let negative = at(cs, i) == '-';
     let mut j = if(negative) { i + 1 } else { i };
     let mut whole = 0;
@@ -47,7 +47,7 @@ fn number(cs: &[char], i: Int) -> (Value, Int) {
 }
 
 // Text between quotes, its escapes read; and where it ends.
-fn quoted(cs: &[char], i: Int, close: char) -> (Str, Int) {
+fn quoted(cs: &Vec<char>, i: Int, close: char) -> (Str, Int) {
     let mut out = "";
     let mut j = i + 1;
     while({ if(j < len_at(cs)) { at(cs, j) != close } else { false } }) {
@@ -62,7 +62,9 @@ fn quoted(cs: &[char], i: Int, close: char) -> (Str, Int) {
 
 // The value written from `i`, and where it ends. (One function: what a
 // list holds is read by it again.)
-fn value_at(cs: &[char], i: Int) -> (Value, Int) {
+// One character, or the text as it is.
+fn char_or_raw(t: Str) -> Value { let one = chars(t); if(len_at(&one) == 1) { VChar(one[0]) } else { VRaw(t) } }
+fn value_at(cs: &Vec<char>, i: Int) -> (Value, Int) {
     let i = skip_space(cs, i);
     let c = at(cs, i);
     if(if(c == '(') { true } else if(c == '[') { true } else { c == '{' }) {
@@ -87,7 +89,7 @@ fn value_at(cs: &[char], i: Int) -> (Value, Int) {
         (made, j + 1)
     }
     else if(c == '"') { let (t, j) = quoted(cs, i, '"'); (VStr(t), j) }
-    else if(c == '\'') { let (t, j) = quoted(cs, i, '\''); (match(chars(t)) { [one] => VChar(one), _ => VRaw(t) }, j) }
+    else if(c == '\'') { let (t, j) = quoted(cs, i, '\''); (char_or_raw(t), j) }
     else if(if(std::char::is_digit(c)) { true } else { c == '-' }) { number(cs, i) }
     else if(name_char(c)) {
         let mut name = "";

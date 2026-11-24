@@ -13,9 +13,9 @@ use reflected::{Edits, describe_component, set_field};
 // JSON: what requests and replies are written in.
 pub enum Json { JNull, JBool(Bool), JNum(Int), JStr(Str), JArr([Json]), JObj([(Str, Json)]) }
 
-fn jat(cs: &[char], i: Int) -> char { if(i < len_at(cs)) { cs[i] } else { '\u{0}' } }
-fn jskip(cs: &[char], i: Int) -> Int { if(std::char::is_space(jat(cs, i))) { jskip(cs, i + 1) } else { i } }
-fn jstring(cs: &[char], i: Int) -> (Str, Int) {
+fn jat(cs: &Vec<char>, i: Int) -> char { if(i < len_at(cs)) { cs[i] } else { '\u{0}' } }
+fn jskip(cs: &Vec<char>, i: Int) -> Int { if(std::char::is_space(jat(cs, i))) { jskip(cs, i + 1) } else { i } }
+fn jstring(cs: &Vec<char>, i: Int) -> (Str, Int) {
     let mut out = "";
     let mut j = i + 1;
     while({ if(j < len_at(cs)) { jat(cs, j) != '"' } else { false } }) {
@@ -29,7 +29,7 @@ fn jstring(cs: &[char], i: Int) -> (Str, Int) {
 }
 // A JSON value from `i`, and where it ends. (One function: what an array or
 // an object holds is read by it again.)
-fn jvalue(cs: &[char], i: Int) -> (Json, Int) {
+fn jvalue(cs: &Vec<char>, i: Int) -> (Json, Int) {
     let i = jskip(cs, i);
     let c = jat(cs, i);
     if(if(c == '[') { true } else { c == '{' }) {

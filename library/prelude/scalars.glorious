@@ -577,27 +577,20 @@ fn remove_at<T>(a: &mut Array<T>, at: Int) -> T {
 }
 
 // The elements from one place up to, not including, another.
-fn slice<T, U>(a: T, from: Int, to: Int) -> [U] where T: Index, T: Use<[0, *]>, U: Use<[0, *]> { slice_onto(a, from, to, array_empty()) }
-fn slice_onto<T, U>(a: T, i: Int, to: Int, out: [U]) -> [U] where T: Index, T: Use<[0, *]>, U: Use<[0, *]> {
+fn slice<A, T>(a: A, from: Int, to: Int) -> [T] where A: Indexed<Element = T>, T: Use<[0, *]> { let held = a; slice_onto(&held, from, to, array_empty()) }
+fn slice_onto<A, T>(a: &A, i: Int, to: Int, out: [T]) -> [T] where A: Indexed<Element = T>, T: Use<[0, *]> {
     match(int_lt(i, to)) {
         0 => out,
-        _ => tail slice_onto(a, int_add(i, 1), to, push(out, index(a, i)))
+        _ => tail slice_onto(a, int_add(i, 1), to, push(out, *element_at(a, i)))
     }
 }
 
-// A text as its characters, and characters as a text.
-fn chars(text: Str) -> [char] { chars_onto(text, array_empty()) }
-fn chars_onto(text: Str, out: [char]) -> [char] {
-    match(text) {
-        StrEnd => out,
-        StrChar(c, rest) => tail chars_onto(rest, push(out, c))
-    }
-}
-fn text<T>(a: T) -> Str where T: Len, T: Index, T: Use<[0, *]> { text_before(a, len(a), StrEnd) }
-fn text_before<T>(a: T, i: Int, rest: Str) -> Str where T: Index, T: Use<[0, *]> {
+// Characters as a text (`std::text::chars` is a text's characters).
+fn text<A>(a: A) -> Str where A: Indexed<Element = char> { let held = a; text_before(&held, size_at(&held), StrEnd) }
+fn text_before<A>(a: &A, i: Int, rest: Str) -> Str where A: Indexed<Element = char> {
     match(i) {
         0 => rest,
-        _ => tail text_before(a, int_sub(i, 1), StrChar(index(a, int_sub(i, 1)), rest))
+        _ => tail text_before(a, int_sub(i, 1), StrChar(*element_at(a, int_sub(i, 1)), rest))
     }
 }
 

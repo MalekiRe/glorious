@@ -108,7 +108,8 @@ def libraryPrelude : List (String × String) :=
    ("Left", "value"), ("Right", "value"), ("Rejected", "value"), ("Ordering", "cmp"),
    ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator"),
    ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
-   ("catch_fail", "value"), ("Vec", "vec"), ("String", "text"), ("Iterator", "iterator")]
+   ("catch_fail", "value"), ("Vec", "vec"), ("String", "text"), ("Iterator", "iterator"),
+   ("chars", "text")]
 
 /-- How a module is written in a message. -/
 def showPath (p : List String) : String :=

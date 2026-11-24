@@ -57,16 +57,25 @@ pub fn trim_start(text: Str) -> Str {
 }
 
 // The parts of a text between each two of a character.
-pub fn split(text: Str, at: char) -> [Str] { split_onto(text, at, "", []) }
-fn split_onto(text: Str, at: char, part: Str, out: [Str]) -> [Str] {
+pub fn split(text: Str, at: char) -> Vec<Str> { let mut out = Vec::new(); split_onto(text, at, "", &mut out); out }
+fn split_onto(text: Str, at: char, part: Str, out: &mut Vec<Str>) {
     match(text) {
-        StrEnd => push(out, reverse(part)),
+        StrEnd => Vec::push(out, reverse(part)),
         StrChar(c, rest) =>
-            if(c == at) { tail split_onto(rest, at, "", push(out, reverse(part))) }
+            if(c == at) { Vec::push(out, reverse(part)); tail split_onto(rest, at, "", out) }
             else { tail split_onto(rest, at, StrChar(c, part), out) }
     }
 }
-pub fn lines(text: Str) -> [Str] { split(text, '\n') }
+pub fn lines(text: Str) -> Vec<Str> { split(text, '\n') }
+
+// A text's characters, first to last.
+pub fn chars(text: Str) -> Vec<char> { let mut out = Vec::new(); chars_onto(text, &mut out); out }
+fn chars_onto(text: Str, out: &mut Vec<char>) {
+    match(text) {
+        StrEnd => (),
+        StrChar(c, rest) => Vec::push(out, c); tail chars_onto(rest, out)
+    }
+}
 
 // The words of a text: what is between its spaces.
 pub fn words(text: Str) -> Vec<Str> { vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
