@@ -193,5 +193,5 @@ pub fn shown(value: &Value) -> Str {
     }
 }
 fn escaped(t: Str) -> Str {
-    std::text::concat(std::vec::map(chars(t), fn(c: char) -> Str { if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else { show(c) } }))
+    fold(chars(t), "", fn(out: Str, c: char) -> Str { out ++ (if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else { show(c) }) })
 }

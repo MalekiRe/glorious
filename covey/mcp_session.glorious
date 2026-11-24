@@ -57,7 +57,7 @@ fn reply_text(r: Receiver<Str>) -> Str {
     }
 }
 fn is_error(r: Receiver<Str>) -> Bool { match(try_recv(&r)) { Some(t) => contains(t, "\"isError\":true"), None => false } }
-fn args(pairs: [(Str, Str)]) -> Json { object(std::vec::map(pairs, fn(p: (Str, Str)) -> (Str, Json) { let (k, v) = p; (k, JStr(v)) })) }
+fn args(pairs: [(Str, Str)]) -> Json { object(std::vec::Vec::into_array(std::vec::map(pairs, fn(p: (Str, Str)) -> (Str, Json) { let (k, v) = p; (k, JStr(v)) }))) }
 fn shown(b: Bool) -> Str { if(b) { "true" } else { "false" } }
 
 fn main() -> Int {

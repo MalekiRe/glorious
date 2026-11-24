@@ -763,11 +763,15 @@ def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
     Except String Elab.Output := do
   Comptime.evaluate (← Elab.elabProgram items blocks lends root kept)
 
+/-- (`GLORIOUS_UNLOWERED`: no program is lowered, for trying how one runs
+that is not.) -/
+initialize unlowered : Bool ← do pure (← IO.getEnv "GLORIOUS_UNLOWERED").isSome
+
 /-- The program lowered by its types, where it can be: what the machines run. -/
 def Compiled.lower (c : Compiled) : Compiled :=
   -- (The static blocks gathered first: the same for the program lowered.)
   let c := { c with core := c.core.internStatics }
-  match c.types.get.bind (Lower.program · c.core) with
+  match if unlowered then none else c.types.get.bind (Lower.program · c.core) with
   | some (core, copies) =>
     { c with core, checked := c.core, lowered := true
              fnNames := c.fnNames ++ (copies.map fun fn => (c.fnNames[fn]?).getD "").toArray }

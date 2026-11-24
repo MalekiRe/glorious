@@ -42,7 +42,7 @@ fn lines(all: [(Int, Str)]) -> [Str] {
     let mut keys = [];
     let mut i = 0;
     while({ i < len_at(&all) }) { keys = push(keys, all[i].0); i = i + 1 };
-    let keys = sort(keys);
+    let keys = std::vec::Vec::into_array(sort(keys));
     let mut out = [];
     let mut k = 0;
     while({ k < len_at(&keys) }) {

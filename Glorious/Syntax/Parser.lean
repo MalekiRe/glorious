@@ -1671,6 +1671,11 @@ def reflectTexts (items : List Item) : List String := Id.run do
     | _ => pure ()
   out
 
+/-- Where the identities of a text's reflections begin, after its own: clear
+of every text's (each has a million from its base), so that no call of a
+reflection is known by the identity of one of the text's. -/
+def reflectionBase : Nat := 1000000000000
+
 /-- Each declared type's `Reflect` among a module's items, read as its text
 is; checked only where something asks it. -/
 def reflectionsOf (fix : Fixities) (items : List Item) (base : Nat) (records : List String)
@@ -1703,14 +1708,14 @@ def parseKept (fix : Fixities) (src : String) (base : Nat := 0) (records : List 
   match kept with
   | some kept =>
     let ((items, groups), ⟨_, local_, _⟩) ← parseItemsKept kept ctx ⟨0, #[], {}⟩
-    let made ← if reflect then reflectionsOf fix (items ++ local_.toList) (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
+    let made ← if reflect then reflectionsOf fix (items ++ local_.toList) (base + reflectionBase) (collectRecords toks ++ records) tables path fixed else pure []
     pure (items ++ unmutItems (local_.toList ++ made), fix, groups)
   | none =>
     let (items, ⟨_, local_, _⟩) ← parseItems ctx ⟨0, #[], {}⟩
     let items := items ++ local_.toList
     -- (Each declared type's `Reflect`, read as the text is, after its items;
     -- checked only where something asks it.)
-    let made ← if reflect then reflectionsOf fix items (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
+    let made ← if reflect then reflectionsOf fix items (base + reflectionBase) (collectRecords toks ++ records) tables path fixed else pure []
     pure (unmutItems (items ++ made), fix, {})
 
 /-- `parseKept`, nothing taken from an earlier parse. -/

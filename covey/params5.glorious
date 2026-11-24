@@ -67,7 +67,7 @@ fn record(calls: &mut Local<Int>, log: &mut Single<(&mut Log,), ()>) {
 
 fn value<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Value> { match(world.get<Value>(e)) { Some(v) => v.0, None => 0 - 1 } }
 fn logged<S>(world: &World<S>, e: Entity) -> Str where S: ecs::Get<Log> {
-    match(world.get<Log>(e)) { Some(l) => std::text::join(std::vec::map(clone(&l.0), fn(n: Int) -> Str { show(n) }), " "), None => "" }
+    match(world.get<Log>(e)) { Some(l) => std::text::join(std::vec::Vec::into_array(std::vec::map(clone(&l.0), fn(n: Int) -> Str { show(n) })), " "), None => "" }
 }
 fn set_enabled<S>(world: &mut World<S>, e: Entity, to: Bool) where S: ecs::Get<Enabled> { match(world.get_mut<Enabled>(e)) { Some(mut x) => x.0 = to;, None => () } }
 fn set_value<S>(world: &mut World<S>, e: Entity, to: Int) where S: ecs::Get<Value> { match(world.get_mut<Value>(e)) { Some(mut x) => x.0 = to;, None => () } }

@@ -1,72 +1,173 @@
-// Arrays: `[T]`. Nothing here changes an array it is given; each gives a new one.
+// What has elements one after another: an array, a `[T; N]`, a `Vec`, a
+// slice (`Indexed`). Nothing here changes what it is given; what each makes
+// of elements is a `Vec`.
 
 pub fn is_empty<T>(a: T) -> Bool where T: Len, T: Use<[1, 1]> { len(a) == 0 }
 
-pub fn first<T>(a: [T]) -> Option<T> { get(a, 0) }
-pub fn last<T>(a: [T]) -> Option<T> where T: Use<[0, *]> { get(a, len(a) - 1) }
+pub fn first<A, T>(a: A) -> Option<T> where A: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = a;
+    if(size_at(&held) == 0) { None } else { Some(*element_at(&held, 0)) }
+}
+pub fn last<A, T>(a: A) -> Option<T> where A: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = a;
+    let n = size_at(&held);
+    if(n == 0) { None } else { Some(*element_at(&held, n - 1)) }
+}
 
 // The numbers from `from` up to, not including, `to`.
-pub fn range(from: Int, to: Int) -> [Int] { range_onto(from, to, []) }
-fn range_onto(i: Int, to: Int, out: [Int]) -> [Int] {
-    if(i < to) { tail range_onto(i + 1, to, push(out, i)) } else { out }
+pub fn range(from: Int, to: Int) -> Vec<Int> { let mut out = Vec::new(); range_onto(from, to, &mut out); out }
+fn range_onto(i: Int, to: Int, out: &mut Vec<Int>) {
+    if(i < to) { Vec::push(out, i); tail range_onto(i + 1, to, out) } else { () }
 }
 
 // `n` elements, the one at each place what `f` gives for the place.
-pub fn from_fn<T, e: EffectRow>(n: Int, f: fn(Int) -> T / {| e}) -> [T] / {| e} { from_fn_onto(n, f, 0, []) }
-fn from_fn_onto<T, e: EffectRow>(n: Int, f: fn(Int) -> T / {| e}, i: Int, out: [T]) -> [T] / {| e} {
-    if(i < n) { tail from_fn_onto(n, f, i + 1, push(out, f(i))) } else { out }
+pub fn from_fn<T, e: EffectRow>(n: Int, f: fn(Int) -> T / {| e}) -> Vec<T> / {| e} { let mut out = Vec::new(); from_fn_onto(n, f, 0, &mut out); out }
+fn from_fn_onto<T, e: EffectRow>(n: Int, f: fn(Int) -> T / {| e}, i: Int, out: &mut Vec<T>) / {| e} {
+    if(i < n) { Vec::push(out, f(i)); tail from_fn_onto(n, f, i + 1, out) } else { () }
 }
 
-pub fn map<T, U, e: EffectRow>(a: [T], f: fn(T) -> U / {| e}) -> [U] / {| e} where T: Use<[0, *]> { fold(a, [], fn(out, x) { push(out, f(x)) }) }
+// The elements from `i` up to `to`, each copied onto `out`.
+fn copy_onto<A, T>(a: &A, i: Int, to: Int, out: &mut Vec<T>) where A: Indexed<Element = T>, T: Use<[0, *]> {
+    if(i < to) { Vec::push(out, *element_at(a, i)); tail copy_onto(a, i + 1, to, out) } else { () }
+}
+// The elements from `from` up to `to`.
+fn between<A, T>(a: &A, from: Int, to: Int) -> Vec<T> where A: Indexed<Element = T>, T: Use<[0, *]> { let mut out = Vec::new(); copy_onto(a, from, to, &mut out); out }
+
+pub fn map<A, T, U, e: EffectRow>(a: A, f: fn(T) -> U / {| e}) -> Vec<U> / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = a;
+    let mut out = Vec::new();
+    map_elements_onto(&held, size_at(&held), f, 0, &mut out);
+    out
+}
+fn map_elements_onto<A, T, U, e: EffectRow>(a: &A, n: Int, f: fn(T) -> U / {| e}, i: Int, out: &mut Vec<U>) / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> {
+    if(i < n) { Vec::push(out, f(*element_at(a, i))); tail map_elements_onto(a, n, f, i + 1, out) } else { () }
+}
 
 // The elements `keep` says yes to.
-pub fn filter<T, U, V, e: EffectRow>(a: [T], keep: fn(T) -> Result<U, V> / {| e}) -> [T] / {| e} where T: Use<[0, *]> { fold(a, [], fn(out, x) { if(keep(x)) { push(out, x) } else { out } }) }
+pub fn filter<A, T, U, V, e: EffectRow>(a: A, keep: fn(T) -> Result<U, V> / {| e}) -> Vec<T> / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = a;
+    let mut out = Vec::new();
+    filter_onto(&held, size_at(&held), keep, 0, &mut out);
+    out
+}
+fn filter_onto<A, T, U, V, e: EffectRow>(a: &A, n: Int, keep: fn(T) -> Result<U, V> / {| e}, i: Int, out: &mut Vec<T>) / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> {
+    if(i < n) {
+        let x = *element_at(a, i);
+        if(keep(x)) { Vec::push(out, x) } else { () };
+        tail filter_onto(a, n, keep, i + 1, out)
+    } else { () }
+}
 
 // Each element with its place.
-pub fn enumerate<T, U>(a: T) -> [(Int, U)] where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { from_fn(len(a), { i => (i, a[i]) }) }
+pub fn enumerate<A, T>(a: A) -> Vec<(Int, T)> where A: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = a;
+    let mut out = Vec::new();
+    enumerate_onto(&held, size_at(&held), 0, &mut out);
+    out
+}
+fn enumerate_onto<A, T>(a: &A, n: Int, i: Int, out: &mut Vec<(Int, T)>) where A: Indexed<Element = T>, T: Use<[0, *]> {
+    if(i < n) { Vec::push(out, (i, *element_at(a, i))); tail enumerate_onto(a, n, i + 1, out) } else { () }
+}
 
-pub fn reverse<T, U>(a: T) -> [U] where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { from_fn(len(a), { i => a[len(a) - 1 - i] }) }
+pub fn reverse<A, T>(a: A) -> Vec<T> where A: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = a;
+    let mut out = Vec::new();
+    reverse_onto(&held, size_at(&held), &mut out);
+    out
+}
+fn reverse_onto<A, T>(a: &A, i: Int, out: &mut Vec<T>) where A: Indexed<Element = T>, T: Use<[0, *]> {
+    if(i > 0) { Vec::push(out, *element_at(a, i - 1)); tail reverse_onto(a, i - 1, out) } else { () }
+}
 
-// One array after another.
-pub fn append<T>(a: [T], b: [T]) -> [T] where T: Use<[0, *]> { fold(b, a, fn(out, x) { push(out, x) }) }
+// One after another.
+pub fn append<A, B, T>(a: A, b: B) -> Vec<T> where A: Indexed<Element = T>, B: Indexed<Element = T>, T: Use<[0, *]> {
+    let x = a;
+    let y = b;
+    let mut out = Vec::new();
+    copy_onto(&x, 0, size_at(&x), &mut out);
+    copy_onto(&y, 0, size_at(&y), &mut out);
+    out
+}
 
-// The arrays of an array, one after another.
-pub fn concat<T>(parts: [[T]]) -> [T] where T: Use<[0, *]> { fold(parts, [], fn(out, part) { append(out, part) }) }
+// What has elements, each of what has elements: theirs one after another.
+pub fn concat<A, B, T>(parts: A) -> Vec<T> where A: Indexed<Element = B>, B: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = parts;
+    let mut out = Vec::new();
+    concat_onto(&held, size_at(&held), 0, &mut out);
+    out
+}
+fn concat_onto<A, B, T>(parts: &A, n: Int, i: Int, out: &mut Vec<T>) where A: Indexed<Element = B>, B: Indexed<Element = T>, T: Use<[0, *]> {
+    if(i < n) { let part = element_at(parts, i); copy_onto(part, 0, size_at(part), out); tail concat_onto(parts, n, i + 1, out) } else { () }
+}
 
 // The first `n` elements, and the rest.
-pub fn take<T, U>(a: T, n: Int) -> [U] where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { slice(a, 0, if(n < len(a)) { n } else { len(a) }) }
-pub fn drop<T, U>(a: T, n: Int) -> [U] where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { slice(a, if(n < len(a)) { n } else { len(a) }, len(a)) }
+pub fn take<A, T>(a: A, n: Int) -> Vec<T> where A: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = a;
+    let m = size_at(&held);
+    between(&held, 0, if(n < m) { n } else { m })
+}
+pub fn drop<A, T>(a: A, n: Int) -> Vec<T> where A: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = a;
+    let m = size_at(&held);
+    between(&held, if(n < m) { n } else { m }, m)
+}
 
 // Pairs of the elements at the same places, as many as the shorter has.
-pub fn zip<T, U, V, W>(a: T, b: U) -> [(V, W)] where T: Len, U: Len, T: Index, U: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]>, W: Use<[0, *]> { from_fn(if(len(a) < len(b)) { len(a) } else { len(b) }, { i => (a[i], b[i]) }) }
+pub fn zip<A, B, T, U>(a: A, b: B) -> Vec<(T, U)> where A: Indexed<Element = T>, B: Indexed<Element = U>, T: Use<[0, *]>, U: Use<[0, *]> {
+    let x = a;
+    let y = b;
+    let n = if(size_at(&x) < size_at(&y)) { size_at(&x) } else { size_at(&y) };
+    let mut out = Vec::new();
+    zip_onto(&x, &y, n, 0, &mut out);
+    out
+}
+fn zip_onto<A, B, T, U>(a: &A, b: &B, n: Int, i: Int, out: &mut Vec<(T, U)>) where A: Indexed<Element = T>, B: Indexed<Element = U>, T: Use<[0, *]>, U: Use<[0, *]> {
+    if(i < n) { Vec::push(out, (*element_at(a, i), *element_at(b, i))); tail zip_onto(a, b, n, i + 1, out) } else { () }
+}
 
 // The place of the first element `wanted` says yes to.
-pub fn position<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<Int> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { position_from(a, wanted, 0) }
-fn position_from<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}, i: Int) -> Option<Int> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> {
-    if(i < len(a)) {
-        if(wanted(a[i])) { Some(i) } else { tail position_from(a, wanted, i + 1) }
+pub fn position<A, T, V, W, e: EffectRow>(a: A, wanted: fn(T) -> Result<V, W> / {| e}) -> Option<Int> / {| e} where A: Indexed<Element = T>, T: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> {
+    let held = a;
+    position_from(&held, size_at(&held), wanted, 0)
+}
+fn position_from<A, T, V, W, e: EffectRow>(a: &A, n: Int, wanted: fn(T) -> Result<V, W> / {| e}, i: Int) -> Option<Int> / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> {
+    if(i < n) {
+        if(wanted(*element_at(a, i))) { Some(i) } else { tail position_from(a, n, wanted, i + 1) }
     } else { None }
 }
 
 // The first element `wanted` says yes to.
-pub fn find<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<U> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { match(position(a, wanted)) { Some(i) => Some(a[i]), None => None } }
+pub fn find<A, T, V, W, e: EffectRow>(a: A, wanted: fn(T) -> Result<V, W> / {| e}) -> Option<T> / {| e} where A: Indexed<Element = T>, T: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> {
+    let held = a;
+    match(position_from(&held, size_at(&held), wanted, 0)) { Some(i) => Some(*element_at(&held, i)), None => None }
+}
 
-pub fn any<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { match(position(a, wanted)) { Some(_) => true, None => false } }
-pub fn all<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { not any(a, { x => not wanted(x) }) }
-pub fn contains<T, U>(a: T, x: U) -> Bool where U: Eq, T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { any(a, { y => y == x }) }
+pub fn any<A, T, V, W, e: EffectRow>(a: A, wanted: fn(T) -> Result<V, W> / {| e}) -> Bool / {| e} where A: Indexed<Element = T>, T: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { match(position(a, wanted)) { Some(_) => true, None => false } }
+pub fn all<A, T, V, W, e: EffectRow>(a: A, wanted: fn(T) -> Result<V, W> / {| e}) -> Bool / {| e} where A: Indexed<Element = T>, T: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { not any(a, { x => not wanted(x) }) }
+pub fn contains<A, T>(a: A, x: T) -> Bool where A: Indexed<Element = T>, T: Eq, T: Use<[0, *]> { any(a, { y => y == x }) }
 
 // How many elements `wanted` says yes to.
-pub fn count<T, U, V, e: EffectRow>(a: [T], wanted: fn(T) -> Result<U, V> / {| e}) -> Int / {| e} where T: Use<[0, *]> { fold(a, 0, fn(n, x) { if(wanted(x)) { n + 1 } else { n } }) }
+pub fn count<A, T, U, V, e: EffectRow>(a: A, wanted: fn(T) -> Result<U, V> / {| e}) -> Int / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> { fold(a, 0, fn(n, x) { if(wanted(x)) { n + 1 } else { n } }) }
 
-pub fn sum(a: [Int]) -> Int { fold(a, 0, fn(total, x) { total + x }) }
-pub fn product(a: [Int]) -> Int { fold(a, 1, fn(total, x) { total * x }) }
+pub fn sum<A>(a: A) -> Int where A: Indexed<Element = Int> { fold(a, 0, fn(total, x) { total + x }) }
+pub fn product<A>(a: A) -> Int where A: Indexed<Element = Int> { fold(a, 1, fn(total, x) { total * x }) }
 
 // The least and the greatest, if there is any element.
-pub fn minimum<T>(a: [T]) -> Option<T> where T: Ord, T: Use<[0, *]> {
-    if(len(a) == 0) { None } else { Some(fold(a, a[0], fn(m, x) { if(x < m) { x } else { m } })) }
+pub fn minimum<A, T>(a: A) -> Option<T> where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> {
+    let held = a;
+    let n = size_at(&held);
+    if(n == 0) { None } else { Some(least_from(&held, n, 1, *element_at(&held, 0))) }
 }
-pub fn maximum<T>(a: [T]) -> Option<T> where T: Ord, T: Use<[0, *]> {
-    if(len(a) == 0) { None } else { Some(fold(a, a[0], fn(m, x) { if(m < x) { x } else { m } })) }
+fn least_from<A, T>(a: &A, n: Int, i: Int, m: T) -> T where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> {
+    if(i < n) { let x = *element_at(a, i); tail least_from(a, n, i + 1, if(x < m) { x } else { m }) } else { m }
+}
+pub fn maximum<A, T>(a: A) -> Option<T> where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> {
+    let held = a;
+    let n = size_at(&held);
+    if(n == 0) { None } else { Some(greatest_from(&held, n, 1, *element_at(&held, 0))) }
+}
+fn greatest_from<A, T>(a: &A, n: Int, i: Int, m: T) -> T where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> {
+    if(i < n) { let x = *element_at(a, i); tail greatest_from(a, n, i + 1, if(m < x) { x } else { m }) } else { m }
 }
 
 // The array with the elements at two places changed over.
@@ -78,51 +179,45 @@ pub fn swap<T>(a: T, i: Int, j: Int) -> T where T: Index, T: Use<[0, *]> {
 
 // The elements in order, by `<`. Elements that are equal stay as they were
 // to each other.
-pub fn sort<T>(a: [T]) -> [T] where T: Ord, T: Use<[0, *]> { sort_by(a, fn(x, y) { x < y }) }
+pub fn sort<A, T>(a: A) -> Vec<T> where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> { sort_by(a, fn(x, y) { x < y }) }
 
 // The elements in the order `before` gives: `before(x, y)` says `x` comes
 // before `y`.
-pub fn sort_by<T, U, V, e: EffectRow>(a: [T], before: fn(T, T) -> Result<U, V> / {| e}) -> [T] / {| e} where T: Use<[0, *]>, U: Use<[1, 1]>, V: Use<[1, 1]> {
-    if(len(a) < 2) { a } else {
-        let half = len(a) / 2;
-        merge(sort_by(slice(a, 0, half), before), sort_by(slice(a, half, len(a)), before), before)
-    }
+pub fn sort_by<A, T, e: EffectRow>(a: A, before: fn(T, T) -> Bool / {| e}) -> Vec<T> / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> {
+    let held = a;
+    let mut out = between(&held, 0, size_at(&held));
+    Vec::sort_by(&mut out, before);
+    out
 }
 
-// Two arrays in order as one in order.
-fn merge<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]>, W: Use<[1, 1]>, X: Use<[1, 1]> { merge_from(a, b, before, 0, 0, []) }
-fn merge_from<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}, i: Int, j: Int, out: [V]) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]> {
-    if(i < len(a)) {
-        if(j < len(b)) {
-            if(before(b[j], a[i])) { tail merge_from(a, b, before, i, j + 1, push(out, b[j])) }
-            else { tail merge_from(a, b, before, i + 1, j, push(out, a[i])) }
-        } else { tail merge_from(a, b, before, i + 1, j, push(out, a[i])) }
-    } else {
-        if(j < len(b)) { tail merge_from(a, b, before, i, j + 1, push(out, b[j])) } else { out }
-    }
-}
-
-// Where `x` is in an array in order, or where it would go.
-pub fn binary_search<T, U>(a: T, x: U) -> Result<Int, Int> where T: Len, T: Index, U: Ord, T: Use<[0, *]>, U: Use<[0, *]> { search_in(a, x, 0, len(a)) }
-fn search_in<T, U>(a: T, x: U, low: Int, high: Int) -> Result<Int, Int> where T: Index, U: Ord, T: Use<[0, *]>, U: Use<[0, *]> {
+// Where `x` is among elements in order, or where it would go.
+pub fn binary_search<A, T>(a: A, x: T) -> Result<Int, Int> where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> { let held = a; search_in(&held, x, 0, size_at(&held)) }
+fn search_in<A, T>(a: &A, x: T, low: Int, high: Int) -> Result<Int, Int> where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> {
     if(low < high) {
         let mid = low + (high - low) / 2;
-        if(a[mid] < x) { tail search_in(a, x, mid + 1, high) }
-        else { if(x < a[mid]) { tail search_in(a, x, low, mid) } else { Ok(mid) } }
+        let y = *element_at(a, mid);
+        if(y < x) { tail search_in(a, x, mid + 1, high) }
+        else { if(x < y) { tail search_in(a, x, low, mid) } else { Ok(mid) } }
     } else { Err(low) }
 }
 
-// The array without an element that is equal to the one before it.
-pub fn dedup<T>(a: [T]) -> [T] where T: Eq, T: Use<[0, *]> {
-    fold(a, [], fn(out, x) {
-        if(len(out) == 0) { push(out, x) } else {
-            if(out[len(out) - 1] == x) { out } else { push(out, x) }
-        }
-    })
+// The elements without one that is equal to the one before it.
+pub fn dedup<A, T>(a: A) -> Vec<T> where A: Indexed<Element = T>, T: Eq, T: Use<[0, *]> {
+    let held = a;
+    let mut out = Vec::new();
+    dedup_onto(&held, size_at(&held), 0, &mut out);
+    out
+}
+fn dedup_onto<A, T>(a: &A, n: Int, i: Int, out: &mut Vec<T>) where A: Indexed<Element = T>, T: Eq, T: Use<[0, *]> {
+    if(i < n) {
+        let x = *element_at(a, i);
+        if(i > 0 and { *element_at(a, i - 1) == x }) { () } else { Vec::push(out, x) };
+        tail dedup_onto(a, n, i + 1, out)
+    } else { () }
 }
 
-// `f(f(init, a0, b0), a1, b1)` and so on, of an array of pairs.
-pub fn fold_pairs<T, U, V, e: EffectRow>(pairs: [(T, U)], init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
+// `f(f(init, a0, b0), a1, b1)` and so on, of pairs one after another.
+pub fn fold_pairs<A, T, U, V, e: EffectRow>(pairs: A, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where A: Indexed<Element = (T, U)>, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
 
 // How long an array is (the prelude's `len`, of arrays alone).
 pub fn len_of<T>(a: [T]) -> Int where T: Use<[1, 1]> { len(a) }

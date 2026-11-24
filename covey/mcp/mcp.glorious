@@ -68,7 +68,7 @@ fn jvalue(cs: &[char], i: Int) -> (Json, Int) {
 }
 pub fn parse_json(text: Str) -> Json { let cs = chars(text); let (v, _) = jvalue(&cs, 0); v }
 fn jquote(t: Str) -> Str {
-    "\"" ++ std::text::concat(std::vec::map(chars(t), fn(c: char) -> Str { if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else if(c == '\n') { "\\n" } else { show(c) } })) ++ "\""
+    "\"" ++ std::text::concat(std::vec::Vec::into_array(std::vec::map(chars(t), fn(c: char) -> Str { if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else if(c == '\n') { "\\n" } else { show(c) } }))) ++ "\""
 }
 fn jitems(vs: &[Json]) -> Str { let mut out = []; let mut i = 0; while({ i < len_at(vs) }) { push_at(&mut out, written(&vs[i])); i = i + 1 }; join(out, ",") }
 // A JSON value written.
@@ -120,8 +120,8 @@ pub fn value_text(d: &Described) -> Str {
                 i = i + 1
             };
             if(len_at(&parts) == 0) { *name }
-            else if(placed) { *name ++ "(" ++ join(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (_, v) = p; v }), ", ") ++ ")" }
-            else { *name ++ " { " ++ join(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (k, v) = p; k ++ ": " ++ v }), ", ") ++ " }" },
+            else if(placed) { *name ++ "(" ++ join(std::vec::Vec::into_array(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (_, v) = p; v })), ", ") ++ ")" }
+            else { *name ++ " { " ++ join(std::vec::Vec::into_array(std::vec::map(parts, fn(p: (Str, Str)) -> Str { let (k, v) = p; k ++ ": " ++ v })), ", ") ++ " }" },
         ListValue(vs) =>
             let mut out = [];
             let mut i = 0;
@@ -140,7 +140,7 @@ fn number_in(d: &Described) -> Option<Int> {
 }
 // Whether `n` meets a condition written `< 48`, `>= 3`, `== 1`.
 fn meets(n: Int, condition: Str) -> Bool {
-    let parts = std::text::words(condition);
+    let parts = std::vec::Vec::into_array(std::text::words(condition));
     if(len_at(&parts) < 2) { false } else {
         match(parse_int(parts[1])) {
             Some(m) =>
@@ -251,7 +251,7 @@ impl<S, L> Session<S, L> {
                     Some(reply_to(id, object([("protocolVersion", JStr("2025-06-18")), ("capabilities", object([("tools", object([]))])),
                         ("serverInfo", object([("name", JStr("covey")), ("version", JStr("0.1"))]))])))
                 } else if(method == "tools/list") {
-                    Some(reply_to(id, object([("tools", JArr(std::vec::map(tool_names(), fn(n: Str) -> Json { object([("name", JStr(n)), ("inputSchema", object([("type", JStr("object"))]))]) })))])))
+                    Some(reply_to(id, object([("tools", JArr(std::vec::Vec::into_array(std::vec::map(tool_names(), fn(n: Str) -> Json { object([("name", JStr(n)), ("inputSchema", object([("type", JStr("object"))]))]) }))))])))
                 } else if(method == "tools/call") {
                     let tool = match(field(&request, "params")) { Some(p) => text_of(field(p, "name")), None => "" };
                     let args = match(field(&request, "params")) { Some(p) => match(field(p, "arguments")) { Some(a) => written(a), None => "{}" }, None => "{}" };
@@ -280,7 +280,7 @@ impl<S, L> Session<S, L> {
         else if(name == "overview") {
             let infos = app.system_infos();
             Ok("frame " ++ show(session.frame) ++ "\n" ++ show(len_at(&app.world.entities())) ++ " entities\ncomponents: " ++ join(app.world.component_names(), ", ")
-                ++ "\nsystems: " ++ join(std::vec::map(infos, fn(i: SystemInfo) -> Str { i.name }), ", ")
+                ++ "\nsystems: " ++ join(std::vec::Vec::into_array(std::vec::map(infos, fn(i: SystemInfo) -> Str { i.name })), ", ")
                 ++ "\nlabels you can emit/step: " ++ join(clone(&session.labels), ", "))
         }
         else if(name == "emit") {

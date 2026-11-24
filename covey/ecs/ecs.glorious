@@ -2314,7 +2314,7 @@ impl<Q, N, St> Query<Q, N, St> {
     // have a first.)
     pub fn cascade(query: &mut Self, f: for<'a> fn(Q::Got<'a>)) where Q: Item<Store = St>, St: Cascading {
         let rows = copied(&query.entities);
-        let mut placed = std::vec::map(copied(&rows), fn(e: Entity) -> Bool { false });
+        let mut placed = [false; len_at(&rows)];
         let mut order = [];
         let mut grew = true;
         while({ grew }) {

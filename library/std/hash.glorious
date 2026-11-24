@@ -103,7 +103,7 @@ pub fn remove<T, U>(m: HashMap<T, U>, key: T) -> HashMap<T, U> where T: Hash, T:
                 Some(i) =>
                     let last = std::vec::len_of(bucket) - 1;
                     let moved = index_set(bucket, i, bucket[last]);
-                    HashMap(index_set(buckets, at, std::vec::take(moved, last)), n - 1),
+                    HashMap(index_set(buckets, at, slice(moved, 0, last)), n - 1),
                 None => m
             }
     }

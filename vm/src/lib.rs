@@ -1706,6 +1706,28 @@ impl Vm {
     }
 
     fn mem(&mut self, op: MemOp, mut args: Vec<Value>) -> Step<Value> {
+        // Where the program is not laid out, a value in memory is one the
+        // machine holds, in a place of 8 bytes: what a size, an alignment
+        // and a place in memory are then.
+        let op = match (op, args.as_slice()) {
+            (MemOp::SizeOf | MemOp::AlignOf, [_]) => return Ok(Value::Int(8)),
+            (MemOp::Deref, [_, Value::Int(at), _]) => {
+                return Ok(Value::Ref(usize::try_from(*at).map_err(|_| Stop::Wrong)?, None));
+            }
+            (op @ (MemOp::Load | MemOp::Store | MemOp::Swap | MemOp::Tag | MemOp::Focus), [Value::Ref(a, _), ..])
+                if *a >= self.cells.len() =>
+            {
+                let held = Rc::new(Lay::Held);
+                match op {
+                    MemOp::Load => MemOp::LoadL(held),
+                    MemOp::Store => MemOp::StoreL(held),
+                    MemOp::Swap => MemOp::SwapL(held),
+                    MemOp::Tag => MemOp::TagL(held),
+                    _ => MemOp::FocusL(held),
+                }
+            }
+            (op, _) => op,
+        };
         let storing = matches!(op, MemOp::StoreL(_));
         // (An address seen as a whole number, `transmute`, is the reference.)
         if let (MemOp::LoadL(_) | MemOp::StoreL(_) | MemOp::SwapL(_) | MemOp::TagL(_) | MemOp::FocusL(_), Some(Value::Int(a))) =

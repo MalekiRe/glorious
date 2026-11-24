@@ -428,10 +428,21 @@ def Store.memOp {φ : Type} (store : Store φ) (op : MemOp) (vs : List Value) : 
     | some (r, mem) => some (r, { store with mem })
     | none =>
       -- (An address seen as a whole number, `transmute`, is the reference.)
-      let vs := match vs with
+      let vs : List Value := match vs with
         | .int a :: rest => if 0 ≤ a then .ref a.toNat 0 [] :: rest else vs
         | _ => vs
-      (op.evalLaid store.mem store.held vs).map fun (r, mem, held) => (r, { store with mem, held })
+      -- Where the program is not laid out, a value in memory is one the
+      -- machine holds, in a place of 8 bytes: what a size, an alignment and
+      -- a place in memory are then.
+      let unlaid : Option MemOp := match op with
+        | .load => some (.loadL .held) | .store => some (.storeL .held) | .swap => some (.swapL .held)
+        | .tag => some (.tagL .held) | .focus => some (.focusL .held) | _ => none
+      match op, vs with
+      | .sizeOf, [_] | .alignOf, [_] => some (Value.int 8, store)
+      | .deref, [_, .int at_, _] =>
+        if 0 ≤ at_ then some (Value.ref at_.toNat 0 [], store) else none
+      | _, _ =>
+        ((unlaid.getD op).evalLaid store.mem store.held vs).map fun (r, mem, held) => (r, { store with mem, held })
 
 /-- The store with a new cell of memory (`Tm.cellL`) holding `v`, laid out so;
 its address. -/

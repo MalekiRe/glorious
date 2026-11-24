@@ -69,7 +69,7 @@ fn split_onto(text: Str, at: char, part: Str, out: [Str]) -> [Str] {
 pub fn lines(text: Str) -> [Str] { split(text, '\n') }
 
 // The words of a text: what is between its spaces.
-pub fn words(text: Str) -> [Str] { vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
+pub fn words(text: Str) -> Vec<Str> { vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
 
 // Texts one after another, with another between each two.
 pub fn join(parts: [Str], between: Str) -> Str {

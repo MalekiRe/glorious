@@ -48,7 +48,7 @@ fn parse_frame(text: Str) -> Option<Frame> {
     let parts = split(location, ':');
     let count = len_at(&parts);
     if(count < 2) { None } else {
-        let file = join(std::vec::take(clone(&parts), count - 1), ":");
+        let file = join(slice(clone(&parts), 0, count - 1), ":");
         let function = match(rest) {
             Some(r) => let f = if(ends_with(r, ")")) { take(r, length((r)) - 1) } else { r }; if(starts_with(f, "discriminator")) { None } else { Some(f) },
             None => None
@@ -73,7 +73,7 @@ fn is_hex(word: Str) -> Bool {
 }
 // An instruction with its addresses and offsets left out.
 fn normalize(instruction: Str) -> Str {
-    let ws = words(instruction);
+    let ws = std::vec::Vec::into_array(words(instruction));
     let mut out = [];
     let mut i = 0;
     let mut going = true;
@@ -137,15 +137,15 @@ pub fn scan(lines: [Str], target: Target) -> (Code, Bool) {
         } else { () };
         i = i + 1
     };
-    (Code { instructions: instructions, symbols: std::vec::sort(symbols) }, saw_lines)
+    (Code { instructions: instructions, symbols: std::vec::Vec::into_array(std::vec::sort(symbols)) }, saw_lines)
 }
 
 // Counts that say most about the code.
 pub fn stats(code: &Code) -> Str {
-    let count = fn(test: fn(Str) -> Bool) -> Int { len_at(&std::vec::filter(clone(&code.instructions), test)) };
+    let count = fn(test: fn(Str) -> Bool) -> Int { size_at(&std::vec::filter(clone(&code.instructions), test)) };
     let vector = count(fn(i: Str) -> Bool { if(contains(i, "%ymm")) { true } else if(contains(i, "%zmm")) { true } else if(contains(i, "%xmm")) { contains(i, "p") } else { false } });
     show(len_at(&code.instructions)) ++ " instructions (" ++ show(vector) ++ " vector, "
         ++ show(count(fn(i: Str) -> Bool { starts_with(i, "call") })) ++ " calls, "
         ++ show(count(fn(i: Str) -> Bool { starts_with(i, "j") })) ++ " branches) in "
-        ++ join(std::vec::map(clone(&code.symbols), short_type), ", ")
+        ++ join(std::vec::Vec::into_array(std::vec::map(clone(&code.symbols), short_type)), ", ")
 }

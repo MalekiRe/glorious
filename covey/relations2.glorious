@@ -74,7 +74,7 @@ struct Mount
 impl Relation for Mount { type Kind = OneToMany; }
 
 fn names<S>(world: &World<S>, es: [Entity]) -> [Int] where S: ecs::Get<Name> {
-    sort(fold(es, [], fn(out: [Int], e: Entity) -> [Int] { match(world.get<Name>(e)) { Some(n) => push(out, n.0), None => out } }))
+    std::vec::Vec::into_array(sort(fold(es, [], fn(out: [Int], e: Entity) -> [Int] { match(world.get<Name>(e)) { Some(n) => push(out, n.0), None => out } })))
 }
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 

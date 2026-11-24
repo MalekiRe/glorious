@@ -61,7 +61,7 @@ fn lines(all: [(Int, Str)]) -> [Str] {
     let mut keys = [];
     let mut i = 0;
     while({ i < len_at(&all) }) { keys = push(keys, all[i].0); i = i + 1 };
-    let keys = sort(keys);
+    let keys = std::vec::Vec::into_array(sort(keys));
     let mut out = [];
     let mut k = 0;
     while({ k < len_at(&keys) }) {
@@ -138,7 +138,7 @@ fn main() -> Int {
             let mut firsts = [];
             let mut i = 0;
             while({ i < len_at(&l.0) }) { firsts = push(firsts, l.0[i].0 * 100 + l.0[i].1); i = i + 1 };
-            let sorted = sort(firsts);
+            let sorted = std::vec::Vec::into_array(sort(firsts));
             let mut shown = [];
             let mut k = 0;
             while({ k < len_at(&sorted) }) { shown = push(shown, "(" ++ show(sorted[k] / 100) ++ ", " ++ show(sorted[k] % 100) ++ ")"); k = k + 1 };

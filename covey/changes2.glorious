@@ -60,7 +60,7 @@ struct Other(Int)
 fn values(q: &mut Query<(&Value,), (Changed<Value>,)>) -> [Int] {
     let mut out = [];
     q.for_each() { (v,) => out = push(out, v.0); };
-    sort(out)
+    std::vec::Vec::into_array(sort(out))
 }
 
 // `skipped_single_and_conditions_do_not_consume_pending_changes`
