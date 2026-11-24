@@ -237,10 +237,19 @@ partial def borrowAfterValue (b : Body) (x : String) (seen : Bool) (e : ExprId) 
   | .name none y => (seen || y == x, false)
   | .ref _ y | .refField _ _ y _ _ => (seen, seen && y == x)
   | .proj e _ | .fieldOf _ e _ => if b.placeRoot e == some x then (seen, seen) else b.borrowAfterValue x seen e
-  | .closure _ _ =>
+  | .closure _ cs =>
+    -- (Within each clause in the order it is written, from what was seen
+    -- before the callable: `&mut v; v` in one arm borrows before the value
+    -- goes. A callable run again counts its uses again, which the count of
+    -- them sees.)
     let u := b.nameUseExpr false x e
-    (seen || u.valuedInside,
-      (seen || u.valuedInside) && (u.shared || u.changed || u.fielded || u.looked))
+    let inner := cs.toList.any fun c =>
+      let ⟨pats, body⟩ := b.clause c
+      if (pats.flatMap patternNames).contains x then false
+      else (body.foldl (fun (seen, bad) s =>
+        let (seen', bad') := b.borrowAfterValueStmt x seen s
+        (seen', bad || bad')) (seen, false)).2
+    (seen || u.valuedInside, inner)
   | .handle subject arms =>
     let (seen, bad) := b.borrowAfterValue x seen subject
     let u := arms.foldl (fun u c => u.or (b.nameUseClause false x c)) ({} : NameUse)

@@ -176,9 +176,11 @@ def scalars : List (String × Option Int) :=
    ("f32", none), ("f64", none), ("char", none)]
 
 /-- The bits a scalar type is held in, with a sign if positive (Core's
-`Ty.scalar`): a float or a `char` as the bits it is held in. -/
+`Ty.scalar`): a float or a `char` as the bits it is held in. (An `f64`'s
+bits are held as the integer with the same 64 bits read with a sign, as the
+float operations give them: so it is read back from memory.) -/
 def scalarBits (t : String) : Int :=
-  ((scalars.lookup t).bind id).getD (if t == "f64" then -64 else -32)
+  ((scalars.lookup t).bind id).getD (if t == "f64" then 64 else -32)
 
 def isScalar (name : String) : Bool :=
   -- (Asked of every type name there is: told by its first letter before the

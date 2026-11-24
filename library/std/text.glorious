@@ -206,4 +206,4 @@ impl String {
         unsafe { str_at(ptr_mut_address(Vec::as_mut_ptr(&value.bytes)), Vec::len(&value.bytes)) }
     }
 }
-impl Show for String { fn show(s: String) -> Str { String::to_str(&s) } }
+impl Show for String { fn fmt(s: &String) -> Str { String::to_str(s) } }

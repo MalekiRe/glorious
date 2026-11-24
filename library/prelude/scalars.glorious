@@ -60,9 +60,14 @@ impl Eq for Str {
 }
 
 // A value as text.
-trait Show { fn show(Self) -> Str }
-impl Show for Str { fn show(text: Str) -> Str { text } }
-impl Show for char { fn show(c: char) -> Str { StrChar(c, StrEnd) } }
+// What can be written as text, looked at where it is: nothing of it is
+// copied or taken. `show(x)` writes what it is given; `show(&x)` what `x` is.
+trait Show { fn fmt(&Self) -> Str }
+fn show<T>(value: T) -> Str where T: Show { let held = value; fmt(&held) }
+impl<'a, T> Show for &'a T where T: Show { fn fmt(r: &&'a T) -> Str { fmt(*r) } }
+impl<'a, T> Show for &'a mut T where T: Show { fn fmt(r: &&'a mut T) -> Str { fmt(&**r) } }
+impl Show for Str { fn fmt(text: &Str) -> Str { *text } }
+impl Show for char { fn fmt(c: &char) -> Str { StrChar(*c, StrEnd) } }
 
 // How numbers are written as text. Only what is `pub` is the prelude's.
 mod number_text {
@@ -166,28 +171,28 @@ fn show_whole(n: Int) -> Str {
     }
 }
 
-impl Show for Int { fn show(n: Int) -> Str { show_whole(n) } }
+impl Show for Int { fn fmt(n: &Int) -> Str { show_whole(*n) } }
 
 // A tuple and a `Result` as text, if their parts are. Truth is `Ok(())`.
-impl Show for () { fn show(u: ()) -> Str { "()" } }
+impl Show for () { fn fmt(u: &()) -> Str { "()" } }
 impl<A, B> Show for (A, B) where A: Show, B: Show {
-    fn show(p: (A, B)) -> Str { match(p) { (a, b) => "(" ++ show(a) ++ ", " ++ show(b) ++ ")" } }
+    fn fmt(p: &(A, B)) -> Str { "(" ++ fmt(&(*p).0) ++ ", " ++ fmt(&(*p).1) ++ ")" }
 }
 impl<A, B, C> Show for (A, B, C) where A: Show, B: Show, C: Show {
-    fn show(p: (A, B, C)) -> Str { match(p) { (a, b, c) => "(" ++ show(a) ++ ", " ++ show(b) ++ ", " ++ show(c) ++ ")" } }
+    fn fmt(p: &(A, B, C)) -> Str { "(" ++ fmt(&(*p).0) ++ ", " ++ fmt(&(*p).1) ++ ", " ++ fmt(&(*p).2) ++ ")" }
 }
 impl<T, E> Show for Result<T, E> where T: Show, E: Show {
-    fn show(r: Result<T, E>) -> Str {
+    fn fmt(r: &Result<T, E>) -> Str {
         match(r) {
-            Ok(value) => "Ok(" ++ show(value) ++ ")",
-            Err(error) => "Err(" ++ show(error) ++ ")"
+            Ok(value) => "Ok(" ++ fmt(value) ++ ")",
+            Err(error) => "Err(" ++ fmt(error) ++ ")"
         }
     }
 }
 // Truth, `Result<(), ()>`, as `true` and `false` (preferred, as the more
 // particular implementation, over the one of every `Result`).
 impl Show for Result<(), ()> {
-    fn show(b: Result<(), ()>) -> Str { match(b) { Ok(_) => "true", Err(_) => "false" } }
+    fn fmt(b: &Result<(), ()>) -> Str { match(b) { Ok(_) => "true", Err(_) => "false" } }
 }
 
 // An array: its elements, one after another. The machines build its values
@@ -271,7 +276,7 @@ fn str_chars(s: &StrRef, i: Int, out: Str) -> Str {
 }
 fn str_char_at(s: &StrRef, i: Int) -> char { char_of(u8_bits(StrRef::byte(s, i))) }
 impl<'a> Show for StrRef<'a> {
-    fn show(s: StrRef<'a>) -> Str { str_decode(&s, 0, StrEnd) }
+    fn fmt(s: &StrRef<'a>) -> Str { str_decode(s, 0, StrEnd) }
 }
 // The text's characters, decoded from UTF-8 from a place on, before `rest`
 // reversed and then put back in order.
@@ -610,31 +615,22 @@ where A: Indexed<Element = T>, T: Use<[0, *]>, U: Use<[1, 1]> {
 }
 fn each<A, T, e: EffectRow>(a: A, f: fn(T) -> () / {| e}) -> () / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> { fold(a, (), fn(done, x) { f(x) }) }
 
-impl<T> Show for Array<T> where T: Show, T: Use<[0, *]> {
-    fn show(a: Array<T>) -> Str {
-        "[" ++ fold(a, "", fn(text, x) {
-            match(text) {
-                StrEnd => show(x),
-                _ => text ++ ", " ++ show(x)
-            }
-        }) ++ "]"
+// Elements one after another, each written where it is: `[a, b]`.
+fn elements_text<A, T>(a: &A) -> Str where A: Indexed<Element = T>, T: Show { "[" ++ elements_from(a, size_at(a), 0, StrEnd) ++ "]" }
+fn elements_from<A, T>(a: &A, n: Int, i: Int, text: Str) -> Str where A: Indexed<Element = T>, T: Show {
+    match(int_lt(i, n)) {
+        0 => text,
+        _ => tail elements_from(a, n, int_add(i, 1), match(i) { 0 => fmt(element_at(a, i)), _ => text ++ ", " ++ fmt(element_at(a, i)) })
     }
 }
+
+impl<T> Show for Array<T> where T: Show, T: Use<[1, 1]> { fn fmt(a: &Array<T>) -> Str { elements_text(a) } }
 
 // A `[T; N]` written as an array is.
-impl<T, N> Show for Fixed<T, N> where T: Show, T: Use<[0, *]>, N: Known {
-    fn show(a: Fixed<T, N>) -> Str {
-        "[" ++ fold(a, "", fn(text, x) {
-            match(text) {
-                StrEnd => show(x),
-                _ => text ++ ", " ++ show(x)
-            }
-        }) ++ "]"
-    }
-}
+impl<T, N> Show for Fixed<T, N> where T: Show, N: Known { fn fmt(a: &Fixed<T, N>) -> Str { elements_text(a) } }
 
 // Write a value as text.
-fn say<T>(value: T) where T: Show, T: Use<[1, 1]> { host_write(show(value)) }
+fn say<T>(value: T) where T: Show { host_write(show(value)) }
 
 // A value owned anew, from one read through a reference (the library
 // specification's §3.1): of what is copied as it is read, the copy; of a
@@ -857,8 +853,8 @@ impl Real for f32 {
 fn f32(n: Int) -> f32 { narrow(f64(n)) }
 
 impl Show for f64 {
-    fn show(x: f64) -> Str {
-        let bits = f64_bits(x);
+    fn fmt(x: &f64) -> Str {
+        let bits = f64_bits(*x);
         match(int_lt(bits, 0)) {
             0 => float_text(0, bits, bits, 0, 9218868437227405312),
             _ =>
@@ -869,8 +865,8 @@ impl Show for f64 {
 }
 
 impl Show for f32 {
-    fn show(x: f32) -> Str {
-        let bits = f32_bits(x);
+    fn fmt(x: &f32) -> Str {
+        let bits = f32_bits(*x);
         match(int_lt(bits, 2147483648)) {
             0 =>
                 let rest = int_sub(bits, 2147483648);

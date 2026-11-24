@@ -4,6 +4,7 @@
 // another.
 
 use std::text::{split, join, starts_with, is_empty};
+use std::vec::{Vec};
 
 // A path, kept as it is written.
 pub struct PathBuf { text: Str }
@@ -12,21 +13,14 @@ pub enum PathComponent { Root, Current, Parent, Normal(Str) }
 pub enum PathError { InvalidEncoding, InvalidComponent, UnsupportedPrefix }
 
 // The names between the `/`s, those that are nothing left out.
-fn names(text: Str) -> [Str] { let parts = split(text, '/'); kept(&parts, 0, []) }
-fn kept<A>(parts: &A, i: Int, out: [Str]) -> [Str] where A: Indexed<Element = Str> {
-    if(i >= size_at(parts)) { out } else { let part = *element_at(parts, i); tail kept(parts, i + 1, if(is_empty(part)) { out } else { push(out, part) }) }
-}
+fn names(text: Str) -> Vec<Str> { std::vec::filter(split(text, '/'), { part => not is_empty(part) }) }
 
 fn component(name: Str) -> PathComponent {
     if(name == ".") { PathComponent::Current } else { if(name == "..") { PathComponent::Parent } else { PathComponent::Normal(name) } }
 }
 
-fn components_of(parts: [Str], i: Int, out: [PathComponent]) -> [PathComponent] {
-    if(i >= len(parts)) { out } else { tail components_of(parts, i + 1, push(out, component(parts[i]))) }
-}
-
-fn upto(parts: [Str], n: Int, i: Int, out: [Str]) -> [Str] {
-    if(i >= n) { out } else { tail upto(parts, n, i + 1, push(out, parts[i])) }
+fn components_of(parts: &Vec<Str>, i: Int, out: &mut Vec<PathComponent>) {
+    if(i >= Vec::len(parts)) { () } else { Vec::push(out, component(*Vec::index(parts, i))); tail components_of(parts, i + 1, out) }
 }
 
 // The place of the last `.` in a name, if it has one after its first
@@ -45,15 +39,19 @@ impl PathBuf {
     pub fn is_absolute(p: &Self) -> Bool { starts_with(p.text, "/") }
     // What it is made of, in order: the root if it starts at it, then each
     // name, with `.` and `..` told from the others.
-    pub fn components(p: &Self) -> [PathComponent] {
-        components_of(names(p.text), 0, if(starts_with(p.text, "/")) { [PathComponent::Root] } else { [] })
+    pub fn components(p: &Self) -> Vec<PathComponent> {
+        let mut out = Vec::new();
+        if(starts_with(p.text, "/")) { Vec::push(&mut out, PathComponent::Root) } else { () };
+        let parts = names(p.text);
+        components_of(&parts, 0, &mut out);
+        out
     }
     // The last name, if the path ends in one.
     pub fn file_name(p: &Self) -> Option<Str> {
         let parts = names(p.text);
-        let n = len(parts);
+        let n = Vec::len(&parts);
         if(n == 0) { None } else {
-            let last = parts[n - 1];
+            let last = *Vec::index(&parts, n - 1);
             if(last == "." or { last == ".." }) { None } else { Some(last) }
         }
     }
@@ -70,9 +68,9 @@ impl PathBuf {
     // no names.
     pub fn parent(p: &Self) -> Option<PathBuf> {
         let parts = names(p.text);
-        let n = len(parts);
+        let n = Vec::len(&parts);
         if(n == 0) { None } else {
-            let before = join(upto(parts, n - 1, 0, []), "/");
+            let before = join(std::vec::take(&parts, n - 1), "/");
             Some(PathBuf { text: if(starts_with(p.text, "/")) { "/" ++ before } else { before } })
         }
     }

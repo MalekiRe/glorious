@@ -765,6 +765,22 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String 
             if sure && !holdsTracked fv && !vs.any holdsTracked
                 && !(ctx.probing && (holdsProbe fv || vs.any holdsProbe)) then
               out := (.unknown, n + m) :: out
+            -- A function given nothing a use could come of, for the most
+            -- uses along a path: followed so far, and where that is not far
+            -- enough, taken as a call that cannot be followed is
+            -- (`unfollowed`), not as the count given up.
+            else if !ctx.lower && !ctx.probing && (match fv with | .fn _ => true | _ => false)
+                && !vs.any holdsTracked && !vs.any holdsProbe then
+              let st ← get
+              let budget := min st.fuel 2000
+              match (callValue ctx depth fv vs).run { st with fuel := budget } with
+              | some (found, st') =>
+                set { st' with fuel := st.fuel - (budget - st'.fuel) }
+                for (v, k) in found do
+                  out := (v, n + m + k) :: out
+              | none =>
+                set { st with fuel := st.fuel - budget }
+                out := (.unknown, n + m) :: out
             else
               let found ← callValue ctx depth fv vs
               for (v, k) in found do
@@ -1200,7 +1216,9 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
         match ← pathUses (if dropped then { ctx with handed := true } else ctx)
             (names.filter (· != x)) x code body with
         | some n => if n ≥ 2 then mustDup t (twice x)
-        | none => mustDup t (twice x)
+        -- (The count gave up: said as that, not as a second use it did not
+        -- find.)
+        | none => mustDup t s!"`{x}` is used in more than one place, and the paths through the function are too many for the compiler to follow far enough to see that it is used at most once on each (give it to a function of its own where it is used, or say where it is taken with `replace`)"
     -- A value that has to be used: is it, however the body goes? Looked at
     -- once the function's types are known. A name the compiler made up
     -- stands for nothing the program wrote.

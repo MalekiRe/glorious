@@ -9415,6 +9415,8 @@ fn main() -> Int { let mut f = open(); write(&mut f, 4); write(&mut f, 5); both(
 #### expect
 error: 9:76: in `main`: `f` is given away while a callable this expression is still using uses it
 #### case
+#### A callable that borrows a variable and then gives its value away, in
+#### that order: it holds the value, and can be called once.
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
@@ -9424,7 +9426,19 @@ fn write(f: &mut File, n: Int) { f.written = f.written + n; }
 fn close(f: File) -> Int { match(f) { File { fd, written } => redeem(fd) * 100 + written } }
 fn main() -> Int { let mut f = open(); write(&mut f, 4); write(&mut f, 5); let g = { write(&mut f, 1); close(f) }; g() }
 #### expect
-error: 8:104: in `main`: reading the variable `f` copies its value (`replace` takes it out instead), but a `Ticket` can be used only once
+310
+#### case
+#### Called twice, it would give the value away twice.
+struct Ticket(Int);
+impl Use<[1, 1]> for Ticket {}
+fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
+struct File { fd: Ticket, written: Int }
+fn open() -> File { File { fd: Ticket(3), written: 0 } }
+fn write(f: &mut File, n: Int) { f.written = f.written + n; }
+fn close(f: File) -> Int { match(f) { File { fd, written } => redeem(fd) * 100 + written } }
+fn main() -> Int { let mut f = open(); write(&mut f, 4); write(&mut f, 5); let g = { write(&mut f, 1); close(f) }; g() + g() }
+#### expect
+error: 8:76: in `main`: `g` is used more than once, but a value that holds a resumption can be used only once
 #### case
 #### The same for a value with a `drop`: it runs once, where the value went, or when the block ends if it went nowhere.
 struct Noisy { id: Int, hits: Int }
@@ -9945,19 +9959,19 @@ use std::slice::{Slice};
 struct Edges { to: [[Int]] }
 impl Graph for Edges {
     type Node = Int;
-    fn successors(g: &Edges, node: Int) -> [Int] { match(element(&g.to, node)) { Some(next) => *next, None => [] } }
+    fn successors(g: &Edges, node: Int) -> Vec<Int> { match(element(&g.to, node)) { Some(next) => Vec::from_array(*next), None => Vec::new() } }
 }
 fn main() -> Int {
     // 0 -> 1 -> 2 -> 0 is a circle; 2 -> 3 -> 4; 5 is apart.
     let g = Edges { to: [[1], [2], [0, 3], [4], [], [4]] };
     let mut budget = StepBudget::new(1000);
-    say(match(reachable(&g, 3, &mut budget)) { Ok(found) => found, Err(_) => [] });
-    say(match(reachable(&g, 0, &mut budget)) { Ok(found) => found, Err(_) => [] });
+    say(match(reachable(&g, 3, &mut budget)) { Ok(found) => found, Err(_) => Vec::new() });
+    say(match(reachable(&g, 0, &mut budget)) { Ok(found) => found, Err(_) => Vec::new() });
     let tail_nodes = [5, 3];
-    say(match(topological_order(&g, Slice::of(&tail_nodes), &mut budget)) { Ok(order) => order, Err(_) => [] });
+    say(match(topological_order(&g, Slice::of(&tail_nodes), &mut budget)) { Ok(order) => order, Err(_) => Vec::new() });
     let all = [0, 5];
-    say(match(topological_order(&g, Slice::of(&all), &mut budget)) { Ok(_) => [], Err(GraphError::Cycle(c)) => c.nodes, Err(GraphError::Limit(_)) => [0 - 1] });
-    say(match(strongly_connected_components(&g, Slice::of(&all), &mut budget)) { Ok(groups) => groups, Err(_) => [] });
+    say(match(topological_order(&g, Slice::of(&all), &mut budget)) { Ok(_) => Vec::new(), Err(GraphError::Cycle(c)) => c.nodes, Err(GraphError::Limit(_)) => Vec::from_array([0 - 1]) });
+    say(match(strongly_connected_components(&g, Slice::of(&all), &mut budget)) { Ok(groups) => groups, Err(_) => Vec::new() });
     let mut small = StepBudget::new(2);
     say(match(reachable(&g, 0, &mut small)) { Ok(_) => 0 - 1, Err(e) => e.remaining });
     1000 - StepBudget::remaining(&budget)
@@ -10451,15 +10465,15 @@ error: 14:9: in `main`: `b` is not used on every path, but a `std::task::Task` h
 #### Paths taken apart and put together as text (library 29.1).
 use std::path::{PathBuf, PathComponent};
 
-fn show_all(cs: [PathComponent], i: Int, out: Str) -> Str {
-    if(i >= len(cs)) { out } else {
+fn show_all(cs: &Vec<PathComponent>, i: Int, out: Str) -> Str {
+    if(i >= len_at(cs)) { out } else {
         show_all(cs, i + 1, out ++ match(cs[i]) { PathComponent::Root => "<root>", PathComponent::Current => "<.>", PathComponent::Parent => "<..>", PathComponent::Normal(n) => "[" ++ n ++ "]" })
     }
 }
 fn or_none(o: Option<Str>) -> Str { match(o) { Some(s) => s, None => "(none)" } }
 fn main() -> Int {
     let p = PathBuf::from_str("/usr/local/./lib/../archive.tar.gz");
-    say(show_all(PathBuf::components(&p), 0, ""));
+    say(show_all(&PathBuf::components(&p), 0, ""));
     say(or_none(PathBuf::file_name(&p)));
     say(or_none(PathBuf::extension(&p)));
     say(match(PathBuf::parent(&p)) { Some(up) => PathBuf::as_str(&up), None => "(none)" });
@@ -11028,8 +11042,8 @@ use std::vec::{Vec};
 enum Status { Open, Done }
 struct Task { id: Int, title: Str, status: Status, priority: Int }
 
-impl Show for Status { fn show(s: Status) -> Str { match(s) { Open => "open", Done => "done" } } }
-impl Show for Task { fn show(t: Task) -> Str { "#" ++ show(t.id) ++ " " ++ t.title ++ " [" ++ show(t.status) ++ "]" } }
+impl Show for Status { fn fmt(s: &Status) -> Str { match(s) { Open => "open", Done => "done" } } }
+impl Show for Task { fn fmt(t: &Task) -> Str { "#" ++ show(t.id) ++ " " ++ t.title ++ " [" ++ fmt(&t.status) ++ "]" } }
 
 effect Log { log(Str) }
 

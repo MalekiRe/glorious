@@ -660,8 +660,17 @@ def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb
   let holds := fun (t : Ty) => tyHolds brand t
   let escape := fun (how : String) =>
     (throw s!"{what}: {how}" : M Unit)
+  -- (A function that calls itself, or one checked with it, is given the
+  -- same lifetime at each of those calls for each of its references: one
+  -- made inside it, given where its caller's is given too, is taken to last
+  -- as long as the caller's. Said so where that is how it could be held.)
+  let s0 ← get
+  let recursive := s0.groupUses.any fun u => u.owner == s0.owner
   for (how, t) in roots do
-    if ← holds t then escape how
+    if ← holds t then
+      if recursive && (← match ← find t with | .ref .. => pure true | _ => pure false) then
+        escape s!"{how}: a function that calls itself is checked with one lifetime for each of its references, the same at every call of itself, so a reference to a value made inside it, given where its caller's reference is given too, is taken to last as long as the caller's (give the value to the call as it is, owned, or borrow it in a function that does not call this one)"
+      escape how
   let row ← flattenRow amb
   for (e, args) in row.effs do
     for a in args do

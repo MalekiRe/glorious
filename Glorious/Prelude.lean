@@ -67,7 +67,7 @@ impl Whole for {t} \{
     fn whole(x: {t}) -> i128 {test s!"i128_of({t}_bits(x))"}
     fn of_whole(n: i128) -> {t} {test s!"{t}_of(int_fit(i128_bits(n), {width}))"}
 }
-impl Show for {t} \{ fn show(x: {t}) -> Str {test s!"show_whole({t}_bits(x))"} }
+impl Show for {t} \{ fn fmt(x: &{t}) -> Str {test s!"show_whole({t}_bits(*x))"} }
 fn {t}(n: Int) -> {t} {test s!"{t}_of(int_fit(n, {width}))"}
 "
 
@@ -97,7 +97,7 @@ impl Whole for {t} \{
     fn whole(x: {t}) -> i128 {test s!"i128_of(int_fit({t}_bits(x), -127))"}
     fn of_whole(n: i128) -> {t} {test s!"{t}_of(int_fit(i128_bits(n), -127))"}
 }
-impl Show for {t} \{ fn show(x: {t}) -> Str {test s!"unsigned_digits({t}_bits(x), StrEnd)"} }
+impl Show for {t} \{ fn fmt(x: &{t}) -> Str {test s!"unsigned_digits({t}_bits(*x), StrEnd)"} }
 fn {t}(n: Int) -> {t} {test s!"{t}_of(int_fit(n, -63))"}
 "
 
@@ -110,7 +110,7 @@ private def casts : String :=
 sign where the type has one. -/
 private def scalarReprs : String :=
   String.join (Syntax.scalars.map fun (t, w) =>
-    let width : Int := w.getD (if t == "f64" then -64 else -32)
+    let width : Int := w.getD (if t == "f64" then 64 else -32)
     s!"impl Repr for {t} \{ unsafe fn repr_store(at: usize, value: {t}) \{ ptr_write(at, {width}, {t}_bits(value)) } unsafe fn repr_load(at: usize) -> {t} \{ {t}_of(ptr_read(at, {width})) } }\n")
 
 /-- The scalar types: what each has. -/
