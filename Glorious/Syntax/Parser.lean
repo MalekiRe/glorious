@@ -1623,8 +1623,8 @@ def reflectText (name : String) (params : List String) (isPub : Bool)
     let parts := (fs.zip (ns.zip ps)).zipIdx.map fun ((t, n, p), k) =>
       let value := if t.spell == "Bool" then s!"std::reflect::FlagValue(*f{k})"
         else if describable t then s!"std::reflect::reflect_describe(f{k}, all, token)" else s!"std::reflect::OpaqueValue({quoted t.spell})"
-      s!"if({if p then "true" else "all"}) \{ fields = push(fields, ({quoted n}, {value})) } else \{ () };"
-    s!"{pattern c fs ns} => let mut fields = []; {" ".intercalate parts} std::reflect::StructValue({quoted c}, fields)"
+      s!"if({if p then "true" else "all"}) \{ std::vec::Vec::push(&mut fields, ({quoted n}, {value})) } else \{ () };"
+    s!"{pattern c fs ns} => let mut fields = std::vec::Vec::new(); {" ".intercalate parts} std::reflect::StructValue({quoted c}, fields)"
   let setArm := fun (c : String) (fs : List TypeExpr) (ns : List String) (ps : List Bool) =>
     let tries := (fs.zip (ns.zip ps)).zipIdx.map fun ((t, n, p), k) =>
       let set := if t.spell == "Bool" then s!"match(std::reflect::reflect_bool(text)) \{ Some(b) => *f{k} = b; Ok(std::reflect::FlagValue(b)), None => Err(\"not true or false\") }"
@@ -1676,10 +1676,16 @@ of every text's (each has a million from its base), so that no call of a
 reflection is known by the identity of one of the text's. -/
 def reflectionBase : Nat := 1000000000000
 
+/-- The modules `std::reflect` is written over: a `Reflect` of their types
+would use `std::reflect`, which uses them, and modules use each other in no
+circle. (`std::reflect` writes `Vec`'s itself.) -/
+def reflectionFree : List (List String) := [["std", "vec"], ["std", "slice"], ["std", "iterator"], ["std", "value"]]
+
 /-- Each declared type's `Reflect` among a module's items, read as its text
 is; checked only where something asks it. -/
 def reflectionsOf (fix : Fixities) (items : List Item) (base : Nat) (records : List String)
     (tables : List (List String × Fixities)) (path : List String) (fixed : Bool) : Except String (List Item) := do
+  if reflectionFree.contains path then return []
   let texts := reflectTexts items
   if texts.isEmpty then return []
   let gtoks ← lex (String.join texts)

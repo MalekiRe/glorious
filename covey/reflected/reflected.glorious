@@ -36,7 +36,7 @@ impl<H, R, S> Edits<S> for (Column<H>, R) where R: Edits<S>, S: Get<H>, H: Refle
     fn fields_in(name: Str) -> Option<[Str]> {
         if(name_of<H>() == name) {
             let info = unsafe { type_info_unchecked<H>() };
-            Some(if(len_at(&info.variants) == 1) { fold(info.variants[0].fields, [], fn(out: [Str], f: FieldInfo) -> [Str] { push(out, f.name) }) } else { [] })
+            Some(if(len_at(&info.variants) == 1) { fold(&info.variants[0].fields, [], fn(out: [Str], f: FieldInfo) -> [Str] { push(out, f.name) }) } else { [] })
         } else { <R as Edits<S>>::fields_in(name) }
     }
     fn set_in(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Option<Result<Described, Str>> {

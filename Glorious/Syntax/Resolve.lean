@@ -338,6 +338,29 @@ partial def throughRefOf (b : Body) (known : List (String × Nat)) (e : ExprId) 
 /-- `a[i]` of a place that is not copied for it: what reads the element
 where it is, `*element_at(&a, i)`; none where `a` is not such a place. -/
 def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : ExprId) : Build (Option ExprId) := do
+  -- (`a[i][j]`: the element of the element, where it is.)
+  let isElement : ExprId → Bool := fun e => match b.expr e with
+    | .call _ g _ => (b.name? g).map (·.2) == some "element_at"
+    | _ => false
+  if let .deref inner := b.expr a then
+    if isElement inner then
+      return some (← pushExpr (.deref (← pushExpr (.call id (← pushExpr (.name none "element_at")) #[inner, i]))))
+  -- (`a[i].f[j]`: the element of a field of the element, through the
+  -- element's reference, held for it.)
+  let rec fieldsOfElement (e : ExprId) (fuel : Nat) : Option (ExprId × List String × Nat) :=
+    match fuel, b.expr e with
+    | fuel + 1, .fieldOf fid inner field =>
+      match b.expr inner with
+      | .deref r => if isElement r then some (r, [field], fid) else none
+      | _ => (fieldsOfElement inner fuel).map fun (r, path, _) => (r, path ++ [field], fid)
+    | _, _ => none
+  if let some (r, path, fid) := fieldsOfElement a 64 then
+    if fid != 0 then
+      let held := s!"%element{id}"
+      let first ← pushStmt (.let_ (.var held) r)
+      let base ← pushExpr (.refField fid false held path true)
+      let read ← pushExpr (.deref (← pushExpr (.call id (← pushExpr (.name none "element_at")) #[base, i])))
+      return some (← pushExpr (.labelScope "%block" #[first, ← pushStmt (.expr read)]))
   let base ← match placeOf b known a 64, throughRefOf b known a 64 with
     | some (x, [], _), _ => if known.lookup x == some 1 then some <$> pushExpr (.ref false x) else pure none
     | some (x, path, fid), _ =>

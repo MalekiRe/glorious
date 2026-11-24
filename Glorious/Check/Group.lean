@@ -520,7 +520,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
       if let .var _ ← find u then unify u (← signatureTy rigid annots ret)
   let t ← if signature then signatureTy rigid annots ret
     else (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (do
-        modify fun s => { s with body := d.body }
+        modify fun s => { s with body := d.body, dotRefs := #[] }
         inferCallable [] annots ret (some d.name) d.body.roots s!"the clauses of `{d.name}` do") : M Ty).run s : M Ty)
   if let some effects := declared then
     let (effects, rest) ← resolveRow rigid false effects

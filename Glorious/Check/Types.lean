@@ -756,6 +756,10 @@ structure St where
   where its signature writes it: `0` whole, `1` by a shared reference, `2` by
   a `&mut` one (`receiverKinds`, before the function has a type). -/
   groupFirst : List (String × Nat) := []
+  /-- The receivers of dot calls on a variable of the body being checked
+  that are borrowed for the type's own function (`dotBorrows`): each node,
+  whether for writing, and the variable. Not uses of it that are counted. -/
+  dotRefs : Array (Nat × Bool × String) := #[]
   pending : Array Pending := #[]
   /-- Field reads whose subject was not yet known: subject, index, field type,
   where the read is, and the read's node where it has one (else 0): one of

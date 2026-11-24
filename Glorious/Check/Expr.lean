@@ -1778,7 +1778,9 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
   -- takes it whole: given to that one, `wholeReceiver`.)
   -- (Its dot calls the function of its type's own borrows it for are not
   -- uses that give it away, `dotBorrows`.)
-  let seen := (← dotBorrows b x t rest).foldl (fun (bb : Flat.Body) (a, uniq) =>
+  let borrows ← dotBorrows b x t rest
+  modify fun s => { s with dotRefs := s.dotRefs ++ (borrows.map fun (a, uniq) => (a, uniq, x)).toArray }
+  let seen := borrows.foldl (fun (bb : Flat.Body) (a, uniq) =>
     { bb with exprs := bb.exprs.set! a (.ref uniq x) }) b
   let given := seen.givenAway x rest || (← wholeReceiver x t)
   modify fun s =>

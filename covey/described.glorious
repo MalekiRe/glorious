@@ -30,7 +30,7 @@ fn shown(d: Described) -> Str {
         FloatValue(_) => "float",
         CharValue(_) => "char",
         TextValue(t) => t,
-        StructValue(name, fields) => name ++ "{" ++ fold(fields, "", fn(out: Str, f: (Str, Described)) -> Str { let (n, v) = f; out ++ " " ++ n ++ ": " ++ shown(v) }) ++ " }",
+        StructValue(name, fields) => let mut each = fields.into_iter(); name ++ "{" ++ std::iterator::fold(&mut each, "", fn(out: Str, f: (Str, Described)) -> Str { let (n, v) = f; out ++ " " ++ n ++ ": " ++ shown(v) }) ++ " }",
         ListValue(_) => "list",
         OpaqueValue(n) => "opaque " ++ n
     }

@@ -26,7 +26,7 @@ private def reflectWhole (t : String) (width : Int) : String :=
   -- (Of one as wide as `Int` or wider: any whole number `Int` holds.)
   let range := if bits >= 64 then "reflect_whole_any(text)" else s!"reflect_whole(text, {lit lo}, {lit hi})"
   s!"impl Reflect for {t} \{
-    const INFO: TypeInfo = TypeInfo \{ name: \"{t}\", kind: KindWhole, public: true, variants: [] };
+    const INFO: TypeInfo = TypeInfo \{ name: \"{t}\", kind: KindWhole, public: true, variants: Vec::new() };
     fn describe_as(v: &{t}, all: Bool, token: Unchecked) -> Described \{ WholeValue({t}_bits(*v)) }
     fn set_from(v: &mut {t}, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> \{
         match({range}) \{ Ok(n) => *v = {t}_of(n); Ok(WholeValue(n)), Err(e) => Err(e) }

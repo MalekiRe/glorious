@@ -7702,6 +7702,27 @@ Two checker faults this showed:
   group being checked takes its first argument is now known from its
   signature (`St.groupFirst`).
 
+## Reflection over `Vec`; places read through elements
+
+`std::reflect`'s `TypeInfo::variants`, `VariantInfo::fields`, and a
+description's `StructValue` fields and `ListValue` elements are `Vec`s.
+`type_info_of`, `variant_info` and `fields_of` take anything `ToVec`, so
+what the compiler writes for a type (`INFO`, a literal) is as it was; a
+description's fields are pushed onto a `Vec`. `Vec<T>` has a `Reflect` of
+its own, written in `std::reflect`. The modules `std::reflect` is written
+over (`std::vec`, `std::slice`, `std::iterator`, `std::value`) get no
+generated `Reflect` (`reflectionFree`): theirs would use `std::reflect`,
+which uses them, and modules use each other in no circle.
+
+Places read through elements, as Rust reads them, where a copy of a `Vec`
+was refused before: `x.f[i]` of a `let` counts as an element read of `x`
+(`NameUse.indexed`), so `x` is kept where a reference can point; `a[i][j]`
+reads the element of the element through the first's reference; `a[i].f[j]`
+through a reference to the field of the element, held for the read
+(`elementRead`). And a variable's dot calls that the type's own function
+borrows for are not counted as uses of it (`St.dotRefs`): `v.push(x); v`
+was refused as two uses.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

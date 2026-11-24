@@ -4892,6 +4892,30 @@ fn main() -> Int { let mut n = 1; twice({ p => *p = *p * 3 }, &mut n); n }
 #### expect
 9
 #### case
+#### Elements read where they are through fields and other elements:
+#### `s.v[0]`, `s.v[0][0]`, `s.v[0].f[0]`, `&s.v[0].f` of a `let` copy no
+#### `Vec`; a `Vec` pushed onto by method and then given back whole.
+use std::vec::{Vec};
+struct T { f: Vec<Int> }
+struct S { v: Vec<T>, w: Vec<Vec<Int>> }
+fn make() -> S {
+    let mut f = Vec::new(); f.push(5); f.push(6);
+    let mut v = Vec::new(); v.push(T { f: f });
+    let mut inner = Vec::new(); inner.push(7);
+    let mut w = Vec::new(); w.push(inner);
+    S { v: v, w: w }
+}
+fn main() -> Int {
+    let s = make();
+    say(len_at(&s.v[0].f));
+    say(s.w[0][0]);
+    s.v[0].f[1]
+}
+#### expect
+2
+7
+6
+#### case
 #### Dotted calls on a variable whose type's own functions borrow it, where
 #### the prelude has a function of the name that takes a value whole
 #### (`push`, `len`, `get`): each borrows it, none gives it away.
@@ -9760,7 +9784,7 @@ fn show_d(d: Described) -> Str {
         FloatValue(_) => "float",
         CharValue(_) => "char",
         TextValue(t) => t,
-        StructValue(name, fields) => name ++ "{" ++ fold(fields, "", fn(out: Str, f: (Str, Described)) -> Str { let (n, v) = f; out ++ " " ++ n ++ ": " ++ show_d(v) }) ++ " }",
+        StructValue(name, fields) => let mut each = fields.into_iter(); name ++ "{" ++ std::iterator::fold(&mut each, "", fn(out: Str, f: (Str, Described)) -> Str { let (n, v) = f; out ++ " " ++ n ++ ": " ++ show_d(v) }) ++ " }",
         ListValue(_) => "list",
         OpaqueValue(n) => "opaque " ++ n
     }
