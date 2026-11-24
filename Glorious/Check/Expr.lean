@@ -452,8 +452,15 @@ partial def inferExprRef (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := 
     let choosing := match (← get).body.bare? e with
       | some x => x.startsWith "%given"
       | none => false
+    -- (`a[i]` read where the element is, `*element_at(&a, i)`.)
+    let body := (← get).body
+    let element : Bool := match body.expr e with
+      | .call _ f _ => (body.name? f).map (·.2) == some "element_at"
+      | _ => false
     if choosing then
       mustDup inner "reading through a reference copies the value to choose a clause"
+    else if element then
+      mustDup inner "`a[i]` copies the element (take it out with `pop` or `remove`, or borrow it, `&a[i]`)"
     else mustDup inner "reading through a reference copies the value (`replace` takes it out instead)"
     pure inner
   | _ => throw "an expression was taken for one of another kind; this is a compiler defect"

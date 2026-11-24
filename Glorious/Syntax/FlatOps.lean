@@ -175,6 +175,13 @@ partial def nameUseExpr (b : Body) (noDefers : Bool) (x : String) (e : ExprId) :
   | .ref uniq y => if y != x then {} else if uniq then { changed := true } else { shared := true }
   | .refField _ uniq y _ _ => if y == x then { fielded := true, changed := uniq } else {}
   | .proj e _ | .fieldOf _ e _ => if b.placeRoot e == some x then { looked := true } else b.nameUseExpr noDefers x e
+  -- (`x[i]`: the element read where it is, through a borrow of `x`.)
+  | .call _ f #[a, i] =>
+    match b.expr f, b.expr a with
+    | .name _ "index", .name none y =>
+      if y == x then ({ indexed := true } : NameUse).or (b.nameUseExpr noDefers x i)
+      else b.foldDirect (fun u e => u.or (b.nameUseExpr noDefers x e)) {} e
+    | _, _ => b.foldDirect (fun u e => u.or (b.nameUseExpr noDefers x e)) {} e
   | .closure _ cs =>
     NameUse.inside (cs.foldl (fun u c => u.or (b.nameUseClause noDefers x c)) ({} : NameUse))
   | .handle subject arms =>
@@ -733,7 +740,8 @@ def Body.valueLike (b : Body) (e : ExprId) : Bool :=
 changes (`Syntax.borrowedOnly`)? -/
 def Body.borrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=
   let u := b.nameUseStmts false x after
-  !x.startsWith "%" && u.shared && !u.changed
+  -- (One whose elements alone are read, `x[i]`, is borrowed for each.)
+  !x.startsWith "%" && (u.shared || (u.indexed && !u.valued && !u.valuedInside)) && !u.changed
 
 def Body.fieldBorrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=
   let u := b.nameUseStmts false x after

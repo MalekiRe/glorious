@@ -15745,3 +15745,15 @@ fn main() -> Int { let mut a = Vec::new(); Vec::push(&mut a, D { n: 4 }); Vec::p
 4
 5
 2
+#### case
+#### `v[i]` of a `let` whose elements alone are read is read where the
+#### element is, through a borrow: a `Vec`, which is not copied, keeps its
+#### elements; so does an array.
+fn main() -> Int { let v = std::vec::range(0, 5); say(v[2]); say(v[4]); say(len_at(&v)); let a = [7, 8, 9]; say(a[1]); say(len(a)); 0 }
+#### expect
+2
+4
+5
+8
+3
+0

@@ -949,11 +949,14 @@ structure NameUse where
   /-- A part of it is read where it is, `x.f`: a look at it, as through a
   borrow, and not a use of the whole. -/
   looked : Bool := false
+  /-- An element of it is read, `x[i]`: through a borrow, where it is not
+  used otherwise. -/
+  indexed : Bool := false
   deriving Inhabited
 
 def NameUse.or (a b : NameUse) : NameUse :=
   ⟨a.shared || b.shared, a.changed || b.changed, a.fielded || b.fielded, a.rebound || b.rebound,
-    a.valued || b.valued, a.valuedInside || b.valuedInside, a.looked || b.looked⟩
+    a.valued || b.valued, a.valuedInside || b.valuedInside, a.looked || b.looked, a.indexed || b.indexed⟩
 
 /-- The label `@f` a function is also known by: the last part of its name,
 `f` of `m::f` or `T::f`, and of a function written in a block, `f%12`. -/
