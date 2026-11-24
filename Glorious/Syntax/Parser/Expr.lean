@@ -43,7 +43,7 @@ partial def parsePatternRest : P Pattern := do
     expectPunct "]"
     match before with
     | some k => pure (.ctor (restPatName k opened at_.line at_.col) none ps.toList)
-    | none => pure (.ctor (arrayPatName ps.size) none ps.toList)
+    | none => pure (.ctor ((if (← read).fixed then fixedPatName else arrayPatName) ps.size) none ps.toList)
   | .ident "let" =>
     -- `let name`: a new name, whatever constant or constructor has it.
     advance

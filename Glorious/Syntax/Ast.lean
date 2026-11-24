@@ -283,6 +283,10 @@ def arrayMark : String := "%array"
 pattern `[a, b, c]`. -/
 def arrayPatName (n : Nat) : String := s!"%array:{n}"
 
+/-- `[a, b, c]` as a pattern of a `[T; 3]`, where literals are read with a
+length their type says. -/
+def fixedPatName (n : Nat) : String := s!"%fixed:{n}"
+
 /-- The trait of the prelude a type that stands for a whole number has: the
 number is its `VALUE`. -/
 def knownTrait : String := "%prelude::Known"
@@ -346,7 +350,12 @@ def restPatParts (name : String) : Option (Nat × Nat × Nat × Nat) :=
   else none
 
 def arrayPatLen (name : String) : Option Nat :=
-  if name.startsWith "%array:" then (name.drop 7).toString.toNat? else none
+  if name.startsWith "%array:" then (name.drop 7).toString.toNat?
+  else if name.startsWith "%fixed:" then (name.drop 7).toString.toNat? else none
+
+/-- The length of a pattern of a `[T; N]`, `fixedPatName`. -/
+def fixedPatLen (name : String) : Option Nat :=
+  if name.startsWith "%fixed:" then (name.drop 7).toString.toNat? else none
 
 /-- The host operations that are unsafe, by name: a call of a foreign
 function, and reading and writing memory at an address. -/

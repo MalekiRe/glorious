@@ -4892,6 +4892,15 @@ fn main() -> Int { let mut n = 1; twice({ p => *p = *p * 3 }, &mut n); n }
 #### expect
 9
 #### case
+#### A `[T; N]` taken apart by a pattern of its elements, in a `match` and
+#### in a `let`: the clause covers every value, as a tuple's does.
+fn sum3(a: [Int; 3]) -> Int { match(a) { [x, y, z] => x + y + z } }
+fn main() -> Int { let t = [1, 2, 3]; say(sum3(t)); let [p, q] = [4, 5]; say(p + q); match([5, 6]) { [a, b] => a * b } }
+#### expect
+6
+9
+30
+#### case
 #### Rust's reads through references and places, each refused or gone wrong
 #### before: a field through a reference to a reference (`r.0` of an
 #### `&&Name`); `a[index]` with a variable named `index`; an element's named

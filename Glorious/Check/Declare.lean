@@ -1042,6 +1042,12 @@ def instOp (sig : OpSig) (inst : List Ty) (own : List (Nat × Nat) := []) : List
     | _ => none
   (sig.payload.map (subst tm [] cm), sig.result.map (subst tm [] cm))
 
+/-- A length as the type of a `[T; N]` says it, `B1<B1<Z>>` of 3. -/
+def lengthTy : Nat → Nat → Ty
+  | 0, _ => .con "Z" []
+  | _, 0 => .con "Z" []
+  | fuel + 1, k => .con (if k % 2 == 0 then "B0" else "B1") [lengthTy fuel (k / 2)]
+
 /-- Resolve a name to a constructor, following constructor aliases. -/
 partial def resolveCtor (name : String) (qual : Option String) : M (Option (String × CtorSig)) := do
   let s ← get
@@ -1057,7 +1063,11 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option (Stri
     -- elements, each of the element's type.
     if let (some n, some array) := (Syntax.arrayPatLen name, s.arrayType) then
       if let some sig := s.ctors[array]? then
-        return some (name, { sig with fields := List.replicate n (sig.fields.headD .unit) })
+        let elem := sig.fields.headD .unit
+        -- (Of a `[T; N]`: its length is the pattern's.)
+        if (Syntax.fixedPatLen name).isSome then
+          return some (name, { sig with fields := List.replicate n elem, result := .con "Fixed" [elem, lengthTy 64 n] })
+        return some (name, { sig with fields := List.replicate n elem })
     match (s.aliases[name]?).map Syntax.aliasValue with
     | some (.name q y) => resolveCtor y q
     | _ => pure none

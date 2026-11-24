@@ -1056,6 +1056,8 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option CtorI
   | none =>
     -- `[a, b, c]` in a pattern: the constructor that builds an array of so
     -- many elements.
+    if let some n := Syntax.fixedPatLen name then
+      return some { owner := "", tag := fixedBase + n, arity := n, single := true }
     if let some n := Syntax.arrayPatLen name then
       return some { owner := "", tag := arrayBase + n, arity := n, single := false }
     match (g.aliases[name]?).map Syntax.aliasValue with

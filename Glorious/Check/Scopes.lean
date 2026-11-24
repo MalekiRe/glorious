@@ -33,6 +33,8 @@ partial def normPat : Pattern → M NPat
     if let some (_, n) := Syntax.scalarPattern (.ctor x q ps) then return .int n
     -- What an `is` found, taken apart: its names, which nothing can fail.
     if (Syntax.packNames x).isSome then return .any
+    -- (A `[T; N]` taken apart is a tuple of its `N` elements.)
+    if (Syntax.fixedPatLen x).isSome then return .tuple (← ps.mapM normPat)
     match ← resolveCtor x q with
     | some (name, _) => do
       pure (.ctor name (← ps.mapM normPat))
@@ -63,6 +65,11 @@ partial def uncovered (tys : List Ty) (rows : List (List NPat)) : M (Option (Lis
           | _ => none) with
       | some w => pure (some (s!"({", ".intercalate (w.take ts.length)})" :: w.drop ts.length))
       | none => pure none
+    | .con "Fixed" (elem :: _) =>
+      -- (Taken apart as a tuple of its elements, `[a, b, c]`.)
+      match rows.findSome? fun | .tuple ps :: _ => some ps.length | _ => none with
+      | some n => uncovered (.tuple (List.replicate n elem) :: rest) rows
+      | none => fallback
     | .con name args =>
       match (← get).types[name]? with
       | some decl =>
