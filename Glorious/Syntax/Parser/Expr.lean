@@ -430,10 +430,10 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
     advance
     -- Where the program has arrays of a fixed length, the literal is an
     -- array or one of exactly so many: whichever is wanted of it.
-    -- (A program's own literal is a `[T; N]`: there is no growable array,
-    -- `[a, b]` is a `[T; 2]` and `[]` a `[T; 0]`, as in Rust. The library's
-    -- are while it moves off arrays.)
-    let own := (← read).base ≥ 1000000 && (← read).path.head? != some "std"
+    -- (A literal is a `[T; N]`: there is no growable array, `[a, b]` is a
+    -- `[T; 2]` and `[]` a `[T; 0]`, as in Rust. The prelude's are arrays
+    -- while it moves off them.)
+    let own := (← read).base ≥ 1000000
     let fixedOf := fun (value : ExprId) (n : Nat) => do
       callOf 0 none instMark #[← mk (.call (numbered opened 800000) (← preludeFn "array_literal") #[value]),
         ← tree (TypeExpr.tuple [numberType n]).asExpr]

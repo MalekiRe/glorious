@@ -16,20 +16,6 @@ impl Iterator for Range<Int> {
     fn next(r: &mut Range<Int>) -> Option<Int> { if(r.start < r.end) { let v = r.start; r.start = v + 1; Some(v) } else { None } }
 }
 
-// The elements of an array, each given away, first to last.
-pub struct ArrayIter<T> { rest: [T] }
-impl<T> Iterator for ArrayIter<T> {
-    type Item = T;
-    fn next(it: &mut ArrayIter<T>) -> Option<T> {
-        pop_at(&mut it.rest)
-    }
-}
-fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
-    match(array_pop(from)) {
-        Some((rest, last)) => tail turned(rest, array_push(onto, last)),
-        None => onto
-    }
-}
 
 // A slice's elements by reference, first to last (`s.iter()`).
 impl<'a, T> Iterator for SliceIter<'a, T> {
@@ -39,9 +25,40 @@ impl<'a, T> Iterator for SliceIter<'a, T> {
 
 // What gives all its elements away, one after another, first to last.
 pub trait IntoIterator { type Iter; fn into_iter(Self) -> Iter }
+// An array's elements given away, first to last: their bytes moved to memory
+// of their own, the array let go of without being destroyed, each element
+// read out as it comes and the rest destroyed with the iterator.
+pub struct ArrayIntoIter<T> { at: *mut T, len: Int, next: Int }
+impl<T, N> IntoIterator for [T; N] where T: Use<[1, 1]> {
+    type Iter = ArrayIntoIter<T>;
+    fn into_iter(a: [T; N]) -> ArrayIntoIter<T> {
+        let n = fixed_len_at(&a);
+        let base = unsafe { fixed_ptr(&a) };
+        let size = usize_bits(size_of_at(base));
+        if(n == 0) { unsafe { let _: () = transmute(a); }; ArrayIntoIter { at: base, len: 0, next: 0 } } else {
+            let at = ptr_mut_at(unsafe { mem_alloc(usize_of(n * size), align_of_at(base)) });
+            let mut i = 0;
+            while({ i < n }) { unsafe { overwrite(ptr_mut_ref_at(at, array_slot(at, i)), read_out(fixed_at(&a, i))) }; i = i + 1 };
+            unsafe { let _: () = transmute(a); };
+            ArrayIntoIter { at: at, len: n, next: 0 }
+        }
+    }
+}
+fn array_slot<T>(at: *mut T, i: Int) -> usize { usize_of(usize_bits(ptr_mut_address(at)) + i * usize_bits(size_of_at(at))) }
+impl<T> Iterator for ArrayIntoIter<T> {
+    type Item = T;
+    fn next(it: &mut ArrayIntoIter<T>) -> Option<T> {
+        if(it.next < it.len) { let i = it.next; it.next = i + 1; Some(unsafe { read_out(ptr_ref_at(it.at, array_slot(it.at, i))) }) } else { None }
+    }
+}
+impl<T> Drop for ArrayIntoIter<T> {
+    fn drop(it: &mut ArrayIntoIter<T>) {
+        while({ it.next < it.len }) { std::value::discard(unsafe { read_out(ptr_ref_at(it.at, array_slot(it.at, it.next))) }); it.next = it.next + 1 };
+        if(it.len > 0) { unsafe { mem_free(ptr_mut_address(it.at)) } } else { () };
+        it.len = 0
+    }
+}
 impl<'a, T> IntoIterator for &'a [T] { type Iter = SliceIter<'a, T>; fn into_iter(s: &'a [T]) -> SliceIter<'a, T> { s.iter() } }
-impl<T> IntoIterator for [T] where T: Use<[1, 1]> { type Iter = ArrayIter<T>; fn into_iter(a: [T]) -> ArrayIter<T> { ArrayIter { rest: turned(a, array_empty()) } } }
-impl<T, N> IntoIterator for [T; N] where T: Use<[1, 1]> { type Iter = ArrayIter<T>; fn into_iter(a: [T; N]) -> ArrayIter<T> { ArrayIter { rest: turned(fixed_to_array(a), array_empty()) } } }
 
 // Every value, folded into one.
 pub fn fold<I: Iterator, A, e: EffectRow>(it: &mut I, acc: A, f: fn(A, I::Item) -> A / {| e}) -> A / {| e} where I: Use<[1, 1]>, A: Use<[1, 1]> {

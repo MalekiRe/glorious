@@ -74,7 +74,7 @@ fn is_hex(word: Str) -> Bool {
 }
 // An instruction with its addresses and offsets left out.
 fn normalize(instruction: Str) -> Str {
-    let ws = std::vec::Vec::into_array(words(instruction));
+    let ws = words(instruction);
     let mut out = Vec::new();
     let mut i = 0;
     let mut going = true;

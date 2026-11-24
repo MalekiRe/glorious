@@ -6848,7 +6848,7 @@ fn main() -> Int {
     say(match(Vec::first(&v)) { Some(r) => *r, None => 0 });
     Vec::truncate(&mut v, 4);
     say(Vec::insert(&mut v, 99, 5));
-    say(Vec::into_array(v));
+    say(v);
     0 }
 #### expect
 Ok(())
@@ -11587,7 +11587,7 @@ fn main() -> Int {
         Vec::push(&mut lines, s.name ++ ": " ++ show(s.average()) ++ " " ++ s.grade());
         i = i + 1
     };
-    say(join(Vec::into_array(lines), "; "));
+    say(join(lines, "; "));
     match(class.top()) { Some(n) => say(n), None => () };
     class.students.len()
 }

@@ -220,17 +220,22 @@ fn dedup_onto<A, T>(a: &A, n: Int, i: Int, out: &mut Vec<T>) where A: Indexed<El
 pub fn fold_pairs<A, T, U, V, e: EffectRow>(pairs: A, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where A: Indexed<Element = (T, U)>, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
 
 // How long an array is (the prelude's `len`, of arrays alone).
-pub fn len_of<T>(a: [T]) -> Int where T: Use<[1, 1]> { len(a) }
-
 // What gives all its elements away, as a `Vec` of them (`Vec::from_array`).
 pub trait ToVec { type Elem; fn to_vec(Self) -> Vec<Elem> }
 impl<T> ToVec for Vec<T> { type Elem = T; fn to_vec(v: Vec<T>) -> Vec<T> { v } }
-impl<T> ToVec for [T] where T: Use<[1, 1]> { type Elem = T; fn to_vec(a: [T]) -> Vec<T> { of_array(a) } }
-impl<T, N> ToVec for [T; N] where T: Use<[1, 1]> { type Elem = T; fn to_vec(a: [T; N]) -> Vec<T> { of_array(fixed_to_array(a)) } }
-fn of_array<T>(items: [T]) -> Vec<T> where T: Use<[1, 1]> {
-    let mut v = Vec::new();
-    push_each(&mut v, turned(items, array_empty()));
-    v
+// (A `[T; N]`'s elements moved out one by one, where they are, into the
+// `Vec`; the array let go of without being destroyed, its elements the
+// `Vec`'s now.)
+impl<T, N> ToVec for [T; N] where T: Use<[1, 1]> {
+    type Elem = T;
+    fn to_vec(a: [T; N]) -> Vec<T> {
+        let n = fixed_len_at(&a);
+        let mut v = Vec::with_capacity(n);
+        let mut i = 0;
+        while({ i < n }) { Vec::push(&mut v, unsafe { read_out(fixed_at(&a, i)) }); i = i + 1 };
+        unsafe { let _: () = transmute(a); };
+        v
+    }
 }
 
 // A growable array changed where it is, in the shape the library
@@ -241,22 +246,6 @@ fn of_array<T>(items: [T]) -> Vec<T> where T: Use<[1, 1]> {
 use std::iterator::{Iterator, IntoIterator};
 
 pub struct Vec<T> { at: *mut T, cap: Int, len: Int }
-
-// The elements of one array onto another, last first.
-fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
-    match(array_pop(from)) {
-        Some((rest, last)) => tail turned(rest, array_push(onto, last)),
-        None => onto
-    }
-}
-
-// Each element of an array, last first, pushed.
-fn push_each<T>(v: &mut Vec<T>, reversed: [T]) where T: Use<[1, 1]> {
-    match(array_pop(reversed)) {
-        Some((rest, x)) => Vec::push(v, x); push_each(v, rest),
-        None => ()
-    }
-}
 
 // The elements from `lo` up to `hi` in order: each half in order, then
 // merged into `scratch` and moved back, each element's bytes.
@@ -370,7 +359,11 @@ coerce vec_slice_mut
 fn vec_slice_mut<'a, T>(v: &'a mut Vec<T>) -> &'a mut [T] where T: Use<[1, 1]> { Vec::as_mut_slice(v) }
 impl<T> Index for Vec<T> {
     type Elem = T;
-    fn index(v: Vec<T>, i: Int) -> T { arr_get(Vec::into_array(v), i) }
+    fn index(v: Vec<T>, i: Int) -> T {
+        let mut v = v;
+        must_be_at(&v, i);
+        match(Vec::remove(&mut v, i)) { Some(x) => x, None => abort("a place of a `Vec` that is not there") }
+    }
     fn index_set(v: Vec<T>, i: Int, x: T) -> Vec<T> {
         let mut v = v;
         must_be_at(&v, i);
@@ -415,15 +408,6 @@ impl<T> Vec<T> {
     pub fn with_capacity(capacity: Int) -> Self { let mut v = Vec::new(); reserve_total(&mut v, capacity); v }
     // Of the elements of an array, a `[T; N]` or a `Vec`, given away.
     pub fn from_array<A>(items: A) -> Self where A: ToVec<Elem = T>, A: Use<[1, 1]> { to_vec(items) }
-    pub fn into_array(value: Self) -> [T] where T: Use<[1, 1]> {
-        let parts = parts_of(value);
-        let v = Vec { at: parts.at, cap: 0, len: 0 };
-        let mut out = array_empty();
-        let mut i = 0;
-        while({ i < parts.len }) { push_at(&mut out, unsafe { take_at(&v, i) }); i = i + 1 };
-        if(parts.cap > 0) { unsafe { mem_free(ptr_mut_address(parts.at)) } } else { () };
-        out
-    }
     pub fn len(value: &Self) -> Int { value.len }
     // Where its elements are.
     pub fn as_mut_ptr(value: &Self) -> *mut T { value.at }
