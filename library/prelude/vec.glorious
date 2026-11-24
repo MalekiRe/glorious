@@ -1,0 +1,406 @@
+// What the language has of collections, as Rust's prelude does: iteration,
+// and `Vec`. (`std::iterator` and `std::vec` name them again, and have the
+// rest.)
+
+// A value let go: its `drop` runs, if it has one.
+fn discard<T>(value: T) { () }
+
+// One value at a time, asked for through a `&mut` reference: the shape the
+// library specification gives iteration (18). What is iterated says what its
+// values are (`Item`); what uses them is a function over anything iterated.
+pub trait Iterator {
+    type Item;
+    fn next(&mut Self) -> Option<Self::Item>;
+}
+
+// What gives all its elements away, one after another, first to last.
+pub trait IntoIterator { type Iter; fn into_iter(Self) -> Iter }
+
+// A slice's elements by reference, first to last (`s.iter()`).
+impl<'a, T> Iterator for SliceIter<'a, T> {
+    type Item = &'a T;
+    fn next(it: &mut SliceIter<'a, T>) -> Option<&'a T> { SliceIter::next_ref(it) }
+}
+impl<'a, T> IntoIterator for &'a [T] { type Iter = SliceIter<'a, T>; fn into_iter(s: &'a [T]) -> SliceIter<'a, T> { s.iter() } }
+
+// What gives all its elements away, as a `Vec` of them (`Vec::from_array`).
+pub trait ToVec { type Elem; fn to_vec(Self) -> Vec<Elem> }
+impl<T> ToVec for Vec<T> { type Elem = T; fn to_vec(v: Vec<T>) -> Vec<T> { v } }
+// (A `[T; N]`'s elements moved out one by one, where they are, into the
+// `Vec`; the array let go of without being destroyed, its elements the
+// `Vec`'s now.)
+impl<T, N> ToVec for [T; N] where T: Use<[1, 1]> {
+    type Elem = T;
+    fn to_vec(a: [T; N]) -> Vec<T> {
+        let n = fixed_len_at(&a);
+        let mut v = Vec::with_capacity(n);
+        let mut i = 0;
+        while({ i < n }) { Vec::push(&mut v, unsafe { read_out(fixed_at(&a, i)) }); i = i + 1 };
+        unsafe { let _: () = transmute(a); };
+        v
+    }
+}
+
+// A growable array changed where it is, in the shape the library
+// specification gives it (15): functions of the type, `&mut Self` to change
+// one, `Option<&T>` to look at an element. Sizes and places are `Int`. Its
+// elements are in memory it allocates and frees, one after another, each laid
+// out as its type is; it holds room for `cap` of them, and `len` are there.
+
+pub struct Vec<T> { at: *mut T, cap: Int, len: Int }
+
+// The elements from `lo` up to `hi` in order: each half in order, then
+// merged into `scratch` and moved back, each element's bytes.
+fn vec_sort_range<T, e: EffectRow>(v: &mut Vec<T>, scratch: usize, lo: Int, hi: Int, before: fn(T, T) -> Bool / {| e}) / {| e} where T: Use<[0, *]> {
+    if(hi - lo > 1) {
+        let mid = (lo + hi) / 2;
+        vec_sort_range(v, scratch, lo, mid, before);
+        vec_sort_range(v, scratch, mid, hi, before);
+        let size = vec_elem_size(&*v);
+        let mut i = lo;
+        let mut j = mid;
+        let mut k = 0;
+        while({ i < mid and { j < hi } }) {
+            let from = if(before(*vec_at_ref(&*v, j), *vec_at_ref(&*v, i))) { j = j + 1; j - 1 } else { i = i + 1; i - 1 };
+            unsafe { mem_copy(usize_of(usize_bits(scratch) + k * size), vec_slot(&*v, from), usize_of(size)) };
+            k = k + 1
+        };
+        // (What is left of the first half goes before the second's rest,
+        // which is in its place already.)
+        unsafe { mem_copy(usize_of(usize_bits(scratch) + k * size), vec_slot(&*v, i), usize_of((mid - i) * size)) };
+        let placed = k + mid - i;
+        unsafe { mem_copy(vec_slot(&*v, lo), scratch, usize_of(placed * size)) }
+    } else { () }
+}
+
+// The elements of a `Vec` given away one by one, first to last; those not
+// asked for are destroyed with it, and its memory freed.
+pub struct IntoIter<T> { at: *mut T, cap: Int, len: Int, next: Int }
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+    fn next(it: &mut IntoIter<T>) -> Option<T> {
+        if(it.next < it.len) {
+            let v = Vec { at: it.at, cap: 0, len: 0 };
+            let x = unsafe { vec_take_at(&v, it.next) };
+            unsafe { vec_forget(v) };
+            it.next = it.next + 1;
+            Some(x)
+        } else { None }
+    }
+}
+impl<T> Drop for IntoIter<T> {
+    fn drop(it: &mut IntoIter<T>) {
+        let v = Vec { at: it.at, cap: 0, len: 0 };
+        while({ it.next < it.len }) { discard(unsafe { vec_take_at(&v, it.next) }); it.next = it.next + 1 };
+        unsafe { vec_forget(v) };
+        if(it.cap > 0) { unsafe { mem_free(ptr_mut_address(it.at)) } } else { () };
+        it.cap = 0
+    }
+}
+// A value let go of without being destroyed: the caller's to get right.
+unsafe fn vec_forget<T>(value: T) { let _: VecParts<()> = transmute(value); () }
+
+// What a `Vec` is, taken apart without its elements being destroyed.
+struct VecParts<T> { at: *mut T, cap: Int, len: Int }
+// A `Vec` taken apart, which nothing destroys; read field by field, so that
+// what it holds is the type its parts point to.
+fn vec_parts_of<T>(value: Vec<T>) -> VecParts<T> { let parts = vec_parts_at(&value); unsafe { vec_forget(value) }; parts }
+fn vec_parts_at<T>(v: &Vec<T>) -> VecParts<T> { VecParts { at: v.at, cap: v.cap, len: v.len } }
+
+// How many bytes one element takes.
+fn vec_elem_size<T>(v: &Vec<T>) -> Int { usize_bits(size_of_at(v.at)) }
+// The address of the element at a place.
+fn vec_slot<T>(v: &Vec<T>, i: Int) -> usize { usize_of(usize_bits(ptr_mut_address(v.at)) + i * vec_elem_size(v)) }
+// The element at a place, which is there, by reference.
+fn vec_at_ref<'a, T>(v: &'a Vec<T>, i: Int) -> &'a T { unsafe { ptr_ref_at(v.at, vec_slot(v, i)) } }
+fn vec_at_mut<'a, T>(v: &'a mut Vec<T>, i: Int) -> &'a mut T { let s = vec_slot(&*v, i); let base = v.at; unsafe { ptr_mut_ref_at(base, s) } }
+// The element at a place moved out, what is left there not to be used again.
+unsafe fn vec_take_at<T>(v: &Vec<T>, i: Int) -> T { read_out(vec_at_ref(v, i)) }
+// An element moved to a place where none is.
+unsafe fn vec_put_at<T>(v: &mut Vec<T>, i: Int, item: T) where T: Use<[1, 1]> { overwrite(vec_at_mut(v, i), item) }
+// The same, where the place is one an element was taken out of.
+fn vec_place<T>(v: &mut Vec<T>, i: Int, item: T) where T: Use<[1, 1]> { unsafe { vec_put_at(v, i, item) } }
+// So many elements moved, from one place to another, as if through a buffer.
+unsafe fn vec_move_within<T>(v: &mut Vec<T>, from: Int, to: Int, count: Int) {
+    if(count > 0) { mem_copy(vec_slot(&*v, to), vec_slot(&*v, from), usize_of(count * vec_elem_size(&*v))) } else { () }
+}
+// Room for at least so many in all: more memory, what is there moved to it.
+fn vec_reserve_total<T>(v: &mut Vec<T>, want: Int) {
+    if(want > v.cap) {
+        let size = vec_elem_size(&*v);
+        let doubled = if(v.cap == 0) { 4 } else { v.cap * 2 };
+        let cap = if(doubled < want) { want } else { doubled };
+        let fresh = unsafe { mem_alloc(usize_of(cap * size), align_of_at(v.at)) };
+        if(v.cap > 0) {
+            unsafe { mem_copy(fresh, ptr_mut_address(v.at), usize_of(v.len * size)); mem_free(ptr_mut_address(v.at)) }
+        } else { () };
+        v.at = ptr_mut_at(fresh);
+        v.cap = cap
+    } else { () }
+}
+// A place that is not there stops the program.
+fn vec_must_be_at<T>(v: &Vec<T>, i: Int) {
+    if(i < 0 or { i >= v.len }) { abort("a place of a `Vec` that is not there") } else { () }
+}
+
+// The elements destroyed, and the memory freed.
+impl<T> Drop for Vec<T> {
+    fn drop(v: &mut Vec<T>) {
+        while({ v.len > 0 }) { v.len = v.len - 1; discard(unsafe { vec_take_at(&*v, v.len) }) };
+        if(v.cap > 0) { unsafe { mem_free(ptr_mut_address(v.at)) } } else { () };
+        v.cap = 0
+    }
+}
+
+// `v[i]`, and `v[i] = x`: a place that is not there stops the program.
+// A `&Vec<T>` is a `&[T]` wherever one is wanted, and a `&mut Vec<T>` a
+// `&mut [T]`, as Rust's are.
+coerce vec_slice
+fn vec_slice<'a, T>(v: &'a Vec<T>) -> &'a [T] where T: Use<[1, 1]> { Vec::as_slice(v) }
+coerce vec_slice_mut
+fn vec_slice_mut<'a, T>(v: &'a mut Vec<T>) -> &'a mut [T] where T: Use<[1, 1]> { Vec::as_mut_slice(v) }
+impl<T> Index for Vec<T> {
+    type Elem = T;
+    fn index(v: Vec<T>, i: Int) -> T {
+        let mut v = v;
+        vec_must_be_at(&v, i);
+        match(Vec::remove(&mut v, i)) { Some(x) => x, None => abort("a place of a `Vec` that is not there") }
+    }
+    fn index_set(v: Vec<T>, i: Int, x: T) -> Vec<T> {
+        let mut v = v;
+        vec_must_be_at(&v, i);
+        discard(replace(vec_at_mut(&mut v, i), x));
+        v
+    }
+}
+impl<T> Indexed for Vec<T> where T: Use<[1, 1]> {
+    type Element = T;
+    fn element_at(v: &Vec<T>, i: Int) -> &T { vec_must_be_at(v, i); vec_at_ref(v, i) }
+    fn size_at(v: &Vec<T>) -> Int { v.len }
+}
+impl<T> IndexedMut for Vec<T> where T: Use<[1, 1]> {
+    fn place_at(i: Int, v: &mut Vec<T>) -> &mut <Vec<T> as Indexed>::Element { vec_must_be_at(&*v, i); vec_at_mut(v, i) }
+}
+// Written as an array is: `[a, b]`.
+impl<T> Show for Vec<T> where T: Show { fn fmt(v: &Vec<T>) -> Str { elements_text(v) } }
+// Equal where each element is.
+impl<T> Eq for Vec<T> where T: Eq, T: Use<[0, *]> {
+    fn ==(a: Vec<T>, b: Vec<T>) -> Bool {
+        if(a.len != b.len) { false } else {
+            let mut i = 0;
+            let mut same = true;
+            while({ same and { i < a.len } }) { same = *vec_at_ref(&a, i) == *vec_at_ref(&b, i); i = i + 1 };
+            same
+        }
+    }
+}
+impl<T> Len for Vec<T> { fn len(v: Vec<T>) -> Int { v.len } }
+
+impl<T> Clone for Vec<T> where T: Clone, T: Use<[1, 1]> {
+    fn clone(v: &Vec<T>) -> Vec<T> {
+        let mut out = Vec::with_capacity(v.len);
+        let mut i = 0;
+        while({ i < v.len }) { Vec::push(&mut out, clone(vec_at_ref(v, i))); i = i + 1 };
+        out
+    }
+}
+
+impl<T> Vec<T> {
+    pub fn new() -> Self { Self { at: ptr_mut_at(0usize), cap: 0, len: 0 } }
+    pub fn with_capacity(capacity: Int) -> Self { let mut v = Vec::new(); vec_reserve_total(&mut v, capacity); v }
+    // Of the elements of an array, a `[T; N]` or a `Vec`, given away.
+    pub fn from_array<A>(items: A) -> Self where A: ToVec<Elem = T>, A: Use<[1, 1]> { to_vec(items) }
+    pub fn len(value: &Self) -> Int { value.len }
+    // Where its elements are.
+    pub fn as_mut_ptr(value: &Self) -> *mut T { value.at }
+    pub fn is_empty(value: &Self) -> Bool { value.len == 0 }
+    pub fn get<'a>(value: &'a Self, index: Int) -> Option<&'a T> where T: Use<[1, 1]> {
+        if(index < 0 or { index >= value.len }) { None } else { Some(vec_at_ref(value, index)) }
+    }
+    pub fn get_mut<'a>(value: &'a mut Self, index: Int) -> Option<&'a mut T> where T: Use<[1, 1]> {
+        if(index < 0 or { index >= value.len }) { None } else { Some(vec_at_mut(value, index)) }
+    }
+    pub fn first<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { Vec::get(value, 0) }
+    pub fn last<'a>(value: &'a Self) -> Option<&'a T> where T: Use<[1, 1]> { Vec::get(value, value.len - 1) }
+    pub fn push(value: &mut Self, item: T) where T: Use<[1, 1]> {
+        let n = value.len;
+        vec_reserve_total(value, n + 1);
+        unsafe { vec_put_at(value, n, item) };
+        value.len = n + 1
+    }
+    pub fn pop(value: &mut Self) -> Option<T> where T: Use<[1, 1]> {
+        if(value.len == 0) { None } else { value.len = value.len - 1; Some(unsafe { vec_take_at(&*value, value.len) }) }
+    }
+    // The item put at a place, what was there and after it moving up; the
+    // item given back if there is no such place.
+    pub fn insert(value: &mut Self, index: Int, item: T) -> Result<(), T> where T: Use<[1, 1]> {
+        if(index < 0 or { index > value.len }) { Err(item) } else {
+            let n = value.len;
+            vec_reserve_total(value, n + 1);
+            unsafe { vec_move_within(value, index, index + 1, n - index); vec_put_at(value, index, item) };
+            value.len = n + 1;
+            Ok(())
+        }
+    }
+    // The element at a place taken out, what was after it moving down.
+    pub fn remove(value: &mut Self, index: Int) -> Option<T> {
+        if(index < 0 or { index >= value.len }) { None } else {
+            let taken = unsafe { vec_take_at(&*value, index) };
+            let n = value.len;
+            unsafe { vec_move_within(value, index + 1, index, n - index - 1) };
+            value.len = n - 1;
+            Some(taken)
+        }
+    }
+    // Everything of another put after what is here.
+    pub fn append(value: &mut Self, source: Self) where T: Use<[1, 1]> {
+        let mut source = source;
+        let n = source.len;
+        let want = value.len + n;
+        vec_reserve_total(value, want);
+        let mut i = 0;
+        while({ i < n }) { let x = unsafe { vec_take_at(&source, i) }; Vec::push(value, x); i = i + 1 };
+        source.len = 0
+    }
+    pub fn reverse(value: &mut Self) where T: Use<[1, 1]> {
+        let mut i = 0;
+        let mut j = value.len - 1;
+        while({ i < j }) {
+            let a = unsafe { vec_take_at(&*value, i) };
+            let b = unsafe { vec_take_at(&*value, j) };
+            unsafe { vec_put_at(value, i, b); vec_put_at(value, j, a) };
+            i = i + 1;
+            j = j - 1
+        }
+    }
+    // In order, by `<`, equal ones as they were to each other; or in the
+    // order `before` gives.
+    pub fn sort(value: &mut Self) where T: Ord, T: Use<[0, *]> { Vec::sort_by(value, { (a, b) => a < b }) }
+    pub fn sort_by<e: EffectRow>(value: &mut Self, before: fn(T, T) -> Bool / {| e}) / {| e} where T: Use<[0, *]> {
+        // (Merged a half at a time through memory of the same size, each
+        // element moved as its bytes: stable, n log n.)
+        let n = value.len;
+        if(n > 1) {
+            let scratch = unsafe { mem_alloc(usize_of(n * vec_elem_size(&*value)), align_of_at(value.at)) };
+            vec_sort_range(value, scratch, 0, n, before);
+            unsafe { mem_free(scratch) }
+        } else { () }
+    }
+    // How many it holds room for without growing.
+    pub fn capacity(value: &Self) -> Int { value.cap }
+    pub fn reserve(value: &mut Self, additional: Int) { let want = value.len + additional; vec_reserve_total(value, want) }
+    pub fn shrink_to_fit(value: &mut Self) { () }
+    // The element at a place, which must be there.
+    pub fn index<'a>(value: &'a Self, index: Int) -> &'a T where T: Use<[1, 1]> { vec_must_be_at(value, index); vec_at_ref(value, index) }
+    pub fn index_mut<'a>(value: &'a mut Self, index: Int) -> &'a mut T where T: Use<[1, 1]> { vec_must_be_at(&*value, index); vec_at_mut(value, index) }
+    pub fn first_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> where T: Use<[1, 1]> { Vec::get_mut(value, 0) }
+    pub fn last_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> where T: Use<[1, 1]> { let n = value.len; Vec::get_mut(value, n - 1) }
+    // The element at a place, the last put in its place.
+    pub fn swap_remove(value: &mut Self, index: Int) -> Option<T> where T: Use<[1, 1]> {
+        if(index < 0 or { index >= value.len }) { None } else {
+            let taken = unsafe { vec_take_at(&*value, index) };
+            let n = value.len - 1;
+            if(index < n) { let last = unsafe { vec_take_at(&*value, n) }; unsafe { vec_put_at(value, index, last) } } else { () };
+            value.len = n;
+            Some(taken)
+        }
+    }
+    // What is at a place, with another put there; or the other given back.
+    pub fn replace(value: &mut Self, index: Int, item: T) -> Result<T, T> where T: Use<[1, 1]> {
+        if(index < 0 or { index >= value.len }) { Err(item) } else { Ok(replace(vec_at_mut(value, index), item)) }
+    }
+    // The elements at two places changed over.
+    pub fn swap(value: &mut Self, left: Int, right: Int) -> Result<(), ()> where T: Use<[1, 1]> {
+        let n = value.len;
+        if(left < 0 or { right < 0 } or { left >= n } or { right >= n }) { Err(()) } else {
+            if(left != right) {
+                let a = unsafe { vec_take_at(&*value, left) };
+                let b = unsafe { vec_take_at(&*value, right) };
+                unsafe { vec_put_at(value, left, b); vec_put_at(value, right, a) }
+            } else { () };
+            Ok(())
+        }
+    }
+    // The elements turned: the first `count` taken from the front to the back.
+    pub fn rotate_left(value: &mut Self, count: Int) -> Result<(), ()> where T: Use<[1, 1]> {
+        let n = value.len;
+        if(count < 0 or { count > n }) { Err(()) } else {
+            let rest = Vec::split_off_at(value, count);
+            let front = replace(value, rest);
+            Vec::append(value, front);
+            Ok(())
+        }
+    }
+    pub fn rotate_right(value: &mut Self, count: Int) -> Result<(), ()> where T: Use<[1, 1]> {
+        let n = value.len;
+        if(count < 0 or { count > n }) { Err(()) } else { Vec::rotate_left(value, n - count) }
+    }
+    // The elements from a place on, taken off into a new one.
+    pub fn split_off(value: &mut Self, index: Int) -> Result<Self, ()> where T: Use<[1, 1]> {
+        if(index < 0 or { index > value.len }) { Err(()) } else { Ok(Vec::split_off_at(value, index)) }
+    }
+    fn split_off_at(value: &mut Self, index: Int) -> Self where T: Use<[1, 1]> {
+        let n = value.len;
+        let mut off = Vec::with_capacity(n - index);
+        let mut i = index;
+        while({ i < n }) { let x = unsafe { vec_take_at(&*value, i) }; Vec::push(&mut off, x); i = i + 1 };
+        value.len = index;
+        off
+    }
+    // So many elements: those after the length let go, or copies of the
+    // fill put on.
+    pub fn resize(value: &mut Self, length: Int, fill: T) where T: Use<[0, *]> {
+        if(length < value.len) { Vec::truncate(value, length) }
+        else { while({ value.len < length }) { Vec::push(value, fill) } }
+    }
+    // Those for which the test holds, kept in order; the rest let go.
+    pub fn retain<e: EffectRow>(value: &mut Self, keep: for<'a> fn(&'a T) -> Bool / {| e}) / {| e} {
+        let n = value.len;
+        let mut kept = 0;
+        let mut i = 0;
+        while({ i < n }) {
+            let x = unsafe { vec_take_at(&*value, i) };
+            if(keep(&x)) { vec_place(value, kept, x); kept = kept + 1 } else { discard(x) };
+            i = i + 1
+        };
+        value.len = kept
+    }
+    pub fn into_iter(value: Self) -> IntoIter<T> {
+        let parts = vec_parts_of(value);
+        IntoIter { at: parts.at, cap: parts.cap, len: parts.len, next: 0 }
+    }
+    pub fn finish_empty(value: Self) -> Result<(), Self> {
+        let parts = vec_parts_of(value);
+        if(parts.len == 0) {
+            if(parts.cap > 0) { unsafe { mem_free(ptr_mut_address(parts.at)) } } else { () };
+            Ok(())
+        } else { Err(Vec { at: parts.at, cap: parts.cap, len: parts.len }) }
+    }
+    // Is a value equal to one of the elements?
+    pub fn contains(value: &Self, item: &T) -> Bool where T: Eq, T: Use<[0, *]> {
+        let mut i = 0;
+        let mut found = false;
+        while({ i < value.len and { not found } }) { if(*vec_at_ref(value, i) == *item) { found = true } else { () }; i = i + 1 };
+        found
+    }
+    // (Of anything `ToVec`: a `Vec`, `[a, b]`.)
+    pub fn extend<A>(value: &mut Self, more: A) where A: ToVec<Elem = T>, T: Use<[1, 1]> { let mut rest = to_vec(more); Vec::append(value, rest) }
+    // Only so many kept: the rest are let go.
+    pub fn truncate(value: &mut Self, length: Int) {
+        while({ value.len > length and { value.len > 0 } }) {
+            value.len = value.len - 1;
+            discard(unsafe { vec_take_at(&*value, value.len) })
+        }
+    }
+    pub fn clear(value: &mut Self) { Vec::truncate(value, 0) }
+    // The elements as a slice: looked at where they are.
+    pub fn as_slice<'a>(value: &'a Self) -> &'a [T] where T: Use<[1, 1]> { unsafe { slice_at(value.at, value.len) } }
+    // Its elements, borrowed where they are.
+    pub fn as_elements<'a>(value: &'a Self) -> SliceRef<'a, T> { unsafe { slice_at(value.at, value.len) } }
+    // The elements one after another, by reference.
+    pub fn as_mut_slice<'a>(value: &'a mut Self) -> &'a mut [T] where T: Use<[1, 1]> { unsafe { slice_mut_at(value.at, value.len) } }
+    pub fn iter<'a>(value: &'a Self) -> SliceIter<'a, T> where T: Use<[1, 1]> { Vec::as_slice(value).iter() }
+}
+
+// What gives its elements away.
+impl<T> IntoIterator for Vec<T> { type Iter = IntoIter<T>; fn into_iter(v: Vec<T>) -> IntoIter<T> { Vec::into_iter(v) } }

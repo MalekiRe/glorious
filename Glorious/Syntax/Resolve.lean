@@ -736,6 +736,10 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
         fixed := fixed.push ((.typeAlias (fixedArgName j) [] (← ty (.name a []))))
     pure (Item.impl (ps ++ fresh.toList) tr head newArgs.toList context (methods ++ fixed.toList))
   let rec item : Item → Except String Item
+    -- (What is said of a type parameter: `F: Fn<(Int,), Output = Bool>`.)
+    | .bounds f bs => do
+      pure (.bounds f (← bs.mapM fun b => do
+        pure { b with args := ← b.args.mapM ty, assoc := ← b.assoc.mapM fun (n, t) => do pure (n, ← ty t) }))
     | (.enum name ps ctors) => do
       pure ((.enum name ps (← ctors.mapM fun (c, fields) => do pure (c, ← fields.mapM ty))))
     | (.struct name ps fields) => do pure ((.struct name ps (← fields.mapM ty)))

@@ -7394,14 +7394,14 @@ struct Pass<I, A> { inner: I, extra: A }
 impl<I, A> Iterator for Pass<I, A> where I: Iterator<Item = A> { type Item = A; fn next(it: &mut Pass<I, A>) -> Option<A> { next(&mut it.inner) } }
 fn main() -> Int { let mut p = Pass { inner: range(0, 3), extra: "text" }; say(collect(&mut p)); 0 }
 #### expect
-error: 4:76: in `main`: `Item` of `std::iterator::Iterator` for `std::iterator::Range`: expected `Int`, found `Str`
+error: 4:76: in `main`: `Item` of `Iterator` for `std::iterator::Range`: expected `Int`, found `Str`
 #### case
 use core::iter::{Iterator, range, next};
 struct Pass<I, A> { inner: I, extra: A }
 impl<I, A> Iterator for Pass<I, A> where I: Iterator<Thing = A> { type Item = A; fn next(it: &mut Pass<I, A>) -> Option<A> { next(&mut it.inner) } }
 fn main() -> Int { 0 }
 #### expect
-error: `impl std::iterator::Iterator for Pass`: `Iterator` leaves no type `Thing` to its implementations
+error: `impl Iterator for Pass`: `Iterator` leaves no type `Thing` to its implementations
 #### case
 use alloc::vec::{Vec};
 use core::iter::{fold};
@@ -14077,14 +14077,14 @@ impl<T, H, R> Get<T> for (Option<Column<H>>, R) where R: Get<T> {
     fn put(w: &mut (Option<Column<H>>, R), c: Column<T>) { <R as Get<T>>::put(&mut w.1, c) }
 }
 trait System<W> { fn run(Self, &mut W) }
-impl<W, A> System<W> for fn(&mut Column<A>) -> () where W: Get<A> {
+impl<W, A> System<W> for fn(&mut Column<A>) -> () where W: Get<A>, A: Use<[0, *]> {
     fn run(f: fn(&mut Column<A>) -> (), world: &mut W) {
         let mut a = <W as Get<A>>::take(world);
         f(&mut a);
         <W as Get<A>>::put(world, a)
     }
 }
-impl<W, A, B> System<W> for fn(&mut Column<A>, &Column<B>) -> () where W: Get<A>, W: Get<B> {
+impl<W, A, B> System<W> for fn(&mut Column<A>, &Column<B>) -> () where W: Get<A>, W: Get<B>, A: Use<[0, *]>, B: Use<[0, *]> {
     fn run(f: fn(&mut Column<A>, &Column<B>) -> (), world: &mut W) {
         let mut a = <W as Get<A>>::take(world);
         let b = <W as Get<B>>::take(world);

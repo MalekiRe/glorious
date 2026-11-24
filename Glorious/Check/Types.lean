@@ -1155,7 +1155,9 @@ def unseenEdges (cap : Nat) : M (Option (Array (Nat × Captured))) := do
 
 /-- A function of the library, which is checked once for every program. -/
 def libraryOwner (owner : String) : Bool :=
-  ["std::", "core::", "alloc::"].any (owner.startsWith ·)
+  -- (Or an implementation's function, of a trait of the prelude's, for a
+  -- type of the library's: `Iterator::next@std::iterator::Zip`.)
+  ["std::", "core::", "alloc::"].any fun p => owner.startsWith p || (owner.splitOn ("@" ++ p)).length > 1
 
 /-- Follow a type variable to what it stands for. -/
 partial def find (t : Ty) : M Ty := do

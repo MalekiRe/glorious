@@ -104,11 +104,11 @@ each name, with its module. Every module of a program that has the
 library can name them, after what it declares and brings and after the
 prelude (`scopeOf`). -/
 def libraryPrelude : List (String × String) :=
-  [("identity", "value"), ("discard", "value"), ("Either", "value"),
+  [("identity", "value"), ("Either", "value"),
    ("Left", "value"), ("Right", "value"), ("Rejected", "value"), ("Ordering", "cmp"),
    ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator"),
    ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
-   ("catch_fail", "value"), ("Vec", "vec"), ("String", "text"), ("Iterator", "iterator"),
+   ("catch_fail", "value"), ("String", "text"),
    ("chars", "text")]
 
 /-- How a module is written in a message. -/

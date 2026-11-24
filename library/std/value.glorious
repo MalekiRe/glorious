@@ -9,8 +9,8 @@ pub struct Rejected<T, E> { pub value: T, pub error: E }
 
 pub fn identity<T>(value: T) -> T where T: Use<[1, 1]> { value }
 
-// A value let go: its `drop` runs, if it has one.
-pub fn discard<T>(value: T) { () }
+// A value let go: its `drop` runs, if it has one (the prelude's).
+pub use prelude::discard;
 
 // A type with a value to start from.
 pub trait Default {

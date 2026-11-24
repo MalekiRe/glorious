@@ -97,6 +97,15 @@ partial def hasParam : Ty → Bool
   | .ref _ t _ => hasParam t
   | _ => false
 
+/-- The type parameters a type mentions (`hasParam`'s). -/
+partial def paramNames : Ty → List String
+  | .con n [] => if n.startsWith "'" && n.length > 1 then [n] else []
+  | .con _ args => args.flatMap paramNames
+  | .tuple args => args.flatMap paramNames
+  | .fn ps r _ _ _ => ps.flatMap paramNames ++ paramNames r
+  | .ref _ t _ => paramNames t
+  | _ => []
+
 /-- Record that a value of this type is let go unused here. -/
 def mustDrop (t : Ty) (why : String) : M Unit := do
   unless (← get).anyMust do return
@@ -1503,6 +1512,14 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
               | _ => (0, 0)
             throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used", decision := some (.letMut owner line col x) }
       continue
+    -- (A value whose type has nothing to destroy, its type parameters each
+    -- said to be copied, `A: Use<[0, *]>`: let go on a path that does not
+    -- use it, nothing is lost.)
+    if hasParam t then
+      let params := paramNames t
+      if !params.isEmpty && params.all (fun n => s.copyParams.contains (((n.drop 1).takeWhile (· != '@')).toString)) then
+        modify fun st => { st with seen := {} }
+        if (← tyHasDrop [] t).isNone && (← tyMustUse roots [] t).isNone then continue
     let mut unused := false
     if usesStmts b resumptive x body == 0 then unused := true
     else if usedFirst b quiet x body then unused := false

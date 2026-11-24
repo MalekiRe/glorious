@@ -535,7 +535,7 @@ some 0
 #### by a function that takes any callable: its destructor, and the function,
 #### touch the variable, and the region rules hold.
 effect Ask { ask() -> Int }
-    fn drop_it<F0>(c: F0) -> Int where F0: Fn<(), Output = Int>, F0: Use<[1, 1]> { cancel(c); 7 }
+    fn drop_it<F0>(c: F0) -> Int where F0: Fn<(), Output = Int>, F0: Use<[0, 1]> { cancel(c); 7 }
     fn main() -> Int { let mut n = 0;
       let got = handle { defer say(9); let a = ask(); n = n + a; a }() { ask(k) => drop_it({ k(1) }) };
       got + n }

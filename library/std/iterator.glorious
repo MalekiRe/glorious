@@ -1,11 +1,7 @@
-// One value at a time, asked for through a `&mut` reference: the shape the
-// library specification gives iteration (18). What is iterated says what its
-// values are (`Item`); what uses them is a function over anything iterated.
+// What is iterated, and what iterates: `Iterator` and `IntoIterator` are the
+// prelude's (`prelude/vec.glorious`), named here again.
+pub use prelude::{Iterator, IntoIterator, next, into_iter};
 
-pub trait Iterator {
-    type Item;
-    fn next(&mut Self) -> Option<Self::Item>;
-}
 
 // From one value up to, not including, another (the library
 // specification's §3); of whole numbers, what is iterated.
@@ -17,14 +13,7 @@ impl Iterator for Range<Int> {
 }
 
 
-// A slice's elements by reference, first to last (`s.iter()`).
-impl<'a, T> Iterator for SliceIter<'a, T> {
-    type Item = &'a T;
-    fn next(it: &mut SliceIter<'a, T>) -> Option<&'a T> { SliceIter::next_ref(it) }
-}
 
-// What gives all its elements away, one after another, first to last.
-pub trait IntoIterator { type Iter; fn into_iter(Self) -> Iter }
 // An array's elements given away, first to last: their bytes moved to memory
 // of their own, the array let go of without being destroyed, each element
 // read out as it comes and the rest destroyed with the iterator.
@@ -58,7 +47,6 @@ impl<T> Drop for ArrayIntoIter<T> {
         it.len = 0
     }
 }
-impl<'a, T> IntoIterator for &'a [T] { type Iter = SliceIter<'a, T>; fn into_iter(s: &'a [T]) -> SliceIter<'a, T> { s.iter() } }
 
 // Every value, folded into one.
 pub fn fold<I: Iterator, A, e: EffectRow>(it: &mut I, acc: A, f: fn(A, I::Item) -> A / {| e}) -> A / {| e} where I: Use<[1, 1]>, A: Use<[1, 1]> {

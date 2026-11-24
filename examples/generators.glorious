@@ -27,8 +27,10 @@ fn fold<T, U, e: EffectRow>(generator: fn() -> T / {Yield | e}, initial: U, step
 }
 
 // Stop a generator early: the first value satisfying `wanted`, if any. The
-// rest of the generator is cancelled, which runs its cleanups.
-fn find<T, e: EffectRow>(generator: fn() -> T / {Yield | e}, wanted: fn(Int) -> Bool / {}) -> Option<Int> / {| e} {
+// rest of the generator is cancelled, which runs its cleanups. (`wanted` is
+// called while the generator's resumption, which has to be used, is held:
+// it is said to come back, `F: Returns`.)
+fn find<T, F, e: EffectRow>(generator: fn() -> T / {Yield | e}, wanted: F) -> Option<Int> / {| e} where F: Fn<(Int,), Output = Bool, Effects = {}>, F: Returns {
     handle generator() {
         _ => None,
         yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) }

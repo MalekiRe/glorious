@@ -34,6 +34,9 @@ private def intOperators : String := include_str "../library/prelude/int_operato
 
 private def world : String := include_str "../library/prelude/world.glorious"
 
+/-- Iteration and `Vec`. -/
+private def collections : String := include_str "../library/prelude/vec.glorious"
+
 /-- What a type of whole numbers has: `Int`'s operations, each result asked to
 fit the type's width; and the way in from an `Int`, which asks the same. A
 type of 64 bits or more computes within 128, so that a result too large for
@@ -151,7 +154,7 @@ trait Elements { type Each; fn elements(Self) -> Each }
 
 private def layouts : String := include_str "../library/prelude/layouts.glorious"
 
-def source : String := intrinsics ++ casts ++ core ++ operators ++ scalars ++ world ++ fixedElements ++ layouts ++ scalarReprs
+def source : String := intrinsics ++ casts ++ core ++ operators ++ scalars ++ world ++ collections ++ fixedElements ++ layouts ++ scalarReprs
 
 /-- The prelude of a program run without the checker. -/
 def unchecked : String := intrinsics ++ casts ++ core ++ intOperators ++ world

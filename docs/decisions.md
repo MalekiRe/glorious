@@ -7945,6 +7945,28 @@ at a variable it is already spelling.
 
 Messages change: `i8 + u8` is "`i8` does not implement `Add<u8>`".
 
+## `Vec` and iteration in the prelude
+
+As Rust's prelude has them: `Iterator`, `IntoIterator`, `Vec` (with
+`IntoIter`, `ToVec`) and `discard` are in `library/prelude/vec.glorious`.
+`std::iterator`, `std::vec` and `std::value` name them again with
+`pub use prelude::{..}`, the traits' functions too (`next`, `into_iter`,
+`to_vec`), so that what `use`s them from there still does. Vec's helpers are
+the prelude's, named `vec_*`. `libraryPrelude` no longer lists them.
+
+What follows from every program now having a type with a `drop`:
+
+- A function of the library's is known by its implementing type too:
+  `Iterator::next@std::iterator::Zip` is the library's (`libraryOwner`).
+- The rules for values that have to be used apply to every program. A
+  variable whose type has nothing to destroy, its type parameters each said
+  to be copied (`A: Use<[0, *]>`), is not one (`paramNames`).
+- Two programs say more: `examples/generators.glorious`'s `find` says its
+  test comes back (`F: Returns`), and a test's `System` implementations say
+  their columns' elements are copied. Check 94's callable may be let go,
+  `Use<[0, 1]>`: `cancel` gives it up without calling it.
+- Aliases are written out in what bounds say (`Output = Bool`).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
