@@ -133,6 +133,7 @@ pub fn len_of<T>(a: [T]) -> Int where T: Use<[1, 1]> { len(a) }
 // elements are in memory it allocates and frees, one after another, each laid
 // out as its type is; it holds room for `cap` of them, and `len` are there.
 use std::slice::{Slice, SliceIter};
+use std::iterator::{Iterator};
 
 pub struct Vec<T> { at: *mut T, cap: Int, len: Int }
 
@@ -151,6 +152,57 @@ fn push_each<T>(v: &mut Vec<T>, reversed: [T]) where T: Use<[1, 1]> {
         None => ()
     }
 }
+
+// The elements from `lo` up to `hi` in order: each half in order, then
+// merged into `scratch` and moved back, each element's bytes.
+fn sort_range<T, e: EffectRow>(v: &mut Vec<T>, scratch: usize, lo: Int, hi: Int, before: fn(T, T) -> Bool / {| e}) / {| e} where T: Use<[0, *]> {
+    if(hi - lo > 1) {
+        let mid = (lo + hi) / 2;
+        sort_range(v, scratch, lo, mid, before);
+        sort_range(v, scratch, mid, hi, before);
+        let size = elem_size(&*v);
+        let mut i = lo;
+        let mut j = mid;
+        let mut k = 0;
+        while({ i < mid and { j < hi } }) {
+            let from = if(before(*at_ref(&*v, j), *at_ref(&*v, i))) { j = j + 1; j - 1 } else { i = i + 1; i - 1 };
+            unsafe { mem_copy(usize_of(usize_bits(scratch) + k * size), slot(&*v, from), usize_of(size)) };
+            k = k + 1
+        };
+        // (What is left of the first half goes before the second's rest,
+        // which is in its place already.)
+        unsafe { mem_copy(usize_of(usize_bits(scratch) + k * size), slot(&*v, i), usize_of((mid - i) * size)) };
+        let placed = k + mid - i;
+        unsafe { mem_copy(slot(&*v, lo), scratch, usize_of(placed * size)) }
+    } else { () }
+}
+
+// The elements of a `Vec` given away one by one, first to last; those not
+// asked for are destroyed with it, and its memory freed.
+pub struct IntoIter<T> { at: *mut T, cap: Int, len: Int, next: Int }
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+    fn next(it: &mut IntoIter<T>) -> Option<T> {
+        if(it.next < it.len) {
+            let v = Vec { at: it.at, cap: 0, len: 0 };
+            let x = unsafe { take_at(&v, it.next) };
+            unsafe { forget(v) };
+            it.next = it.next + 1;
+            Some(x)
+        } else { None }
+    }
+}
+impl<T> Drop for IntoIter<T> {
+    fn drop(it: &mut IntoIter<T>) {
+        let v = Vec { at: it.at, cap: 0, len: 0 };
+        while({ it.next < it.len }) { std::value::discard(unsafe { take_at(&v, it.next) }); it.next = it.next + 1 };
+        unsafe { forget(v) };
+        if(it.cap > 0) { unsafe { mem_free(ptr_mut_address(it.at)) } } else { () };
+        it.cap = 0
+    }
+}
+// A value let go of without being destroyed: the caller's to get right.
+unsafe fn forget<T>(value: T) { let _: VecParts<()> = transmute(value); () }
 
 // What a `Vec` is, taken apart without its elements being destroyed.
 struct VecParts<T> { at: *mut T, cap: Int, len: Int }
@@ -310,13 +362,16 @@ impl<T> Vec<T> {
     }
     // In order, by `<`, equal ones as they were to each other; or in the
     // order `before` gives.
-    pub fn sort(value: &mut Self) where T: Ord, T: Use<[0, *]> {
-        let all = sort(Vec::into_array(replace(value, Vec::new())));
-        *value = Vec::from_array(all)
-    }
+    pub fn sort(value: &mut Self) where T: Ord, T: Use<[0, *]> { Vec::sort_by(value, { (a, b) => a < b }) }
     pub fn sort_by<e: EffectRow>(value: &mut Self, before: fn(T, T) -> Bool / {| e}) / {| e} where T: Use<[0, *]> {
-        let all = sort_by(Vec::into_array(replace(value, Vec::new())), before);
-        *value = Vec::from_array(all)
+        // (Merged a half at a time through memory of the same size, each
+        // element moved as its bytes: stable, n log n.)
+        let n = value.len;
+        if(n > 1) {
+            let scratch = unsafe { mem_alloc(usize_of(n * elem_size(&*value)), align_of_at(value.at)) };
+            sort_range(value, scratch, 0, n, before);
+            unsafe { mem_free(scratch) }
+        } else { () }
     }
     // How many it holds room for without growing.
     pub fn capacity(value: &Self) -> Int { value.cap }
@@ -397,7 +452,10 @@ impl<T> Vec<T> {
         };
         value.len = kept
     }
-    pub fn into_iter(value: Self) -> std::iterator::IntoIter<T> where T: Use<[1, 1]> { std::iterator::into_iter(Vec::into_array(value)) }
+    pub fn into_iter(value: Self) -> IntoIter<T> {
+        let parts: VecParts<T> = unsafe { transmute(value) };
+        IntoIter { at: parts.at, cap: parts.cap, len: parts.len, next: 0 }
+    }
     pub fn finish_empty(value: Self) -> Result<(), Self> {
         // (Taken apart, which nothing destroys, so that either way can have it.)
         let parts: VecParts<T> = unsafe { transmute(value) };
