@@ -9008,7 +9008,7 @@ use std::index::{Id, IndexVec, Arena, GenArena, StringInterner, BitSet, SparseSe
 
 struct Function;
 struct Name;
-fn ids<Tag>(found: [Id<Tag>], i: Int, out: [Int]) -> [Int] { if(i >= len(found)) { out } else { ids(found, i + 1, push(out, Id::index(found[i]))) } }
+fn ids<Tag>(found: std::vec::Vec<Id<Tag>>, i: Int, out: [Int]) -> [Int] { if(i >= len_at(&found)) { out } else { let n = Id::index(found[i]); ids(found, i + 1, push(out, n)) } }
 fn id<Tag>(n: Int) -> Id<Tag> { match(Id::at(n)) { Ok(found) => found, Err(_) => Id::from_u32(0u32) } }
 fn main() -> Int {
     let mut names: IndexVec<Function, Str> = IndexVec::new();
@@ -9022,7 +9022,7 @@ fn main() -> Int {
     let mark = Arena::mark(&arena);
     Arena::insert(&mut arena, 20);
     Arena::insert(&mut arena, 30);
-    say(match(Arena::rollback_take(&mut arena, mark)) { Ok(taken) => taken, Err(_) => [] });
+    say(match(Arena::rollback_take(&mut arena, mark)) { Ok(taken) => taken, Err(_) => std::vec::Vec::new() });
     say(Arena::len(&arena));
     // A place used again refuses its old name.
     let mut pool: GenArena<Function, Str> = GenArena::new();
@@ -9105,7 +9105,7 @@ struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
 struct Kind;
-fn redeem_all(ts: [Ticket], sum: Int) -> Int { match(pop(ts)) { Some((rest, t)) => redeem_all(rest, sum + redeem(t)), None => sum } }
+fn redeem_all(ts: std::vec::Vec<Ticket>, sum: Int) -> Int { let mut v = ts; match(std::vec::Vec::pop(&mut v)) { Some(t) => redeem_all(v, sum + redeem(t)), None => match(std::vec::Vec::finish_empty(v)) { Ok(_) => sum, Err(rest) => redeem_all(rest, sum) } } }
 fn add(a: &mut Arena<Kind, Ticket>, n: Int) -> Int { match(Arena::insert(a, Ticket(n))) { Ok(_) => 0, Err(Rejected { value, error: _ }) => redeem(value) } }
 fn main() -> Int {
     let mut a: Arena<Kind, Ticket> = Arena::new();
@@ -9125,7 +9125,7 @@ struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
 struct Kind;
-fn redeem_all(ts: [Ticket], sum: Int) -> Int { match(pop(ts)) { Some((rest, t)) => redeem_all(rest, sum + redeem(t)), None => sum } }
+fn redeem_all(ts: std::vec::Vec<Ticket>, sum: Int) -> Int { let mut v = ts; match(std::vec::Vec::pop(&mut v)) { Some(t) => redeem_all(v, sum + redeem(t)), None => match(std::vec::Vec::finish_empty(v)) { Ok(_) => sum, Err(rest) => redeem_all(rest, sum) } } }
 fn add(a: &mut Arena<Kind, Ticket>, n: Int) -> Int { match(Arena::insert(a, Ticket(n))) { Ok(_) => 0, Err(Rejected { value, error: _ }) => redeem(value) } }
 fn main() -> Int {
     let mut a: Arena<Kind, Ticket> = Arena::new();
@@ -9145,7 +9145,7 @@ struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
 struct Kind;
-fn redeem_all(ts: [Ticket], sum: Int) -> Int { match(pop(ts)) { Some((rest, t)) => redeem_all(rest, sum + redeem(t)), None => sum } }
+fn redeem_all(ts: std::vec::Vec<Ticket>, sum: Int) -> Int { let mut v = ts; match(std::vec::Vec::pop(&mut v)) { Some(t) => redeem_all(v, sum + redeem(t)), None => match(std::vec::Vec::finish_empty(v)) { Ok(_) => sum, Err(rest) => redeem_all(rest, sum) } } }
 fn main() -> Int {
     let mut pool: GenArena<Kind, Ticket> = GenArena::new();
     let n = match(GenArena::insert(&mut pool, Ticket(5))) {
@@ -9162,13 +9162,13 @@ use std::vec::{Vec};
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-fn redeem_all(ts: [Ticket], sum: Int) -> Int { match(pop(ts)) { Some((rest, t)) => redeem_all(rest, sum + redeem(t)), None => sum } }
+fn redeem_all(ts: std::vec::Vec<Ticket>, sum: Int) -> Int { let mut v = ts; match(std::vec::Vec::pop(&mut v)) { Some(t) => redeem_all(v, sum + redeem(t)), None => match(std::vec::Vec::finish_empty(v)) { Ok(_) => sum, Err(rest) => redeem_all(rest, sum) } } }
 fn main() -> Int {
     let mut v: Vec<Ticket> = Vec::new();
     Vec::push(&mut v, Ticket(1));
     Vec::push(&mut v, Ticket(20));
     let last = match(Vec::pop(&mut v)) { Some(t) => redeem(t), None => 0 };
-    last * 100 + redeem_all(Vec::into_array(v), 0)
+    last * 100 + redeem_all(v, 0)
 }
 #### expect
 2001
@@ -9177,8 +9177,8 @@ use std::vec::{Vec};
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-fn redeem_all(ts: [Ticket], sum: Int) -> Int { match(pop(ts)) { Some((rest, t)) => redeem_all(rest, sum + redeem(t)), None => sum } }
-fn main() -> Int { let mut v: Vec<Ticket> = Vec::new(); let mut i = 0; while({ i < 3 }, { Vec::push(&mut v, Ticket(i)); i = i + 1; }); redeem_all(Vec::into_array(v), 0) }
+fn redeem_all(ts: std::vec::Vec<Ticket>, sum: Int) -> Int { let mut v = ts; match(std::vec::Vec::pop(&mut v)) { Some(t) => redeem_all(v, sum + redeem(t)), None => match(std::vec::Vec::finish_empty(v)) { Ok(_) => sum, Err(rest) => redeem_all(rest, sum) } } }
+fn main() -> Int { let mut v: Vec<Ticket> = Vec::new(); let mut i = 0; while({ i < 3 }, { Vec::push(&mut v, Ticket(i)); i = i + 1; }); redeem_all(v, 0) }
 #### expect
 3
 #### case
@@ -9506,7 +9506,7 @@ fn main() -> Int { let mut f = Noisy { id: 6, hits: 0 }; poke(&mut f); say(55); 
 struct Ticket(Int);
 impl Use<[1, 1]> for Ticket {}
 fn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }
-fn redeem_all(ts: [Ticket], sum: Int) -> Int { match(pop(ts)) { Some((rest, t)) => redeem_all(rest, sum + redeem(t)), None => sum } }
+fn redeem_all(ts: std::vec::Vec<Ticket>, sum: Int) -> Int { let mut v = ts; match(std::vec::Vec::pop(&mut v)) { Some(t) => redeem_all(v, sum + redeem(t)), None => match(std::vec::Vec::finish_empty(v)) { Ok(_) => sum, Err(rest) => redeem_all(rest, sum) } } }
 fn taken_from<T>(items: [T], count: Int, taken: [T]) -> ([T], [T]) {
     if(count <= 0) { (items, taken) } else {
         match(pop(items)) {

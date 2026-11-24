@@ -2,11 +2,13 @@
 // which code, where, with what beside it) and written out at the end, as the
 // library specification has it (21).
 //
-// Texts are `Str` and what a bag gives back is an array, as elsewhere here.
+// Texts are `Str`; what a bag gives back is a `Vec`.
 
 use std::source::{SourceMap, SourceSpan, SourceId};
 use std::fmt::{FormatError};
 use std::text::{utf8};
+use std::vec::{Vec, IntoIter};
+use std::iterator::{Iterator, next};
 
 pub enum Severity { Note, Warning, Error }
 
@@ -20,20 +22,16 @@ impl DiagnosticCode {
 // A place something is said of: the first is what the diagnostic is about.
 struct Label { span: SourceSpan, text: Str, primary: Bool }
 
-pub struct Diagnostic { severity: Severity, code: DiagnosticCode, message: Str, labels: [Label], notes: [Str], helps: [Str] }
+pub struct Diagnostic { severity: Severity, code: DiagnosticCode, message: Str, labels: Vec<Label>, notes: Vec<Str>, helps: Vec<Str> }
 
 impl Diagnostic {
     pub fn new(severity: Severity, code: DiagnosticCode, message: Str) -> Self {
-        Self { severity: severity, code: code, message: message, labels: [], notes: [], helps: [] }
+        Self { severity: severity, code: code, message: message, labels: Vec::new(), notes: Vec::new(), helps: Vec::new() }
     }
-    pub fn primary(value: &mut Self, span: SourceSpan, label: Str) {
-        value.labels = push(replace(&mut value.labels, []), Label { span: span, text: label, primary: true });
-    }
-    pub fn secondary(value: &mut Self, span: SourceSpan, label: Str) {
-        value.labels = push(replace(&mut value.labels, []), Label { span: span, text: label, primary: false });
-    }
-    pub fn note(value: &mut Self, text: Str) { value.notes = push(replace(&mut value.notes, []), text); }
-    pub fn help(value: &mut Self, text: Str) { value.helps = push(replace(&mut value.helps, []), text); }
+    pub fn primary(value: &mut Self, span: SourceSpan, label: Str) { Vec::push(&mut value.labels, Label { span: span, text: label, primary: true }) }
+    pub fn secondary(value: &mut Self, span: SourceSpan, label: Str) { Vec::push(&mut value.labels, Label { span: span, text: label, primary: false }) }
+    pub fn note(value: &mut Self, text: Str) { Vec::push(&mut value.notes, text) }
+    pub fn help(value: &mut Self, text: Str) { Vec::push(&mut value.helps, text) }
     pub fn is_error(value: &Self) -> Bool { rank(&value.severity) == 0 }
     pub fn code(value: &Self) -> u32 { value.code.0 }
     pub fn message(value: &Self) -> Str { value.message }
@@ -46,7 +44,7 @@ fn word(s: &Severity) -> Str { match(s) { &Severity::Error => "error", &Severity
 // Where a diagnostic is put among others: by the text its first primary
 // place is in, then how far in, then how bad, then its code. One with no
 // place comes after those that have one.
-fn first_place(labels: &[Label], i: Int) -> (Int, Int) {
+fn first_place(labels: &Vec<Label>, i: Int) -> (Int, Int) {
     match(element(labels, i)) {
         None => (4294967296, 0),
         Some(label) => if(label.primary) { (int(SourceId::to_u32(label.span.source)), label.span.start) } else { first_place(labels, i + 1) }
@@ -63,52 +61,46 @@ fn comes_before(a: &Diagnostic, b: &Diagnostic) -> Bool {
 }
 
 // Diagnostics up to a limit: one more is given back, not lost.
-pub struct DiagnosticBag { items: [Diagnostic], limit: Int, errors: Int }
+pub struct DiagnosticBag { items: Vec<Diagnostic>, limit: Int, errors: Int }
 
 impl DiagnosticBag {
-    pub fn new(limit: Int) -> Self { Self { items: [], limit: limit, errors: 0 } }
+    pub fn new(limit: Int) -> Self { Self { items: Vec::new(), limit: limit, errors: 0 } }
     pub fn push(value: &mut Self, diagnostic: Diagnostic) -> Result<(), Diagnostic> {
-        if(len_at(&value.items) >= value.limit) { Err(diagnostic) } else {
+        if(Vec::len(&value.items) >= value.limit) { Err(diagnostic) } else {
             value.errors = value.errors + (if(Diagnostic::is_error(&diagnostic)) { 1 } else { 0 });
-            push_at(&mut value.items, diagnostic);
+            Vec::push(&mut value.items, diagnostic);
             Ok(())
         }
     }
-    pub fn len(value: &Self) -> Int { len_at(&value.items) }
+    pub fn len(value: &Self) -> Int { Vec::len(&value.items) }
     pub fn has_errors(value: &Self) -> Bool { value.errors > 0 }
     // Every diagnostic, in the order above; those the order does not tell
     // apart stay as they were pushed.
-    pub fn into_vec(value: Self) -> [Diagnostic] {
-        match(value) { DiagnosticBag { items, limit, errors } => in_order(items, []) }
+    pub fn into_vec(value: Self) -> Vec<Diagnostic> {
+        match(value) { DiagnosticBag { items, limit, errors } =>
+            let mut each = Vec::into_iter(items);
+            let mut placed = Vec::new();
+            in_order(&mut each, &mut placed);
+            placed }
     }
 }
 
-// Each put where it belongs among those already placed.
-fn in_order(left: [Diagnostic], placed: [Diagnostic]) -> [Diagnostic] {
-    match(pop_first(left)) {
-        None => placed,
-        Some((next, rest)) => in_order(rest, placed_with(placed, next))
+// Each put where it belongs among those already placed: after every one
+// it does not come before.
+fn in_order(left: &mut IntoIter<Diagnostic>, placed: &mut Vec<Diagnostic>) {
+    match(next(left)) {
+        None => (),
+        Some(d) => placed_at(placed, d); tail in_order(left, placed)
     }
 }
-fn pop_first(items: [Diagnostic]) -> Option<(Diagnostic, [Diagnostic])> {
-    let mut items = items;
-    match(pop_at(&mut items)) {
-        None => None,
-        Some(last) =>
-            // The last taken off, and what is left turned so that the first is next.
-            match(pop_first(items)) {
-                None => Some((last, [])),
-                Some((first, rest)) => Some((first, push(rest, last)))
-            }
-    }
+fn placed_at(placed: &mut Vec<Diagnostic>, d: Diagnostic) {
+    let at = place_of(&*placed, &d, 0);
+    std::value::discard(Vec::insert(placed, at, d))
 }
-fn placed_with(placed: [Diagnostic], next: Diagnostic) -> [Diagnostic] {
-    let mut placed = placed;
-    match(pop_at(&mut placed)) {
-        None => [next],
-        Some(last) =>
-            if(comes_before(&next, &last)) { push(placed_with(placed, next), last) }
-            else { push(push(placed, last), next) }
+fn place_of(placed: &Vec<Diagnostic>, d: &Diagnostic, i: Int) -> Int {
+    match(Vec::get(placed, i)) {
+        None => i,
+        Some(there) => if(comes_before(d, there)) { i } else { tail place_of(placed, d, i + 1) }
     }
 }
 
@@ -126,7 +118,7 @@ fn place_text(span: &SourceSpan, sources: &SourceMap) -> Str {
     }
 }
 
-fn labels_text(labels: &[Label], sources: &SourceMap, i: Int, out: Str) -> Str {
+fn labels_text(labels: &Vec<Label>, sources: &SourceMap, i: Int, out: Str) -> Str {
     match(element(labels, i)) {
         None => out,
         Some(label) =>
@@ -136,7 +128,7 @@ fn labels_text(labels: &[Label], sources: &SourceMap, i: Int, out: Str) -> Str {
     }
 }
 
-fn lines_text(kind: Str, lines: &[Str], i: Int, most: Int, out: Str) -> Str {
+fn lines_text(kind: Str, lines: &Vec<Str>, i: Int, most: Int, out: Str) -> Str {
     match(element(lines, i)) {
         None => out,
         Some(text) =>
@@ -153,5 +145,5 @@ pub fn render_diagnostic(value: &Diagnostic, sources: &SourceMap, options: Rende
     let places = labels_text(&value.labels, sources, 0, head);
     let noted = lines_text("note", &value.notes, 0, options.maximum_notes, places);
     let all = lines_text("help", &value.helps, 0, len_at(&value.helps), noted);
-    if(len(utf8(all)) > options.maximum_bytes) { Err(FormatError::OutputLimit) } else { Ok(all) }
+    if(Vec::len(&utf8(all)) > options.maximum_bytes) { Err(FormatError::OutputLimit) } else { Ok(all) }
 }

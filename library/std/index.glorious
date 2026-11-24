@@ -5,6 +5,7 @@
 use std::value::{Rejected};
 use std::slice::{Slice};
 use std::hash::{Hash, HashMap};
+use std::vec::{Vec};
 pub use std::error::{MarkError, IndexOverflow};
 
 // A place among the things of one kind. `Tag` says which kind and is only a
@@ -26,74 +27,69 @@ impl<Tag> Id<Tag> {
 }
 
 // Things of one kind, each at the place it was given when it was added.
-pub struct IndexVec<Tag, T> { items: [T] }
+pub struct IndexVec<Tag, T> { items: Vec<T> }
 
 impl<Tag, T> IndexVec<Tag, T> {
-    pub fn new() -> Self { Self { items: [] } }
-    pub fn len(v: &Self) -> Int { len_at(&v.items) }
+    pub fn new() -> Self { Self { items: Vec::new() } }
+    pub fn len(v: &Self) -> Int { Vec::len(&v.items) }
     pub fn push(v: &mut Self, item: T) -> Result<Id<Tag>, Rejected<T, IndexOverflow>> where Tag: Use<[1, 1]>, T: Use<[1, 1]> {
-        let n = len_at(&v.items);
+        let n = Vec::len(&v.items);
         if(n > 4294967295) { Err(Rejected { value: item, error: IndexOverflow }) } else {
-            push_at(&mut v.items, item);
+            Vec::push(&mut v.items, item);
             Ok(numbered(n))
         }
     }
-    pub fn get<'a>(v: &'a Self, id: Id<Tag>) -> Option<&'a T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { element(&v.items, int(id.0)) }
-    pub fn get_mut<'a>(v: &'a mut Self, id: Id<Tag>) -> Option<&'a mut T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { element_mut(&mut v.items, int(id.0)) }
-    pub fn as_slice<'a>(v: &'a Self) -> Slice<'a, T> where T: Use<[1, 1]> { Slice::of(&v.items) }
-    pub fn into_vec(v: Self) -> [T] where T: Use<[1, 1]> { match(v) { IndexVec { items } => items } }
+    pub fn get<'a>(v: &'a Self, id: Id<Tag>) -> Option<&'a T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { Vec::get(&v.items, int(id.0)) }
+    pub fn get_mut<'a>(v: &'a mut Self, id: Id<Tag>) -> Option<&'a mut T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { Vec::get_mut(&mut v.items, int(id.0)) }
+    pub fn as_slice<'a>(v: &'a Self) -> Slice<'a, T> where T: Use<[1, 1]> { Vec::as_slice(&v.items) }
+    pub fn into_vec(v: Self) -> Vec<T> where T: Use<[1, 1]> { match(v) { IndexVec { items } => items } }
 }
 
-// The last so many of some things onto others: what is left, and what was
-// taken with the last taken first.
-fn taken_from<T>(items: [T], count: Int, taken: [T]) -> ([T], [T]) where T: Use<[1, 1]> {
-    if(count <= 0) { (items, taken) } else {
-        match(pop(items)) {
-            Some((rest, last)) => tail taken_from(rest, count - 1, push(taken, last)),
-            None => ([], taken)
+// The last so many of some things taken off, the last taken first.
+fn taken_from<T>(items: &mut Vec<T>, count: Int, taken: &mut Vec<T>) where T: Use<[1, 1]> {
+    if(count <= 0) { () } else {
+        match(Vec::pop(items)) {
+            Some(last) => Vec::push(taken, last); tail taken_from(items, count - 1, taken),
+            None => ()
         }
     }
-}
-
-fn turned<T>(from: [T], onto: [T]) -> [T] where T: Use<[1, 1]> {
-    match(pop(from)) { Some((rest, last)) => tail turned(rest, push(onto, last)), None => onto }
 }
 
 // Things added and never moved, which can be cut back to how many there
 // were at a mark.
-pub struct Arena<Tag, T> { items: [T] }
+pub struct Arena<Tag, T> { items: Vec<T> }
 
 // How many things an arena had.
 pub struct ArenaMark<Tag> { length: Int }
 
 impl<Tag, T> Arena<Tag, T> {
-    pub fn new() -> Self { Self { items: [] } }
-    pub fn len(a: &Self) -> Int { len_at(&a.items) }
+    pub fn new() -> Self { Self { items: Vec::new() } }
+    pub fn len(a: &Self) -> Int { Vec::len(&a.items) }
     pub fn insert(a: &mut Self, item: T) -> Result<Id<Tag>, Rejected<T, IndexOverflow>> where Tag: Use<[1, 1]>, T: Use<[1, 1]> {
-        let n = len_at(&a.items);
+        let n = Vec::len(&a.items);
         if(n > 4294967295) { Err(Rejected { value: item, error: IndexOverflow }) } else {
-            push_at(&mut a.items, item);
+            Vec::push(&mut a.items, item);
             Ok(numbered(n))
         }
     }
-    pub fn get<'a>(a: &'a Self, id: Id<Tag>) -> Option<&'a T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { element(&a.items, int(id.0)) }
-    pub fn get_mut<'a>(a: &'a mut Self, id: Id<Tag>) -> Option<&'a mut T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { element_mut(&mut a.items, int(id.0)) }
-    pub fn mark(a: &Self) -> ArenaMark<Tag> where Tag: Use<[1, 1]> { ArenaMark { length: len_at(&a.items) } }
+    pub fn get<'a>(a: &'a Self, id: Id<Tag>) -> Option<&'a T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { Vec::get(&a.items, int(id.0)) }
+    pub fn get_mut<'a>(a: &'a mut Self, id: Id<Tag>) -> Option<&'a mut T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { Vec::get_mut(&mut a.items, int(id.0)) }
+    pub fn mark(a: &Self) -> ArenaMark<Tag> where Tag: Use<[1, 1]> { ArenaMark { length: Vec::len(&a.items) } }
     // What was added since a mark, taken back out in the order it went in.
-    pub fn rollback_take(a: &mut Self, mark: ArenaMark<Tag>) -> Result<[T], MarkError> where Tag: Use<[1, 1]>, T: Use<[1, 1]> {
-        if(mark.length > len_at(&a.items)) { Err(MarkError::Stale) } else {
-            let count = len_at(&a.items) - mark.length;
-            let items = &mut a.items;
-            match(taken_from(replace(items, []), count, [])) {
-                (kept, taken) => unsafe { restore_at(items, kept) }; Ok(turned(taken, []))
-            }
+    pub fn rollback_take(a: &mut Self, mark: ArenaMark<Tag>) -> Result<Vec<T>, MarkError> where Tag: Use<[1, 1]>, T: Use<[1, 1]> {
+        if(mark.length > Vec::len(&a.items)) { Err(MarkError::Stale) } else {
+            let count = Vec::len(&a.items) - mark.length;
+            let mut taken = Vec::new();
+            taken_from(&mut a.items, count, &mut taken);
+            Vec::reverse(&mut taken);
+            Ok(taken)
         }
     }
     // The same, with what was added let go.
     pub fn truncate(a: &mut Self, mark: ArenaMark<Tag>) -> Result<(), MarkError> where T: Use<[0, 1]>, Tag: Use<[1, 1]> {
         match(Arena::rollback_take(a, mark)) { Ok(_) => Ok(()), Err(e) => Err(e) }
     }
-    pub fn into_vec(a: Self) -> [T] where T: Use<[1, 1]> { match(a) { Arena { items } => items } }
+    pub fn into_vec(a: Self) -> Vec<T> where T: Use<[1, 1]> { match(a) { Arena { items } => items } }
 }
 
 // A place in an arena whose places are used again: it says which use of
@@ -103,28 +99,37 @@ pub struct GenId<Tag> { index: u32, generation: u32 }
 enum Slot<T> { Full(Int, T), Empty(Int) }
 
 // Things that can be taken out again, their places used for others.
-pub struct GenArena<Tag, T> { slots: [Slot<T>], free: [Int] }
+pub struct GenArena<Tag, T> { slots: Vec<Slot<T>>, free: Vec<Int> }
 
 fn slot_generation<T>(slot: &Slot<T>) -> Int where T: Use<[1, 1]> {
     match(slot) { &Slot::Full(g, _) => *g, &Slot::Empty(g) => *g }
 }
 
-fn live<T>(slots: [Slot<T>], out: [T]) -> [T] where T: Use<[1, 1]> {
-    match(pop(slots)) {
-        Some((rest, Slot::Full(_, item))) => tail live(rest, push(out, item)),
-        Some((rest, Slot::Empty(_))) => tail live(rest, out),
-        None => turned(out, [])
+// What the places hold, from the last: each taken out, none let go.
+fn live<T>(slots: &mut Vec<Slot<T>>, out: &mut Vec<T>) where T: Use<[1, 1]> {
+    match(Vec::pop(slots)) {
+        Some(Slot::Full(_, item)) => Vec::push(out, item); tail live(slots, out),
+        Some(Slot::Empty(_)) => tail live(slots, out),
+        None => ()
+    }
+}
+// A `Vec` of what has to be used, emptied: given up, its memory freed; one
+// that is not, emptied again.
+fn finished<T>(v: Vec<Slot<T>>, out: &mut Vec<T>) where T: Use<[1, 1]> {
+    match(Vec::finish_empty(v)) {
+        Ok(_) => (),
+        Err(rest) => let mut more = rest; live(&mut more, out); finished(more, out)
     }
 }
 
 impl<Tag, T> GenArena<Tag, T> {
-    pub fn new() -> Self { Self { slots: [], free: [] } }
+    pub fn new() -> Self { Self { slots: Vec::new(), free: Vec::new() } }
     pub fn insert(a: &mut Self, item: T) -> Result<GenId<Tag>, Rejected<T, IndexOverflow>> where Tag: Use<[1, 1]>, T: Use<[1, 1]> {
-        match(pop(a.free)) {
-            Some((rest, i)) => a.free = rest;
-                match(element_mut(&mut a.slots, i)) {
+        match(Vec::pop(&mut a.free)) {
+            Some(i) =>
+                match(Vec::get_mut(&mut a.slots, i)) {
                     Some(slot) =>
-                        let g = slot_generation(slot);
+                        let g = slot_generation(&*slot);
                         match(replace(slot, Slot::Full(g, item))) {
                             Slot::Empty(_) => Ok(GenId { index: to(i), generation: to(g) }),
                             // (A place that is free holds nothing. If one
@@ -134,21 +139,21 @@ impl<Tag, T> GenArena<Tag, T> {
                         },
                     None => Err(Rejected { value: item, error: IndexOverflow })
                 },
-            None => let n = len_at(&a.slots);
+            None => let n = Vec::len(&a.slots);
                 if(n > 4294967295) { Err(Rejected { value: item, error: IndexOverflow }) } else {
-                    push_at(&mut a.slots, Slot::Full(0, item));
+                    Vec::push(&mut a.slots, Slot::Full(0, item));
                     Ok(GenId { index: to(n), generation: 0u32 })
                 }
         }
     }
     pub fn contains(a: &Self, id: GenId<Tag>) -> Bool where Tag: Use<[1, 1]> {
-        match(element(&a.slots, int(id.index))) {
+        match(Vec::get(&a.slots, int(id.index))) {
             Some(slot) => match(slot) { &Slot::Full(g, _) => *g == int(id.generation), &Slot::Empty(_) => false },
             None => false
         }
     }
     pub fn get<'a>(a: &'a Self, id: GenId<Tag>) -> Option<&'a T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> {
-        match(element(&a.slots, int(id.index))) {
+        match(Vec::get(&a.slots, int(id.index))) {
             Some(slot) => match(slot) {
                 &Slot::Full(g, item) => if(*g == int(id.generation)) { Some(item) } else { None },
                 &Slot::Empty(_) => None
@@ -157,7 +162,7 @@ impl<Tag, T> GenArena<Tag, T> {
         }
     }
     pub fn get_mut<'a>(a: &'a mut Self, id: GenId<Tag>) -> Option<&'a mut T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> {
-        match(element_mut(&mut a.slots, int(id.index))) {
+        match(Vec::get_mut(&mut a.slots, int(id.index))) {
             Some(slot) => match(slot) {
                 &mut Slot::Full(g, item) => if(*g == int(id.generation)) { Some(item) } else { None },
                 &mut Slot::Empty(_) => None
@@ -168,11 +173,11 @@ impl<Tag, T> GenArena<Tag, T> {
     // The thing taken out; its place is for another, and this name for it
     // is refused from now on.
     pub fn remove(a: &mut Self, id: GenId<Tag>) -> Option<T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> {
-        if(GenArena::contains(a, id)) {
+        if(GenArena::contains(&*a, id)) {
             let i = int(id.index);
-            match(element_mut(&mut a.slots, i)) {
+            match(Vec::get_mut(&mut a.slots, i)) {
                 Some(slot) => match(replace(slot, Slot::Empty(int(id.generation) + 1))) {
-                    Slot::Full(_, item) => a.free = push(a.free, i); Some(item),
+                    Slot::Full(_, item) => Vec::push(&mut a.free, i); Some(item),
                     Slot::Empty(_) => None
                 },
                 None => None
@@ -180,7 +185,15 @@ impl<Tag, T> GenArena<Tag, T> {
         } else { None }
     }
     // What is still in it, in the order of its places.
-    pub fn into_vec(a: Self) -> [T] where T: Use<[1, 1]> { match(a) { GenArena { slots, free: _ } => live(slots, []) } }
+    pub fn into_vec(a: Self) -> Vec<T> where T: Use<[1, 1]> {
+        match(a) { GenArena { slots, free: _ } =>
+            let mut left = slots;
+            let mut out = Vec::new();
+            live(&mut left, &mut out);
+            finished(left, &mut out);
+            Vec::reverse(&mut out);
+            out }
+    }
 }
 
 // What interning found: a new place, or the place of an equal thing already
@@ -188,20 +201,20 @@ impl<Tag, T> GenArena<Tag, T> {
 pub enum InternOutcome<Tag, T> { Inserted(Id<Tag>), Existing { id: Id<Tag>, unused: T } }
 
 // Equal things kept once, each with a place.
-pub struct Interner<Tag, T> { values: [T], places: HashMap<T, Int> }
+pub struct Interner<Tag, T> { values: Vec<T>, places: HashMap<T, Int> }
 
 impl<Tag, T> Interner<Tag, T> where T: Eq + Hash {
-    pub fn new() -> Self where T: Use<[0, *]> { Self { values: [], places: std::hash::new() } }
-    pub fn len(i: &Self) -> Int { len_at(&i.values) }
+    pub fn new() -> Self where T: Use<[0, *]> { Self { values: Vec::new(), places: std::hash::new() } }
+    pub fn len(i: &Self) -> Int { Vec::len(&i.values) }
     pub fn find(i: &Self, item: T) -> Option<Id<Tag>> where T: Use<[0, *]>, Tag: Use<[1, 1]> {
         match(std::hash::get(i.places, item)) { Some(n) => Some(numbered(n)), None => None }
     }
     pub fn intern(i: &mut Self, item: T) -> Result<InternOutcome<Tag, T>, Rejected<T, IndexOverflow>> where T: Use<[0, *]>, Tag: Use<[1, 1]> {
         match(std::hash::get(i.places, item)) {
             Some(n) => Ok(InternOutcome::Existing { id: numbered(n), unused: item }),
-            None => let n = len_at(&i.values);
+            None => let n = Vec::len(&i.values);
                 if(n > 4294967295) { Err(Rejected { value: item, error: IndexOverflow }) } else {
-                    i.values = push(i.values, item);
+                    Vec::push(&mut i.values, item);
                     i.places = std::hash::insert(i.places, item, n);
                     Ok(InternOutcome::Inserted(numbered(n)))
                 }
@@ -215,8 +228,8 @@ impl<Tag, T> Interner<Tag, T> where T: Eq + Hash {
             Err(e) => Err(e)
         }
     }
-    pub fn get<'a>(i: &'a Self, id: Id<Tag>) -> Option<&'a T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { element(&i.values, int(id.0)) }
-    pub fn into_values(i: Self) -> [T] where T: Use<[1, 1]> { i.values }
+    pub fn get<'a>(i: &'a Self, id: Id<Tag>) -> Option<&'a T> where Tag: Use<[1, 1]>, T: Use<[1, 1]> { Vec::get(&i.values, int(id.0)) }
+    pub fn into_values(i: Self) -> Vec<T> where T: Use<[1, 1]> { match(i) { Interner { values, places: _ } => values } }
 }
 
 // Texts kept once each.
@@ -235,52 +248,55 @@ impl<Tag> StringInterner<Tag> {
 }
 
 // Whether a place of so many is in: one flag each.
-pub struct BitSet<Tag> { flags: [Bool], count: Int }
+pub struct BitSet<Tag> { flags: Vec<Bool>, count: Int }
 
-fn flag_at(flags: &[Bool], i: Int) -> Bool { match(element(flags, i)) { Some(f) => *f, None => false } }
+fn flag_at(flags: &Vec<Bool>, i: Int) -> Bool { match(Vec::get(flags, i)) { Some(f) => *f, None => false } }
 
-fn grown(flags: [Bool], length: Int) -> [Bool] {
-    if(len(flags) >= length) { flags } else { tail grown(push(flags, false), length) }
+// The flag at a place set, the flags grown to have it.
+fn set_flag(flags: &mut Vec<Bool>, i: Int, flag: Bool) {
+    if(Vec::len(&*flags) <= i) { Vec::resize(flags, i + 1, false) } else { () };
+    match(Vec::get_mut(flags, i)) { Some(f) => *f = flag, None => () }
 }
 
-fn with_flag(flags: [Bool], i: Int, flag: Bool) -> [Bool] { let mut next = grown(flags, i + 1); next[i] = flag; next }
-
-fn places_of<Tag>(flags: &[Bool], i: Int, out: [Id<Tag>]) -> [Id<Tag>] where Tag: Use<[1, 1]> {
-    if(i >= len_at(flags)) { out } else { tail places_of(flags, i + 1, if(flag_at(flags, i)) { push(out, numbered(i)) } else { out }) }
+fn places_of<Tag>(flags: &Vec<Bool>, i: Int, out: &mut Vec<Id<Tag>>) where Tag: Use<[1, 1]> {
+    if(i >= Vec::len(flags)) { () } else {
+        if(flag_at(flags, i)) { Vec::push(out, numbered(i)) } else { () };
+        tail places_of(flags, i + 1, out)
+    }
 }
 
 // One set changed by another, a place at a time: `keep(mine, theirs)` is
 // whether a place is in afterwards. How many places changed.
-fn merged<e: EffectRow>(mine: [Bool], theirs: &[Bool], i: Int, changed: Int, keep: fn(Bool, Bool) -> Bool / {| e}) -> ([Bool], Int) / {| e} {
-    if(i >= len(mine) and { i >= len_at(theirs) }) { (mine, changed) } else {
-        let was = flag_at(&mine, i);
+fn merged<e: EffectRow>(mine: &mut Vec<Bool>, theirs: &Vec<Bool>, i: Int, changed: Int, keep: fn(Bool, Bool) -> Bool / {| e}) -> Int / {| e} {
+    if(i >= Vec::len(&*mine) and { i >= Vec::len(theirs) }) { changed } else {
+        let was = flag_at(&*mine, i);
         let now = keep(was, flag_at(theirs, i));
         if(was == now) { tail merged(mine, theirs, i + 1, changed, keep) }
-        else { tail merged(with_flag(mine, i, now), theirs, i + 1, changed + 1, keep) }
+        else { set_flag(mine, i, now); tail merged(mine, theirs, i + 1, changed + 1, keep) }
     }
 }
 
-fn counted(flags: &[Bool], i: Int, n: Int) -> Int {
-    if(i >= len_at(flags)) { n } else { tail counted(flags, i + 1, if(flag_at(flags, i)) { n + 1 } else { n }) }
+fn counted(flags: &Vec<Bool>, i: Int, n: Int) -> Int {
+    if(i >= Vec::len(flags)) { n } else { tail counted(flags, i + 1, if(flag_at(flags, i)) { n + 1 } else { n }) }
 }
 
 impl<Tag> BitSet<Tag> {
-    pub fn new() -> Self { Self { flags: [], count: 0 } }
+    pub fn new() -> Self { Self { flags: Vec::new(), count: 0 } }
     pub fn len(s: &Self) -> Int { s.count }
     pub fn contains(s: &Self, id: Id<Tag>) -> Bool where Tag: Use<[1, 1]> { flag_at(&s.flags, int(id.0)) }
     // Put in: whether it was not in before.
     pub fn insert(s: &mut Self, id: Id<Tag>) -> Bool where Tag: Use<[1, 1]> {
-        if(flag_at(&s.flags, int(id.0))) { false } else { s.flags = with_flag(s.flags, int(id.0), true); s.count = s.count + 1; true }
+        if(flag_at(&s.flags, int(id.0))) { false } else { set_flag(&mut s.flags, int(id.0), true); s.count = s.count + 1; true }
     }
     // Taken out: whether it was in.
     pub fn remove(s: &mut Self, id: Id<Tag>) -> Bool where Tag: Use<[1, 1]> {
-        if(flag_at(&s.flags, int(id.0))) { s.flags = with_flag(s.flags, int(id.0), false); s.count = s.count - 1; true } else { false }
+        if(flag_at(&s.flags, int(id.0))) { set_flag(&mut s.flags, int(id.0), false); s.count = s.count - 1; true } else { false }
     }
-    pub fn clear(s: &mut Self) { s.flags = []; s.count = 0; }
+    pub fn clear(s: &mut Self) { Vec::clear(&mut s.flags); s.count = 0; }
     fn merge<e: EffectRow>(s: &mut Self, other: &Self, keep: fn(Bool, Bool) -> Bool / {| e}) -> Bool / {| e} {
-        match(merged(s.flags, &other.flags, 0, 0, keep)) {
-            (flags, changed) => s.count = counted(&flags, 0, 0); s.flags = flags; changed > 0
-        }
+        let changed = merged(&mut s.flags, &other.flags, 0, 0, keep);
+        s.count = counted(&s.flags, 0, 0);
+        changed > 0
     }
     // Each says whether the set changed.
     pub fn union_with(s: &mut Self, other: &Self) -> Bool { BitSet::merge(s, other, fn(mine, theirs) { mine or { theirs } }) }
@@ -288,86 +304,89 @@ impl<Tag> BitSet<Tag> {
     pub fn subtract(s: &mut Self, other: &Self) -> Bool { BitSet::merge(s, other, fn(mine, theirs) { mine and { not theirs } }) }
     pub fn is_subset(s: &Self, other: &Self) -> Bool { subset_from(&s.flags, &other.flags, 0) }
     // The places in it, least first.
-    pub fn to_vec(s: &Self) -> [Id<Tag>] where Tag: Use<[1, 1]> { places_of(&s.flags, 0, []) }
+    pub fn to_vec(s: &Self) -> Vec<Id<Tag>> where Tag: Use<[1, 1]> { let mut out = Vec::new(); places_of(&s.flags, 0, &mut out); out }
 }
 
-fn subset_from(mine: &[Bool], theirs: &[Bool], i: Int) -> Bool {
-    if(i >= len_at(mine)) { true } else {
+fn subset_from(mine: &Vec<Bool>, theirs: &Vec<Bool>, i: Int) -> Bool {
+    if(i >= Vec::len(mine)) { true } else {
         if(flag_at(mine, i) and { not flag_at(theirs, i) }) { false } else { tail subset_from(mine, theirs, i + 1) }
     }
 }
 
 // A set of places that is gone through and emptied quickly: the places in
 // it side by side, and for each place where it is among them.
-pub struct SparseSet<Tag> { dense: [Int], sparse: [Int] }
+pub struct SparseSet<Tag> { dense: Vec<Int>, sparse: Vec<Int> }
 
-fn int_at(items: &[Int], i: Int) -> Int { match(element(items, i)) { Some(n) => *n, None => 0 - 1 } }
+fn int_at(items: &Vec<Int>, i: Int) -> Int { match(Vec::get(items, i)) { Some(n) => *n, None => 0 - 1 } }
 
-fn grown_ints(items: [Int], length: Int) -> [Int] {
-    if(len(items) >= length) { items } else { tail grown_ints(push(items, 0 - 1), length) }
+// The number at a place set, the numbers grown with -1 to have it.
+fn set_int(items: &mut Vec<Int>, i: Int, n: Int) {
+    if(Vec::len(&*items) <= i) { Vec::resize(items, i + 1, 0 - 1) } else { () };
+    match(Vec::get_mut(items, i)) { Some(x) => *x = n, None => () }
 }
 
-fn with_int(items: [Int], i: Int, n: Int) -> [Int] { let mut next = grown_ints(items, i + 1); next[i] = n; next }
-
-fn ids_of<Tag>(items: &[Int], i: Int, out: [Id<Tag>]) -> [Id<Tag>] where Tag: Use<[1, 1]> {
-    if(i >= len_at(items)) { out } else { tail ids_of(items, i + 1, push(out, numbered(int_at(items, i)))) }
+fn ids_of<Tag>(items: &Vec<Int>, i: Int, out: &mut Vec<Id<Tag>>) where Tag: Use<[1, 1]> {
+    if(i >= Vec::len(items)) { () } else { Vec::push(out, numbered(int_at(items, i))); tail ids_of(items, i + 1, out) }
 }
 
 impl<Tag> SparseSet<Tag> {
-    pub fn new() -> Self { Self { dense: [], sparse: [] } }
-    pub fn len(s: &Self) -> Int { len_at(&s.dense) }
+    pub fn new() -> Self { Self { dense: Vec::new(), sparse: Vec::new() } }
+    pub fn len(s: &Self) -> Int { Vec::len(&s.dense) }
     pub fn contains(s: &Self, id: Id<Tag>) -> Bool where Tag: Use<[1, 1]> {
         let at = int_at(&s.sparse, int(id.0));
         if(at < 0) { false } else { int_at(&s.dense, at) == int(id.0) }
     }
     pub fn insert(s: &mut Self, id: Id<Tag>) -> Bool where Tag: Use<[1, 1]> {
-        if(SparseSet::contains(s, id)) { false } else {
-            s.sparse = with_int(s.sparse, int(id.0), len_at(&s.dense));
-            s.dense = push(s.dense, int(id.0));
+        if(SparseSet::contains(&*s, id)) { false } else {
+            let n = Vec::len(&s.dense);
+            set_int(&mut s.sparse, int(id.0), n);
+            Vec::push(&mut s.dense, int(id.0));
             true
         }
     }
     // The last among them takes the place of the one taken out.
     pub fn remove(s: &mut Self, id: Id<Tag>) -> Bool where Tag: Use<[1, 1]> {
-        if(SparseSet::contains(s, id)) {
+        if(SparseSet::contains(&*s, id)) {
             let at = int_at(&s.sparse, int(id.0));
-            match(pop(s.dense)) {
-                Some((rest, last)) => s.dense = if(at < len(rest)) { with_int(rest, at, last) } else { rest };
-                    s.sparse = with_int(with_int(s.sparse, last, at), int(id.0), 0 - 1);
+            match(Vec::pop(&mut s.dense)) {
+                Some(last) =>
+                    if(at < Vec::len(&s.dense)) { set_int(&mut s.dense, at, last) } else { () };
+                    set_int(&mut s.sparse, last, at);
+                    set_int(&mut s.sparse, int(id.0), 0 - 1);
                     true,
                 None => false
             }
         } else { false }
     }
-    pub fn clear(s: &mut Self) { s.dense = []; s.sparse = []; }
-    pub fn to_vec(s: &Self) -> [Id<Tag>] where Tag: Use<[1, 1]> { ids_of(&s.dense, 0, []) }
+    pub fn clear(s: &mut Self) { Vec::clear(&mut s.dense); Vec::clear(&mut s.sparse); }
+    pub fn to_vec(s: &Self) -> Vec<Id<Tag>> where Tag: Use<[1, 1]> { let mut out = Vec::new(); ids_of(&s.dense, 0, &mut out); out }
 }
 
 // Places waiting to be seen to, first in first out, each waiting once.
-pub struct WorkQueue<Tag> { waiting: [Int], next: Int, pending: [Bool] }
+pub struct WorkQueue<Tag> { waiting: Vec<Int>, next: Int, pending: Vec<Bool> }
 
 impl<Tag> WorkQueue<Tag> {
-    pub fn new() -> Self { Self { waiting: [], next: 0, pending: [] } }
+    pub fn new() -> Self { Self { waiting: Vec::new(), next: 0, pending: Vec::new() } }
     pub fn contains(q: &Self, id: Id<Tag>) -> Bool where Tag: Use<[1, 1]> { flag_at(&q.pending, int(id.0)) }
-    pub fn is_empty(q: &Self) -> Bool { q.next >= len_at(&q.waiting) }
+    pub fn is_empty(q: &Self) -> Bool { q.next >= Vec::len(&q.waiting) }
     // Whether it was not already waiting.
     pub fn push(q: &mut Self, id: Id<Tag>) -> Bool where Tag: Use<[1, 1]> {
         if(flag_at(&q.pending, int(id.0))) { false } else {
-            q.pending = with_flag(q.pending, int(id.0), true);
-            q.waiting = push(q.waiting, int(id.0));
+            set_flag(&mut q.pending, int(id.0), true);
+            Vec::push(&mut q.waiting, int(id.0));
             true
         }
     }
     // The one that has waited longest, no longer waiting.
     pub fn pop(q: &mut Self) -> Option<Id<Tag>> where Tag: Use<[1, 1]> {
-        if(q.next >= len_at(&q.waiting)) { None } else {
+        if(q.next >= Vec::len(&q.waiting)) { None } else {
             let i = int_at(&q.waiting, q.next);
-            q.pending = with_flag(q.pending, i, false);
+            set_flag(&mut q.pending, i, false);
             q.next = q.next + 1;
             // (Nothing waiting: start again from the front.)
-            if(q.next >= len_at(&q.waiting)) { q.waiting = []; q.next = 0; } else { };
+            if(q.next >= Vec::len(&q.waiting)) { Vec::clear(&mut q.waiting); q.next = 0 } else { () };
             Some(numbered(i))
         }
     }
-    pub fn clear(q: &mut Self) { q.waiting = []; q.next = 0; q.pending = []; }
+    pub fn clear(q: &mut Self) { Vec::clear(&mut q.waiting); q.next = 0; Vec::clear(&mut q.pending); }
 }

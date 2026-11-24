@@ -233,6 +233,21 @@ mutual
 /-- Is the name borrowed once its value has been used
 ? -/
 partial def borrowAfterValue (b : Body) (x : String) (seen : Bool) (e : ExprId) : Bool × Bool :=
+  -- (`if(c) { a } else { b }`: `a` and `b` are the one or the other, each
+  -- from what was seen once `c` was.)
+  let branches : Option (ExprId × ExprId × ExprId) := match b.expr e with
+    | .call _ f #[i, other] =>
+      match (b.name? f).map (·.2), b.expr i with
+      | some "else", .call _ g #[c, first] => if (b.name? g).map (·.2) == some "if" then some (c, first, other) else none
+      | _, _ => none
+    | _ => none
+  match branches with
+  | some (c, first, other) =>
+    let (seen, bad) := b.borrowAfterValue x seen c
+    let (s1, b1) := b.borrowAfterValue x seen first
+    let (s2, b2) := b.borrowAfterValue x seen other
+    (s1 || s2, bad || b1 || b2)
+  | none =>
   match b.expr e with
   | .name none y => (seen || y == x, false)
   | .ref _ y | .refField _ _ y _ _ => (seen, seen && y == x)

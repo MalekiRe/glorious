@@ -9,6 +9,7 @@
 // waits for which is what a program can tell, not whether they run at the
 // same moment.)
 
+use std::vec::{Vec};
 use core::value::discard;
 
 // Waiting until something holds: whoever handles it runs other threads
@@ -16,7 +17,7 @@ use core::value::discard;
 pub effect Threads { block_until(fn() -> Bool) }
 
 // The threads waiting in a scope: what each waits for, and the rest of it.
-struct Waiting { ready: [fn() -> Bool], rest: [fn() -> ()] }
+struct Waiting { ready: Vec<fn() -> Bool>, rest: Vec<fn() -> ()> }
 
 pub struct Scope { queue: Int }
 
@@ -28,21 +29,21 @@ fn new_cell<T>(value: T) -> Int where T: Use<[1, 1]> { unsafe { heap_new(value) 
 
 fn waiting_count(queue: Int) -> Int {
     let w = take_cell<Waiting>(queue);
-    let n = len_at(&w.rest);
+    let n = Vec::len(&w.rest);
     put_cell(queue, w);
     n
 }
 fn push_waiting(queue: Int, ready: fn() -> Bool, rest: fn() -> ()) {
     let mut w = take_cell<Waiting>(queue);
-    push_at(&mut w.ready, ready);
-    push_at(&mut w.rest, rest);
+    Vec::push(&mut w.ready, ready);
+    Vec::push(&mut w.rest, rest);
     put_cell(queue, w)
 }
 
 // Where the first wait that is over is, or -1.
-fn first_ready(ready: &[fn() -> Bool]) -> Int { first_ready_from(ready, 0) }
-fn first_ready_from(ready: &[fn() -> Bool], i: Int) -> Int {
-    if(i >= len_at(ready)) { 0 - 1 } else {
+fn first_ready(ready: &Vec<fn() -> Bool>) -> Int { first_ready_from(ready, 0) }
+fn first_ready_from(ready: &Vec<fn() -> Bool>, i: Int) -> Int {
+    if(i >= Vec::len(ready)) { 0 - 1 } else {
         let f = ready[i];
         if(f()) { i } else { first_ready_from(ready, i + 1) }
     }
@@ -52,8 +53,8 @@ fn first_ready_from(ready: &[fn() -> Bool], i: Int) -> Int {
 fn run_next(queue: Int) {
     let mut w = take_cell<Waiting>(queue);
     let at = first_ready(&w.ready);
-    let next = if(at < 0) { None } else { discard(remove_at(&mut w.ready, at)); Some(remove_at(&mut w.rest, at)) };
-    let empty = len_at(&w.rest) == 0;
+    let next = if(at < 0) { None } else { discard(Vec::remove(&mut w.ready, at)); Vec::remove(&mut w.rest, at) };
+    let empty = Vec::len(&w.rest) == 0;
     put_cell(queue, w);
     match(next) {
         Some(k) => k(),
@@ -74,7 +75,7 @@ fn always() -> Bool { true }
 // Run `f` with a scope in which it may spawn threads; each is done before
 // this returns.
 pub fn scope<R>(f: fn(&Scope) -> R / {Threads}) -> R {
-    let queue = new_cell(Waiting { ready: [], rest: [] });
+    let queue = new_cell(Waiting { ready: Vec::new(), rest: Vec::new() });
     let result = new_cell<Option<R>>(None);
     let s = Scope { queue: queue };
     run_thread(queue, fn() / {Threads} { let r = f(&s); put_cell(result, Some(r)) });
@@ -90,7 +91,7 @@ pub fn scope<R>(f: fn(&Scope) -> R / {Threads}) -> R {
 // A thread's result, once it is done.
 // (Holding what the thread borrows, `'h`: while the handle is there, so is
 // what it borrows.)
-pub struct Handle<'h, T> { cell: Int, none: [T], held: Option<&'h ()> }
+pub struct Handle<'h, T> { cell: Int, none: [T; 0], held: Option<&'h ()> }
 
 impl Scope {
     // A thread in this scope; it runs once the spawning thread waits. It
@@ -101,7 +102,7 @@ impl Scope {
         let cell = new_cell<Option<T>>(None);
         let queue = s.queue;
         push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });
-        Handle { cell: cell, none: [], held: None }
+        Handle { cell: cell, none: fixed_of([], 0), held: None }
     }
     // A thread in this scope, waited for before this gives back what it
     // gave: it may borrow what the caller has, since it is done before the
@@ -110,7 +111,7 @@ impl Scope {
         let cell = new_cell<Option<T>>(None);
         let queue = s.queue;
         push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });
-        join(Handle { cell: cell, none: [], held: None })
+        join(Handle { cell: cell, none: fixed_of([], 0), held: None })
     }
 }
 
@@ -179,7 +180,7 @@ extern "C" {
     fn malloc(n: usize) -> usize;
     fn free(p: usize);
 }
-pub struct OsThread<T> { id: usize, cell: Int, none: [T] }
+pub struct OsThread<T> { id: usize, cell: Int, none: [T; 0] }
 pub fn spawn_os<T, F>(f: F) -> OsThread<T> where F: Fn<(), Output = T>, F: 'static {
     let cell = new_cell<Option<T>>(None);
     unsafe {
@@ -189,7 +190,7 @@ pub fn spawn_os<T, F>(f: F) -> OsThread<T> where F: Fn<(), Output = T>, F: 'stat
         if(pthread_create(place, 0usize, entry, 0usize) != 0i32) { abort("a thread could not be started") } else { () };
         let id = usize(ptr_read(place, 64));
         free(place);
-        OsThread { id: id, cell: cell, none: [] }
+        OsThread { id: id, cell: cell, none: fixed_of([], 0) }
     }
 }
 // Wait for a thread of the system's to be done, and what it gave.
@@ -202,12 +203,12 @@ pub fn join_os<T>(t: OsThread<T>) -> T {
 pub trait Share { fn share(&Self) -> Self }
 
 // A value threads share, changed only by one at a time.
-pub struct Mutex<T> { cell: Int, none: [T] }
+pub struct Mutex<T> { cell: Int, none: [T; 0] }
 impl<T> Use<[0, *]> for Mutex<T> {}
 impl<T> Mutex<T> {
-    pub fn new(value: T) -> Mutex<T> { Mutex { cell: new_cell(value), none: [] } }
+    pub fn new(value: T) -> Mutex<T> { Mutex { cell: new_cell(value), none: fixed_of([], 0) } }
 }
-impl<T> Share for Mutex<T> { fn share(m: &Mutex<T>) -> Mutex<T> { Mutex { cell: m.cell, none: [] } } }
+impl<T> Share for Mutex<T> { fn share(m: &Mutex<T>) -> Mutex<T> { Mutex { cell: m.cell, none: fixed_of([], 0) } } }
 // Run `f` with the value: no other thread has it meanwhile.
 pub fn lock<T, R, F>(m: &Mutex<T>, f: F) -> R where F: for<'a> Fn<(&'a mut T,), Output = R>, F: Returns {
     let mut value = take_cell<T>(m.cell);
@@ -217,12 +218,12 @@ pub fn lock<T, R, F>(m: &Mutex<T>, f: F) -> R where F: for<'a> Fn<(&'a mut T,), 
 }
 
 // A value many threads hold and read.
-pub struct Shared<T> { cell: Int, none: [T] }
+pub struct Shared<T> { cell: Int, none: [T; 0] }
 impl<T> Use<[0, *]> for Shared<T> {}
 impl<T> Shared<T> {
-    pub fn new(value: T) -> Shared<T> { Shared { cell: new_cell(value), none: [] } }
+    pub fn new(value: T) -> Shared<T> { Shared { cell: new_cell(value), none: fixed_of([], 0) } }
 }
-impl<T> Share for Shared<T> { fn share(s: &Shared<T>) -> Shared<T> { Shared { cell: s.cell, none: [] } } }
+impl<T> Share for Shared<T> { fn share(s: &Shared<T>) -> Shared<T> { Shared { cell: s.cell, none: fixed_of([], 0) } } }
 // Run `f` with the value.
 pub fn with_shared<T, R, F>(s: &Shared<T>, f: F) -> R where F: for<'a> Fn<(&'a T,), Output = R>, F: Returns {
     let value = take_cell<T>(s.cell);
@@ -251,15 +252,15 @@ pub fn compare_exchange(a: &AtomicInt, old: Int, new: Int) -> Int {
 }
 
 // Values sent from one thread to another, in the order sent.
-pub struct Sender<T> { cell: Int, none: [T] }
+pub struct Sender<T> { cell: Int, none: [T; 0] }
 impl<T> Use<[0, *]> for Sender<T> {}
-pub struct Receiver<T> { cell: Int, none: [T] }
+pub struct Receiver<T> { cell: Int, none: [T; 0] }
 impl<T> Use<[0, *]> for Receiver<T> {}
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let cell = new_cell<[T]>([]);
-    (Sender { cell: cell, none: [] }, Receiver { cell: cell, none: [] })
+    (Sender { cell: cell, none: fixed_of([], 0) }, Receiver { cell: cell, none: fixed_of([], 0) })
 }
-impl<T> Share for Sender<T> { fn share(s: &Sender<T>) -> Sender<T> { Sender { cell: s.cell, none: [] } } }
+impl<T> Share for Sender<T> { fn share(s: &Sender<T>) -> Sender<T> { Sender { cell: s.cell, none: fixed_of([], 0) } } }
 pub fn send<T>(s: &Sender<T>, value: T) {
     let queue = take_cell<[T]>(s.cell);
     put_cell(s.cell, push(queue, value))
