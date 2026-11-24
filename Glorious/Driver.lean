@@ -390,6 +390,16 @@ def readPrelude : Thunk (Except String (List Syntax.Item × Syntax.Fixities)) :=
   | .ok r => .ok r
   | .error e => .error s!"prelude: {e}"
 
+/-- Does a text write a length in brackets, `[T; N]` or `[x; n]`: a `;`
+with only a name or a number between it and the `]`? -/
+def saysLength (text : String) : Bool :=
+  (text.splitOn ";").drop 1 |>.any fun piece =>
+    match piece.splitOn "]" with
+    | before :: _ :: _ =>
+      let word := before.trimAscii.toString
+      !word.isEmpty && word.all fun c => c.isAlphanum || c == '_'
+    | _ => false
+
 /-- The library's texts read, once: what each says before it is parsed, the
 operators of each of its modules in a program that declares none, every
 name written in the texts, and each text parsed. A program that names the
@@ -410,21 +420,11 @@ def readStd : Thunk (Except String StdRead) := Thunk.mk fun _ => do
   let mut parsed : Array (List Syntax.Item) := #[]
   for ((path, text), k) in Std.texts.zipIdx do
     match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records) (tables := tables)
-        (path := path) (reflect := false) with
+        (path := path) (fixed := saysLength text) (reflect := false) with
     | .ok (items, _) => parsed := parsed.push items
     | .error e => throw s!"module `{"::".intercalate path}`: {e}"
   let names := syn.foldl (fun set s => s.names.foldl (fun set n => set.insert n) set) {}
   pure { said := syn, names := names, tables := tables, parsed := parsed }
-
-/-- Does a text write a length in brackets, `[T; N]` or `[x; n]`: a `;`
-with only a name or a number between it and the `]`? -/
-def saysLength (text : String) : Bool :=
-  (text.splitOn ";").drop 1 |>.any fun piece =>
-    match piece.splitOn "]" with
-    | before :: _ :: _ =>
-      let word := before.trimAscii.toString
-      !word.isEmpty && word.all fun c => c.isAlphanum || c == '_'
-    | _ => false
 
 /-- Where a scan for names of the library is (`libraryNames`). -/
 structure LibScan where
@@ -648,14 +648,16 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
               -- (Read once without each type's `Reflect`: theirs, where the
               -- program names reflection.)
               if reflect then
-                match Syntax.reflectionsOf fix items (1000000 * (k + 2) + 700000) records tables here false with
+                match Syntax.reflectionsOf fix items (1000000 * (k + 2) + Syntax.reflectionBase) records tables here false with
                 | .ok made => pure (items ++ made)
                 | .error e => throw s!"module `{shown}`: {e}"
               else pure items
             | none =>
               let text := ((files[k]?).map (·.2)).getD ""
               let base := 1000000 * (k + 2)
-              let fixed := fixed && k ≥ (if std then library.length else 0)
+              -- (A module of the library has arrays of a length its type says
+              -- where its own text says so.)
+              let fixed := (fixed && k ≥ (if std then library.length else 0)) || saysLength text
               let key := parseKey text base records tables here fixed reflect
               let items ← match parsedKept[key]? with
                 | some items => pure items

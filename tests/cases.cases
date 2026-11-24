@@ -8963,8 +8963,8 @@ fn main() -> Int {
     say(hex_encode(ByteBuf::as_slice(&b)));
     ByteBuf::truncate_to(&mut b, m);
     let bytes = ByteBuf::finish(b);
-    say(len(bytes));
-    let mut r = ByteReader::new(Slice::of(&bytes));
+    say(len_at(&bytes));
+    let mut r = ByteReader::new(std::vec::Vec::as_slice(&bytes));
     let mut bad = 0;
     bad = bad + check(ByteReader::read_u8(&mut r) is Ok(7u8), 1);
     bad = bad + check(ByteReader::read_u16_le(&mut r) is Ok(513u16), 2);
@@ -8982,7 +8982,7 @@ fn main() -> Int {
     let left = ByteReader::remaining_len(&r);
     ByteReader::skip(&mut r, left);
     bad = bad + check(ByteReader::finish(r) is Ok(_), 9);
-    say(match(hex_decode("00ff7F")) { Ok(found) => found, Err(_) => [] });
+    say(match(hex_decode("00ff7F")) { Ok(found) => found, Err(_) => std::vec::Vec::new() });
     say(match(hex_decode("0g")) { Ok(_) => 0 - 1, Err(e) => e.offset });
     // The one shortest way: a redundant last byte is refused.
     let padded = [128u8, 0u8];

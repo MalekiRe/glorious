@@ -2,26 +2,27 @@
 // of 64 bits, BLAKE3, and the fingerprints a compiler keeps of what it has
 // made, as the library specification has them (20).
 //
-// A digest's bytes are an array here, always of thirty-two (`from_bytes`
-// says if they are not); `hash64` over the `Hash` trait is not here.
+// A digest's bytes are a `[u8; 32]` (`from_bytes` says if what it is given
+// is not thirty-two); `hash64` over the `Hash` trait is not here.
 
 use std::slice::{Slice};
 use std::bytes::{hex_encode, hex_decode, HexError, HexErrorKind};
 use std::text::{utf8};
+use std::vec::{Vec};
 
 fn low32(n: Int) -> Int { bit_and(n, 4294967295) }
 fn rotr(x: Int, n: Int) -> Int { low32(bit_or(shr(x, n), shl(x, 32 - n))) }
 fn byte(n: Int) -> u8 { to(bit_and(n, 255)) }
 
 // The bytes of a number, the least first.
-fn le_onto(out: [u8], n: Int, count: Int) -> [u8] {
-    if(count == 0) { out } else { le_onto(push(out, byte(n)), shr(n, 8), count - 1) }
+fn le_onto(out: &mut Vec<u8>, n: Int, count: Int) {
+    if(count == 0) { () } else { Vec::push(out, byte(n)); tail le_onto(out, shr(n, 8), count - 1) }
 }
-fn all_onto<'a>(out: [u8], bytes: &Slice<'a, u8>, i: Int) -> [u8] {
-    match(Slice::get(bytes, i)) { Some(b) => all_onto(push(out, *b), bytes, i + 1), None => out }
+fn all_onto<'a>(out: &mut Vec<u8>, bytes: &Slice<'a, u8>, i: Int) {
+    match(Slice::get(bytes, i)) { Some(b) => Vec::push(out, *b); tail all_onto(out, bytes, i + 1), None => () }
 }
-fn array_onto<A>(out: [u8], bytes: &A, i: Int) -> [u8] where A: Indexed<Element = u8> {
-    match(element(bytes, i)) { Some(b) => array_onto(push(out, *b), bytes, i + 1), None => out }
+fn each_onto<A>(out: &mut Vec<u8>, bytes: &A, i: Int) where A: Indexed<Element = u8> {
+    match(element(bytes, i)) { Some(b) => Vec::push(out, *b); tail each_onto(out, bytes, i + 1), None => () }
 }
 
 // ---- A quick hash of 64 bits (FNV-1a): not a secret, not an identity. ----
@@ -57,9 +58,9 @@ fn write_le(h: &mut Hasher, n: Int, count: Int) {
 
 // ---- BLAKE3, unkeyed, 256 bits. ----
 
-fn iv() -> [Int] { [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225] }
+fn iv() -> [Int; 8] { [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225] }
 
-fn g(state: [Int], a: Int, b: Int, c: Int, d: Int, mx: Int, my: Int) -> [Int] {
+fn g(state: [Int; 16], a: Int, b: Int, c: Int, d: Int, mx: Int, my: Int) -> [Int; 16] {
     let mut s = state;
     s[a] = low32(s[a] + s[b] + mx);
     s[d] = rotr(bit_xor(s[d], s[a]), 16);
@@ -72,7 +73,7 @@ fn g(state: [Int], a: Int, b: Int, c: Int, d: Int, mx: Int, my: Int) -> [Int] {
     s
 }
 
-fn round(s: [Int], m: [Int]) -> [Int] {
+fn round(s: [Int; 16], m: [Int; 16]) -> [Int; 16] {
     let s = g(s, 0, 4, 8, 12, m[0], m[1]);
     let s = g(s, 1, 5, 9, 13, m[2], m[3]);
     let s = g(s, 2, 6, 10, 14, m[4], m[5]);
@@ -84,61 +85,62 @@ fn round(s: [Int], m: [Int]) -> [Int] {
     s
 }
 
-fn permute(m: [Int]) -> [Int] { [m[2], m[6], m[3], m[10], m[7], m[0], m[4], m[13], m[1], m[11], m[12], m[5], m[9], m[14], m[15], m[8]] }
+fn permute(m: [Int; 16]) -> [Int; 16] { [m[2], m[6], m[3], m[10], m[7], m[0], m[4], m[13], m[1], m[11], m[12], m[5], m[9], m[14], m[15], m[8]] }
 
-fn rounds(s: [Int], m: [Int], left: Int) -> [Int] {
+fn rounds(s: [Int; 16], m: [Int; 16], left: Int) -> [Int; 16] {
     let s = round(s, m);
     if(left == 1) { s } else { rounds(s, permute(m), left - 1) }
 }
 
 // What a block of sixteen words makes of a chaining value of eight.
-fn compress(cv: [Int], block: [Int], counter: Int, length: Int, flags: Int) -> [Int] {
+fn compress(cv: [Int; 8], block: [Int; 16], counter: Int, length: Int, flags: Int) -> [Int; 16] {
     let k = iv();
     let s = rounds([cv[0], cv[1], cv[2], cv[3], cv[4], cv[5], cv[6], cv[7], k[0], k[1], k[2], k[3],
         low32(counter), low32(shr(counter, 32)), length, flags], block, 7);
     [bit_xor(s[0], s[8]), bit_xor(s[1], s[9]), bit_xor(s[2], s[10]), bit_xor(s[3], s[11]), bit_xor(s[4], s[12]), bit_xor(s[5], s[13]), bit_xor(s[6], s[14]), bit_xor(s[7], s[15]),
      bit_xor(s[8], cv[0]), bit_xor(s[9], cv[1]), bit_xor(s[10], cv[2]), bit_xor(s[11], cv[3]), bit_xor(s[12], cv[4]), bit_xor(s[13], cv[5]), bit_xor(s[14], cv[6]), bit_xor(s[15], cv[7])]
 }
-fn first8(s: [Int]) -> [Int] { [s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]] }
+fn first8(s: [Int; 16]) -> [Int; 8] { [s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]] }
 
-fn byte_at(bytes: &[u8], i: Int, end: Int) -> Int { if(i < end) { int((*bytes)[i]) } else { 0 } }
-fn word_at(bytes: &[u8], at: Int, end: Int) -> Int {
+fn byte_at(bytes: &Vec<u8>, i: Int, end: Int) -> Int { if(i < end) { int(bytes[i]) } else { 0 } }
+fn word_at(bytes: &Vec<u8>, at: Int, end: Int) -> Int {
     byte_at(bytes, at, end) + shl(byte_at(bytes, at + 1, end), 8) + shl(byte_at(bytes, at + 2, end), 16)
         + shl(byte_at(bytes, at + 3, end), 24)
 }
 // The sixteen words of the block at a place, with nothing past the end.
-fn words_from(bytes: &[u8], at: Int, end: Int, i: Int, out: [Int]) -> [Int] {
-    if(i == 16) { out } else { words_from(bytes, at, end, i + 1, push(out, word_at(bytes, at + 4 * i, end))) }
+fn words_from(bytes: &Vec<u8>, at: Int, end: Int) -> [Int; 16] {
+    let w = fn(i: Int) -> Int { word_at(bytes, at + 4 * i, end) };
+    [w(0), w(1), w(2), w(3), w(4), w(5), w(6), w(7), w(8), w(9), w(10), w(11), w(12), w(13), w(14), w(15)]
 }
 
 // What is still to be compressed of a chunk or of two halves joined: the
 // last step, kept apart because the root's is done differently.
-struct Out { cv: [Int], block: [Int], counter: Int, length: Int, flags: Int }
+struct Out { cv: [Int; 8], block: [Int; 16], counter: Int, length: Int, flags: Int }
 
-fn chaining(o: &Out) -> [Int] { first8(compress(o.cv, o.block, o.counter, o.length, o.flags)) }
+fn chaining(o: &Out) -> [Int; 8] { first8(compress(o.cv, o.block, o.counter, o.length, o.flags)) }
 
 // A chunk of up to 1024 bytes, block by block; `first` is 1 until one is done.
-fn chunk_out(bytes: &[u8], at: Int, end: Int, counter: Int, cv: [Int], first: Int) -> Out {
+fn chunk_out(bytes: &Vec<u8>, at: Int, end: Int, counter: Int, cv: [Int; 8], first: Int) -> Out {
     if(end - at > 64) {
-        let next = first8(compress(cv, words_from(bytes, at, end, 0, []), counter, 64, first));
+        let next = first8(compress(cv, words_from(bytes, at, end), counter, 64, first));
         chunk_out(bytes, at + 64, end, counter, next, 0)
     } else {
-        Out { cv: cv, block: words_from(bytes, at, end, 0, []), counter: counter, length: end - at, flags: first + 2 }
+        Out { cv: cv, block: words_from(bytes, at, end), counter: counter, length: end - at, flags: first + 2 }
     }
 }
 
-fn joined(left: [Int], right: [Int]) -> Out {
+fn joined(left: [Int; 8], right: [Int; 8]) -> Out {
     Out { cv: iv(), block: [left[0], left[1], left[2], left[3], left[4], left[5], left[6], left[7],
         right[0], right[1], right[2], right[3], right[4], right[5], right[6], right[7]],
         counter: 0, length: 64, flags: 4 }
 }
 
 // The chaining values of the subtrees finished so far, the latest on top.
-enum Stack { Bottom, On([Int], Stack) }
+enum Stack { Bottom, On([Int; 8], Stack) }
 
 // A finished chunk joins as many finished subtrees as the count of chunks
 // so far has twos in it.
-fn add_chunk(stack: Stack, cv: [Int], total: Int) -> Stack {
+fn add_chunk(stack: Stack, cv: [Int; 8], total: Int) -> Stack {
     if(bit_and(total, 1) == 0) {
         match(stack) {
             On(left, rest) => add_chunk(rest, chaining(&joined(left, cv)), shr(total, 1)),
@@ -151,54 +153,63 @@ fn fold_up(stack: Stack, out: Out) -> Out {
     match(stack) { Bottom => out, On(left, rest) => fold_up(rest, joined(left, chaining(&out))) }
 }
 
-fn chunks(bytes: &[u8], at: Int, end: Int, counter: Int, stack: Stack) -> Out {
+fn chunks(bytes: &Vec<u8>, at: Int, end: Int, counter: Int, stack: Stack) -> Out {
     if(end - at > 1024) {
         let cv = chaining(&chunk_out(bytes, at, at + 1024, counter, iv(), 1));
         chunks(bytes, at + 1024, end, counter + 1, add_chunk(stack, cv, counter + 1))
     } else { fold_up(stack, chunk_out(bytes, at, end, counter, iv(), 1)) }
 }
 
-fn words_onto(out: [u8], words: &[Int], i: Int) -> [u8] {
-    match(element(words, i)) { Some(w) => words_onto(le_onto(out, *w, 4), words, i + 1), None => out }
-}
+// A word's four bytes, the least first.
+fn b4(w: Int, k: Int) -> u8 { byte(shr(w, 8 * k)) }
 
-fn digest_of(bytes: &[u8]) -> Digest256 {
-    let last = chunks(bytes, 0, len_at(bytes), 0, Bottom);
-    let root = first8(compress(last.cv, last.block, 0, last.length, bit_or(last.flags, 8)));
-    Digest256 { bytes: words_onto([], &root, 0) }
+fn digest_of(bytes: &Vec<u8>) -> Digest256 {
+    let last = chunks(bytes, 0, Vec::len(bytes), 0, Bottom);
+    let r = first8(compress(last.cv, last.block, 0, last.length, bit_or(last.flags, 8)));
+    Digest256 { bytes: [b4(r[0], 0), b4(r[0], 1), b4(r[0], 2), b4(r[0], 3), b4(r[1], 0), b4(r[1], 1), b4(r[1], 2), b4(r[1], 3),
+        b4(r[2], 0), b4(r[2], 1), b4(r[2], 2), b4(r[2], 3), b4(r[3], 0), b4(r[3], 1), b4(r[3], 2), b4(r[3], 3),
+        b4(r[4], 0), b4(r[4], 1), b4(r[4], 2), b4(r[4], 3), b4(r[5], 0), b4(r[5], 1), b4(r[5], 2), b4(r[5], 3),
+        b4(r[6], 0), b4(r[6], 1), b4(r[6], 2), b4(r[6], 3), b4(r[7], 0), b4(r[7], 1), b4(r[7], 2), b4(r[7], 3)] }
 }
 
 // Thirty-two bytes.
-pub struct Digest256 { bytes: [u8] }
+pub struct Digest256 { bytes: [u8; 32] }
+
+// The first thirty-two bytes, as a digest's.
+fn digest_bytes<A>(bytes: &A) -> [u8; 32] where A: Indexed<Element = u8> {
+    let b = fn(i: Int) -> u8 { *element_at(bytes, i) };
+    [b(0), b(1), b(2), b(3), b(4), b(5), b(6), b(7), b(8), b(9), b(10), b(11), b(12), b(13), b(14), b(15),
+     b(16), b(17), b(18), b(19), b(20), b(21), b(22), b(23), b(24), b(25), b(26), b(27), b(28), b(29), b(30), b(31)]
+}
 
 impl Digest256 {
-    // The digest these bytes are, if there are thirty-two of them.
-    pub fn from_bytes(bytes: [u8]) -> Option<Self> {
-        if(len(bytes) == 32) { Some(Self { bytes: bytes }) } else { None }
+    // The digest these bytes are (an array, a `[u8; N]`, a `Vec<u8>`, a
+    // slice), if there are thirty-two of them.
+    pub fn from_bytes<A>(bytes: A) -> Option<Self> where A: Indexed<Element = u8> {
+        let held = bytes;
+        if(size_at(&held) == 32) { Some(Self { bytes: digest_bytes(&held) }) } else { None }
     }
-    pub fn as_bytes<'a>(value: &'a Self) -> Slice<'a, u8> { Slice::of(&value.bytes) }
-    pub fn to_hex(value: &Self) -> Str { hex_encode(Slice::of(&value.bytes)) }
+    pub fn as_bytes<'a>(value: &'a Self) -> &'a [u8; 32] { &value.bytes }
+    pub fn to_hex(value: &Self) -> Str { let bytes = Vec::from_array(value.bytes); hex_encode(Vec::as_slice(&bytes)) }
     pub fn parse_hex(text: Str) -> Result<Self, HexError> {
         match(hex_decode(text)) {
             Err(e) => Err(e),
-            Ok(bytes) => if(len(bytes) == 32) { Ok(Self { bytes: bytes }) }
+            Ok(bytes) => if(Vec::len(&bytes) == 32) { Ok(Self { bytes: digest_bytes(&bytes) }) }
                 else { Err(HexError { offset: 0, kind: HexErrorKind::IncorrectLength }) }
         }
     }
 }
 impl Eq for Digest256 { fn ==(a: Digest256, b: Digest256) -> Bool { a.bytes == b.bytes } }
 
-pub fn blake3<'a>(bytes: Slice<'a, u8>) -> Digest256 { digest_of(&all_onto([], &bytes, 0)) }
+pub fn blake3<'a>(bytes: Slice<'a, u8>) -> Digest256 { let mut all = Vec::new(); all_onto(&mut all, &bytes, 0); digest_of(&all) }
 
 // The same, a piece at a time: the pieces are kept and hashed at the end.
-pub struct Blake3 { bytes: [u8] }
+pub struct Blake3 { bytes: Vec<u8> }
 
 impl Blake3 {
-    pub fn new() -> Self { Self { bytes: [] } }
-    pub fn update<'a>(value: &mut Self, bytes: Slice<'a, u8>) {
-        value.bytes = all_onto(replace(&mut value.bytes, []), &bytes, 0);
-    }
-    pub fn finish(value: Self) -> Digest256 { let bytes = value.bytes; digest_of(&bytes) }
+    pub fn new() -> Self { Self { bytes: Vec::new() } }
+    pub fn update<'a>(value: &mut Self, bytes: Slice<'a, u8>) { all_onto(&mut value.bytes, &bytes, 0) }
+    pub fn finish(value: Self) -> Digest256 { digest_of(&value.bytes) }
 }
 
 // ---- Fingerprints: BLAKE3 of a stream written one way only. ----
@@ -206,28 +217,30 @@ impl Blake3 {
 // `GLORIOUS-FP`, a zero byte, the schema, how long the domain is, the domain;
 // then each thing written, numbers the least byte first, bytes and texts
 // with how many bytes they are before them.
-pub struct FingerprintWriter { bytes: [u8] }
+pub struct FingerprintWriter { bytes: Vec<u8> }
 
 impl FingerprintWriter {
     pub fn new(domain: Str, schema: u32) -> Self {
         let name = utf8(domain);
-        let start = le_onto(le_onto(push(array_onto([], &utf8("GLORIOUS-FP"), 0), 0u8), int(schema), 4), len_at(&name), 8);
-        Self { bytes: array_onto(start, &name, 0) }
+        let mut bytes = utf8("GLORIOUS-FP");
+        Vec::push(&mut bytes, 0u8);
+        le_onto(&mut bytes, int(schema), 4);
+        le_onto(&mut bytes, Vec::len(&name), 8);
+        each_onto(&mut bytes, &name, 0);
+        Self { bytes: bytes }
     }
-    pub fn tag(value: &mut Self, tag: u32) { value.bytes = le_onto(replace(&mut value.bytes, []), int(tag), 4); }
-    pub fn u32(value: &mut Self, input: u32) { value.bytes = le_onto(replace(&mut value.bytes, []), int(input), 4); }
-    pub fn u64(value: &mut Self, input: u64) { value.bytes = le_onto(replace(&mut value.bytes, []), int(input), 8); }
+    pub fn tag(value: &mut Self, tag: u32) { le_onto(&mut value.bytes, int(tag), 4) }
+    pub fn u32(value: &mut Self, input: u32) { le_onto(&mut value.bytes, int(input), 4) }
+    pub fn u64(value: &mut Self, input: u64) { le_onto(&mut value.bytes, int(input), 8) }
     pub fn bytes<'a>(value: &mut Self, bytes: Slice<'a, u8>) {
-        let counted = le_onto(replace(&mut value.bytes, []), Slice::len(&bytes), 8);
-        value.bytes = all_onto(counted, &bytes, 0);
+        le_onto(&mut value.bytes, Slice::len(&bytes), 8);
+        all_onto(&mut value.bytes, &bytes, 0)
     }
     pub fn text(value: &mut Self, text: Str) {
         let written = utf8(text);
-        let counted = le_onto(replace(&mut value.bytes, []), len_at(&written), 8);
-        value.bytes = array_onto(counted, &written, 0);
+        le_onto(&mut value.bytes, Vec::len(&written), 8);
+        each_onto(&mut value.bytes, &written, 0)
     }
-    pub fn digest(value: &mut Self, digest: &Digest256) {
-        value.bytes = array_onto(replace(&mut value.bytes, []), &digest.bytes, 0);
-    }
-    pub fn finish(value: Self) -> Digest256 { let bytes = value.bytes; digest_of(&bytes) }
+    pub fn digest(value: &mut Self, digest: &Digest256) { each_onto(&mut value.bytes, &digest.bytes, 0) }
+    pub fn finish(value: Self) -> Digest256 { digest_of(&value.bytes) }
 }

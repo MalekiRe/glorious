@@ -229,7 +229,7 @@ impl<T> ToVec for [T] where T: Use<[1, 1]> { type Elem = T; fn to_vec(a: [T]) ->
 impl<T, N> ToVec for [T; N] where T: Use<[1, 1]> { type Elem = T; fn to_vec(a: [T; N]) -> Vec<T> { of_array(fixed_to_array(a)) } }
 fn of_array<T>(items: [T]) -> Vec<T> where T: Use<[1, 1]> {
     let mut v = Vec::new();
-    push_each(&mut v, turned(items, []));
+    push_each(&mut v, turned(items, array_empty()));
     v
 }
 
@@ -413,7 +413,7 @@ impl<T> Vec<T> {
     pub fn into_array(value: Self) -> [T] where T: Use<[1, 1]> {
         let parts = parts_of(value);
         let v = Vec { at: parts.at, cap: 0, len: 0 };
-        let mut out = [];
+        let mut out = array_empty();
         let mut i = 0;
         while({ i < parts.len }) { push_at(&mut out, unsafe { take_at(&v, i) }); i = i + 1 };
         if(parts.cap > 0) { unsafe { mem_free(ptr_mut_address(parts.at)) } } else { () };
@@ -592,7 +592,7 @@ impl<T> Vec<T> {
         while({ i < value.len and { not found } }) { if(*at_ref(value, i) == *item) { found = true } else { () }; i = i + 1 };
         found
     }
-    pub fn extend(value: &mut Self, more: [T]) where T: Use<[1, 1]> { push_each(value, turned(more, [])) }
+    pub fn extend(value: &mut Self, more: [T]) where T: Use<[1, 1]> { push_each(value, turned(more, array_empty())) }
     // Only so many kept: the rest are let go.
     pub fn truncate(value: &mut Self, length: Int) {
         while({ value.len > length and { value.len > 0 } }) {

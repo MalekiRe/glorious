@@ -1,6 +1,7 @@
 // Bytes read and written a number at a time, as the library specification
 // has them (23). Places and lengths are `Int`.
 
+use std::vec::{Vec};
 use std::slice::{Slice};
 use std::text::{from_utf8};
 
@@ -107,7 +108,7 @@ impl<'a> ByteReader<'a> {
     pub fn read_str(r: &mut Self, length: Int) -> Result<Str, DecodeError> {
         let start = r.at;
         match(ByteReader::step(r, length)) {
-            Ok(at) => match(from_utf8(copied(&r.bytes, at, at + length, []))) {
+            Ok(at) => let mut text = Vec::new(); copied(&r.bytes, at, at + length, &mut text); match(from_utf8(text)) {
                 Some(text) => Ok(text),
                 None => r.at = start; fails(start, DecodeErrorKind::InvalidUtf8)
             },
@@ -127,8 +128,8 @@ impl<'a> ByteReader<'a> {
     }
 }
 
-fn copied<'a>(bytes: &Slice<'a, u8>, at: Int, end: Int, out: [u8]) -> [u8] {
-    if(at >= end) { out } else { tail copied(bytes, at + 1, end, push(out, u8(byte_at(bytes, at)))) }
+fn copied<'a>(bytes: &Slice<'a, u8>, at: Int, end: Int, out: &mut Vec<u8>) {
+    if(at >= end) { () } else { Vec::push(out, u8(byte_at(bytes, at))); tail copied(bytes, at + 1, end, out) }
 }
 
 fn var_from<'a>(bytes: &Slice<'a, u8>, at: Int, value: u128, scale: u128, width: Int) -> Result<(u128, Int), DecodeErrorKind> {
@@ -148,77 +149,68 @@ fn var_from<'a>(bytes: &Slice<'a, u8>, at: Int, value: u128, scale: u128, width:
 }
 
 // Bytes built from front to back.
-pub struct ByteBuf { bytes: [u8] }
+pub struct ByteBuf { bytes: Vec<u8> }
 
 // How long a buffer was, to cut it back to.
 pub struct BufferMark { length: Int }
 
 fn low(value: u128, modulus: u128) -> u8 { to(value % modulus) }
 
-fn le_onto(out: [u8], value: u128, width: Int) -> [u8] {
-    if(width <= 0) { out } else { tail le_onto(push(out, low(value, 256u128)), value / 256u128, width - 1) }
+fn le_onto(out: &mut Vec<u8>, value: u128, width: Int) {
+    if(width <= 0) { () } else { Vec::push(out, low(value, 256u128)); tail le_onto(out, value / 256u128, width - 1) }
 }
 
-fn be_onto(out: [u8], value: u128, width: Int) -> [u8] {
-    if(width <= 0) { out } else { push(be_onto(out, value / 256u128, width - 1), low(value, 256u128)) }
+fn be_onto(out: &mut Vec<u8>, value: u128, width: Int) {
+    if(width <= 0) { () } else { be_onto(out, value / 256u128, width - 1); Vec::push(out, low(value, 256u128)) }
 }
 
-fn var_onto(out: [u8], value: u128) -> [u8] {
-    if(value < 128u128) { push(out, low(value, 128u128)) }
-    else { tail var_onto(push(out, u8(128 + int(low(value, 128u128)))), value / 128u128) }
+fn var_onto(out: &mut Vec<u8>, value: u128) {
+    if(value < 128u128) { Vec::push(out, low(value, 128u128)) }
+    else { Vec::push(out, u8(128 + int(low(value, 128u128)))); tail var_onto(out, value / 128u128) }
 }
 
-fn zeros_onto(out: [u8], count: Int) -> [u8] {
-    if(count <= 0) { out } else { tail zeros_onto(push(out, 0u8), count - 1) }
+fn zeros_onto(out: &mut Vec<u8>, count: Int) {
+    if(count <= 0) { () } else { Vec::push(out, 0u8); tail zeros_onto(out, count - 1) }
 }
 
-fn slice_onto<'a>(out: [u8], bytes: &Slice<'a, u8>, at: Int) -> [u8] {
-    if(at >= Slice::len(bytes)) { out } else { tail slice_onto(push(out, u8(byte_at(bytes, at))), bytes, at + 1) }
+fn slice_onto<'a>(out: &mut Vec<u8>, bytes: &Slice<'a, u8>, at: Int) {
+    if(at >= Slice::len(bytes)) { () } else { Vec::push(out, u8(byte_at(bytes, at))); tail slice_onto(out, bytes, at + 1) }
 }
 
-// The bytes with those from a place on replaced by a number's, the least first.
-fn patched(bytes: [u8], at: Int, value: u128, width: Int) -> [u8] {
-    if(width <= 0) { bytes } else { tail patched(with_byte(bytes, at, low(value, 256u128)), at + 1, value / 256u128, width - 1) }
-}
-
-fn with_byte(bytes: [u8], at: Int, byte: u8) -> [u8] { let mut next = bytes; next[at] = byte; next }
-
-// The bytes from one place up to another.
-fn piece(bytes: &[u8], from: Int, upto: Int, out: [u8]) -> [u8] {
-    if(from >= upto) { out } else {
-        match(element(bytes, from)) {
-            Some(b) => tail piece(bytes, from + 1, upto, push(out, *b)),
-            None => out
-        }
+// The bytes from a place on written over by a number's, the least first.
+fn patched(bytes: &mut Vec<u8>, at: Int, value: u128, width: Int) {
+    if(width <= 0) { () } else {
+        match(Vec::get_mut(bytes, at)) { Some(b) => *b = low(value, 256u128), None => () };
+        tail patched(bytes, at + 1, value / 256u128, width - 1)
     }
 }
 
 fn is_power_of_two(n: Int) -> Bool { if(n <= 0) { false } else { if(n == 1) { true } else { if(n % 2 == 0) { is_power_of_two(n / 2) } else { false } } } }
 
 impl ByteBuf {
-    pub fn new() -> Self { Self { bytes: [] } }
+    pub fn new() -> Self { Self { bytes: Vec::new() } }
     pub fn with_capacity(capacity: Int) -> Result<Self, ReserveError> {
-        if(capacity < 0) { Err(ReserveError::CapacityOverflow) } else { Ok(Self { bytes: [] }) }
+        if(capacity < 0) { Err(ReserveError::CapacityOverflow) } else { Ok(Self { bytes: Vec::with_capacity(capacity) }) }
     }
-    pub fn len(b: &Self) -> Int { len_at(&b.bytes) }
-    pub fn as_slice<'a>(b: &'a Self) -> Slice<'a, u8> { Slice::of(&b.bytes) }
+    pub fn len(b: &Self) -> Int { Vec::len(&b.bytes) }
+    pub fn as_slice<'a>(b: &'a Self) -> Slice<'a, u8> { Vec::as_slice(&b.bytes) }
     pub fn reserve(b: &mut Self, additional: Int) -> Result<(), ReserveError> {
         if(additional < 0) { Err(ReserveError::CapacityOverflow) } else { Ok(()) }
     }
-    pub fn push(b: &mut Self, byte: u8) -> Result<(), ReserveError> { b.bytes = push(b.bytes, byte); Ok(()) }
-    pub fn extend<'a>(b: &mut Self, bytes: Slice<'a, u8>) -> Result<(), ReserveError> { b.bytes = slice_onto(b.bytes, &bytes, 0); Ok(()) }
-    pub fn write_u16_le(b: &mut Self, input: u16) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 2); Ok(()) }
-    pub fn write_u32_le(b: &mut Self, input: u32) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 4); Ok(()) }
-    pub fn write_u64_le(b: &mut Self, input: u64) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 8); Ok(()) }
-    pub fn write_u128_le(b: &mut Self, input: u128) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 16); Ok(()) }
-    pub fn write_u16_be(b: &mut Self, input: u16) -> Result<(), ReserveError> { b.bytes = be_onto(b.bytes, to(input), 2); Ok(()) }
-    pub fn write_u32_be(b: &mut Self, input: u32) -> Result<(), ReserveError> { b.bytes = be_onto(b.bytes, to(input), 4); Ok(()) }
-    pub fn write_u64_be(b: &mut Self, input: u64) -> Result<(), ReserveError> { b.bytes = be_onto(b.bytes, to(input), 8); Ok(()) }
-    pub fn write_var_u64(b: &mut Self, input: u64) -> Result<(), ReserveError> { b.bytes = var_onto(b.bytes, to(input)); Ok(()) }
+    pub fn push(b: &mut Self, byte: u8) -> Result<(), ReserveError> { Vec::push(&mut b.bytes, byte); Ok(()) }
+    pub fn extend<'a>(b: &mut Self, bytes: Slice<'a, u8>) -> Result<(), ReserveError> { slice_onto(&mut b.bytes, &bytes, 0); Ok(()) }
+    pub fn write_u16_le(b: &mut Self, input: u16) -> Result<(), ReserveError> { le_onto(&mut b.bytes, to(input), 2); Ok(()) }
+    pub fn write_u32_le(b: &mut Self, input: u32) -> Result<(), ReserveError> { le_onto(&mut b.bytes, to(input), 4); Ok(()) }
+    pub fn write_u64_le(b: &mut Self, input: u64) -> Result<(), ReserveError> { le_onto(&mut b.bytes, to(input), 8); Ok(()) }
+    pub fn write_u128_le(b: &mut Self, input: u128) -> Result<(), ReserveError> { le_onto(&mut b.bytes, to(input), 16); Ok(()) }
+    pub fn write_u16_be(b: &mut Self, input: u16) -> Result<(), ReserveError> { be_onto(&mut b.bytes, to(input), 2); Ok(()) }
+    pub fn write_u32_be(b: &mut Self, input: u32) -> Result<(), ReserveError> { be_onto(&mut b.bytes, to(input), 4); Ok(()) }
+    pub fn write_u64_be(b: &mut Self, input: u64) -> Result<(), ReserveError> { be_onto(&mut b.bytes, to(input), 8); Ok(()) }
+    pub fn write_var_u64(b: &mut Self, input: u64) -> Result<(), ReserveError> { var_onto(&mut b.bytes, to(input)); Ok(()) }
     // A number written over bytes already there; all of them, or none.
     fn patch(b: &mut Self, offset: Int, value: u128, width: Int) -> Result<(), RangeError> {
-        if(offset < 0 or { offset + width > len_at(&b.bytes) }) { Err(RangeError { offset: offset, length: width }) }
-        else { b.bytes = patched(b.bytes, offset, value, width); Ok(()) }
+        if(offset < 0 or { offset + width > Vec::len(&b.bytes) }) { Err(RangeError { offset: offset, length: width }) }
+        else { patched(&mut b.bytes, offset, value, width); Ok(()) }
     }
     pub fn patch_u16_le(b: &mut Self, offset: Int, input: u16) -> Result<(), RangeError> { ByteBuf::patch(b, offset, to(input), 2) }
     pub fn patch_u32_le(b: &mut Self, offset: Int, input: u32) -> Result<(), RangeError> { ByteBuf::patch(b, offset, to(input), 4) }
@@ -226,24 +218,20 @@ impl ByteBuf {
     // Zeros up to the next multiple of a power of two.
     pub fn align_zeroed(b: &mut Self, alignment: Int) -> Result<(), ByteWriteError> {
         if(is_power_of_two(alignment)) {
-            let over = len_at(&b.bytes) % alignment;
-            b.bytes = zeros_onto(b.bytes, (alignment - over) % alignment);
+            let over = Vec::len(&b.bytes) % alignment;
+            zeros_onto(&mut b.bytes, (alignment - over) % alignment);
             Ok(())
         } else { Err(ByteWriteError::InvalidAlignment) }
     }
     // Made so long: with zeros added, or cut short.
     pub fn resize_zeroed(b: &mut Self, length: Int) -> Result<(), ReserveError> {
-        if(length < 0) { Err(ReserveError::CapacityOverflow) } else {
-            let n = len_at(&b.bytes);
-            b.bytes = if(length >= n) { zeros_onto(b.bytes, length - n) } else { piece(&b.bytes, 0, length, []) };
-            Ok(())
-        }
+        if(length < 0) { Err(ReserveError::CapacityOverflow) } else { Vec::resize(&mut b.bytes, length, 0u8); Ok(()) }
     }
-    pub fn mark(b: &Self) -> BufferMark { BufferMark { length: len_at(&b.bytes) } }
+    pub fn mark(b: &Self) -> BufferMark { BufferMark { length: Vec::len(&b.bytes) } }
     pub fn truncate_to(b: &mut Self, mark: BufferMark) -> Result<(), MarkError> {
-        if(mark.length > len_at(&b.bytes)) { Err(MarkError::Stale) } else { b.bytes = piece(&b.bytes, 0, mark.length, []); Ok(()) }
+        if(mark.length > Vec::len(&b.bytes)) { Err(MarkError::Stale) } else { Vec::truncate(&mut b.bytes, mark.length); Ok(()) }
     }
-    pub fn finish(b: Self) -> [u8] { b.bytes }
+    pub fn finish(b: Self) -> Vec<u8> { match(b) { ByteBuf { bytes } => bytes } }
 }
 
 pub enum HexErrorKind { InvalidDigit, OddLength, IncorrectLength }
@@ -271,16 +259,16 @@ fn hex_value(c: char) -> Option<Int> {
     }
 }
 
-fn hex_from(text: Str, at: Int, out: [u8]) -> Result<[u8], HexError> {
+fn hex_from(text: Str, at: Int, out: &mut Vec<u8>) -> Result<(), HexError> {
     match(text) {
-        StrEnd => Ok(out),
+        StrEnd => Ok(()),
         StrChar(a, rest) => match(rest) {
             StrEnd => Err(HexError { offset: at, kind: HexErrorKind::OddLength }),
             StrChar(b, more) => match(hex_value(a)) {
                 None => Err(HexError { offset: at, kind: HexErrorKind::InvalidDigit }),
                 Some(high) => match(hex_value(b)) {
                     None => Err(HexError { offset: at + 1, kind: HexErrorKind::InvalidDigit }),
-                    Some(low) => tail hex_from(more, at + 2, push(out, u8(high * 16 + low)))
+                    Some(low) => Vec::push(out, u8(high * 16 + low)); tail hex_from(more, at + 2, out)
                 }
             }
         }
@@ -288,7 +276,10 @@ fn hex_from(text: Str, at: Int, out: [u8]) -> Result<[u8], HexError> {
 }
 
 // The bytes a text of hexadecimal digits says, or where it stops being one.
-pub fn hex_decode(text: Str) -> Result<[u8], HexError> { hex_from(text, 0, []) }
+pub fn hex_decode(text: Str) -> Result<Vec<u8>, HexError> {
+    let mut out = Vec::new();
+    match(hex_from(text, 0, &mut out)) { Ok(_) => Ok(out), Err(e) => Err(e) }
+}
 
 // Bytes as text six bits to a character.
 pub enum Base64Alphabet { Standard, UrlSafe }
@@ -326,15 +317,16 @@ fn value64(c: char, url: Bool) -> Option<Int> {
 
 // The digits of the bytes from a place on, three bytes to four digits; the
 // last one or two bytes to two or three.
-fn digits64<'a>(bytes: &Slice<'a, u8>, at: Int, out: [Int]) -> [Int] {
+fn digits64<'a>(bytes: &Slice<'a, u8>, at: Int, out: &mut Vec<Int>) {
     let left = Slice::len(bytes) - at;
-    if(left <= 0) { out } else {
+    if(left <= 0) { () } else {
         let a = byte_at(bytes, at);
-        if(left == 1) { push(push(out, a / 4), (a % 4) * 16) } else {
+        if(left == 1) { Vec::push(out, a / 4); Vec::push(out, (a % 4) * 16) } else {
             let b = byte_at(bytes, at + 1);
-            if(left == 2) { push(push(push(out, a / 4), (a % 4) * 16 + b / 16), (b % 16) * 4) } else {
+            if(left == 2) { Vec::push(out, a / 4); Vec::push(out, (a % 4) * 16 + b / 16); Vec::push(out, (b % 16) * 4) } else {
                 let c = byte_at(bytes, at + 2);
-                tail digits64(bytes, at + 3, push(push(push(push(out, a / 4), (a % 4) * 16 + b / 16), (b % 16) * 4 + c / 64), c % 64))
+                Vec::push(out, a / 4); Vec::push(out, (a % 4) * 16 + b / 16); Vec::push(out, (b % 16) * 4 + c / 64); Vec::push(out, c % 64);
+                tail digits64(bytes, at + 3, out)
             }
         }
     }
@@ -342,30 +334,31 @@ fn digits64<'a>(bytes: &Slice<'a, u8>, at: Int, out: [Int]) -> [Int] {
 
 fn padded(n: Int, out: Str) -> Str { if(n % 4 == 0) { out } else { tail padded(n + 1, StrChar('=', out)) } }
 
-fn text64(digits: &[Int], i: Int, url: Bool, out: Str) -> Str {
+fn text64(digits: &Vec<Int>, i: Int, url: Bool, out: Str) -> Str {
     if(i <= 0) { out } else {
         tail text64(digits, i - 1, url, StrChar(digit64(match(element(digits, i - 1)) { Some(d) => *d, None => 0 }, url), out))
     }
 }
 
 pub fn base64_encode<'a>(bytes: Slice<'a, u8>, options: Base64Options) -> Str {
-    let digits = digits64(&bytes, 0, []);
-    let n = len(digits);
+    let mut digits = Vec::new();
+    digits64(&bytes, 0, &mut digits);
+    let n = Vec::len(&digits);
     let end = match(options.padding) { Padding::Required => padded(n, ""), Padding::Optional => padded(n, ""), Padding::Forbidden => "" };
     text64(&digits, n, is_url(&options), end)
 }
 
 // The digits a text has before its padding, and how many `=` follow them:
 // or the place of a character that is neither.
-fn read64(text: Str, at: Int, url: Bool, digits: [Int], pads: Int) -> Result<([Int], Int), Base64Error> {
+fn read64(text: Str, at: Int, url: Bool, digits: &mut Vec<Int>, pads: Int) -> Result<Int, Base64Error> {
     match(text) {
-        StrEnd => Ok((digits, pads)),
+        StrEnd => Ok(pads),
         StrChar(c, rest) =>
             if(c == '=') { tail read64(rest, at + 1, url, digits, pads + 1) } else {
                 // A digit after padding is not where one can be.
                 if(pads > 0) { Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidPadding }) } else {
                     match(value64(c, url)) {
-                        Some(v) => tail read64(rest, at + 1, url, push(digits, v), 0),
+                        Some(v) => Vec::push(digits, v); tail read64(rest, at + 1, url, digits, 0),
                         None => Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidDigit })
                     }
                 }
@@ -373,21 +366,22 @@ fn read64(text: Str, at: Int, url: Bool, digits: [Int], pads: Int) -> Result<([I
     }
 }
 
-fn bytes64(digits: &[Int], at: Int, out: [u8]) -> Result<[u8], Base64Error> {
-    let left = len_at(digits) - at;
-    let d = fn(i: Int) -> Int { match(element(digits, at + i)) { Some(v) => *v, None => 0 } };
-    if(left <= 0) { Ok(out) } else {
+fn bytes64(digits: &Vec<Int>, at: Int, out: &mut Vec<u8>) -> Result<(), Base64Error> {
+    let left = Vec::len(digits) - at;
+    let d = fn(i: Int) -> Int { match(Vec::get(digits, at + i)) { Some(v) => *v, None => 0 } };
+    if(left <= 0) { Ok(()) } else {
         if(left == 1) { Err(Base64Error { offset: at, kind: Base64ErrorKind::IncorrectLength }) } else {
             let first = u8(d(0) * 4 + d(1) / 16);
             if(left == 2) {
                 // (Bits left over have to be nothing: the one way to write it.)
-                if(d(1) % 16 != 0) { Err(Base64Error { offset: at + 1, kind: Base64ErrorKind::NonCanonicalTail }) } else { Ok(push(out, first)) }
+                if(d(1) % 16 != 0) { Err(Base64Error { offset: at + 1, kind: Base64ErrorKind::NonCanonicalTail }) } else { Vec::push(out, first); Ok(()) }
             } else {
                 let second = u8((d(1) % 16) * 16 + d(2) / 4);
                 if(left == 3) {
-                    if(d(2) % 4 != 0) { Err(Base64Error { offset: at + 2, kind: Base64ErrorKind::NonCanonicalTail }) } else { Ok(push(push(out, first), second)) }
+                    if(d(2) % 4 != 0) { Err(Base64Error { offset: at + 2, kind: Base64ErrorKind::NonCanonicalTail }) } else { Vec::push(out, first); Vec::push(out, second); Ok(()) }
                 } else {
-                    bytes64(digits, at + 4, push(push(push(out, first), second), u8((d(2) % 4) * 64 + d(3))))
+                    Vec::push(out, first); Vec::push(out, second); Vec::push(out, u8((d(2) % 4) * 64 + d(3)));
+                    bytes64(digits, at + 4, out)
                 }
             }
         }
@@ -396,17 +390,18 @@ fn bytes64(digits: &[Int], at: Int, out: [u8]) -> Result<[u8], Base64Error> {
 
 // The bytes a text says, or where it stops being one: nothing is skipped,
 // and padding is taken as the options say.
-pub fn base64_decode(text: Str, options: Base64Options) -> Result<[u8], Base64Error> {
-    match(read64(text, 0, is_url(&options), [], 0)) {
+pub fn base64_decode(text: Str, options: Base64Options) -> Result<Vec<u8>, Base64Error> {
+    let mut digits = Vec::new();
+    match(read64(text, 0, is_url(&options), &mut digits, 0)) {
         Err(e) => Err(e),
-        Ok((digits, pads)) =>
-            let n = len(digits);
+        Ok(pads) =>
+            let n = Vec::len(&digits);
             let wanted = (4 - n % 4) % 4;
             let fits = match(options.padding) {
                 Padding::Required => pads == wanted,
                 Padding::Optional => pads == 0 or { pads == wanted },
                 Padding::Forbidden => pads == 0
             };
-            if(fits) { bytes64(&digits, 0, []) } else { Err(Base64Error { offset: n, kind: Base64ErrorKind::InvalidPadding }) }
+            if(fits) { let mut out = Vec::new(); match(bytes64(&digits, 0, &mut out)) { Ok(_) => Ok(out), Err(e) => Err(e) } } else { Err(Base64Error { offset: n, kind: Base64ErrorKind::InvalidPadding }) }
     }
 }

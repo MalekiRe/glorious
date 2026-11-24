@@ -192,7 +192,9 @@ partial def nameUseExpr (b : Body) (noDefers : Bool) (x : String) (e : ExprId) :
 
 partial def nameUseClause (b : Body) (noDefers : Bool) (x : String) (c : ClauseId) : NameUse :=
   let ⟨pats, body⟩ := b.clause c
-  if (pats.flatMap patternNames).contains x then { rebound := true } else b.nameUseStmts noDefers x body.toList
+  -- (A clause whose patterns bind the name again: none of its uses are of
+  -- this one.)
+  if (pats.flatMap patternNames).contains x then {} else b.nameUseStmts noDefers x body.toList
 
 partial def nameUseStmts (b : Body) (noDefers : Bool) (x : String) : List StmtId → NameUse
   | [] => {}

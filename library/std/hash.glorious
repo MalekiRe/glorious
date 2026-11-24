@@ -31,7 +31,7 @@ impl<T> Hash for Array<T> where T: Hash, T: Use<[0, *]> {
 // A map: its buckets, and how many keys it has.
 pub struct HashMap<K, V>([[(K, V)]], Int)
 
-pub fn new<T, U>() -> HashMap<T, U> where T: Use<[0, *]>, U: Use<[0, *]> { HashMap([[]; 8], 0) }
+pub fn new<T, U>() -> HashMap<T, U> where T: Use<[0, *]>, U: Use<[0, *]> { HashMap([array_empty(); 8], 0) }
 
 pub fn len<T, U>(m: HashMap<T, U>) -> Int where T: Use<[1, 1]>, U: Use<[1, 1]> { match(m) { HashMap(_, n) => n } }
 pub fn is_empty<T, U>(m: HashMap<T, U>) -> Bool where T: Use<[1, 1]>, U: Use<[1, 1]> { len(m) == 0 }
@@ -77,7 +77,7 @@ fn grown<T, U>(m: HashMap<T, U>) -> HashMap<T, U> where T: Hash, T: Use<[0, *]>,
     match(m) {
         HashMap(buckets, n) =>
             if(n <= std::vec::len_of(buckets)) { m } else {
-                fold(buckets, HashMap([[]; std::vec::len_of(buckets) * 2], 0), fn(out, bucket) {
+                fold(buckets, HashMap([array_empty(); std::vec::len_of(buckets) * 2], 0), fn(out, bucket) {
                     fold(bucket, out, fn(acc, pair) { match(pair) { (k, v) => put_new(acc, k, v) } })
                 })
             }
@@ -113,7 +113,7 @@ pub fn remove<T, U>(m: HashMap<T, U>, key: T) -> HashMap<T, U> where T: Hash, T:
 // gives it (17): a key is hashed and compared as a value, so it is one that
 // is copied (a number, a text); what a key stands for may be anything.
 impl<K, V> HashMap<K, V> {
-    pub fn new() -> Self { HashMap(empty_buckets(8, []), 0) }
+    pub fn new() -> Self { HashMap(empty_buckets(8, array_empty()), 0) }
     pub fn len(value: &Self) -> Int { value.1 }
     pub fn is_empty(value: &Self) -> Bool { value.1 == 0 }
     pub fn contains_key(value: &Self, key: &K) -> Bool where K: Eq, K: Hash, K: Use<[0, *]> {
@@ -151,8 +151,8 @@ impl<K, V> HashMap<K, V> {
             Some(i) =>
                 // (The last of the bucket takes its place.)
                 // (The bucket is made again without it.)
-                let mut bucket = replace(&mut value.0[at], []);
-                let mut kept = [];
+                let mut bucket = replace(&mut value.0[at], array_empty());
+                let mut kept = array_empty();
                 let mut found = None;
                 let mut n = len_at(&bucket);
                 loop({
@@ -170,7 +170,7 @@ impl<K, V> HashMap<K, V> {
         }
     }
     pub fn clear(value: &mut Self) {
-        value.0 = empty_buckets(8, []);
+        value.0 = empty_buckets(8, array_empty());
         value.1 = 0
     }
     // The place of a key: what it stands for, or where it would.
@@ -191,17 +191,17 @@ impl<K, V> HashMap<K, V> {
     }
     // Its keys and what they stand for, in no order one can rely on.
     pub fn into_entries(value: Self) -> [(K, V)] {
-        match(value) { HashMap(buckets, _) => flat_onto(buckets, []) }
+        match(value) { HashMap(buckets, _) => flat_onto(buckets, array_empty()) }
     }
     pub fn keys(value: &Self) -> [K] where K: Eq, K: Use<[0, *]> {
-        keys_onto(&value.0, 0, 0, [])
+        keys_onto(&value.0, 0, 0, array_empty())
     }
     // With twice the buckets: each key moved to where it now falls.
     fn regrow(value: &mut Self) where K: Hash, K: Use<[0, *]> {
         let size = len_at(&value.0) * 2;
-        let old = replace(&mut value.0, []);
-        let mut all = flat_onto(old, []);
-        let mut buckets = empty_buckets(size, []);
+        let old = replace(&mut value.0, array_empty());
+        let mut all = flat_onto(old, array_empty());
+        let mut buckets = empty_buckets(size, array_empty());
         loop({
             match(pop_at(&mut all)) {
                 Some((k, v)) =>
@@ -233,7 +233,7 @@ impl<'a, K, V> Entry<'a, K, V> {
 // So many empty buckets: each made anew, as a bucket may come to hold what
 // is not copied.
 fn empty_buckets<K, V>(n: Int, out: [[(K, V)]]) -> [[(K, V)]] where K: Use<[1, 1]>, V: Use<[1, 1]> {
-    if(n <= 0) { out } else { tail empty_buckets(n - 1, push(out, [])) }
+    if(n <= 0) { out } else { tail empty_buckets(n - 1, push(out, array_empty())) }
 }
 
 // Where a key is in a bucket. (Each pair is looked at where it is: what
@@ -290,7 +290,7 @@ impl<T> HashSet<T> {
     }
     pub fn clear(value: &mut Self) { HashMap::clear(&mut value.0) }
     pub fn into_vec(value: Self) -> [T] where T: Use<[0, *]> {
-        match(value) { HashSet(m) => fold(HashMap::into_entries(m), [], fn(out, pair) { match(pair) { (k, _) => push(out, k) } }) }
+        match(value) { HashSet(m) => fold(HashMap::into_entries(m), array_empty(), fn(out, pair) { match(pair) { (k, _) => push(out, k) } }) }
     }
 }
 
@@ -304,8 +304,8 @@ fn fold_buckets<T, U, V, e: EffectRow>(bs: [[(T, U)]], i: Int, acc: V, f: fn(V, 
 fn fold_pairs<T, U, V, e: EffectRow>(ps: [(T, U)], i: Int, acc: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> {
     if(i >= len_at(&ps)) { acc } else { match(ps[i]) { (k, v) => tail fold_pairs(ps, i + 1, f(acc, k, v), f) } }
 }
-pub fn keys<T, U>(m: HashMap<T, U>) -> [T] where T: Use<[0, *]>, U: Use<[0, *]> { fold_map(m, [], fn(out, k, v) { push(out, k) }) }
-pub fn values<T, U>(m: HashMap<T, U>) -> [U] where T: Use<[0, *]>, U: Use<[0, *]> { fold_map(m, [], fn(out, k, v) { push(out, v) }) }
-pub fn entries<T, U>(m: HashMap<T, U>) -> [(T, U)] where T: Use<[0, *]>, U: Use<[0, *]> { fold_map(m, [], fn(out, k, v) { push(out, (k, v)) }) }
+pub fn keys<T, U>(m: HashMap<T, U>) -> [T] where T: Use<[0, *]>, U: Use<[0, *]> { fold_map(m, array_empty(), fn(out, k, v) { push(out, k) }) }
+pub fn values<T, U>(m: HashMap<T, U>) -> [U] where T: Use<[0, *]>, U: Use<[0, *]> { fold_map(m, array_empty(), fn(out, k, v) { push(out, v) }) }
+pub fn entries<T, U>(m: HashMap<T, U>) -> [(T, U)] where T: Use<[0, *]>, U: Use<[0, *]> { fold_map(m, array_empty(), fn(out, k, v) { push(out, (k, v)) }) }
 pub fn from<T, U>(pairs: [(T, U)]) -> HashMap<T, U> where T: Hash, T: Eq, T: Use<[0, *]>, U: Use<[0, *]> { fold(pairs, new(), fn(m, pair) { match(pair) { (k, v) => insert(m, k, v) } }) }
 
