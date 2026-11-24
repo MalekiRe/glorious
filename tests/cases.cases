@@ -15671,3 +15671,21 @@ impl Drop for File { fn drop(p: &mut File) { () } }
 fn main() -> Int { let o = Some(4); if(o is Some(x)) { x } else { 0 } }
 #### expect
 4
+#### case
+#### Text written where `&str` is wanted is its UTF-8 bytes, there from the
+#### program's start; a `String`'s bytes are in memory it owns, borrowed as
+#### `&str`, and grown by another's.
+use std::text::{String};
+fn greet(s: &str) -> Int { say(show(s)); s.len() }
+fn main() -> Int {
+    let t: &str = "héllo";
+    let mut owned = String::from_str("ab");
+    String::push_str(&mut owned, "cdé");
+    let n = greet(String::as_str(&owned));
+    greet(t) * 100 + greet("abc") * 10 + n + (if(t == "héllo") { 1000 } else { 0 })
+}
+#### expect
+abcdé
+héllo
+abc
+1636

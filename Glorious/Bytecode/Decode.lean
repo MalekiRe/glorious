@@ -186,6 +186,7 @@ def memOp : Bytes → Option (MemOp × Bytes)
   | 15 :: bs => some (.sizeOf, bs)
   | 16 :: bs => some (.alignOf, bs)
   | 17 :: bs => some (.deref, bs)
+  | 18 :: bs => some (.staticAt, bs)
   | 10 :: bs => (lay bs).map fun (l, bs) => (.loadL l, bs)
   | 11 :: bs => (lay bs).map fun (l, bs) => (.storeL l, bs)
   | 12 :: bs => (lay bs).map fun (l, bs) => (.swapL l, bs)
@@ -294,7 +295,10 @@ def program (bs : Bytes) : Option Program :=
     match code rest with
     | some (main, rest) =>
       match list pair rest with
-      | some (drops, []) => some ⟨fns.toArray, main, drops, #[]⟩
+      | some (drops, rest) =>
+        match list (list nat) rest with
+        | some (statics, []) => some ⟨fns.toArray, main, drops, #[], statics⟩
+        | _ => none
       | _ => none
     | none => none
   | none => none

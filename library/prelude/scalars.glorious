@@ -211,6 +211,69 @@ fn ptr_at<T>(address: usize) -> *const T { Ptr(address) }
 // alignment: as the type is laid out, which the program's types say.
 // (Of a `*mut T`: what its `T` is, the program's types say, where an
 // address made from it is a `*mut` of anything.)
+// Text borrowed, `&'a str`: so many bytes of UTF-8 at an address, there for
+// as long as `'a`.
+struct StrRef<'a> { at: usize, len: Int, life: &'a () }
+// So many bytes of text at an address, borrowed for as long as the caller
+// says: the caller's to get right.
+unsafe fn str_at<'a>(at: usize, len: Int) -> &'a str { StrRef { at: at, len: len, life: transmute(at) } }
+impl<'a> StrRef<'a> {
+    // How many bytes.
+    fn len(s: &Self) -> Int { s.len }
+    fn is_empty(s: &Self) -> Bool { int_eq(s.len, 0) == 1 }
+    // The byte at a place, which is there.
+    fn byte(s: &Self, i: Int) -> u8 { u8_of(unsafe { ptr_read(usize_of(int_add(usize_bits(s.at), i)), -8) }) }
+    // Where its bytes are.
+    fn address(s: &Self) -> usize { s.at }
+}
+// The characters UTF-8 bytes from a place on are, as a `Str`; `rest` after.
+fn str_chars(s: &StrRef, i: Int, out: Str) -> Str {
+    match(int_lt(i, 0)) {
+        0 => out,
+        _ => tail str_chars(s, int_sub(i, 1), StrChar(str_char_at(s, i), out))
+    }
+}
+fn str_char_at(s: &StrRef, i: Int) -> char { char_of(u8_bits(StrRef::byte(s, i))) }
+impl<'a> Show for StrRef<'a> {
+    fn show(s: StrRef<'a>) -> Str { str_decode(&s, 0, StrEnd) }
+}
+// The text's characters, decoded from UTF-8 from a place on, before `rest`
+// reversed and then put back in order.
+fn str_decode(s: &StrRef, i: Int, back: Str) -> Str {
+    match(int_lt(i, s.len)) {
+        0 => str_reversed(back, StrEnd),
+        _ =>
+            let b0 = u8_bits(StrRef::byte(s, i));
+            let (code, n) = match(int_lt(b0, 128)) {
+                1 => (b0, 1),
+                _ => match(int_lt(b0, 224)) {
+                    1 => (int_add(int_mul(int_sub(b0, 192), 64), int_sub(u8_bits(StrRef::byte(s, int_add(i, 1))), 128)), 2),
+                    _ => match(int_lt(b0, 240)) {
+                        1 => (int_add(int_mul(int_add(int_mul(int_sub(b0, 224), 64), int_sub(u8_bits(StrRef::byte(s, int_add(i, 1))), 128)), 64),
+                              int_sub(u8_bits(StrRef::byte(s, int_add(i, 2))), 128)), 3),
+                        _ => (int_add(int_mul(int_add(int_mul(int_add(int_mul(int_sub(b0, 240), 64), int_sub(u8_bits(StrRef::byte(s, int_add(i, 1))), 128)), 64),
+                              int_sub(u8_bits(StrRef::byte(s, int_add(i, 2))), 128)), 64), int_sub(u8_bits(StrRef::byte(s, int_add(i, 3))), 128)), 4)
+                    }
+                }
+            };
+            tail str_decode(s, int_add(i, n), StrChar(char_of(code), back))
+    }
+}
+fn str_reversed(a: Str, out: Str) -> Str {
+    match(a) { StrEnd => out, StrChar(c, rest) => tail str_reversed(rest, StrChar(c, out)) }
+}
+// Two texts are equal where their bytes are.
+impl<'a> Eq for StrRef<'a> {
+    fn ==(a: StrRef<'a>, b: StrRef<'a>) -> Bool {
+        match(int_eq(a.len, b.len)) { 0 => false, _ => str_same(&a, &b, 0) }
+    }
+}
+fn str_same(a: &StrRef, b: &StrRef, i: Int) -> Bool {
+    match(int_lt(i, a.len)) {
+        0 => true,
+        _ => match(int_eq(u8_bits(StrRef::byte(a, i)), u8_bits(StrRef::byte(b, i)))) { 0 => false, _ => tail str_same(a, b, int_add(i, 1)) }
+    }
+}
 #[intrinsic] fn size_of_at<T>(p: *mut T) -> usize;
 #[intrinsic] fn align_of_at<T>(p: *mut T) -> usize;
 // A `T` at an address, as a reference for as long as the caller says, for a

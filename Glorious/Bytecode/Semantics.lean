@@ -264,7 +264,7 @@ def step (p : Program) (s : State) : Step State Value :=
   -- A host operation is a step of the program in its world; see `stepIO`.
   | some (.host _ _) => .stuck
 
-def init (p : Program) : State := ⟨p.main, 0, [], [], { conts := [], labels := 0, cells := #[] }⟩
+def init (p : Program) : State := ⟨p.main, 0, [], [], { conts := [], labels := 0, cells := #[], mem := .withStatics p.statics }⟩
 
 /-- A machine state together with the world outside the program. -/
 structure Config where

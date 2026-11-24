@@ -26,6 +26,8 @@ structure Memory where
   blocks : Std.HashMap Nat Nat := {}
   /-- Where the next block may start. -/
   next : Nat := memBase
+  /-- Where each of the program's static blocks is (`MemOp.staticAt`). -/
+  statics : Array Nat := #[]
 
 namespace Memory
 
@@ -49,7 +51,14 @@ def alloc (m : Memory) (size align : Nat) : Nat × Memory :=
   let align := max align 1
   let addr := (m.next + align - 1) / align * align
   let bytes := (List.range size).foldl (fun b i => b.insert (addr + i) 0) m.bytes
-  (addr, { bytes, blocks := m.blocks.insert addr size, next := addr + max size 1 })
+  (addr, { m with bytes, blocks := m.blocks.insert addr size, next := addr + max size 1 })
+
+/-- Memory with the program's static blocks in it, each its bytes. -/
+def withStatics (blocks : List (List Nat)) : Memory :=
+  blocks.foldl (fun m bs =>
+    let (addr, m) := m.alloc bs.length 1
+    let m := bs.zipIdx.foldl (fun m (b, i) => (m.write (addr + i) 1 b).getD m) m
+    { m with statics := m.statics.push addr }) {}
 
 /-- The block that starts at `addr`, freed; none if no live block starts there. -/
 def free (m : Memory) (addr : Nat) : Option Memory := do

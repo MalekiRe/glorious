@@ -658,7 +658,7 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
       | .readBits, [a, w] => do addr a; int w; pure .int
       | .writeBits, [a, w, v] => do addr a; int w; int v; pure .unit
       | .copy, [a, b, n] => do addr a; addr b; addr n; pure .unit
-      | .sizeOf, [_] | .alignOf, [_] => pure (.scalar (-64))
+      | .sizeOf, [_] | .alignOf, [_] | .staticAt, _ => pure (.scalar (-64))
       | .deref, [p, a, _] =>
         match args with
         | [_, _, .int tag] => do

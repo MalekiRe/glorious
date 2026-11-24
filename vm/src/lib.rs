@@ -199,6 +199,8 @@ enum MemOp {
     SizeOf,
     AlignOf,
     Deref,
+    /// Where the program's static block `i` is.
+    StaticAt,
     /// Those of a reference that is an address, of a value laid out so.
     LoadL(Rc<Lay>),
     StoreL(Rc<Lay>),
@@ -539,6 +541,7 @@ impl Reader<'_> {
                     15 => MemOp::SizeOf,
                     16 => MemOp::AlignOf,
                     17 => MemOp::Deref,
+                    18 => MemOp::StaticAt,
                     10 => MemOp::LoadL(Rc::new(self.lay()?)),
                     11 => MemOp::StoreL(Rc::new(self.lay()?)),
                     12 => MemOp::SwapL(Rc::new(self.lay()?)),
@@ -836,13 +839,34 @@ struct Program {
     drops: HashMap<usize, usize>,
     /// Each function's name, by its index.
     fn_names: Vec<String>,
+    /// The bytes the program has from its start, each block's, and where
+    /// each was put in memory when the program was read.
+    statics: Vec<Vec<u8>>,
+    static_at: Vec<usize>,
+}
+
+/// The program's static blocks put in memory, each in a block of its own
+/// that is never freed: where each is.
+fn place_statics(statics: &[Vec<u8>]) -> Vec<usize> {
+    statics
+        .iter()
+        .map(|b| {
+            let layout = std::alloc::Layout::from_size_align(b.len().max(1), 1).expect("a static block");
+            // SAFETY: the layout's size is not zero.
+            let at = unsafe { std::alloc::alloc_zeroed(layout) };
+            // SAFETY: the block has room for the bytes.
+            unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), at, b.len()) };
+            blocks().insert(at as usize, layout);
+            at as usize
+        })
+        .collect()
 }
 
 fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
     if bytes.len() < 5 || &bytes[..4] != b"GLBC" {
         return Err("not a Glorious bytecode file".into());
     }
-    if bytes[4] != 7 {
+    if bytes[4] != 8 {
         return Err(format!("unsupported bytecode version {}", bytes[4]));
     }
     let mut r = Reader { bytes, pos: 5 };
@@ -860,6 +884,8 @@ fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
         // As `List.lookup`: the first entry for a function is the one used.
         drops.entry(f).or_insert(d);
     }
+    let statics: Vec<Vec<u8>> = r.list(|r: &mut Reader| r.list(|r: &mut Reader| Ok(r.nat()? as u8)))?;
+    let static_at = place_statics(&statics);
     for code in &mut codes {
         mark_takes(code, None);
     }
@@ -879,7 +905,7 @@ fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
         return Err("trailing bytes after the program".into());
     }
     let main = codes.len() - 1;
-    let mut program = Program { names, fn_names, codes, starts, main, drops };
+    let mut program = Program { names, fn_names, codes, starts, main, drops, statics, static_at };
     if rewrite {
         opt::optimise(&mut program);
     }
@@ -1309,6 +1335,8 @@ pub struct Vm {
     pool: Vec<Vec<Value>>,
     /// For each function whose closures say how they are destroyed, the
     /// function that destroys what one captured.
+    /// Where each of the program's static blocks is.
+    static_at: Rc<Vec<usize>>,
     drops: Rc<HashMap<usize, usize>>,
     /// The cells every machine of the program shares.
     heap: Rc<Heap>,
@@ -1524,6 +1552,8 @@ impl Vm {
                 }
             }
             (Lay::Addr, Value::Ref(a, p)) if steps(&p).is_empty() => write_at(at, 8, a as u128),
+            // (An address made a reference, `transmute`: the address.)
+            (Lay::Addr, Value::Int(a)) => write_at(at, 8, a as u128),
             // (A reference into a value the machine holds is held, its id
             // written with the top bit set.)
             (Lay::Addr, v) => {
@@ -1649,6 +1679,10 @@ impl Vm {
             args[0] = Value::Ref(a, None);
         }
         match (op, args.as_mut_slice()) {
+            (MemOp::StaticAt, [Value::Int(i)]) => {
+                let at = self.static_at.get(usize::try_from(*i).map_err(|_| Stop::Wrong)?).ok_or(Stop::Wrong)?;
+                Ok(Value::Int(*at as i128))
+            }
             // A reference into a value the machine holds: the address of its
             // id, and a path into it.
             (MemOp::LoadL(_), [Value::Ref(a, p)]) if !steps(p).is_empty() => {
@@ -2448,6 +2482,7 @@ fn machine(program: Program, input: VecDeque<i64>) -> Vm {
         stop: None,
         pool: Vec::new(),
         drops: Rc::new(program.drops),
+        static_at: Rc::new(program.static_at),
         heap: Rc::new(Heap::new()),
     }
 }
@@ -2473,6 +2508,7 @@ fn sibling(vm: &Vm) -> Vm {
         stop: None,
         pool: Vec::new(),
         drops: Rc::clone(&vm.drops),
+        static_at: Rc::clone(&vm.static_at),
         heap: Rc::clone(&vm.heap),
         shared_names: Rc::clone(&vm.shared_names),
     }

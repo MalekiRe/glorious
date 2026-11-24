@@ -114,5 +114,46 @@ structure Program where
   /-- Each function's name, by its index: what a program is told of a
   callable of its own (`Host.call` 9). -/
   names : Array String := #[]
+  /-- Bytes the program has from its start, each in a block of its own that
+  is never freed (`MemOp.staticAt`): its text literals. -/
+  statics : List (List Nat) := []
+
+/-- Each static operation that has its bytes written out (`MemOp.staticAt`,
+as the elaborator writes it) made one of a block of the program's, the same
+bytes one block: what a compile that took a function from an earlier one
+makes alike. -/
+partial def Program.internStatics (p : Program) : Program := Id.run do
+  let mut table : List (List Nat) := p.statics
+  let rec go (table : List (List Nat)) : Tm → Tm × List (List Nat)
+    | .mem .staticAt args body =>
+      let bytes := args.filterMap fun a => match a with | .int b => some b.toNat | _ => none
+      let (table, i) := match table.idxOf? bytes with
+        | some i => (table, i)
+        | none => (table ++ [bytes], table.length)
+      let (body, table) := go table body
+      (.mem .staticAt [.int i] body, table)
+    | .let_ rhs body => let (b, t) := go table body; (.let_ rhs b, t)
+    | .call f args body => let (b, t) := go table body; (.call f args b, t)
+    | .handle ret ops caps thunk body => let (b, t) := go table body; (.handle ret ops caps thunk b, t)
+    | .perform op args body => let (b, t) := go table body; (.perform op args b, t)
+    | .label thunk body => let (b, t) := go table body; (.label thunk b, t)
+    | .guard c thunk body => let (b, t) := go table body; (.guard c thunk b, t)
+    | .cancel k body => let (b, t) := go table body; (.cancel k b, t)
+    | .cell i thunk body => let (b, t) := go table body; (.cell i thunk b, t)
+    | .cellL l i thunk body => let (b, t) := go table body; (.cellL l i thunk b, t)
+    | .lend u r thunk pre post body => let (b, t) := go table body; (.lend u r thunk pre post b, t)
+    | .mem op args body => let (b, t) := go table body; (.mem op args b, t)
+    | .host id args body => let (b, t) := go table body; (.host id args b, t)
+    | tm => (tm, table)
+  let mut fns : Array Fn := #[]
+  for F in p.fns do
+    let mut clauses : List Clause := []
+    for c in F.clauses do
+      let (body, t) := go table c.body
+      table := t
+      clauses := clauses ++ [{ c with body }]
+    fns := fns.push { F with clauses }
+  let (main, t) := go table p.main
+  pure { p with fns, main, statics := t }
 
 end Glorious.Core

@@ -905,6 +905,14 @@ def scalarLiterals (b : Blocks) (items : List Syntax.Item) : List Syntax.Item :=
     if !owners.contains name then body else
     let rw : Flat.FRewrite :=
       { onExpr := fun _ body e => (b.scalarLits[(name, e)]?).map fun t => do
+          -- (A text where `&str` is wanted: its UTF-8 bytes, from the
+          -- program's start, borrowed.)
+          if t == "%text" then
+            let bytes := (String.ofList (((body.textCodes e).getD []).map Char.ofNat)).toUTF8.toList
+            let at_ ← Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none "static_bytes"))
+              (← bytes.toArray.mapM fun b => Flat.pushExpr (.int b.toNat)))
+            return ← Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none "str_at"))
+              #[at_, ← Flat.pushExpr (.int bytes.length)])
           let lit ← Flat.pushExpr (body.expr e)
           Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none s!"{t}_of")) #[lit]) }
     rw.body body) item

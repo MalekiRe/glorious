@@ -76,5 +76,7 @@ structure Program where
   drops : List (Nat × Nat) := []
   /-- As Core's: each function's name, by its index. -/
   names : Array String := #[]
+  /-- As Core's: the bytes it has from its start. -/
+  statics : List (List Nat) := []
 
 end Glorious.Bytecode

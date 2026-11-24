@@ -86,6 +86,8 @@ partial def write (mem : Memory) (held : Held) (addr : Nat) : Lay → Value → 
     let mem ← mem.write addr 1 i
     writeAll mem held addr fs vs
   | .addr, .ref a _ [] => do pure (← mem.write addr 8 a, held)
+  -- (An address made a reference, `transmute`: the address.)
+  | .addr, .int a => do pure (← mem.write addr 8 a.toNat, held)
   -- (A reference into a value the machine holds is not an address alone:
   -- it is held, and its id written with the top bit set.)
   | .addr, v@(.ref _ _ (_ :: _)) => do

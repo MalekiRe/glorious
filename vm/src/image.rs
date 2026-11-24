@@ -67,6 +67,7 @@ fn mem_op(out: &mut Vec<u8>, op: &MemOp) {
         MemOp::SizeOf => (15, None),
         MemOp::AlignOf => (16, None),
         MemOp::Deref => (17, None),
+        MemOp::StaticAt => (18, None),
         MemOp::LoadL(l) => (10, Some(l)),
         MemOp::StoreL(l) => (11, Some(l)),
         MemOp::SwapL(l) => (12, Some(l)),
@@ -314,6 +315,13 @@ pub(crate) fn write(p: &Program) -> Vec<u8> {
         nat(&mut out, *f as u64);
         nat(&mut out, *d as u64);
     }
+    nat(&mut out, p.statics.len() as u64);
+    for b in &p.statics {
+        nat(&mut out, b.len() as u64);
+        for x in b {
+            nat(&mut out, *x as u64);
+        }
+    }
     out
 }
 
@@ -368,5 +376,7 @@ pub(crate) fn read(bytes: &[u8]) -> Decoded<Program> {
         let f = r.index()?;
         drops.insert(f, r.index()?);
     }
-    Ok(Program { names, fn_names, codes, starts, main, drops })
+    let statics: Vec<Vec<u8>> = r.list(|r| r.list(|r| Ok(r.nat()? as u8)))?;
+    let static_at = place_statics(&statics);
+    Ok(Program { names, fn_names, codes, starts, main, drops, statics, static_at })
 }

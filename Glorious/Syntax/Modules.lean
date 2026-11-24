@@ -639,6 +639,12 @@ partial def resolveType (ctx : Ctx) (generics : List String) : TypeExpr → R Ty
     let effects ← effects.mapM fun (e, args) => do
       pure ((← resolveNamed ctx .effect [] e).1, ← args.mapM (resolveType ctx generics))
     pure (.performs (← resolveType ctx generics r) effects)
+  -- `&'a str`: text borrowed, the prelude's `StrRef<'a>` (what `str` is
+  -- otherwise, where a program names its own, is that).
+  | .ref false (.name "str" []) life => do
+    if (lookupIn (ctx.of "str") .type "str").isSome then
+      return .ref false (← resolveType ctx generics (.name "str" [])) life
+    pure (.name (← resolveNamed ctx .type generics "StrRef").1 (life.toList.map (.name · [])))
   | .ref uniq t life => do pure (.ref uniq (← resolveType ctx generics t) life)
   | t => pure t
 

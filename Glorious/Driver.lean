@@ -765,6 +765,8 @@ def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
 
 /-- The program lowered by its types, where it can be: what the machines run. -/
 def Compiled.lower (c : Compiled) : Compiled :=
+  -- (The static blocks gathered first: the same for the program lowered.)
+  let c := { c with core := c.core.internStatics }
   match c.types.get.bind (Lower.program · c.core) with
   | some (core, copies) =>
     { c with core, checked := c.core, lowered := true
@@ -918,7 +920,7 @@ def compileSource (src : String) (check : Bool := true)
     | .error e => if check then throw e.msg else pure (none, [], [], #[])
   -- (Where only what the checker found is asked, that is all.)
   if lenient then
-    return { core := ⟨#[], .ret (.int 0), [], #[]⟩, ctorNames := #[], fnNames := #[], opNames := #[], checkKept := checkMade }
+    return { core := ⟨#[], .ret (.int 0), [], #[], []⟩, ctorNames := #[], fnNames := #[], opNames := #[], checkKept := checkMade }
   -- (A call of an intrinsic is the machine's operation: its declaration was
   -- the checker's alone.)
   let first := first.map fun (count, st) => ((Syntax.Item.withoutIntrinsics (all.take count)).length, st)

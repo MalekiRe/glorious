@@ -564,6 +564,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if (Syntax.packNames x).isSome then return .pack x
   if x == "c_callback" then return .host 5
   if x == Syntax.foreignCall then return .host 2
+  if x == "static_bytes" then return .host 19
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
   if x == "swap" then return .swap
@@ -977,6 +978,17 @@ def literalAt (t : Ty) (n : Int) (e : Option Nat := none) : M (Option (Option St
       else pure (some (some s!"`{n}` does not fit in `{name}`"))
     | _ => pure none
   | _ => pure none
+
+/-- A text written out where borrowed text is wanted, `&str`: its bytes, put
+where the program has them from its start (`Elab`'s `%text`). Whether it was. -/
+def textAt (t : Ty) (e : Flat.ExprId) : M Bool := do
+  match ← find t with
+  | .con name _ =>
+    if Syntax.lastSegment name != "StrRef" then return false
+    if ((← get).body.textCodes e).isNone then return false
+    modify fun s => { s with scalarLits := (s.owner, e, "%text") :: s.scalarLits }
+    pure true
+  | _ => pure false
 
 /-- The lifetimes a callable type is for every one of, if it is such a type. -/
 def rankedOf (cap : Nat) : M (List (Nat × String)) := do

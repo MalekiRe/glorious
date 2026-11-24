@@ -41,11 +41,11 @@ impl Formatter {
         let starts = if(value.fresh) { not(is_empty(text)) } else { false };
         let before = if(starts) { spaces(value.depth * value.width, "") } else { "" };
         value.fresh = if(starts) { false } else { value.fresh };
-        String::push_str(&mut value.text, before ++ text);
+        String::push_text(&mut value.text, before ++ text);
     }
     pub fn write_char(value: &mut Self, character: char) { Formatter::write_str(value, show(character)) }
     pub fn newline(value: &mut Self) {
-        String::push_str(&mut value.text, "\n");
+        String::push_text(&mut value.text, "\n");
         value.fresh = true;
     }
     pub fn indent(value: &mut Self) -> Result<(), FormatError> {

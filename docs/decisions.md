@@ -422,6 +422,19 @@ a loop's body, with the prelude's array `push`), and `v[i].f` reads `v[i]`
 whole: three tests write `Vec::push(&mut v, x)` and a `let` of `&v[i]` for
 now. Both go with the arrays.
 
+**Text as bytes** (decision, user: staged, `Str` kept until the library
+and the tests are moved). A program has static blocks of bytes from its
+start (`Core.Program.statics`, never freed; `static_bytes(..)` written out,
+`MemOp.staticAt`), the same bytes one block. `&'a str` is the prelude's
+`StrRef<'a>`: so many UTF-8 bytes at an address (`str_at`), with `len`,
+`byte`, `==` and `show` (to a `Str`). Text written where `&str` is wanted,
+an argument, a `let` of that type or a body's result, is its bytes in a
+static block (`Check.textAt`, `"%text"` among the literals the elaborator
+is told of). `String` is a `Vec<u8>`, with `from_str`, `push_str` and
+`as_str` of `&str`, as Rust has them, and `from_text`, `push_text` of a
+`Str` meanwhile. Next: the library's text functions over `&str` and
+`String`, then `Str` gone.
+
 Stage 2 so far: `Repr` (the prelude's) writes a value to memory and reads
 it back, `repr_store` and `repr_load`, both `unsafe fn` (a trait's
 `unsafe fn` is called only in `unsafe`). `Int`'s and each scalar's are its

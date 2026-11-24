@@ -225,6 +225,8 @@ inductive MemOp where
   tag of the pointer type's constructor, for its type. What the typed
   lowering makes the address. -/
   | deref
+  /-- Where the program's static block `i` is. -/
+  | staticAt
   /-- `load`, `store`, `swap`, `tag` and `focus` of a reference that is an
   address (a cell of memory, `Tm.cellL`), of a value laid out so (the
   typed lowering's). -/
@@ -253,6 +255,7 @@ abbrev Cells := Array (Option Value)
 /-- Perform an operation on memory by address: its result and the memory
 afterwards. -/
 def MemOp.evalBytes (m : Memory) : MemOp → List Value → Option (Value × Memory)
+  | .staticAt, [.int i] => do pure (.int (← m.statics[i.toNat]?), m)
   | .alloc, [.int size, .int align] =>
     if 0 ≤ size ∧ 0 < align then
       let (addr, m) := m.alloc size.toNat align.toNat
@@ -299,7 +302,7 @@ def Lay.tagAt (m : Memory) (addr : Nat) : Lay → Option Nat
 def MemOp.name : MemOp → String
   | .load => "load" | .store => "store" | .swap => "swap" | .tag => "tag" | .focus => "focus"
   | .alloc => "alloc" | .free => "free" | .readBits => "read" | .writeBits => "write"
-  | .copy => "copy" | .sizeOf => "size" | .alignOf => "align" | .deref => "deref"
+  | .copy => "copy" | .sizeOf => "size" | .alignOf => "align" | .deref => "deref" | .staticAt => "static"
   | .loadL l => s!"load as {l.show}" | .storeL l => s!"store as {l.show}"
   | .swapL l => s!"swap as {l.show}" | .tagL l => s!"tag as {l.show}" | .focusL l => s!"focus as {l.show}"
 

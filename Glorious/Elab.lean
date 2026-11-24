@@ -168,6 +168,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if (Syntax.packNames x).isSome then return .pack
   if let some (id, n) := hosts.lookup x then return .host id n
   if x == Syntax.foreignCall then return .host 2 0
+  if x == "static_bytes" then return .host 19 0
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
   if x == "swap" then return .swap
@@ -505,12 +506,18 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
       | _, _ => throw s!"intrinsic `{x}` takes 1 argument, but is given {args.size}"
     | .host id n => do
       if isTail then throw s!"`tail` applies to calls, not to the host operation `{x}`"
-      if n != args.size && id != 2 then
+      if n != args.size && id != 2 && id != 19 then
         throw s!"host operation `{x}` takes {n} arguments, but is given {args.size}"
       let atoms ← elabArgs scope args
       -- What is unsafe is outside what Core's rules are about.
       if id ≥ 2 then modify fun s => { s with foreign := true }
       -- (Memory by address is the machine's, not the host's.)
+      -- (Bytes the program has from its start, written out: put in its
+      -- static blocks once it is elaborated, `Core.Program.internStatics`.)
+      if id == 19 then
+        unless atoms.all (fun a => match a with | .int b => 0 ≤ b && b < 256 | _ => false) do
+          throw "`static_bytes` takes the bytes, each written out"
+        return ← emit (.mem .staticAt atoms)
       match memOfHost id with
       | some .deref =>
         -- (With the pointer type's constructor, for the type it points to.)
@@ -2091,7 +2098,7 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
     for (name, info) in g.ops do
       out := out.set! info.id name
     pure out
-  pure ⟨⟨st.fns, .let_ (.closure mainIdx []) (.tail (.var 0) []), st.drops.reverse, fns.toArray.map (·.1)⟩, names, st.names,
+  pure ⟨⟨st.fns, .let_ (.closure mainIdx []) (.tail (.var 0) []), st.drops.reverse, fns.toArray.map (·.1), []⟩, names, st.names,
     opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign, st.under, st.twoWays,
     st.siteOwners, st.fnSites, made⟩
 

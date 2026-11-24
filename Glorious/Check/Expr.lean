@@ -511,6 +511,8 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
   -- A whole number written where a type of whole numbers is wanted is of it.
   if let .int n := b.expr a then
     if let some fits ← literalAt p n a then return fits.map fun e => s!"{what}: {e}"
+  -- A text written where `&str` is wanted is one.
+  if ← textAt p a then return none
   -- A block where what is wanted is known and is no callable: it is run
   -- there, and is its value (5.4).
   if let some (id, _) := b.plainBlock a then
@@ -1068,8 +1070,13 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
     pure (.con name ts)
   | .host id => do
     -- (The host's operations are declared in the prelude, each with its
-    -- type, but for these two: a foreign function's call, of however many
-    -- whole numbers, and a callable given to C.)
+    -- type, but for these three: bytes the program has from its start, a
+    -- foreign function's call, of however many whole numbers, and a
+    -- callable given to C.)
+    if id == 19 then
+      -- The address of a block of these bytes, written out.
+      checkArgs scope amb s!"`{x}`" (args.toList.map fun _ => Ty.int) args call
+      return .con "usize" []
     let s ← get
     unless s.unsafeBlock || s.unsafeFns.contains s.owner do
       throw s!"`{x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
@@ -1358,6 +1365,7 @@ partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
       return some t
     if mark == Syntax.ascribeMark then
       let expected ← resolveType (← get).rigidParams false (TypeExpr.ofExpr (Flat.treeExpr b ty))
+      if ← textAt expected value then return some expected
       if let .int n := b.expr value then
         match ← literalAt expected n value with
         | some none => return some expected
@@ -1834,6 +1842,9 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
         if let .con n [] ← find expected then
           if Syntax.isScalar n then
             modify fun s => { s with wantResult := some (id, expected) }
+      -- A text a body ends with, where `&str` is wanted of the body.
+      if let some (expected, _) := want then
+        if ← textAt expected e then return expected
       -- A whole number a body ends with is of the type wanted of the body.
       if let (.int n, some (expected, _)) := (b.expr e, want) then
         match ← literalAt expected n e with

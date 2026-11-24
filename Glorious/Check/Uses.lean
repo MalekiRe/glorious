@@ -256,7 +256,7 @@ structure ACtx where
 /-- What only computes: the machine's own operations and what builds a value. -/
 def intrinsics : Std.HashSet String :=
   Std.HashSet.ofList (Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1)
-    ++ ["cancel", "replace", "swap", "overwrite", "read_out", "transmute", Syntax.foreignCall, Syntax.ctorIsMark, "%shapes", "%never"])
+    ++ ["cancel", "replace", "swap", "overwrite", "read_out", "transmute", "static_bytes", Syntax.foreignCall, Syntax.ctorIsMark, "%shapes", "%never"])
 
 /-- Where a path that ends at a call of a `probe` is said to leave to. -/
 def probeTarget : String := "%probe"

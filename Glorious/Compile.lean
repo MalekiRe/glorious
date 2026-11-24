@@ -108,6 +108,6 @@ def compileClauses (base : Nat) : List Core.Clause → Code
 
 def compileFn (f : Core.Fn) : Bytecode.Fn := ⟨compileClauses 0 f.clauses⟩
 
-def compile (p : Core.Program) : Bytecode.Program := ⟨p.fns.map compileFn, compileTm p.main, p.drops, p.names⟩
+def compile (p : Core.Program) : Bytecode.Program := ⟨p.fns.map compileFn, compileTm p.main, p.drops, p.names, p.statics⟩
 
 end Glorious
