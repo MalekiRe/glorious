@@ -15729,3 +15729,19 @@ fn main() -> Int { let e: [File; 2] = [File(20), File(21)]; 0 }
 21
 20
 0
+#### case
+#### A function generic in what a `Vec` holds, at two kinds of it: each
+#### copy laid out as its own, what is left of its iterator destroyed.
+use std::iterator::{next};
+use std::vec::{Vec};
+struct D { n: Int }
+impl Drop for D { fn drop(d: &mut D) { say(d.n) } }
+fn apply<S>(v: Vec<S>) -> Int {
+    let mut each = Vec::into_iter(v);
+    match(next(&mut each)) { Some(_) => 1, None => 0 }
+}
+fn main() -> Int { let mut a = Vec::new(); Vec::push(&mut a, D { n: 4 }); Vec::push(&mut a, D { n: 5 }); let mut b = Vec::new(); Vec::push(&mut b, 1); Vec::push(&mut b, 2); apply(a) + apply(b) }
+#### expect
+4
+5
+2

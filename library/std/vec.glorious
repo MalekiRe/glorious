@@ -206,6 +206,10 @@ unsafe fn forget<T>(value: T) { let _: VecParts<()> = transmute(value); () }
 
 // What a `Vec` is, taken apart without its elements being destroyed.
 struct VecParts<T> { at: *mut T, cap: Int, len: Int }
+// A `Vec` taken apart, which nothing destroys; read field by field, so that
+// what it holds is the type its parts point to.
+fn parts_of<T>(value: Vec<T>) -> VecParts<T> { let parts = parts_at(&value); unsafe { forget(value) }; parts }
+fn parts_at<T>(v: &Vec<T>) -> VecParts<T> { VecParts { at: v.at, cap: v.cap, len: v.len } }
 
 // How many bytes one element takes.
 fn elem_size<T>(v: &Vec<T>) -> Int { usize_bits(size_of_at(v.at)) }
@@ -315,7 +319,7 @@ impl<T> Vec<T> {
         v
     }
     pub fn into_array(value: Self) -> [T] where T: Use<[1, 1]> {
-        let parts: VecParts<T> = unsafe { transmute(value) };
+        let parts = parts_of(value);
         let v = Vec { at: parts.at, cap: 0, len: 0 };
         let mut out = [];
         let mut i = 0;
@@ -479,16 +483,15 @@ impl<T> Vec<T> {
         value.len = kept
     }
     pub fn into_iter(value: Self) -> IntoIter<T> {
-        let parts: VecParts<T> = unsafe { transmute(value) };
+        let parts = parts_of(value);
         IntoIter { at: parts.at, cap: parts.cap, len: parts.len, next: 0 }
     }
     pub fn finish_empty(value: Self) -> Result<(), Self> {
-        // (Taken apart, which nothing destroys, so that either way can have it.)
-        let parts: VecParts<T> = unsafe { transmute(value) };
+        let parts = parts_of(value);
         if(parts.len == 0) {
             if(parts.cap > 0) { unsafe { mem_free(ptr_mut_address(parts.at)) } } else { () };
             Ok(())
-        } else { Err(unsafe { transmute(parts) }) }
+        } else { Err(Vec { at: parts.at, cap: parts.cap, len: parts.len }) }
     }
     // Is a value equal to one of the elements?
     pub fn contains(value: &Self, item: &T) -> Bool where T: Eq, T: Use<[0, *]> {
