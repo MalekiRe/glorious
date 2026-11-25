@@ -90,25 +90,6 @@ structure Uses where
   base : Array Nat
   total : Nat
 
-/-- The functions a computation uses, each made `f` of itself. -/
-def _root_.Glorious.Core.Tm.mapFns (f : Nat → Nat) : Tm → Tm
-  | .let_ (.closure fn cs) b => .let_ (.closure (f fn) cs) (b.mapFns f)
-  | .let_ (.rebind a fn) b => .let_ (.rebind a (f fn)) (b.mapFns f)
-  | .let_ r b => .let_ r (b.mapFns f)
-  | .handle ret ops cs t b => .handle (f ret) (ops.map fun (o, g) => (o, f g)) cs t (b.mapFns f)
-  | .handleTail ret ops cs t => .handleTail (f ret) (ops.map fun (o, g) => (o, f g)) cs t
-  | .call g as b => .call g as (b.mapFns f)
-  | .perform o as b => .perform o as (b.mapFns f)
-  | .label t b => .label t (b.mapFns f)
-  | .guard c t b => .guard c t (b.mapFns f)
-  | .cancel k b => .cancel k (b.mapFns f)
-  | .cell i t b => .cell i t (b.mapFns f)
-  | .cellL l i t b => .cellL l i t (b.mapFns f)
-  | .lend u r t pre post b => .lend u r t pre post (b.mapFns f)
-  | .mem op as b => .mem op as (b.mapFns f)
-  | .host id as b => .host id as (b.mapFns f)
-  | t => t
-
 /-- Whether a computation uses a function `p` says. -/
 def _root_.Glorious.Core.Tm.anyFn (p : Nat → Bool) : Tm → Bool
   | .let_ (.closure fn _) b | .let_ (.rebind _ fn) b => p fn || b.anyFn p

@@ -156,4 +156,41 @@ partial def Program.internStatics (p : Program) : Program := Id.run do
   let (main, t) := go table p.main
   pure { p with fns, main, statics := t }
 
+/-- The functions a computation uses, each made `f` of itself. -/
+def Tm.mapFns (f : Nat → Nat) : Tm → Tm
+  | .let_ (.closure fn cs) b => .let_ (.closure (f fn) cs) (b.mapFns f)
+  | .let_ (.rebind a fn) b => .let_ (.rebind a (f fn)) (b.mapFns f)
+  | .let_ r b => .let_ r (b.mapFns f)
+  | .handle back ops cs t b => .handle (f back) (ops.map fun (o, g) => (o, f g)) cs t (b.mapFns f)
+  | .handleTail back ops cs t => .handleTail (f back) (ops.map fun (o, g) => (o, f g)) cs t
+  | .call g as b => .call g as (b.mapFns f)
+  | .perform o as b => .perform o as (b.mapFns f)
+  | .label t b => .label t (b.mapFns f)
+  | .guard c t b => .guard c t (b.mapFns f)
+  | .cancel k b => .cancel k (b.mapFns f)
+  | .cell i t b => .cell i t (b.mapFns f)
+  | .cellL l i t b => .cellL l i t (b.mapFns f)
+  | .lend u r t pre post b => .lend u r t pre post (b.mapFns f)
+  | .mem op as b => .mem op as (b.mapFns f)
+  | .host id as b => .host id as (b.mapFns f)
+  | t => t
+
+/-- The blocks of bytes a computation names (`MemOp.staticAt`), each made
+`f` of itself. -/
+def Tm.mapStatics (f : Int → Int) : Tm → Tm
+  | .mem .staticAt [.int i] b => .mem .staticAt [.int (f i)] (b.mapStatics f)
+  | .let_ r b => .let_ r (b.mapStatics f)
+  | .handle back ops cs t b => .handle back ops cs t (b.mapStatics f)
+  | .call g as b => .call g as (b.mapStatics f)
+  | .perform o as b => .perform o as (b.mapStatics f)
+  | .label t b => .label t (b.mapStatics f)
+  | .guard c t b => .guard c t (b.mapStatics f)
+  | .cancel k b => .cancel k (b.mapStatics f)
+  | .cell i t b => .cell i t (b.mapStatics f)
+  | .cellL l i t b => .cellL l i t (b.mapStatics f)
+  | .lend u r t pre post b => .lend u r t pre post (b.mapStatics f)
+  | .mem op as b => .mem op as (b.mapStatics f)
+  | .host id as b => .host id as (b.mapStatics f)
+  | t => t
+
 end Glorious.Core

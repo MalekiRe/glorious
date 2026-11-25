@@ -264,6 +264,16 @@ structure Frozen where
   are given is known. -/
   waiting : List (List ITy × List ITy × Nat) := []
 
+/-- A scheme with each function it names, as a member, a use or where a
+question was found, named otherwise (`St.sids`): none where one is not. -/
+def Scheme.relink (sch : Scheme) (f : Nat → Option Nat) : Option Scheme := do
+  let incl := fun (c : Incl) => do pure { c with fn := ← f c.fn }
+  pure { sch with
+    members := ← sch.members.mapM fun m => do
+      pure { m with fn := ← f m.fn, refs := ← m.refs.mapM fun (g, s) => do pure (← f g, s) }
+    incls := ← sch.incls.mapM incl
+    exported := ← sch.exported.mapM incl }
+
 /-- What a kept scheme is, to the groups that use it: two that are the same
 give the same hash. -/
 def Frozen.face (fz : Frozen) : UInt64 :=
@@ -440,6 +450,10 @@ structure St where
   each function is made of and what is known of it, each group's functions
   and the groups outside it they refer to, and what the program declares. -/
   keyed : Bool := false
+  /-- Each function as another compile knows it, whatever place it has
+  there: its name, and which of those of the name it is; and back. -/
+  sids : Array UInt64 := #[]
+  bySid : Std.HashMap UInt64 Nat := {}
   ownKeys : Array UInt64 := #[]
   members : Std.HashMap Nat (List Nat) := {}
   outside : Std.HashMap Nat (List Nat) := {}

@@ -106,17 +106,20 @@ and what each group it refers to shows those that use it (`faceOf`), so that
 a change to a function that leaves its scheme as it was keys none of the
 groups that use it anew. Zero where nothing is keyed. -/
 partial def groupKeyOf (scc : Nat) : M UInt64 := do
-  let s ← get
-  if !s.keyed then return 0
-  if let some k := s.groupKeys[scc]? then return k
-  let ms := s.members.getD scc [scc]
-  let mut k := ms.foldl (fun h f => mixHash h ((s.ownKeys[f]?).getD 0)) s.keyBase
-  for g in s.outside.getD scc [] do
+  -- (Nothing of the state held past where it is changed: the maps it
+  -- changes would be copied whole, each time.)
+  if !(← get).keyed then return 0
+  if let some k := (← get).groupKeys[scc]? then return k
+  let ms := (← get).members.getD scc [scc]
+  let own := (← get).ownKeys
+  let mut k := ms.foldl (fun h f => mixHash h ((own[f]?).getD 0)) (← get).keyBase
+  for g in (← get).outside.getD scc [] do
     k := mixHash k (← faceOf g)
+  let sids := (← get).sids
   modify fun s =>
     { s with
       groupKeys := s.groupKeys.insert scc k
-      byKey := ms.zipIdx.foldl (fun m (f, i) => m.insert (mixHash k (hash (i, f))) f) s.byKey }
+      byKey := ms.foldl (fun m f => m.insert (mixHash k ((sids[f]?).getD (hash f))) f) s.byKey }
   return k
 
 /-- The key of function `fn`: its group's, and which of the group it is. -/
@@ -124,8 +127,7 @@ partial def fnKey (fn : Nat) : M UInt64 := do
   let scc := ((← get).scc[fn]?).getD fn
   let k ← groupKeyOf scc
   if k == 0 then return 0
-  let i := (((← get).members.getD scc [scc]).idxOf fn)
-  return mixHash k (hash (i, fn))
+  return mixHash k (((← get).sids[fn]?).getD (hash fn))
 
 /-- What group `scc` shows the groups that use it: what an earlier compile
 found it to, for its key; or else of the scheme inferred now, where that can
@@ -150,9 +152,11 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   let key ← fnKey scc
   if key != 0 then
     if let some fz := (← get).frozen.get? key then
-      let sch ← thaw fz
-      modify fun s => { s with schemes := s.schemes.insert scc sch, frozenMade := s.frozenMade.push (key, fz) }
-      return sch
+      -- (Its functions by where they are in this compile.)
+      let bySid := (← get).bySid
+      if let some sch := (← thaw fz).relink fun f => bySid[(f.toUInt64)]? then
+        modify fun s => { s with schemes := s.schemes.insert scc sch, frozenMade := s.frozenMade.push (key, fz) }
+        return sch
   -- The groups it refers to, first: each then has its scheme before this one
   -- begins, and what this one makes is its own, not theirs inside it too.
   for g in (← get).outside.getD scc [] do
@@ -432,7 +436,9 @@ partial def schemeOf (scc : Nat) : M Scheme := do
         && samePrefix now.clss clss now.globalClss && samePrefix now.accs accs now.globalAccs
         && samePrefix now.closureRanks ranks waiting then
       if let some fz ← freeze sch (now.closureRanks.extract waiting now.closureRanks.size).toList then
-        modify fun s => { s with frozenMade := s.frozenMade.push (key, fz) }
+        -- (Its functions by name, `St.sids`.)
+        if let some scheme := fz.scheme.relink fun f => (now.sids[f]?).map (·.toNat) then
+          modify fun s => { s with frozenMade := s.frozenMade.push (key, { fz with scheme }) }
   pure sch
 
 /-- The signature to use for a reference to `fn`: the group's own inside its

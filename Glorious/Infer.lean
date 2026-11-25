@@ -5,6 +5,7 @@ public import Glorious.Trace
 
 public section
 
+
 namespace Glorious.Infer
 
 open Syntax
@@ -238,9 +239,39 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   let givenUpBy : Std.HashMap Nat Nat := st.givenUp.foldl (fun m (f, a) => m.insertIfNew f a) {}
   let dropsBy : Std.HashMap Nat Nat := p.drops.foldl (fun m (f, d) => m.insertIfNew f d) {}
   let anySet : Std.HashSet Nat := st.anyCallable.foldl (·.insert ·) {}
+  -- (Each function by its name, and which of those of the name it is; a
+  -- closure, which has none, by the function that first makes it and which
+  -- of what that one names it is: an edit that moves the others, `main`'s
+  -- reaching more first, keys none of them anew.)
+  let named0 : Array UInt64 := (p.names.foldl (fun (acc : Array UInt64 × Std.HashMap String Nat) nm =>
+      let k := acc.2.getD nm 0
+      (acc.1.push (hash (nm, k)), acc.2.insert nm (k + 1))) (#[], {})).1
+  let sids : Array UInt64 := Id.run do
+    let top := named0.size
+    let mut sids : Array UInt64 := named0 ++ ((List.range (st.fns.size - top)).map fun k => hash (top + k)).toArray
+    let mut known : Std.HashSet Nat := {}
+    let mut queue : Array Nat := (List.range top).toArray
+    let mut i := 0
+    while i < queue.size do
+      let f := queue[i]!
+      i := i + 1
+      -- (And what destroys a closure of it, after what it names.)
+      let refs := (((st.fns[f]?).map fun F => F.clauses.flatMap fun c => tmRefs c.body).getD [])
+        ++ (dropsBy[f]?).toList
+      for (g, j) in refs.zipIdx do
+        if top ≤ g && !known.contains g then
+          known := known.insert g
+          sids := sids.set! g (mixHash sids[f]! (hash j))
+          queue := queue.push g
+    pure sids
+  let sid := fun (f : Nat) => (sids[f]?).getD (hash f)
+  -- (And each block of bytes by its bytes, not where it is among them.)
+  let statics := p.statics.toArray
+  let named := fun (t : Core.Tm) =>
+    (t.mapFns fun g => (sid g).toNat).mapStatics fun i => (hash (statics[i.toNat]?)).toNat
   let extra := fun (f : Nat) =>
     hash (st.armFns.contains f, st.ncaps[f]?, givenUpBy[f]?, anySet.contains f,
-      dropsBy[f]?, (capBy.getD f []).mergeSort (fun (a : Nat × Nat) b => a.1 ≤ b.1))
+      (dropsBy[f]?).map sid, (capBy.getD f []).mergeSort (fun (a : Nat × Nat) b => a.1 ≤ b.1))
   -- (What closures capture and which destroy which are each function's,
   -- in `extra`: a change to one function's is not every function's.)
   let globals := hash (items.filter (fun
@@ -258,14 +289,16 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   modify fun s =>
     { s with
       keyed := !(st.memo.isEmpty && st.frozen.isEmpty && st.keptMains.isEmpty && !st.remember)
-      ownKeys := (List.range n).toArray.map fun f => mixHash (hash (st.fns[f]?.map (·.clauses))) (extra f)
+      ownKeys := (List.range n).toArray.map fun f =>
+        mixHash (hash (st.fns[f]?.map (·.clauses.map fun c => { c with body := named c.body }))) (extra f)
+      sids, bySid := sids.zipIdx.foldl (fun m (k, f) => m.insert k f) {}
       members, outside, keyBase := globals }
   let τ ← freshTy
   -- (`main`'s key, for what an earlier compile kept: what it is made of,
   -- and what each group it uses shows it, as a group's key is.)
   let mainKey ← (fun s => Trace.timed "infer: main's key" fun _ => (do
     if !(← get).keyed then pure (0 : UInt64) else do
-    let mut k := mixHash st.keyBase (hash p.main)
+    let mut k := mixHash st.keyBase (hash (named p.main))
     for g in ((tmRefs p.main).map fun f => (st.scc[f]?).getD f).eraseDups do
       k := mixHash k (← faceOf g)
     pure k : M UInt64).run s : M UInt64)
