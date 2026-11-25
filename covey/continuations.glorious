@@ -83,7 +83,7 @@ fn main() -> Int {
         app.emit(&Update);
         k = k + 1
     };
-    say(lock(&visits, fn(list: &mut Vec<Int>) -> Str { std::text::join(std::vec::map(clone(&*list), fn(n: Int) -> Str { show(n) }), " ") }));
+    say(lock(&visits, fn(list: &mut Vec<Int>) -> String { std::text::join(clone(&*list), " ") }));
     say("--");
 
     let active = AtomicInt::new(0);

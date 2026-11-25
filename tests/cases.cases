@@ -6820,7 +6820,7 @@ trait Sum { fn sum(Self) -> Int; }
 impl<B> Sum for Pair<Int, B> { fn sum(p: Pair<Int, B>) -> Int { p.a } }
 fn main() -> Int { sum(Pair { a: "no", b: "x" }) }
 #### expect
-error: 4:20: in `main`: `Sum` is implemented for `Pair<Int, Str>`, not for `Pair<Str, Str>`
+error: 4:20: in `main`: `Sum` is implemented for `Pair<Int, &str>`, not for `Pair<&str, &str>`
 #### case
 #### A loop that hands its state on, and a body run so many times.
 fn main() -> Int { loop_state((0, 0), { (state) => match(state) { (i, total) => if(i == 5) { Break(total) } else { Continue((i + 1, total + i)) } } }) }
@@ -7267,12 +7267,14 @@ Err(())
 8
 #### case
 use core::result::{as_mut};
-fn main() -> Result<Int, Str> {
-    let mut r: Result<Int, Str> = Err("no");
+fn main() -> Int {
+    let mut r: Result<Int, &'static str> = Err("no");
     match(as_mut(&mut r)) { Ok(n) => *n = 1;, Err(e) => *e = "changed"; };
-    r }
+    say_debug(r);
+    0 }
 #### expect
 Err("changed")
+0
 #### case
 use std::hash::{HashMap};
 fn main() -> Int {
@@ -7393,7 +7395,7 @@ struct Pass<I, A> { inner: I, extra: A }
 impl<I, A> Iterator for Pass<I, A> where I: Iterator<Item = A> { type Item = A; fn next(it: &mut Pass<I, A>) -> Option<A> { next(&mut it.inner) } }
 fn main() -> Int { let mut p = Pass { inner: range(0, 3), extra: "text" }; say(collect(&mut p)); 0 }
 #### expect
-error: 4:76: in `main`: `Item` of `Iterator` for `std::iterator::Range`: expected `Int`, found `Str`
+error: 4:76: in `main`: `Item` of `Iterator` for `std::iterator::Range`: expected `Int`, found `&str`
 #### case
 use core::iter::{Iterator, range, next};
 struct Pass<I, A> { inner: I, extra: A }
@@ -7672,7 +7674,7 @@ fn main() -> Int { let x = Some(4); if(x is Some(n)) { 1 } else { n } }
 error: 1:67: in `main`: unknown name `n`
 #### case
 #### Conformance L17: err post state.
-fn step(n: &mut Int) -> Result<Int, Str> { *n = *n + 1; Err("no") }
+fn step(n: &mut Int) -> Result<Int, &'static str> { *n = *n + 1; Err("no") }
 fn main() -> Int { let mut n = 0; match(step(&mut n)) { Ok(v) => v, Err(_) => n } }
 #### expect
 1
@@ -8041,7 +8043,7 @@ error: 1:35: in `main`: `a` is borrowed with `&mut` while a value this expressio
 #### case
 fn main() -> Int { let mut a = 1; let mut b = "x"; swap(&mut a, &mut b); a }
 #### expect
-error: 1:52: in `main`: argument 2 of `swap`: expected `&mut Int`, found `&mut Str`
+error: 1:52: in `main`: argument 2 of `swap`: expected `&mut Int`, found `&mut &str`
 #### case
 #### The specification's small things: `take`, `Default`, `Either`, `identity`.
 use core::value::{take, Default, Either, identity};
@@ -8877,14 +8879,14 @@ error: 5:20: in `main`: `_` lets go of a value, but a `Ticket` has to be used
 #### An implementation may give its trait arguments made of its own type parameters: it is then the trait's one implementation for the type.
 struct Wrap<T>(T)
 impl<T> From<T> for Wrap<T> { fn from(x: T) -> Wrap<T> { Wrap(x) } }
-fn main() -> Int { let w: Wrap<Int> = from(5); let s: Wrap<Str> = from("ab"); match(w) { Wrap(n) => n } + match(s) { Wrap(t) => length(t) } }
+fn main() -> Int { let w: Wrap<Int> = from(5); let s: Wrap<&str> = from("ab"); match(w) { Wrap(n) => n } + match(s) { Wrap(t) => t.len() } }
 #### expect
 7
 #### case
 trait Convert<A> { fn convert(Self) -> A }
 struct Both<A, B>(A, B)
 impl<A, B> Convert<(B, A)> for Both<A, B> { fn convert(p: Both<A, B>) -> (B, A) { match(p) { Both(a, b) => (b, a) } } }
-fn main() -> Int { match(convert(Both(1, "xy"))) { (s, n) => length(s) * 10 + n } }
+fn main() -> Int { match(convert(Both(1, "xy"))) { (s, n) => s.len() * 10 + n } }
 #### expect
 21
 #### case
@@ -8930,11 +8932,11 @@ struct Wrap<T>(T)
 impl<T> From<T> for Wrap<T> { fn from(x: T) -> Wrap<T> { Wrap(x) } }
 fn main() -> Int { let w: Wrap<Int> = from("ab"); 0 }
 #### expect
-error: 3:20: in `main`: `From` for `Wrap`: expected `Int`, found `Str`
+error: 3:20: in `main`: `From` for `Wrap`: expected `Int`, found `&str`
 #### case
 struct Wrap<T>(T)
 impl<T> From<T> for Wrap<T> { fn from(x: T) -> Wrap<T> { Wrap(x) } }
-impl From<Int> for Wrap<Str> { fn from(x: Int) -> Wrap<Str> { Wrap("n") } }
+impl From<Int> for Wrap<&'static str> { fn from(x: Int) -> Wrap<&'static str> { Wrap("n") } }
 fn main() -> Int { 0 }
 #### expect
 0
@@ -9835,17 +9837,17 @@ pub struct Armor { pub value: u8, tough: Bool }
 pub struct Hp(pub Int)
 struct Secret { code: Int }
 enum Shape { Dot, Line(Int, Int) }
-fn show_d(d: Described) -> Str {
+fn show_d(d: Described) -> String {
     match(d) {
-        NoValue => "()",
-        FlagValue(b) => if(b) { "true" } else { "false" },
-        WholeValue(n) => show(n),
-        FloatValue(_) => "float",
-        CharValue(_) => "char",
+        NoValue => String::from("()"),
+        FlagValue(b) => String::from(if(b) { "true" } else { "false" }),
+        WholeValue(n) => to_string(&n),
+        FloatValue(_) => String::from("float"),
+        CharValue(_) => String::from("char"),
         TextValue(t) => t,
-        StructValue(name, fields) => let mut each = fields.into_iter(); name ++ "{" ++ std::iterator::fold(&mut each, "", fn(out: Str, f: (Str, Described)) -> Str { let (n, v) = f; out ++ " " ++ n ++ ": " ++ show_d(v) }) ++ " }",
-        ListValue(_) => "list",
-        OpaqueValue(n) => "opaque " ++ n
+        StructValue(name, fields) => let mut each = fields.into_iter(); std::iterator::fold(&mut each, String::from(name) + "{", fn(out: String, f: (&str, Described)) -> String { let (n, v) = f; let shown = show_d(v); out + " " + n + ": " + &shown }) + " }",
+        ListValue(_) => String::from("list"),
+        OpaqueValue(n) => String::from("opaque ") + n
     }
 }
 fn main() -> Int {
@@ -10034,15 +10036,15 @@ error: 21:13: in `main`: `value` is not used on every path, but a `std::budget::
 #### A cursor, and a parser tried and repeated up to a limit (library 26.1).
 use std::parse::{Cursor, ParseStep, ParseError, attempt, many};
 
-fn digit<'a>(c: &mut Cursor<'a, char>) -> ParseStep<Int, Str> {
+fn digit<'a>(c: &mut Cursor<'a, char>) -> ParseStep<Int, &'static str> {
     match(Cursor::next(c)) {
         Some(ch) => match(std::char::digit(*ch)) { Some(n) => ParseStep::Matched(n), None => if(*ch == '!') { ParseStep::Failed("bang") } else { ParseStep::NoMatch } },
         None => ParseStep::NoMatch
     }
 }
-fn stuck<'a>(c: &mut Cursor<'a, char>) -> ParseStep<Int, Str> { ParseStep::Matched(0) }
-fn run(text: Str, limit: Int) -> Int {
-    let input = chars(text);
+fn stuck<'a>(c: &mut Cursor<'a, char>) -> ParseStep<Int, &'static str> { ParseStep::Matched(0) }
+fn run(text: &str, limit: Int) -> Int {
+    let input = std::vec::collect(&mut text.chars());
     let mut c = Cursor::new(std::vec::Vec::as_slice(&input));
     match(many(&mut c, limit, digit)) {
         Ok(found) => say(found); Cursor::position(&c),
@@ -10055,7 +10057,7 @@ fn main() -> Int {
     say(run("123ab", 10));
     say(run("12!", 10));
     say(run("12345", 3));
-    let input = chars("ab");
+    let input = std::vec::collect(&mut "ab".chars());
     let mut c = Cursor::new(std::vec::Vec::as_slice(&input));
     say(match(many(&mut c, 5, stuck)) { Err((found, ParseError::NoProgress)) => found.len(), _ => 0 - 1 });
     // What a parser that finds nothing read is given back.
@@ -10594,18 +10596,27 @@ error: 14:9: in `main`: `b` is not used on every path, but a `std::task::Task` h
 #### Paths taken apart and put together as text (library 29.1).
 use std::path::{PathBuf, PathComponent};
 
-fn show_all(cs: &Vec<PathComponent>, i: Int, out: Str) -> Str {
-    if(i >= len_at(cs)) { out } else {
-        show_all(cs, i + 1, out ++ match(cs[i]) { PathComponent::Root => "<root>", PathComponent::Current => "<.>", PathComponent::Parent => "<..>", PathComponent::Normal(n) => "[" ++ n ++ "]" })
-    }
+fn show_all(cs: &Vec<PathComponent>) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while({ i < len_at(cs) }) {
+        match(&cs[i]) {
+            &PathComponent::Root => out.push_str("<root>"),
+            &PathComponent::Current => out.push_str("<.>"),
+            &PathComponent::Parent => out.push_str("<..>"),
+            &PathComponent::Normal(n) => out.push_str("["); out.push_str(n); out.push_str("]")
+        };
+        i = i + 1
+    };
+    out
 }
-fn or_none(o: Option<Str>) -> Str { match(o) { Some(s) => s, None => "(none)" } }
+fn or_none<'a>(o: Option<&'a str>) -> &'a str { match(o) { Some(s) => s, None => "(none)" } }
 fn main() -> Int {
     let p = PathBuf::from_str("/usr/local/./lib/../archive.tar.gz");
-    say(show_all(&PathBuf::components(&p), 0, ""));
+    say(show_all(&PathBuf::components(&p)));
     say(or_none(PathBuf::file_name(&p)));
     say(or_none(PathBuf::extension(&p)));
-    say(match(PathBuf::parent(&p)) { Some(up) => PathBuf::as_str(&up), None => "(none)" });
+    say(match(PathBuf::parent(&p)) { Some(up) => String::from(PathBuf::as_str(&up)), None => String::from("(none)") });
     say(PathBuf::is_absolute(&p));
     let hidden = PathBuf::from_str("home/.profile");
     say(or_none(PathBuf::extension(&hidden)));
@@ -10692,7 +10703,7 @@ impl Future for Countdown {
 }
 fn main() -> Int {
     let a = block_on({ await(Countdown { left: 2, value: 40 }) + await(Countdown { left: 1, value: 2 }) });
-    let b = block_on({ length(await(ready("done"))) });
+    let b = block_on({ await(ready("done")).len() });
     a * 10 + b
 }
 
@@ -10706,14 +10717,13 @@ fn main() -> Int {
 use std::vec::{Vec};
 use std::bytes::{base64_encode, base64_decode, Base64Alphabet, Padding, Base64Options, Base64ErrorKind};
 
-fn enc(text: Str, alphabet: Base64Alphabet, padding: Padding) -> Str {
-    let bytes = std::text::utf8(text);
-    base64_encode(std::vec::Vec::as_slice(&bytes), Base64Options { alphabet: alphabet, padding: padding })
+fn enc(text: &str, alphabet: Base64Alphabet, padding: Padding) -> String {
+    base64_encode(text.as_bytes(), Base64Options { alphabet: alphabet, padding: padding })
 }
-fn dec(text: Str, padding: Padding) -> Str {
+fn dec(text: &str, padding: Padding) -> String {
     match(base64_decode(text, Base64Options { alphabet: Base64Alphabet::Standard, padding: padding })) {
-        Ok(bytes) => match(std::text::from_utf8(bytes)) { Some(s) => s, None => "(not text)" },
-        Err(e) => "error at " ++ show(e.offset) ++ match(e.kind) { Base64ErrorKind::InvalidDigit => " digit", Base64ErrorKind::InvalidPadding => " padding", Base64ErrorKind::NonCanonicalTail => " tail", Base64ErrorKind::IncorrectLength => " length" }
+        Ok(bytes) => match(String::from_utf8(bytes)) { Ok(s) => s, Err(_) => String::from("(not text)") },
+        Err(e) => let offset = e.offset; String::from("error at ") + to_string(&offset).as_str() + match(e.kind) { Base64ErrorKind::InvalidDigit => " digit", Base64ErrorKind::InvalidPadding => " padding", Base64ErrorKind::NonCanonicalTail => " tail", Base64ErrorKind::IncorrectLength => " length" }
     }
 }
 fn main() -> Int {
@@ -10868,8 +10878,8 @@ error: 5:32: in `f`: a clause reaches through a reference inside the value, and 
 #### case
 #### What is computed before a borrow of a field, in a call inside a call inside a call: each kept under a name of its own.
 struct J { n: Int }
-fn w(j: &J) -> Str { show(j.n) }
-fn f(pair: &(Str, J)) -> Str { "<" ++ pair.0 ++ ">" ++ w(&pair.1) }
+fn w(j: &J) -> String { to_string(&j.n) }
+fn f(pair: &(&str, J)) -> String { let n = w(&pair.1); String::from("<") + pair.0 + ">" + &n }
 fn main() -> Int { let p = ("ab", J { n: 7 }); say(f(&p)); 0 }
 #### expect
 <ab>7
@@ -11133,7 +11143,7 @@ fn main() -> Int { let o = Mul; let n = 5; o.apply(6, 7) + n }
 #### unless a condition holds, or with a fallback; stopping with a message.
 fn g(n: Int) -> Result<Int, Int> { if(n > 0) { Ok(n) } else { Err(n) } }
 fn f(n: Int) -> Result<Int, Int> { let x = try(g(n), @f); Ok(x + 1) }
-fn h(n: Int) -> Result<Int, Str> { ensure(n > 0, @h, { "not positive" }); Ok(n * 2) }
+fn h(n: Int) -> Result<Int, &'static str> { ensure(n > 0, @h, { "not positive" }); Ok(n * 2) }
 fn k(o: Option<Int>) -> Int { let x = some_or_leave(o, @k, { 0 - 1 }); x * 2 }
 fn main() -> Int { assert_eq(&f(4), &Ok(5)); assert(k(None) == 0 - 1); match(h(0)) { Ok(_) => 0, Err(e) => say(e); 1 } + match(f(0 - 2)) { Ok(n) => n, Err(e) => e * 10 } + k(Some(4)) }
 #### expect
@@ -11152,7 +11162,7 @@ fn main() -> Int { let r = Range { start: 2, end: 5 }; f(Left(3)) + f(Right(4)) 
 14
 #### case
 #### `Fail`, `Report` and `catch_fail`, brought in from the library by need.
-fn f(n: Int) -> Int / { Fail<Str> } { if(n < 0) { fail("negative") } else { n * 2 } }
+fn f(n: Int) -> Int / { Fail<&'static str> } { if(n < 0) { fail("negative") } else { n * 2 } }
 fn work() -> Int / { Report<Int> } { report(1); report(2); 5 }
 fn main() -> Int { let mut seen = 0; let r = handle work() { report(d, k) => seen = seen + d; k(()) }; match(catch_fail({ f(0 - 1) })) { Ok(n) => n, Err(e) => say(e); 0 - 1 } + match(catch_fail({ f(4) })) { Ok(n) => n, Err(_) => 0 } + r * 10 + seen }
 #### expect
@@ -11191,7 +11201,7 @@ impl Board {
         log("added " ++ title);
         id
     }
-    fn finish(b: &mut Board, id: Int) -> Result<(), Str> / { Log } {
+    fn finish(b: &mut Board, id: Int) -> Result<(), &'static str> / { Log } {
         let mut i = 0;
         while({ i < b.tasks.len() }) {
             if(b.tasks[i].id == id) {
@@ -11291,9 +11301,9 @@ fn main() -> Int { handle { boom("x"); 1 }() { boom(m, k) => 0 } }
 error: unknown type `Never`: what does not return is written `!`
 #### case
 #### `else` binds loosest of all: the refusal says so.
-fn main() -> Int { let s = "a" ++ if(1 < 2) { "b" } else { "c" }; len(s) }
+fn main() -> Int { let s = String::from("a") + if(1 < 2) { "b" } else { "c" }; s.len() }
 #### expect
-error: 1:20: in `main`: argument 2 of `++`: expected `Str`, found `Result<Str, fn(()) -> Str>`. `else` binds more loosely than any other operator: `a ++ if(c) { x } else { y }` is `(a ++ if(c) { x }) else { y }`; write the conditional in parentheses
+error: 1:20: in `main`: `Add` for `String`: expected `&str`, found `Result<_, fn(()) -> _>`
 #### case
 #### The map changed where it is, as the specification has it: what a key
 #### stands for may have a `drop`, and what `insert` replaces is given back.
@@ -11338,10 +11348,9 @@ false
 #### not; a function of a type that cannot be named here, called through a
 #### value of it.
 use std::hash::{HashMap};
-use std::text::{words};
 fn main() -> Int {
     let mut counts = HashMap::new();
-    let ws = words("a b a c b a");
+    let ws = "a b a c b a".split_whitespace();
     let mut i = 0;
     while({ i < size_at(&ws) }) { let n = counts.entry(ws[i]).or_insert(0); *n = *n + 1; i = i + 1 };
     match(counts.get(&"a")) { Some(n) => say(*n), None => () };
@@ -11617,8 +11626,8 @@ Ok(3)
 Err(none)
 6
 #### case
-fn half(x: Int) -> Result<Int, Str> { if(x % 2 == 0) { Ok(x / 2) } else { Err("odd") } }
-fn main() -> Int { say(half(3).map_err({ e => e ++ "!" })); say(half(4).is_ok()); half(8).unwrap_or(0) }
+fn half(x: Int) -> Result<Int, &'static str> { if(x % 2 == 0) { Ok(x / 2) } else { Err("odd") } }
+fn main() -> Int { say(half(3).map_err({ e => String::from(e) + "!" })); say(half(4).is_ok()); half(8).unwrap_or(0) }
 #### expect
 Err(odd!)
 true
@@ -11631,8 +11640,7 @@ Ok(3)
 0
 #### case
 #### A text's functions, brought in, called with a dot.
-use std::text::{trim, to_upper, parse_int, starts_with, words};
-fn main() -> Int { let s = "  Hello "; say(s.trim().to_upper()); say("42".parse_int().unwrap_or(0) + 1); say("abc".starts_with("ab")); len("a b c".words()) }
+fn main() -> Int { let s = "  Hello "; say(s.trim().to_uppercase()); say("42".parse_int().unwrap_or(0) + 1); say("abc".starts_with("ab")); len("a b c".split_whitespace()) }
 #### expect
 HELLO
 43
@@ -11664,7 +11672,7 @@ fn main() -> Int { f(5) }
 error: 1:35: a pattern has no ranges: test in the clause, `x => if(x <= 9) { .. } else { .. }`, found `.`
 #### case
 #### A tuple matched through an `Option<&T>`.
-fn g(o: Option<&(Int, Str)>) -> Str { match(o) { Some(p) => match(p) { (n, w) => *w }, None => "" } }
+fn g(o: Option<&(Int, &'static str)>) -> &'static str { match(o) { Some(p) => match(p) { (n, w) => *w }, None => "" } }
 fn main() -> Int { let t = (1, "x"); say(g(Some(&t))); 0 }
 #### expect
 x
@@ -11693,12 +11701,10 @@ fn main() -> Int { let mut s = String::new(); s.push_str("ab"); s.push('c'); say
 abc
 3
 #### case
-use std::text::{split};
-fn main() -> Int { let parts = "a,b,c".split(','); len(parts) }
+fn main() -> Int { let parts = "a,b,c".split(","); len(parts) }
 #### expect
 3
 #### case
-use std::text::{contains};
 fn main() -> Int { let v = Vec::from_array([1, 2]); let a = if(v.contains(&2)) { 1 } else { 0 }; let b = if("hello".contains("ell")) { 10 } else { 0 }; a + b }
 #### expect
 11
@@ -11971,7 +11977,7 @@ fn main() -> Int { let d = D { n: 4 }; apply(Vec::from_array([d])) + apply(Vec::
 #### (A type's defaults after a lifetime, where the use writes no lifetime;
 #### and a `Drop` may not ask a trait with arguments.)
 trait It { type St; }
-impl It for Int { type St = Str; }
+impl It for Int { type St = &'static str; }
 struct Q2<'w, Q, N, St = <Q as It>::St> { w: &'w Int, st: St, n: N }
 fn make<'a>(w: &'a Int) -> Q2<'a, Int, Int> { Q2 { w: w, st: "s", n: 3 } }
 fn make2(w: &Int) -> Q2<Int, Int> { Q2 { w: w, st: "t", n: 4 } }
@@ -12251,7 +12257,7 @@ struct A
 struct B
 impl Valid for A { const VALID: Bool = true; }
 impl Valid for B { const VALID: Bool = false; }
-fn run<F>() -> Int where F: Valid { let n = const { assert_message(<F as Valid>::VALID, "this access is not valid"); (7, "x") }; n.0 }
+fn run<F>() -> Int where F: Valid { let n = const { assert_message(<F as Valid>::VALID, "this access is not valid"); (7, 'x') }; n.0 }
 fn main() -> Int { run<A>() }
 #### expect
 7
@@ -12353,9 +12359,9 @@ fn main() -> Int { let q = Q { a: note(1), p: P { c: note(2), a: note(3), b: not
 1342
 #### case
 #### Reading a part that can be copied out of a value with `drop` takes nothing out of it: it stays whole and its `drop` runs when its block is left.
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn eat(t: T) -> Int { say("eat " ++ t.name); 1 }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn eat(t: T) -> Int { say(String::from("eat ") + t.name); 1 }
 fn main() -> Int { let a = T { name: "a" }; let b = T { name: "b" }; let n = eat(a); say("after"); n }
 #### expect
 eat a
@@ -12710,9 +12716,9 @@ fn main() -> Int { f((0, None)) * 1000 + f((5, Some(0))) * 100 + f((3, Some(4)))
 #### expect
 71234
 #### case
-fn main() -> Int { let s = "héllo"; say(length(s)); say(s ++ "!" ++ show(42)); say("a" < "b"); say("ab" == "ab"); 0 }
+fn main() -> Int { let s = "héllo"; say(s.len()); say(String::from(s) + "!" + to_string(&42).as_str()); say("a" < "b"); say("ab" == "ab"); 0 }
 #### expect
-5
+6
 héllo!42
 true
 true
@@ -12892,8 +12898,7 @@ fn main() -> Int { let mut xs = [1, 2, 3]; bump(&mut xs[len(xs) - 1]) * 10 + xs[
 #### case
 #### `std::fingerprint`, the part quick enough for the Lean machines: the 64-bit hash against its known values, a number written the least byte first, and digests refused for their length.
 use std::fingerprint::{Hasher, Digest256};
-use std::text::{utf8};
-fn hash_text(text: Str) -> u64 { let mut h = Hasher::new(); let bytes = utf8(text); Hasher::write(&mut h, std::vec::Vec::as_slice(&bytes)); Hasher::finish(&h) }
+fn hash_text(text: &str) -> u64 { let mut h = Hasher::new(); Hasher::write(&mut h, text.as_bytes()); Hasher::finish(&h) }
 fn main() -> Int {
     say(hash_text(""));
     say(hash_text("a"));
@@ -12921,10 +12926,10 @@ not thirty-two bytes
 use std::diagnostic::{Severity, Diagnostic, DiagnosticBag, DiagnosticCode, RenderOptions, render_diagnostic};
 use std::source::{SourceMap, SourceSpan, SourceId};
 
-fn shown(d: &Diagnostic, sources: &SourceMap, most_notes: Int, most_bytes: Int) -> Str {
+fn shown(d: &Diagnostic, sources: &SourceMap, most_notes: Int, most_bytes: Int) -> String {
     match(render_diagnostic(d, sources, RenderOptions { maximum_notes: most_notes, maximum_bytes: most_bytes })) {
         Ok(text) => text,
-        Err(_) => "(too long)\n"
+        Err(_) => String::from("(too long)\n")
     }
 }
 
@@ -13342,8 +13347,8 @@ kept going
 drop a
 12
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn rename(t: &mut T) { t.name = "new"; }
 fn f(t: T) -> Int { let mut t = t; rename(&mut t); 1 }
 fn main() -> Int { let n = f(T { name: "old" }); say("after"); n }
@@ -13506,7 +13511,7 @@ fn main() -> Int { let mut a = Some(4); let seen = match(as_ref(&a)) { Some(r) =
 #### expect
 4
 #### case
-#### Instances of one effect, told apart by their type arguments: `Store<Int>` and `Store<Str>` are two effects, each handled by the nearest handler of exactly that one. A function about an instance of its caller's choosing is written out once for each choice.
+#### Instances of one effect, told apart by their type arguments: `Store<Int>` and `Store<&str>` are two effects, each handled by the nearest handler of exactly that one. A function about an instance of its caller's choosing is written out once for each choice.
 use std::vec::{Vec};
 effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
 fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> R / e {
@@ -13514,7 +13519,7 @@ fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> 
     handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 fn main() -> Int {
-    store(Vec::from_array([1, 2]), { store(Vec::from_array(["a"]), { let mut ps = take<Int>(); let mut ns = take<Str>(); let n = ps[0] + ns.len(); put(ps); put(ns); n }) })
+    store(Vec::from_array([1, 2]), { store(Vec::from_array(["a"]), { let mut ps = take<Int>(); let mut ns = take<&str>(); let n = ps[0] + ns.len(); put(ps); put(ns); n }) })
 }
 #### expect
 2
@@ -13533,10 +13538,10 @@ fn each_mut<C>(f: for<'a> fn(&'a mut C)) / {Store<C>} {
 }
 fn total() -> Int / {Store<Int>} { let c = take<Int>(); let n = fold(&c, 0, { (acc, x) => acc + x }); put(c); n }
 fn main() -> Int {
-    store(Vec::from_array([1, 2, 3]), { store(Vec::from_array(["a", "bc"]), {
+    store(Vec::from_array([1, 2, 3]), { store(Vec::from_array([String::from("a"), String::from("bc")]), {
         each_mut(fn(x: &mut Int) { *x = *x * 2; });
-        each_mut(fn(s: &mut Str) { *s = *s ++ "!"; });
-        let mut names = take<Str>(); say(names[1]); put(names);
+        each_mut(fn(s: &mut String) { s.push_str("!"); });
+        let mut names = take<String>(); say(names[1].as_str()); put(names);
         total()
     }) })
 }
@@ -13551,7 +13556,7 @@ fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> 
     handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 fn main() -> Int {
-    store(Vec::from_array([1]), { store(Vec::from_array(["a"]), { let p: Vec<Int> = Vec::from_array([7, 8]); put(p); let q: Vec<Str> = Vec::from_array(["x", "y", "z"]); put(q); let a = take<Int>(); let b = take<Str>(); a.len() * 10 + b.len() }) })
+    store(Vec::from_array([1]), { store(Vec::from_array(["a"]), { let p: Vec<Int> = Vec::from_array([7, 8]); put(p); let q: Vec<&str> = Vec::from_array(["x", "y", "z"]); put(q); let a = take<Int>(); let b = take<&str>(); a.len() * 10 + b.len() }) })
 }
 #### expect
 23
@@ -13593,7 +13598,7 @@ fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> 
     handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 fn sizes<A, B>() -> Int / {Store<A>, Store<B>} { let a = take<A>(); let b = take<B>(); let n = len_at(&a) * 10 + len_at(&b); put(a); put(b); n }
-fn main() -> Int { store(Vec::from_array([1, 2]), { store(Vec::from_array(["a"]), { sizes<Int, Str>() * 100 + sizes<Str, Int>() }) }) }
+fn main() -> Int { store(Vec::from_array([1, 2]), { store(Vec::from_array(["a"]), { sizes<Int, &str>() * 100 + sizes<&str, Int>() }) }) }
 #### expect
 2112
 #### case
@@ -13604,7 +13609,7 @@ fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> 
     handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
 fn drain<C>(n: Int) -> Int / {Store<C>} { let c = take<C>(); let k = len_at(&c); put(c); if(n == 0) { k } else { drain<C>(n - 1) } }
-fn main() -> Int { store(Vec::from_array([1, 2]), { store(Vec::from_array(["a"]), { drain<Int>(3) * 10 + drain<Str>(2) }) }) }
+fn main() -> Int { store(Vec::from_array([1, 2]), { store(Vec::from_array(["a"]), { drain<Int>(3) * 10 + drain<&'static str>(2) }) }) }
 #### expect
 21
 #### case
@@ -13895,7 +13900,7 @@ trait Twin { fn twin(Self) -> Int }
 impl<A> Twin for (A, A) { fn twin(p: (A, A)) -> Int { 1 } }
 fn main() -> Int { twin((1, "b")) }
 #### expect
-error: 3:20: in `main`: `Twin` is implemented for `(Int, Int)`, not for `(Int, Str)`
+error: 3:20: in `main`: `Twin` is implemented for `(Int, Int)`, not for `(Int, &str)`
 #### case
 #### Two implementations of a trait for one type: the one that asks more of the type is the one for the types it fits. A condition may be a trait at arguments, of any of the implementation's type parameters.
 trait Kind { fn kind(Self) -> Int }
@@ -13920,7 +13925,7 @@ impl<T, R> Get<T> for (Column<T>, R) { fn size(w: &(Column<T>, R)) -> Int { len_
 impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> { fn size(w: &(Column<H>, R)) -> Int { <R as Get<T>>::size(&w.1) } }
 fn main() -> Int {
     let world = (Column { items: Vec::from_array([1, 2, 3]) }, (Column { items: Vec::from_array(["a"]) }, ()));
-    <(Column<Int>, (Column<Str>, ())) as Get<Int>>::size(&world) * 10 + <(Column<Int>, (Column<Str>, ())) as Get<Str>>::size(&world)
+    <(Column<Int>, (Column<&'static str>, ())) as Get<Int>>::size(&world) * 10 + <(Column<Int>, (Column<&'static str>, ())) as Get<&'static str>>::size(&world)
 }
 #### expect
 31
@@ -13978,7 +13983,7 @@ error: 11:5: in `main`: `()` does not implement `Get<Health>`, which `Get` of `(
 trait Count { fn count(Self) -> Int; }
 impl<A> Count for Option<A> { fn count(o: Option<A>) -> Int { 1 } }
 impl<A, E> Count for Result<A, E> { fn count(o: Result<A, E>) -> Int { 2 } }
-fn bad() -> Result<Int, Str> { Err("x") }
+fn bad() -> Result<Int, &'static str> { Err("x") }
 fn main() -> Int { count(Some(1)) * 10 + count(bad()) }
 #### expect
 12
@@ -14311,10 +14316,11 @@ fn main() -> Int { let a = [4, 1, 1]; let f = { [x, ..rest] => *x + rest.len(), 
 #### expect
 6
 #### case
-fn join(words: &[Str]) -> Str { match(words) { [] => "", [w] => *w, [w, ..more] => *w ++ " " ++ join(more) } }
-fn main() -> Str { join(&["a", "b", "c"]) }
+fn join(words: &[&str]) -> String { match(words) { [] => String::new(), [w] => String::from(*w), [w, ..more] => String::from(*w) + " " + &join(more) } }
+fn main() -> Int { say(join(&["a", "b", "c"])); 0 }
 #### expect
 a b c
+0
 #### case
 fn f(xs: &[Int]) -> Int { match(xs) { [0] => 10, [x] => *x, [a, b, ..] => *a + *b, [] => -1 } }
 fn main() -> Int { f(&[0]) + f(&[5]) + f(&[1, 2, 3]) + f(&[]) }
@@ -14603,10 +14609,10 @@ changed read
 #### A condition on a type made from an implementation's type parameters, `where (M, ()): Fetch<..>`, is what the implementation's functions are given: a system's parameters, each fetched by what it asks for, for any shape of parameter list.
 use std::vec::{Vec};
 struct Col<T> { items: Vec<T> }
-struct World { a: Col<Int>, b: Col<Str> }
+struct World { a: Col<Int>, b: Col<&'static str> }
 trait Get<T> { fn take(&mut Self) -> Col<T>; fn put(&mut Self, Col<T>); }
 impl Get<Int> for World { fn take(w: &mut World) -> Col<Int> { replace(&mut w.a, Col { items: Vec::new() }) } fn put(w: &mut World, c: Col<Int>) { w.a = c } }
-impl Get<Str> for World { fn take(w: &mut World) -> Col<Str> { replace(&mut w.b, Col { items: Vec::new() }) } fn put(w: &mut World, c: Col<Str>) { w.b = c } }
+impl Get<&'static str> for World { fn take(w: &mut World) -> Col<&'static str> { replace(&mut w.b, Col { items: Vec::new() }) } fn put(w: &mut World, c: Col<&'static str>) { w.b = c } }
 
 // What a parameter of a system is, without the reference: which column, and whether to change it.
 struct Changed<A>(A)
@@ -14649,7 +14655,7 @@ impl<W, P, Q, MP, MQ> System<W> for fn(P, Q) -> () where P: Kind<Marker = MP>, Q
 }
 
 fn grow(ints: &mut Col<Int>) { Vec::push(&mut ints.items, 7) }
-fn both(ints: &mut Col<Int>, words: &Col<Str>) { Vec::push(&mut ints.items, len_at(&words.items)) }
+fn both(ints: &mut Col<Int>, words: &Col<&'static str>) { Vec::push(&mut ints.items, len_at(&words.items)) }
 fn main() -> Int {
     let mut world = World { a: Col { items: Vec::from_array([1]) }, b: Col { items: Vec::from_array(["x", "y"]) } };
     let g = grow;
@@ -14669,8 +14675,8 @@ struct Arrays
 struct Options
 impl<T> Family<T> for Arrays { type Of = Vec<T>; fn single(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl<T> Family<T> for Options { type Of = Option<T>; fn single(x: T) -> Option<T> { Some(x) } }
-fn twice<F, A, B>(a: Int, b: Str) -> (A, B) where F: Family<Int, Of = A>, F: Family<Str, Of = B> { (<F as Family<Int>>::single(a), <F as Family<Str>>::single(b)) }
-fn main() -> Int { let p: (Vec<Int>, Vec<Str>) = twice<Arrays>(3, "x"); let q: (Option<Int>, Option<Str>) = twice<Options>(4, "y"); len(p.0) + len(p.1) + match(q.0) { Some(n) => n, None => 0 } }
+fn twice<F, A, B>(a: Int, b: &'static str) -> (A, B) where F: Family<Int, Of = A>, F: Family<&'static str, Of = B> { (<F as Family<Int>>::single(a), <F as Family<&'static str>>::single(b)) }
+fn main() -> Int { let p: (Vec<Int>, Vec<&'static str>) = twice<Arrays>(3, "x"); let q: (Option<Int>, Option<&'static str>) = twice<Options>(4, "y"); len(p.0) + len(p.1) + match(q.0) { Some(n) => n, None => 0 } }
 #### expect
 6
 #### case
@@ -14692,7 +14698,7 @@ struct Options
 impl<T> Family<T> for Arrays { type Of = Vec<T>; fn single(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl<T> Family<T> for Options { type Of = Option<T>; fn single(x: T) -> Option<T> { Some(x) } }
 fn make<F, T, A>(a: T) -> A where F: Family<T, Of = A> { <F as Family<T>>::single(a) }
-fn main() -> Int { let p: Vec<Int> = make<Arrays>(3); let q: Option<Str> = make<Options>("s"); len(p) }
+fn main() -> Int { let p: Vec<Int> = make<Arrays>(3); let q: Option<&'static str> = make<Options>("s"); len(p) }
 #### expect
 1
 #### case
@@ -14723,10 +14729,11 @@ fn main() -> Int { let xs: [Int; 3] = [1, 2, 3]; let [a, b, c] = xs; a * 100 + b
 #### expect
 123
 #### case
-fn swap(p: [Str; 2]) -> [Str; 2] { let [a, b] = p; [b, a] }
-fn main() -> Str { let [x, y] = swap(["left", "right"]); x ++ " " ++ y }
+fn swap(p: [&'static str; 2]) -> [&'static str; 2] { let [a, b] = p; [b, a] }
+fn main() -> Int { let [x, y] = swap(["left", "right"]); say(String::from(x) + " " + y); 0 }
 #### expect
 right left
+0
 #### case
 fn main() -> Int { let xs: [Int; 3] = [1, 2, 3]; let [a, b] = xs; a + b }
 #### expect
@@ -15047,12 +15054,12 @@ fn main() -> Int { let (a, b, ..) = (1, 2); a + b }
 #### expect
 3
 #### case
-fn first(t: (Int, Str, Int)) -> Int { match(t) { (0, ..) => 100, (n, ..) => n } }
+fn first(t: (Int, &'static str, Int)) -> Int { match(t) { (0, ..) => 100, (n, ..) => n } }
 fn main() -> Int { first((0, "a", 1)) + first((5, "b", 2)) }
 #### expect
 105
 #### case
-fn first((a, ..): (Int, Str, Int)) -> Int { a }
+fn first((a, ..): (Int, &'static str, Int)) -> Int { a }
 fn main() -> Int { first((7, "x", 9)) }
 #### expect
 7
@@ -15139,7 +15146,7 @@ struct Arrays
 struct Options
 impl Family for Arrays { type Of<T> = Vec<T>; fn single<T>(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl Family for Options { type Of<T> = Option<T>; fn single<T>(x: T) -> Option<T> { Some(x) } }
-fn both<F: Family>() -> (F::Of<Int>, F::Of<Str>) { (<F as Family>::single(1), <F as Family>::single("a")) }
+fn both<F: Family>() -> (F::Of<Int>, F::Of<&'static str>) { (<F as Family>::single(1), <F as Family>::single("a")) }
 fn main() -> Int { let p = both<Arrays>(); let q = both<Options>(); len(p.0) + len(p.1) + match(q.0) { Some(n) => n, None => 0 } }
 #### expect
 3
@@ -15178,7 +15185,7 @@ fn main() -> Int { fill<Rows>() }
 trait Pairs { type Both<A, B>; fn make<A, B>(A, B) -> Both<A, B> }
 struct Tuples
 impl Pairs for Tuples { type Both<A, B> = (A, B); fn make<A, B>(a: A, b: B) -> (A, B) { (a, b) } }
-fn main() -> Int { let p: (Int, Str) = <Tuples as Pairs>::make(4, "s"); p.0 }
+fn main() -> Int { let p: (Int, &'static str) = <Tuples as Pairs>::make(4, "s"); p.0 }
 #### expect
 4
 #### case
@@ -15239,8 +15246,8 @@ fn main() -> Int { let mut c = Cell(2); match(leak(&mut c)) { Some(r) => *r = 9,
 #### case
 use std::vec::{Vec};
 trait Lend { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }
-struct Words(Vec<Str>)
-impl Lend for Words { type Item<'a> = (Int, &'a Str); fn next(w: &mut Words) -> Option<(Int, &Str)> { Some((len_at(&(*w).0), &(*w).0[0])) } }
+struct Words(Vec<&'static str>)
+impl Lend for Words { type Item<'a> = (Int, &'a &'static str); fn next(w: &mut Words) -> Option<(Int, &&'static str)> { Some((len_at(&(*w).0), &(*w).0[0])) } }
 fn main() -> Int { let mut w = Words(Vec::from_array(["hey"])); match(next(&mut w)) { Some(p) => p.0 + len(*(p.1)), None => 0 } }
 #### expect
 4
@@ -15305,7 +15312,7 @@ fn main() -> Int { total((1, 2, 3, 4)) }
 #### case
 trait Shout { fn shout(Self) }
 impl Shout for () { fn shout(t: ()) { () } }
-impl<H, ..R> Shout for (H, ..R) where H: Show, (..R): Shout { fn shout(t: (H, ..R)) { let (h, ..rest) = t; print(h); shout((..rest)) } }
+impl<H, ..R> Shout for (H, ..R) where H: Show, (..R): Shout { fn shout(t: (H, ..R)) { let (h, ..rest) = t; say(h); shout((..rest)) } }
 fn main() -> Int { shout((1, "two", 3)); 0 }
 #### expect
 1
@@ -15346,8 +15353,8 @@ b
 3
 #### case
 trait Asks { type Out; }
-impl Asks for Int { type Out = Str; }
-impl Asks for Str { type Out = Int; }
+impl Asks for Int { type Out = &'static str; }
+impl<'a> Asks for &'a str { type Out = Int; }
 trait Flip { type Out; fn flip(Self) -> Int }
 impl Flip for () { type Out = (); fn flip(t: ()) -> Int { 7 } }
 impl<H, ..R> Flip for (H, ..R) where H: Asks, (..R): Flip { type Out = (<H as Asks>::Out, ..<(..R) as Flip>::Out); fn flip(t: (H, ..R)) -> Int { 7 } }

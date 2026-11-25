@@ -543,6 +543,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
   -- A use of the function inside its group has the function's type, but
   -- what it is given there need not be what the function itself was given:
   -- the captures of the two are kept apart, and related below.
+  settleTexts
   let used := (group.lookup d.name).getD t
   if let .var _ ← find used then unify used t
   else

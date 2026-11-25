@@ -54,6 +54,6 @@ fn main() -> Int {
     app.emit(&Update);
     say(match(app.world.get<C15>(entity)) { Some(c) => c.0, None => 0 - 1 });
     say(match(app.world.get<C15>(tagged)) { Some(c) => c.0, None => 0 - 1 });
-    say(lock(&log, fn(v: &mut Vec<Int>) -> Str { std::text::join(std::vec::map(clone(&*v), fn(n: Int) -> Str { show(n) }), " ") }));
+    say(lock(&log, fn(v: &mut Vec<Int>) -> String { std::text::join(clone(&*v), " ") }));
     0
 }

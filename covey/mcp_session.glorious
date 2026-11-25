@@ -33,7 +33,29 @@ use ecs::{App, Query, chain};
 use mcp::{Json, JStr, JNum, JArr, JObj, session_channel, parse_json, field, object, written};
 use std::reflect::{Described};
 use std::thread::{Receiver, try_recv};
-use std::text::{contains, starts_with};
+
+// ---- Texts as `Str`, while that is the type of this program's texts. ----
+fn starts_with(text: Str, start: Str) -> Bool {
+    match((text, start)) {
+        (_, StrEnd) => true,
+        (StrChar(c, rest), StrChar(d, more)) => if(c == d) { starts_with(rest, more) } else { false },
+        _ => false
+    }
+}
+fn contains(text: Str, part: Str) -> Bool { match(find(text, part)) { Some(_) => true, None => false } }
+fn find(text: Str, part: Str) -> Option<Int> { find_from(text, part, 0) }
+fn find_from(text: Str, part: Str, at: Int) -> Option<Int> {
+    if(starts_with(text, part)) { Some(at) } else {
+        match(text) { StrEnd => None, StrChar(_, rest) => tail find_from(rest, part, at + 1) }
+    }
+}
+fn take(text: Str, n: Int) -> Str {
+    if(n <= 0) { "" } else { match(text) { StrEnd => "", StrChar(c, rest) => StrChar(c, take(rest, n - 1)) } }
+}
+fn drop(text: Str, n: Int) -> Str {
+    if(n <= 0) { text } else { match(text) { StrEnd => "", StrChar(_, rest) => tail drop(rest, n - 1) } }
+}
+
 
 pub struct Update
 impl Use<[0, *]> for Update {}
@@ -96,8 +118,8 @@ fn main() -> Int {
     say(shown(contains(reply_text(shown_entity), "Hp = Hp(44)")));
     let explained = reply_text(explained);
     say(shown(if(contains(explained, "apply_damage")) { if(contains(explained, "reads:")) { contains(explained, "ramp") } else { false } } else { false }));
-    say(std::text::take(reply_text(first), 16));
-    say(std::text::take(reply_text(stepped), 16));
+    say(take(reply_text(first), 16));
+    say(take(reply_text(stepped), 16));
     say(shown(is_error(missing)));
 
     // (With Damage raised, Hp drops further in the edited copy only.)

@@ -5,7 +5,84 @@
 // most about the code. Reading the binary is the caller's: this reads the
 // text.
 use std::vec::{Vec};
-use std::text::{starts_with, ends_with, contains, find, take, drop, trim, split, words, join, parse_int, char_at};
+use std::text::{join};
+
+// ---- Texts as `Str`, while that is the type of this module's texts. ----
+fn is_empty(text: Str) -> Bool { match(text) { StrEnd => true, _ => false } }
+fn reverse(text: Str) -> Str { reverse_onto(text, "") }
+fn reverse_onto(text: Str, out: Str) -> Str {
+    match(text) { StrEnd => out, StrChar(c, rest) => tail reverse_onto(rest, StrChar(c, out)) }
+}
+fn starts_with(text: Str, start: Str) -> Bool {
+    match((text, start)) {
+        (_, StrEnd) => true,
+        (StrChar(c, rest), StrChar(d, more)) => if(c == d) { starts_with(rest, more) } else { false },
+        _ => false
+    }
+}
+fn ends_with(text: Str, end: Str) -> Bool { starts_with(reverse(text), reverse(end)) }
+fn contains(text: Str, part: Str) -> Bool { match(find(text, part)) { Some(_) => true, None => false } }
+fn find(text: Str, part: Str) -> Option<Int> { find_from(text, part, 0) }
+fn find_from(text: Str, part: Str, at: Int) -> Option<Int> {
+    if(starts_with(text, part)) { Some(at) } else {
+        match(text) { StrEnd => None, StrChar(_, rest) => tail find_from(rest, part, at + 1) }
+    }
+}
+fn take(text: Str, n: Int) -> Str {
+    if(n <= 0) { "" } else { match(text) { StrEnd => "", StrChar(c, rest) => StrChar(c, take(rest, n - 1)) } }
+}
+fn drop(text: Str, n: Int) -> Str {
+    if(n <= 0) { text } else { match(text) { StrEnd => "", StrChar(_, rest) => tail drop(rest, n - 1) } }
+}
+fn char_at(text: Str, i: Int) -> Option<char> {
+    match(text) { StrEnd => None, StrChar(c, rest) => if(i == 0) { Some(c) } else { tail char_at(rest, i - 1) } }
+}
+fn map<e: EffectRow>(text: Str, f: fn(char) -> char / {| e}) -> Str / {| e} {
+    match(text) { StrEnd => "", StrChar(c, rest) => StrChar(f(c), map(rest, f)) }
+}
+fn to_upper(text: Str) -> Str { map(text, std::char::to_upper) }
+fn to_lower(text: Str) -> Str { map(text, std::char::to_lower) }
+fn trim(text: Str) -> Str { reverse(trim_start(reverse(trim_start(text)))) }
+fn trim_start(text: Str) -> Str {
+    match(text) {
+        StrEnd => "",
+        StrChar(c, rest) => if(std::char::is_space(c)) { tail trim_start(rest) } else { text }
+    }
+}
+fn split(text: Str, at: char) -> Vec<Str> { let mut out = Vec::new(); split_onto(text, at, "", &mut out); out }
+fn split_onto(text: Str, at: char, part: Str, out: &mut Vec<Str>) {
+    match(text) {
+        StrEnd => Vec::push(out, reverse(part)),
+        StrChar(c, rest) =>
+            if(c == at) { Vec::push(out, reverse(part)); tail split_onto(rest, at, "", out) }
+            else { tail split_onto(rest, at, StrChar(c, part), out) }
+    }
+}
+fn lines(text: Str) -> Vec<Str> { split(text, '\n') }
+fn chars(text: Str) -> Vec<char> { let mut out = Vec::new(); chars_onto(text, &mut out); out }
+fn chars_onto(text: Str, out: &mut Vec<char>) {
+    match(text) {
+        StrEnd => (),
+        StrChar(c, rest) => Vec::push(out, c); tail chars_onto(rest, out)
+    }
+}
+fn words(text: Str) -> Vec<Str> { std::vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
+fn parse_int(text: Str) -> Option<Int> {
+    match(text) {
+        StrChar('-', rest) => match(digits_value(rest, 0, 0)) { Some(n) => Some(0 - n), None => None },
+        _ => digits_value(text, 0, 0)
+    }
+}
+fn digits_value(text: Str, seen: Int, value: Int) -> Option<Int> {
+    match(text) {
+        StrEnd => if(seen > 0) { Some(value) } else { None },
+        StrChar(c, rest) => match(std::char::digit(c)) {
+            Some(d) => tail digits_value(rest, seen + 1, value * 10 + d),
+            None => None
+        }
+    }
+}
+
 
 // What to collect: a function by path, matched by its last segment; or the
 // lines `first` to `last` of a file (a closure's body).

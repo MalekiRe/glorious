@@ -5,6 +5,38 @@
 use std::vec::{Vec};
 use std::text::{join};
 
+// ---- Texts as `Str`, while that is the type of this module's texts. ----
+fn reverse(text: Str) -> Str { reverse_onto(text, "") }
+fn reverse_onto(text: Str, out: Str) -> Str {
+    match(text) { StrEnd => out, StrChar(c, rest) => tail reverse_onto(rest, StrChar(c, out)) }
+}
+fn split(text: Str, at: char) -> Vec<Str> { let mut out = Vec::new(); split_onto(text, at, "", &mut out); out }
+fn split_onto(text: Str, at: char, part: Str, out: &mut Vec<Str>) {
+    match(text) {
+        StrEnd => Vec::push(out, reverse(part)),
+        StrChar(c, rest) =>
+            if(c == at) { Vec::push(out, reverse(part)); tail split_onto(rest, at, "", out) }
+            else { tail split_onto(rest, at, StrChar(c, part), out) }
+    }
+}
+fn lines(text: Str) -> Vec<Str> { split(text, '\n') }
+fn parse_int(text: Str) -> Option<Int> {
+    match(text) {
+        StrChar('-', rest) => match(digits_value(rest, 0, 0)) { Some(n) => Some(0 - n), None => None },
+        _ => digits_value(text, 0, 0)
+    }
+}
+fn digits_value(text: Str, seen: Int, value: Int) -> Option<Int> {
+    match(text) {
+        StrEnd => if(seen > 0) { Some(value) } else { None },
+        StrChar(c, rest) => match(std::char::digit(c)) {
+            Some(d) => tail digits_value(rest, seen + 1, value * 10 + d),
+            None => None
+        }
+    }
+}
+
+
 pub enum Value {
     VUnit, VBool(Bool), VInt(Int), VFloat(f64), VChar(char), VStr(Str),
     // Named fields: `Pos { x: 1.0 }`; positional, `Hp(3)`, a tuple where
@@ -136,12 +168,12 @@ pub fn parse_debug(text: Str) -> Value {
 
 // The value at a path of field names and places, `pos.x`, `items.2`.
 pub fn get<'a>(value: &'a Value, path: Str) -> Option<&'a Value> {
-    let steps = std::text::split(path, '.');
+    let steps = split(path, '.');
     let mut at_: Option<&'a Value> = Some(value);
     let mut k = 0;
     while({ k < len_at(&steps) }) {
         let step = steps[k];
-        let place = std::text::parse_int(step);
+        let place = parse_int(step);
         if(step == "") { () } else {
             at_ = match(at_) {
                 Some(v) => match(v) {

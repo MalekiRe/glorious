@@ -151,7 +151,7 @@ fn main() -> Int { run_host({
     match(back) { Ok(text) => println(text.as_str()), Err(_) => println("error") };
     let missing = read_text("/tmp/glorious-no-such-file");
     match(missing) { Ok(_) => println("found"), Err(e) => let code = e.code; println((String::from("no file: ") + to_string(&code).as_str()).as_str()) };
-    let home = env("HOME");
+    let home = env(String::from("HOME"));
     println(match(home) { Ok(Some(_)) => "HOME is set", _ => "no HOME" });
     let a = monotonic(); let b = monotonic();
     println(if(b >= a) { "the clock goes on" } else { "the clock went back" });

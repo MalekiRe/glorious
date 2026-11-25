@@ -97,6 +97,14 @@ partial def hasParam : Ty → Bool
   | .ref _ t _ => hasParam t
   | _ => false
 
+/-- Does a type borrow nothing, or only for `'static` (a text written,
+`&'static str`)? Such a part read out of a value takes nothing out of it. -/
+def borrowsOnlyStatic (t : Ty) : M Bool := do
+  let statics ← match (← get).staticCap with
+    | some c => pure [← findCap c]
+    | none => pure []
+  (freeCaps t).allM fun c => do pure (statics.contains (← findCap c))
+
 /-- The type parameters a type mentions (`hasParam`'s). -/
 partial def paramNames : Ty → List String
   | .con n [] => if n.startsWith "'" && n.length > 1 then [n] else []
@@ -1121,7 +1129,7 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
       | some ft =>
         let ft ← zonk ft
         modify fun st => { st with seen := {} }
-        pure ((freeTys ft).isEmpty && (freeCaps ft).isEmpty && !hasParam ft
+        pure ((freeTys ft).isEmpty && (← borrowsOnlyStatic ft) && !hasParam ft
           && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone)
       | none => pure false
   let looked : Flat.Body := if !copiedParts then code else
@@ -1152,7 +1160,7 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
             | some ft =>
               let ft ← zonk ft
               modify fun st => { st with seen := {} }
-              unless (freeTys ft).isEmpty && (freeCaps ft).isEmpty && !hasParam ft
+              unless (freeTys ft).isEmpty && (← borrowsOnlyStatic ft) && !hasParam ft
                   && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone do
                 plain := false
             | none => plain := false

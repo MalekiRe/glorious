@@ -998,12 +998,12 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           | _ => false
         if blocky && (e.splitOn "fn() ->").length > 1 then
           return some (i, e ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
-        -- (`a ++ if(c) { x } else { y }` is `(a ++ if(c) { x }) else { y }`:
+        -- (`a + if(c) { x } else { y }` is `(a + if(c) { x }) else { y }`:
         -- `else` binds loosest of all.)
         if let .call _ f _ := b.expr a then
           if (b.name? f).map (·.2) == some "if" then
             if (e.splitOn "found `Result<").length > 1 then
-              return some (i, e ++ ". `else` binds more loosely than any other operator: `a ++ if(c) { x } else { y }` is `(a ++ if(c) { x }) else { y }`; write the conditional in parentheses")
+              return some (i, e ++ ". `else` binds more loosely than any other operator: `a + if(c) { x } else { y }` is `(a + if(c) { x }) else { y }`; write the conditional in parentheses")
         return some (i, e)
       pushTemp p
       pushAnon a p
@@ -1997,8 +1997,14 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
           if Syntax.isScalar n then
             modify fun s => { s with wantResult := some (id, expected) }
       -- A text a body ends with, where `&str` is wanted of the body; or a
-      -- `Str`.
+      -- `Str`. Where what is wanted is not known yet, which it is is settled
+      -- with the function (`settleTexts`).
       if let some (expected, _) := want then
+        if (b.textCodes e).isSome && !(← get).textOwned then
+          if let .var _ ← find expected then
+            let v ← freshTy
+            modify fun s => { s with pendingTexts := s.pendingTexts.push (s.owner, e, v) }
+            return ← finish v false
         if ← textAt expected e then return expected
         if ← ownedTextAt expected e then
           return ← finish (← withTextOwned (inferExpr scope amb e)) false

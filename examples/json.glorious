@@ -31,8 +31,8 @@ fn expect(r: &mut Reader, c: char, wanted: Str) -> Result<(), ParseError> {
     if(peek(&*r) is Some(found) and { found == c }) { r.at = r.at + 1; Ok(()) } else { Err(ParseError { at: r.at, wanted: wanted }) }
 }
 
-fn word(r: &mut Reader, text: Str, value: Json) -> Result<Json, ParseError> {
-    let letters = chars(text);
+fn word(r: &mut Reader, text: &str, value: Json) -> Result<Json, ParseError> {
+    let letters = std::vec::collect(&mut text.chars());
     if(matches(&*r, &letters, 0)) { r.at = r.at + len(letters); Ok(value) } else { Err(ParseError { at: r.at, wanted: "a value" }) }
 }
 
@@ -115,8 +115,8 @@ fn fields(r: &mut Reader, out: &mut Vec<(Str, Json)>) -> Result<(), ParseError> 
     }
 }
 
-fn parse(text: Str) -> Result<Json, ParseError> {
-    let mut r = Reader { chars: chars(text), at: 0 };
+fn parse(text: &str) -> Result<Json, ParseError> {
+    let mut r = Reader { chars: std::vec::collect(&mut text.chars()), at: 0 };
     value(&mut r)
 }
 
@@ -151,7 +151,7 @@ fn find<'a>(pairs: &'a Vec<(Str, Json)>, name: Str, i: Int) -> Option<&'a Json> 
     }
 }
 
-fn report(text: Str) -> Str {
+fn report(text: &str) -> Str {
     match(parse(text)) { Ok(_) => "fine", Err(e) => "1:" ++ show(e.at + 1) ++ ": " ++ e.wanted }
 }
 

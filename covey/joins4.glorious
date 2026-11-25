@@ -144,7 +144,7 @@ fn main() -> Int {
             let mut shown = Vec::new();
             let mut k = 0;
             while({ k < len_at(&sorted) }) { Vec::push(&mut shown, "(" ++ show(sorted[k] / 100) ++ ", " ++ show(sorted[k] % 100) ++ ")"); k = k + 1 };
-            say("[" ++ std::text::join(shown, ", ") ++ "]");
+            say(String::from("[") + std::text::join(shown, ", ").as_str() + "]");
             say(l.1),
         None => ()
     };

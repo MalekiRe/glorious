@@ -618,6 +618,11 @@ structure St where
   /-- A text written is read as a `Str` here, where one is wanted, and not
   as the `&'static str` it is elsewhere (`inferExpr`). -/
   textOwned : Bool := false
+  /-- Texts written at the end of a body whose type was not known there
+  (`if(c) { "x" } else { s }`): the function, the text, and the variable its
+  type is, settled when the function is (`settleTexts`): a `Str` where that
+  is what came of it, a `&'static str` otherwise. -/
+  pendingTexts : Array (String × Nat × Ty) := #[]
   /-- A type a trait leaves to its implementations, at a use: the trait, what
   it is asked of (the type, and after it the trait's arguments if it has
   some), which type, the variable that stands for it, the function this is in,
@@ -1457,6 +1462,10 @@ partial def showTy : Ty → String
     match numberOf (.con n args), n, args with
     | some k, _, _ => toString k
     | none, "Fixed", [element, length] => s!"[{showTy element}; {showTy length}]"
+    -- (Borrowed text and elements as Rust writes them: `&str`, `&[T]`.)
+    | none, "StrRef", [_] => "&str"
+    | none, "SliceRef", [_, element] => s!"&[{showTy element}]"
+    | none, "SliceMut", [_, element] => s!"&mut [{showTy element}]"
     | none, _, _ => s!"{bareName n}<{", ".intercalate (args.map showTy)}>"
   | .tuple [one] => s!"({showTy one},)"
   | .tuple args => s!"({", ".intercalate (args.map showTy)})"

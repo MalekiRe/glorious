@@ -1063,6 +1063,23 @@ def ownedTextAt (t : Ty) (e : Flat.ExprId) : M Bool := do
   | .con n [] => pure (Syntax.lastSegment n == "Str")
   | _ => pure false
 
+/-- Each text a body ended with where what was wanted was not known: a `Str`
+where that is what it came to be, a `&'static str` otherwise. -/
+def settleTexts : M Unit := do
+  let pending := (← get).pendingTexts
+  modify fun s => { s with pendingTexts := #[] }
+  for (owner, e, v) in pending do
+    match ← find v with
+    | .con n [] => if Syntax.lastSegment n == "Str" then continue
+    | _ => pure ()
+    let static ← resolveType [] false (.name "StrRef" [.name "'static" []])
+    try unify v static
+    catch _ =>
+      let want := showTy (← zonk v)
+      let hint := if want == "String" then ": an owned one is `String::from(\"..\")`" else ""
+      throw s!"a text written: expected `{want}`, found `&str`{hint}"
+    modify fun s => { s with scalarLits := (owner, e, "%text") :: s.scalarLits }
+
 /-- `m` with a text written read as a `Str`. -/
 def withTextOwned {α : Type} (m : M α) : M α := do
   let before := (← get).textOwned

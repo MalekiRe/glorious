@@ -26,13 +26,13 @@ struct InSquad
 impl Relation for InSquad { type Kind = OneToMany; }
 impl Eq for InSquad { fn ==(a: InSquad, b: InSquad) -> Bool { true } }
 impl Clone for InSquad { fn clone(s: &InSquad) -> InSquad { InSquad } }
-struct Seen(Vec<Str>)
+struct Seen(Vec<String>)
 
 fn watch(docked: &mut Query<(&Name,), (Relinked<DockedAt>,)>, squads: &mut Query<(&Name,), (Relinked<InSquad>,)>, seen: &mut Single<(&mut Seen,), ()>) {
     let mut all = Vec::new();
     docked.for_each() { (n,) => Vec::push(&mut all, n.0); };
     squads.for_each() { (n,) => Vec::push(&mut all, n.0 + 100); };
-    let line = std::text::join(std::vec::map(sort(all), fn(v: Int) -> Str { show(v) }), " ");
+    let line = std::text::join(sort(all), " ");
     match(seen.get_mut()) { Some((mut s,)) => Vec::push(&mut s.0, line);, None => () }
 }
 
@@ -57,6 +57,6 @@ fn main() -> Int {
     app.emit(&Update);
     let lines = match(app.world.get<Seen>(seen)) { Some(s) => clone(&s.0), None => Vec::new() };
     let mut i = 0;
-    while({ i < len_at(&lines) }) { say(lines[i]); i = i + 1 };
+    while({ i < len_at(&lines) }) { say(lines[i].as_str()); i = i + 1 };
     0
 }

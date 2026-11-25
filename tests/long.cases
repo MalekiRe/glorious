@@ -1,21 +1,19 @@
 #### case
 #### `std::fingerprint`: the quick hash against its known values, BLAKE3 of `abc` whole and in two pieces, a digest written and read back, and a fingerprint against the same stream hashed by the reference implementation.
 use std::fingerprint::{Hasher, FingerprintWriter, Digest256, Blake3, blake3};
-use std::text::{utf8};
-fn hash_text(text: Str) -> u64 { let mut h = Hasher::new(); let bytes = utf8(text); Hasher::write(&mut h, std::vec::Vec::as_slice(&bytes)); Hasher::finish(&h) }
+fn hash_text(text: &str) -> u64 { let mut h = Hasher::new(); Hasher::write(&mut h, text.as_bytes()); Hasher::finish(&h) }
 fn main() -> Int {
     say(hash_text(""));
     say(hash_text("a"));
     say(hash_text("foobar"));
-    let abc = utf8("abc");
-    say(Digest256::to_hex(&blake3(std::vec::Vec::as_slice(&abc))));
+    say(Digest256::to_hex(&blake3("abc".as_bytes())));
     let mut b = Blake3::new();
-    let ab = utf8("ab"); let c = utf8("c");
-    Blake3::update(&mut b, std::vec::Vec::as_slice(&ab));
-    Blake3::update(&mut b, std::vec::Vec::as_slice(&c));
+    Blake3::update(&mut b, "ab".as_bytes());
+    Blake3::update(&mut b, "c".as_bytes());
     let d = Blake3::finish(b);
     say(Digest256::to_hex(&d));
-    say(match(Digest256::parse_hex(Digest256::to_hex(&d))) { Ok(back) => back == d, Err(_) => false });
+    let hex = Digest256::to_hex(&d);
+    say(match(Digest256::parse_hex(hex.as_str())) { Ok(back) => back == d, Err(_) => false });
     say(match(Digest256::parse_hex("00ff")) { Ok(_) => "parsed", Err(_) => "refused" });
     let mut w = FingerprintWriter::new("unit", 7u32);
     FingerprintWriter::tag(&mut w, 1u32);

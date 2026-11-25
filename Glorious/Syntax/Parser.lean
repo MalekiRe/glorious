@@ -334,6 +334,9 @@ private partial def parseItem : P Item := do
       | .ref uniq (.name x [t]) life =>
         if x == sliceMark then pure (if uniq then "SliceMut" else "SliceRef", [.name (life.getD elidedLife) [], t])
         else pure (if uniq then "(&mut)" else "(&)", [.name x [t]])
+      -- `impl<'a> Tr for &'a str`: for borrowed text, the prelude's `StrRef`
+      -- (as `&str` is wherever a type is written).
+      | .ref false (.name "str" []) life => pure ("StrRef", [.name (life.getD elidedLife) []])
       | .ref true t _ => pure ("(&mut)", [t])
       | .ref false t _ => pure ("(&)", [t])
       | _ => failAt "an implementation is for a type made with a name, a tuple, a function or a reference"

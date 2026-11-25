@@ -33,8 +33,8 @@ struct Other
 struct Global
 struct Value(Int)
 
-fn shown(values: Vec<Int>) -> Str { std::text::join(std::vec::map(sort(values), fn(v: Int) -> Str { show(v) }), " ") }
-fn values<F, S>(world: &mut World<S>) -> Str where S: ecs::Get<Position>, S: ecs::Hidden<(&Position,), F>, F: ecs::Only<S> {
+fn shown(values: Vec<Int>) -> String { std::text::join(sort(values), " ") }
+fn values<F, S>(world: &mut World<S>) -> String where S: ecs::Get<Position>, S: ecs::Hidden<(&Position,), F>, F: ecs::Only<S> {
     let mut out = Vec::new();
     world.query_filtered<(&Position,), F>().for_each() { (p,) => Vec::push(&mut out, p.0); };
     shown(out)

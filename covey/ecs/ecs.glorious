@@ -425,7 +425,7 @@ impl<R> PairKey for Relates<R> where R: FragmentIs {
 impl<R> PairKey for Links<R> where R: FragmentIs {
     fn pair_key(links: &Links<R>) -> Str {
         if(<R as FragmentIs>::FRAGMENTS) {
-            let mut out = "";
+            let mut out: Str = "";
             let mut i = 0;
             while({ i < len_at(&links.list) }) { out = out ++ "->" ++ show(links.list[i].target.index); i = i + 1 };
             out
@@ -3358,6 +3358,9 @@ fn text_begins(text: Str, start: Str) -> Bool {
     }
 }
 
+// What a system that may write anything touches.
+fn writes_all() -> Vec<Str> { let all: Str = "w:*"; Vec::from_array([all]) }
+
 // Whether what two systems touch keeps them apart.
 fn touches_apart(a: &Vec<Str>, b: &Vec<Str>) -> Bool {
     let mut apart = true;
@@ -3457,7 +3460,7 @@ impl<E, S> System<E, S> for () {
     fn explain_chain(nothing: &(), places: Vec<Str>, at: Int, out: Vec<SystemInfo>) -> Vec<SystemInfo> { out }
     fn step(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at }
     type Prepared = ();
-    fn touches(system: &()) -> Vec<Str> { Vec::from_array(["w:*"]) }
+    fn touches(system: &()) -> Vec<Str> { writes_all() }
     fn prepare(system: &mut (), event: &E, world: &mut World<S>) -> Option<()> { None }
     fn run_prepared(system: &mut (), event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut (), world: &mut World<S>, prepared: ()) { () }
@@ -3771,7 +3774,7 @@ impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Conditio
     fn explain(guarded: &RunIf<P, C>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { <P as System<E, S>>::explain(&guarded.systems, places, out) }
     fn system_names(guarded: &RunIf<P, C>, names: Vec<Str>) -> Vec<Str> { <P as System<E, S>>::system_names(&guarded.systems, names) }
     type Prepared = ();
-    fn touches(system: &RunIf<P, C>) -> Vec<Str> { Vec::from_array(["w:*"]) }
+    fn touches(system: &RunIf<P, C>) -> Vec<Str> { writes_all() }
     fn prepare(system: &mut RunIf<P, C>, event: &E, world: &mut World<S>) -> Option<()> { None }
     fn run_prepared(system: &mut RunIf<P, C>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut RunIf<P, C>, world: &mut World<S>, prepared: ()) { () }
@@ -3806,11 +3809,11 @@ pub fn exclusive<F>(f: F) -> Exclusive<F> { let (name, f) = std::any::fn_name(f)
 // systems are: the entities commands made have their places before the
 // system makes its own.)
 impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output = ()> {
-    fn explain(system: &Exclusive<F>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(pushed(names, system.name), places, Vec::from_array(["w:*"]), out) }
-    fn explain_chain(system: &Exclusive<F>, places: Vec<Str>, at: Int, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(pushed(names, system.name), pushed(places, "chain[" ++ show(at) ++ "]"), Vec::from_array(["w:*"]), out) }
+    fn explain(system: &Exclusive<F>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(pushed(names, system.name), places, writes_all(), out) }
+    fn explain_chain(system: &Exclusive<F>, places: Vec<Str>, at: Int, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(pushed(names, system.name), pushed(places, "chain[" ++ show(at) ++ "]"), writes_all(), out) }
     fn system_names(system: &Exclusive<F>, names: Vec<Str>) -> Vec<Str> { pushed(names, system.name) }
     type Prepared = ();
-    fn touches(system: &Exclusive<F>) -> Vec<Str> { Vec::from_array(["w:*"]) }
+    fn touches(system: &Exclusive<F>) -> Vec<Str> { writes_all() }
     fn prepare(system: &mut Exclusive<F>, event: &E, world: &mut World<S>) -> Option<()> { None }
     fn run_prepared(system: &mut Exclusive<F>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut Exclusive<F>, world: &mut World<S>, prepared: ()) { () }
@@ -3834,11 +3837,11 @@ impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output
 pub struct ExclusiveWith<F> { f: F, name: Str }
 pub fn exclusive_with<F>(f: F) -> ExclusiveWith<F> { let (name, f) = std::any::fn_name(f); ExclusiveWith { f: f, name: name } }
 impl<E, S, F> System<E, S> for ExclusiveWith<F> where F: Fn<(&E, &mut World<S>), Output = ()> {
-    fn explain(system: &ExclusiveWith<F>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(pushed(names, system.name), places, Vec::from_array(["w:*"]), out) }
-    fn explain_chain(system: &ExclusiveWith<F>, places: Vec<Str>, at: Int, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(pushed(names, system.name), pushed(places, "chain[" ++ show(at) ++ "]"), Vec::from_array(["w:*"]), out) }
+    fn explain(system: &ExclusiveWith<F>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(pushed(names, system.name), places, writes_all(), out) }
+    fn explain_chain(system: &ExclusiveWith<F>, places: Vec<Str>, at: Int, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(pushed(names, system.name), pushed(places, "chain[" ++ show(at) ++ "]"), writes_all(), out) }
     fn system_names(system: &ExclusiveWith<F>, names: Vec<Str>) -> Vec<Str> { pushed(names, system.name) }
     type Prepared = ();
-    fn touches(system: &ExclusiveWith<F>) -> Vec<Str> { Vec::from_array(["w:*"]) }
+    fn touches(system: &ExclusiveWith<F>) -> Vec<Str> { writes_all() }
     fn prepare(system: &mut ExclusiveWith<F>, event: &E, world: &mut World<S>) -> Option<()> { None }
     fn run_prepared(system: &mut ExclusiveWith<F>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut ExclusiveWith<F>, world: &mut World<S>, prepared: ()) { () }
@@ -3972,7 +3975,7 @@ impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S>, P: StartBran
     fn explain(group: &Parallel<P>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { <P as Branches<E, S>>::explain_branches(&group.branches, places, 0, out) }
     fn system_names(group: &Parallel<P>, names: Vec<Str>) -> Vec<Str> { <P as Branches<E, S>>::branch_names(&group.branches, names) }
     type Prepared = ();
-    fn touches(system: &Parallel<P>) -> Vec<Str> { Vec::from_array(["w:*"]) }
+    fn touches(system: &Parallel<P>) -> Vec<Str> { writes_all() }
     fn prepare(system: &mut Parallel<P>, event: &E, world: &mut World<S>) -> Option<()> { None }
     fn run_prepared(system: &mut Parallel<P>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut Parallel<P>, world: &mut World<S>, prepared: ()) { () }
@@ -4129,12 +4132,12 @@ pub trait CountNodes { fn count_nodes() -> Int }
 impl CountNodes for () { fn count_nodes() -> Int { 0 } }
 impl<N, P, D, R> CountNodes for (Node<N, P, D>, R) where R: CountNodes { fn count_nodes() -> Int { 1 + <R as CountNodes>::count_nodes() } }
 impl<E, S, Ns> System<E, S> for Graph<Ns> where Ns: StartNodes<E, S, Ns>, Ns: CountNodes {
-    fn explain(graph: &Graph<Ns>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(names, places, Vec::from_array(["w:*"]), out) }
-    fn explain_chain(graph: &Graph<Ns>, places: Vec<Str>, at: Int, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(names, pushed(places, "chain[" ++ show(at) ++ "]"), Vec::from_array(["w:*"]), out) }
+    fn explain(graph: &Graph<Ns>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(names, places, writes_all(), out) }
+    fn explain_chain(graph: &Graph<Ns>, places: Vec<Str>, at: Int, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(names, pushed(places, "chain[" ++ show(at) ++ "]"), writes_all(), out) }
     // (Its nodes' names are not said.)
     fn system_names(graph: &Graph<Ns>, names: Vec<Str>) -> Vec<Str> { names }
     type Prepared = ();
-    fn touches(system: &Graph<Ns>) -> Vec<Str> { Vec::from_array(["w:*"]) }
+    fn touches(system: &Graph<Ns>) -> Vec<Str> { writes_all() }
     fn prepare(system: &mut Graph<Ns>, event: &E, world: &mut World<S>) -> Option<()> { None }
     fn run_prepared(system: &mut Graph<Ns>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut Graph<Ns>, world: &mut World<S>, prepared: ()) { () }
@@ -4248,11 +4251,11 @@ impl<T> LifecycleEvent for OnRemove<T> where T: Schedule { const KIND: Int = 3; 
 pub struct SharedSystem<Q> { shared: Mutex<Q> }
 impl<Q> Use<[0, *]> for SharedSystem<Q> {}
 impl<E, S, Q> System<E, S> for SharedSystem<Q> where Q: System<E, S> {
-    fn explain(system: &SharedSystem<Q>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(lock(&system.shared, fn(q: &mut Q) -> Vec<Str> { <Q as System<E, S>>::system_names(&*q, names) }), places, Vec::from_array(["w:*"]), out) }
-    fn explain_chain(system: &SharedSystem<Q>, places: Vec<Str>, at: Int, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(lock(&system.shared, fn(q: &mut Q) -> Vec<Str> { <Q as System<E, S>>::system_names(&*q, names) }), pushed(places, "chain[" ++ show(at) ++ "]"), Vec::from_array(["w:*"]), out) }
+    fn explain(system: &SharedSystem<Q>, places: Vec<Str>, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(lock(&system.shared, fn(q: &mut Q) -> Vec<Str> { <Q as System<E, S>>::system_names(&*q, names) }), places, writes_all(), out) }
+    fn explain_chain(system: &SharedSystem<Q>, places: Vec<Str>, at: Int, out: Vec<SystemInfo>) -> Vec<SystemInfo> { let names: Vec<Str> = Vec::new(); explain_leaf(lock(&system.shared, fn(q: &mut Q) -> Vec<Str> { <Q as System<E, S>>::system_names(&*q, names) }), pushed(places, "chain[" ++ show(at) ++ "]"), writes_all(), out) }
     fn system_names(system: &SharedSystem<Q>, names: Vec<Str>) -> Vec<Str> { lock(&system.shared, fn(q: &mut Q) -> Vec<Str> { <Q as System<E, S>>::system_names(&*q, names) }) }
     type Prepared = ();
-    fn touches(system: &SharedSystem<Q>) -> Vec<Str> { Vec::from_array(["w:*"]) }
+    fn touches(system: &SharedSystem<Q>) -> Vec<Str> { writes_all() }
     fn prepare(system: &mut SharedSystem<Q>, event: &E, world: &mut World<S>) -> Option<()> { None }
     fn run_prepared(system: &mut SharedSystem<Q>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut SharedSystem<Q>, world: &mut World<S>, prepared: ()) { () }
@@ -5456,7 +5459,7 @@ pub fn sync_point<P>(point: P) -> SyncPointOf<P> { discard(point); SyncPointOf {
 // does; of any other, everything.
 pub trait PointTouches { fn point_touches() -> Vec<Str> }
 impl<P> PointTouches for P where P: Enveloped, <P as Enveloped>::Env: EnvTouches { fn point_touches() -> Vec<Str> { <<P as Enveloped>::Env as EnvTouches>::env_touches() } }
-impl<P> PointTouches for P { fn point_touches() -> Vec<Str> { Vec::from_array(["w:*"]) } }
+impl<P> PointTouches for P { fn point_touches() -> Vec<Str> { writes_all() } }
 pub trait EnvTouches { fn env_touches() -> Vec<Str> }
 impl<Q, N, St> EnvTouches for Query<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: TouchNames { fn env_touches() -> Vec<Str> { <<Q as ItemTouches>::List as TouchNames>::touch_names(Vec::new()) } }
 // Whether each of a request's touches is among what its point's say.

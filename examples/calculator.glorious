@@ -149,16 +149,17 @@ fn eval(e: Expr, names: Map<Str, Int>) -> Int / {Fail} {
 }
 
 // The value of a text, or what went wrong, said with its line and column.
-fn calculate(text: Str) -> Str {
+fn calculate(text: &str) -> Str {
     let mut sources = SourceMap::new();
+    let refused: Str = "too many texts";
     match(SourceMap::insert(&mut sources, "input", text)) {
         Ok(id) => worked_out(text, &sources, id),
-        Err(_) => "too many texts"
+        Err(_) => refused
     }
 }
 
-fn worked_out(text: Str, sources: &SourceMap, id: SourceId) -> Str {
-    let chars = chars(text);
+fn worked_out(text: &str, sources: &SourceMap, id: SourceId) -> Str {
+    let chars = std::vec::collect(&mut text.chars());
     let end = len_at(&chars);
     handle {
         let spots = tokens(&chars, 0, Vec::new());
