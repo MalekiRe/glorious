@@ -240,6 +240,75 @@ type is used once); bodies as written and as decided (`runFns`, 20: apart,
 that changes what it began with has no delta, and is checked again after
 the others (side by side) or not kept.
 
+What reading the next steps closely showed (measured on covey/fleet):
+
+- **Bodies as jobs across units** (the rest of step 1): a cold check runs
+  ecs (0.93 s) and fleet (1.37 s) one after the other, every other unit
+  under 25 ms; an edit takes the library units from what is kept. Doing
+  their bodies side by side gains under a second, once, and nothing on an
+  edit; and a unit's bodies read what its callees' bodies found (how a call
+  is made, `St.fnCalls`; the bodies the count of uses follows), so they
+  would wait on those. Left for after step 7, where a body's job reads
+  signatures alone.
+- **One copy per use** (step 2) is mostly there: `specCopy` makes a copy of
+  each function for each set of implementations it is called with, so what
+  `main` reaches holds no implementation as a value; the typed lowering
+  lowers each function at each of its signatures and keeps one copy of each
+  that lowers alike. What is left is the dictionaries' form itself
+  (`untraitFn`, `implDictItem`), for what nothing reaches and for a given
+  bound passed on: some hundreds of lines, not 1.2k.
+- **Sema writing the certificate** (step 7): the certificate gives each
+  function, closure and handler regions, loans and capabilities in Core's
+  terms (`Typing.SigEntry`, `Hint`); the checker's lifetimes and captures
+  are another model. Writing one from the other is the rewrite of `Infer`,
+  not 1k lines beside it. What can go first is what makes a body be read
+  again: the decisions, which come from locals not being places.
+
+### Locals as places (step 7, first)
+
+Every decision a body is read again for comes from one thing: a local is a
+value or a cell (`let` or `let mut`) before it is checked, decided from its
+text by the front passes (`promote`, `nameBorrows`, `borrowReceivers` with
+`receiverExpr`, `elementRead`, `hoist`). Where a borrow is found only once
+types are known, the local's kind changes and the body is rewritten and
+checked again: a receiver taken by reference (`receiver`, 543 in the
+suite), a comparison of what is not copied (`compareByRef`, 434), a field
+through `Deref` (`derefField`, 333), a match of a reference against value
+patterns (`refPats`, 800), a value let go on one path (`letMut`, 438, a drop
+flag), a function named as a value (`eta`, 78), `..` in a tuple (`rest`,
+13). fleet's `main` is checked ten times on each edit for them.
+
+As Rust has it, a local is a place: it can be borrowed, and moved out of
+where its type allows, whatever its text says; whether it is a cell in
+Core is decided after it is checked, from what was found.
+
+- **The checker.** A `let` is a place: borrowing it (`&x`, a receiver
+  taken by reference, a comparison's operand) gives it a brand where it is
+  first borrowed, and from then on it is used as a cell is, through loans
+  that end. Each adjustment found is kept by the node it is at (a call's
+  receiver borrowed or given, a field through `Deref`, a comparison by
+  reference, a pattern's binding by reference, a function named as a
+  value): `St.adjust`, by node. The count of uses and the borrow rules read
+  the adjustment where they read the node, as they read a `&x` written.
+- **Drop flags.** A value used on one path and not another, with a `drop`,
+  is destroyed where it was not used: Elab gives it a flag, as Rust does,
+  in place of the `letMut` decision.
+- **Elab.** Makes cells of the locals the checker borrowed (Elab's own
+  `promote`, from `St.adjust`), and writes each adjustment where its node is
+  elaborated.
+- **What goes.** `Decision` and its rewrites (`decideBody`, `receiverBody`,
+  `compareBody`, `refPatsBody`, `letMutRewriteF`, the eta and rest ones),
+  `checkDeciding`'s rounds, `decidedProgram`, the front passes above, the
+  side tables that carry their choices (`dotRefs`, `argsChosen`,
+  `dotChosen`), and checking a body again.
+
+Slices, each landing alone with the suite green and the old path for the
+rest kept until its last user goes: comparisons (operands borrowed by
+type; Elab borrows them, in a cell of the value where it is a `let`); then
+fields through `Deref`; then receivers; then patterns by reference; then
+drop flags; then the front passes and `Decision` go.
+
+
 ## Expected size
 
 Estimates, to be replaced by measurements as each step lands.
