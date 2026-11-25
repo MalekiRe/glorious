@@ -726,6 +726,33 @@ def receiverBody (call : Nat) (fn : Option String) (borrow : Option Bool) (annot
     | _ => false
   reborrowWhere b calls taken annots marked
 
+/-- The comparison `call` of the function of `Eq` or `Ord` that compares by
+reference, each side borrowed as a receiver is (`receiverClause`), named and
+kept where a reference can point. Only the clauses it is in are written
+again. -/
+def compareBody (call : Nat) (annots : List (Option TypeExpr)) (b : Flat.Body) : Flat.Body :=
+  let fnOf := fun (b : Flat.Body) (f : Flat.ExprId) =>
+    (b.name? f).bind fun (_, op) => Syntax.compareOps.lookup op
+  let marked : Flat.FRewrite := { onExpr := fun go b e => match b.expr e with
+    | .call i f #[l, r] =>
+      if i != call then none else
+      (fnOf b f).map fun fn => do
+        -- (A name borrowed as it is, a reference too: `&T` compares as `T`.)
+        let mark := fun (a : Flat.ExprId) => (do
+          match (← get).bare? a with
+          | some x =>
+            if (Syntax.lastSegment x).front.isUpper then
+              Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none Syntax.receiverMark)) #[a])
+            else Flat.pushExpr (.ref false x)
+          | none => Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none Syntax.receiverMark)) #[← go.ex a]) : Flat.Build Flat.ExprId)
+        Flat.pushExpr (.call i (← Flat.pushExpr (.name none fn)) #[← mark l, ← mark r])
+    | _ => none }
+  let taken : Std.HashMap String Bool := Syntax.compareOps.foldl (fun m (_, fn) => m.insert fn false) {}
+  let calls := fun (n : Flat.FExpr) => match n with
+    | .call i _ _ => i == call
+    | _ => false
+  reborrowWhere b calls taken annots marked
+
 /-- The name the field borrow `id` is of, in an expression outside any
 block in it. -/
 partial def refFieldOfF (b : Flat.Body) (id : Nat) (e : Flat.ExprId) : Option String :=
@@ -810,6 +837,7 @@ def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) 
   | .refPats id clauses => refPatsBody id clauses b
   | .receiver call fn borrow => receiverBody call fn borrow annots b
   | .derefField id uniq => derefBody id uniq annots b
+  | .compareByRef call => compareBody call annots b
   | .derefReceiver call =>
     ({ onExpr := fun go b e => match b.expr e with
         | .call i f args =>
@@ -851,7 +879,7 @@ def Decided.of (b : Blocks) : Decided := Id.run do
       | .refPats id _ => { d with closures := d.closures.insert id }
       | .receiver call _ _ => { d with calls := d.calls.insert call }
       | .derefField id _ => { d with fields := d.fields.insert id }
-      | .derefReceiver call => { d with calls := d.calls.insert call }
+      | .derefReceiver call | .compareByRef call => { d with calls := d.calls.insert call }
   for (call, _) in b.dotChosen do d := { d with calls := d.calls.insert call }
   for ((call, _), _) in b.argsChosen do d := { d with calls := d.calls.insert call }
   pure d

@@ -972,6 +972,10 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
             | none => pure a
           else pure a
         | _ => pure a
+      -- (What a comparison compares, `a == b`: told of where its type is
+      -- known, `checkCompares`.)
+      if i == 0 && call != 0 && compareOps.any (what == s!"`{·.1}`") then
+        modify fun s => { s with compares := s.compares.push (call, p) }
       -- (A dot call whose receiver is of a type with a function of its own of
       -- the name: that one, if the function in scope does not fit.)
       let before ← get

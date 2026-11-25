@@ -86,6 +86,29 @@ fn main() -> Int { say(pair("x", 345)); say(pick("xy", 3)); say(pick("xy", 1)); 
 1
 0
 #### case
+#### Comparisons of what is not copied compare what the two are, borrowed,
+#### as Rust's operators do: `a == b` of two `String`s leaves both.
+struct P { name: String, n: Int }
+fn main() -> Int {
+    let a = String::from("x");
+    let b = String::from("y");
+    say(a == b);
+    say(a < b);
+    say(a.len() + b.len());
+    let p = P { name: String::from("q"), n: 1 };
+    let o: Option<String> = Some(String::from("q"));
+    say(o == Some(p.name.clone()));
+    say(p.name >= a);
+    0
+}
+#### expect
+false
+true
+2
+true
+false
+0
+#### case
 #### A field by number of an element that is a reference: read through it.
 struct P(Int)
 fn total(ps: &[&P]) -> Int { let mut s = 0; let mut i = 0; while({ i < ps.len() }) { s = s + ps[i].0; i = i + 1 }; s }

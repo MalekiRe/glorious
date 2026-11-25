@@ -532,6 +532,9 @@ structure St where
   dups : Array (Ty × String) := #[]
   /-- The same, for types that later functions can still affect. -/
   lateDups : Array (Ty × String) := #[]
+  /-- Each comparison, `a == b`, with what it compares: of a type that is
+  not copied, read again comparing by reference (`Decision.compareByRef`). -/
+  compares : Array (Nat × Ty) := #[]
   /-- Types whose values must be free to go unused, with the reason; checked
   once the types are known. -/
   drops : Array (Ty × String) := #[]

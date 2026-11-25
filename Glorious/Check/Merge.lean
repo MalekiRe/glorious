@@ -522,6 +522,7 @@ delta_part StDelta0 diffPart0 applyPart0 fitsPart0 clearPart0 restorePart0 [
 
 delta_part StDelta1 diffPart1 applyPart1 fitsPart1 clearPart1 restorePart1 [
   lateDrops : ArrD (Ty × String),
+  compares : ArrD (Nat × Ty),
   stays : ArrD (Ty × String),
   lateStays : ArrD (Ty × String),
   statics : ArrD (Ty × String),

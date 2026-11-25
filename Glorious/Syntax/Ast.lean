@@ -261,6 +261,11 @@ declaration has been seen: `value.f(a)` borrows `value` if `f` is written to
 take a reference first. -/
 def receiverMark : String := "%receiver"
 
+/-- The comparisons, each with the function of `Eq` or `Ord` that compares
+what two references are to, as it does. -/
+def compareOps : List (String × String) :=
+  [("==", "eq"), ("!=", "ne"), ("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")]
+
 /-- A name written through another, `Owner::NAME`, and not called, kept with
 a number of its own: if it turns out to be a value a trait leaves to
 implementations, it is that trait's function called with nothing. -/

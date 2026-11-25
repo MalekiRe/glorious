@@ -8214,7 +8214,11 @@ could, which left a program not lowered (laid out by its types):
   `&self`: of a type that is copied, as `==` and `<` say (the defaults read
   through the references); `String`, `Vec`, tuples, `Result` and `[T; N]`
   say their own. `==` and `<` stay of values, so that comparing numbers
-  borrows nothing.
+  borrows nothing; a comparison of what is not copied (a `drop` to run, or
+  used once) is read again of `eq`, `lt` and the rest, each side borrowed
+  as a receiver is (`Decision.compareByRef`, from `checkCompares` once the
+  types are known): `a == b` of two `String`s leaves both, as Rust's does.
+  A dot call's receiver marks (`%receiver`) may be on any argument.
 - `&T` is `Eq` and `Ord` where `T` is, as Rust's: `{ a, b => a > b }` of
   two `&Int`s.
 - `Vec::sort` asks only `T: Ord` and `sort_by` gives references, `fn(&T,

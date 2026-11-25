@@ -229,6 +229,9 @@ inductive Decision where
   | derefField (id : Nat) (uniq : Bool)
   /-- The dot call `call`'s receiver, a reference, is of what it points to. -/
   | derefReceiver (call : Nat)
+  /-- The comparison `call`, `a == b`, is of what `a` and `b` are, borrowed:
+  `eq(&a, &b)` (`Syntax.compareOps`). -/
+  | compareByRef (call : Nat)
 
 /-- What the checker says where it stops: why, and what it found to decide,
 where it stops for that; `result`
