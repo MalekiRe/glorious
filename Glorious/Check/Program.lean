@@ -198,9 +198,14 @@ def schemeShape (s : Scheme) : String :=
         -- (A value held whose type is a reference with a lifetime of the
         -- type's own: as that lifetime held, which is what a signature says
         -- of a borrow of what it is given.)
+        -- (Of a lifetime the type does not have, what that one holds: a
+        -- borrow made in the body, of what the type's lifetimes borrow.)
         | .ty t => match refCapsOf t with
           | [] => [s!"ty {showTy t}"]
           | cs => if cs.all (fun c' => (place c').isSome) then cs.filterMap fun c' => (place c').map (s!"life#{·}")
+            else if (freeTys t).isEmpty then cs.flatMap fun c' => match place c' with
+              | some k => [s!"life#{k}"]
+              | none => if seen.contains c' then [] else holds fuel (c' :: seen) c'
             else [s!"ty {showTy t}"]
         | .inner _ => if quiet then [] else ["inner"]
         | .brand _ => ["brand"]
@@ -223,6 +228,42 @@ def schemeShape (s : Scheme) : String :=
         | none => (seen.length, seen ++ [(cur, seen.length)])
       ((out ++ s!"#{k}").push c, seen, "")) ("", [], "")
   out ++ cur
+
+/-- Whether what a function's body was found to need of its callers is no
+more than its signature says (`schemeShape` of each): the same type; of the
+traits it asks, those the signature asks; as many types to use more than
+once, to let go and to come back, or fewer; and of what each of its
+lifetimes and callables holds, what the signature says or less. So callers
+checked with the signature are checked with all the body needs. -/
+def schemeWithin (body sig : Scheme) : Bool :=
+  let parts := fun (text : String) =>
+    match text.splitOn " holds " with
+    | [head, held] =>
+      let toks : List String := head.splitOn " "
+      let counts := (toks.drop (toks.length - 3)).map fun (t : String) => t.length - 1
+      let early := toks.take (toks.length - 3)
+      match early.findIdx? (fun (t : String) => t.startsWith "b" && (t.drop 1).all (· == '|')) with
+      | some i =>
+        let ty := " ".intercalate (early.take i)
+        let bounds := ((" ".intercalate (early.drop (i + 1))).drop 1 |>.dropEnd 1 |>.toString).splitOn ", "
+          |>.filter (· != "")
+        let inner := ((held.drop 1).dropEnd 1).toString
+        let lists := if inner.isEmpty then [] else
+          ((inner.drop 1).dropEnd 1).toString.splitOn "], [" |>.map fun (l : String) => (l.splitOn ", ").filter (· != "")
+        some (ty, bounds, counts, lists)
+      | none => none
+    | _ => none
+  -- (What a callable performs, in any order.)
+  let rows := fun (t : String) => (t.splitOn "{").mapIdx (fun i (part : String) =>
+    if i == 0 then part else match part.splitOn "}" with
+      | inner :: rest => "}".intercalate (", ".intercalate ((inner.splitOn ", ").mergeSort (· ≤ ·)) :: rest)
+      | [] => part) |> "{".intercalate
+  match parts (schemeShape body), parts (schemeShape sig) with
+  | some (t, bs, cs, hs), some (t', bs', cs', hs') =>
+    rows t == rows t' && bs.all (fun b => bs.count b ≤ bs'.count b)
+      && (cs.zip cs').all (fun (a, b) => a ≤ b) && hs.length == hs'.length
+      && (hs.zip hs').all fun (h, h') => h.all h'.contains
+  | _, _ => false
 
 /-- A type with its variables and captures numbered (to see where two differ). -/
 partial def showTyCaps : Ty → String
@@ -717,9 +758,10 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           | some k => s.insert k
           | none => s
           else s) {}
+      -- (A constant's type is its value's, which no signature says.)
       let isSettled := fun (g : List FnDecl) => g.all fun d =>
-        match fromSt.fns[d.name]?, now.fns[d.name]? with
-        | some a, some b => schemeShape a == schemeShape b
+        Syntax.isConstFn d.name || match fromSt.fns[d.name]?, now.fns[d.name]? with
+        | some a, some b => schemeWithin b a
         | _, _ => false
       let firstRefused := rest.toList.find? fun (_, k) => refused.contains k
       let before := rest.toList.takeWhile fun (_, k) => !refused.contains k

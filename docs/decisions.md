@@ -8335,3 +8335,23 @@ could, which left a program not lowered (laid out by its types):
   gives may jump to a label and not come back. Now it is asked as for any
   callable the function is given: `ecs::bridge_world` and a case's
   `each_mut` take `F: for<'a> Fn<(&'a mut ..,), Output = ..>, F: Returns`.
+
+## Bodies within their signatures
+
+- A function's body is settled where what it needs of its callers is no
+  more than its signature says (`schemeWithin`): the same type, what it
+  performs in any order; of the traits it asks, those the signature asks;
+  as many types to use twice, let go and come back, or fewer; and of what
+  each lifetime and callable holds, what the signature says or less. Before,
+  the two had to be the same, and a body that needed less was checked again.
+  A constant's type is its value's, which no signature says.
+- What a lifetime holds through one the type does not have is shown as what
+  that one holds (`schemeShape`): a borrow made in the body of what the
+  type's lifetimes borrow is those lifetimes.
+- Of the 281 functions whose body's type differed from their signature's,
+  52 are left: traits the body asks that the signature does not say,
+  lifetimes related beyond what elision gives (`std::parse`, `ecs::World`),
+  what a callable running in an environment is asked (`else`, `and`, `or`),
+  what a callable a function gives back holds, and callables given by a
+  `Fn` bound whose effects are not written. Each is next, as Rust's rules
+  have it: written in the signature.
