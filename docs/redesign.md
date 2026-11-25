@@ -186,20 +186,40 @@ the program built, as now. The ten caches and their keys go.
 
 ## Order of the work
 
-Hardest first, except where that would make the same work be done twice:
+Migrated in place: each step replaces a part of the compiler as it is, the old
+part ripped out as the new one lands, the suite green after every step.
+Building a second checker beside the first was the first plan; it is not
+taken, for what reading the checker closely showed:
 
-1. **Sema writing typed Core, with the job queue and ids.** Ids and the
-   queue go in first because Sema is built on them; declarations decided
-   from their own text with them. Built beside the old path, behind
-   `GLORIOUS_SEMA=1`, until the suite passes on it, then the old path is
-   deleted.
-2. **Ownership and borrows on typed Core.**
-3. **One copy per use of each generic.**
-4. **One design for keeping work between compiles.**
-5. **Every error, sorted.**
+- A checker group's work is already a job that makes a delta of its own
+  from a base state (`checkGroupKept`, `StDelta`): what is missing for the
+  queue is scheduling by what each group depends on, not new jobs.
+- Whether a local is a value or a cell (`let` or `let mut`) is part of the
+  language: a value is moved out of, a cell is not (`replace`). Borrowing a
+  `let` makes it a cell, decided before checking (`promote`); a borrow found
+  only once types are known (a receiver, a comparison by reference) changes
+  what the local is, which is why those are read again. Recording
+  adjustments in place of reading again (rustc's way) works where nothing
+  declared earlier changes; moving the rest needs locals that are places
+  with moves tracked (Rust's drop flags), a change to the language's model
+  that comes last, with its own design.
+
+So, in order (hardest that does not make the same work be done twice first):
+
+1. **The job queue.** Groups scheduled by what they depend on, reachable
+   from `main` first, the rest after; each a job on a thread of its own as
+   soon as what it reads is finished; results put together in a fixed order.
+   Replaces the levels of `checkItems`. Every independent error collected,
+   sorted by source position.
+2. **One copy per use of each generic** (section 6).
+3. **Adjustments in place of reading again**, where the local stays what it
+   was declared (receivers by type, `derefReceiver`, `derefField`,
+   comparisons of what is already borrowed).
+4. **Ids** for types and names in the checker (section 1).
+5. **One design for keeping work** (section 7), on the ids and the queue.
 6. **`watch` and `serve` running after the reachable band.**
-
-Each step lands with the suite green and is committed and pushed.
+7. **Locals as places, and Sema writing typed Core** (sections 4 and 5):
+   designed when 1–6 have landed.
 
 ## Expected size
 
