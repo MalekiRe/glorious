@@ -183,6 +183,15 @@ def signatureTy (rigid : List (String × Ty)) (annots : List (Option Ty)) (ret :
       let c ← findCap c
       unless named.contains c || c == one do
         captures c (.ty (Ty.life one))
+  -- A callable it gives back holds what it was given, as Rust's `impl Fn`
+  -- captures what is in scope: its signature says so, whatever its body
+  -- made the callable of.
+  let rec callableCaps : Ty → List Nat
+    | .fn _ _ _ _ c => [c]
+    | .con _ args | .tuple args => args.flatMap callableCaps
+    | _ => []
+  for c in callableCaps r do
+    for p in ps do captures c (.ty p)
   pure (Ty.fn ps r [] (some (← freshRowVar)) (← freshCap))
 
 /-- A comparison of what is not copied, `a == b` of two `String`s: read again
@@ -217,7 +226,7 @@ def afterGroupFn (t : Ty) : M Unit := do
 /-- One function of a group checked (`checkGroup`): the types found of it
 and of the uses of its group's functions, with those before. -/
 def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String × Ty)) (d : FnDecl)
-    (defs reused : List (String × Ty)) : M (List (String × Ty) × List (String × Ty)) := do
+    (defs reused : List (String × Ty)) (announce : Bool := false) : M (List (String × Ty) × List (String × Ty)) := do
   let mut defs := defs
   let mut reused := reused
   modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [], assocMemo := {},
@@ -302,9 +311,13 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
         | some (.performs _ effects) => TypeExpr.performs out effects
         | _ => out
       let written : TypeExpr := .fn args result
+      -- (What it performs is what `Effects` says: nothing, where nothing is,
+      -- as in the rest of the signature.)
+      modify fun s => { s with closedRows := true }
       let said ← resolveType rigid false
         (if b.ranked.isEmpty then written
          else .name Syntax.rankedMark (b.ranked.map (TypeExpr.name · []) ++ [written]))
+      modify fun s => { s with closedRows := false }
       unifyAt s!"`{b.subject}` is said twice to be a callable" ((rigid.lookup b.subject).getD said) said
     else if b.trait == "Environment" || b.trait == "Use" || b.trait == "Returns" then pure ()
     else if b.trait.startsWith "'" then
@@ -527,14 +540,13 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
     | some (.fn _ r _ _ _, _) => some r
     | _ => none
   -- (A function of the group whose signature is written whole is known to
-  -- its calls of itself by it before its body is read: each at lifetimes
-  -- of its own, `freshSigCaps`.)
-  let callsGroup := d.body.exprs.any fun n => match n with
-    | .name _ y => group.any (·.1 == y)
-    | _ => false
-  if !signature && callsGroup && (← get).groupSigned.contains d.name && annots.all Option.isSome && ret.isSome then
-    if let some u := group.lookup d.name then
-      if let .var _ ← find u then unify u (← signatureTy rigid annots ret)
+  -- the group's calls of it by it before any body is read, `announce`: each
+  -- at lifetimes of its own, `freshSigCaps`.)
+  if announce then
+    if (← get).groupSigned.contains d.name && annots.all Option.isSome && ret.isSome then
+      if let some u := group.lookup d.name then
+        if let .var _ ← find u then unify u (← signatureTy rigid annots ret)
+    return (defs, reused)
   let t ← if signature then signatureTy rigid annots ret
     else (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (do
         modify fun s => { s with body := d.body, dotRefs := #[] }
@@ -587,6 +599,13 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   modify fun s => { s with group := group, groupSigned := signed, groupFirst := first }
   let mut defs : List (String × Ty) := []
   let mut reused : List (String × Ty) := []
+  if !signature then
+    for d in decls do
+      let called := decls.any fun e => e.body.exprs.any fun n => match n with
+        | .name _ y => y == d.name
+        | _ => false
+      if called && signed.contains d.name then
+        tryCatch (discard (checkGroupFn decls signature group d [] [] (announce := true))) fun _ => pure ()
   for d in decls do
     let (defs', reused') ← onError (checkGroupFn decls signature group d defs reused)
       fun e =>

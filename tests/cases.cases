@@ -1780,7 +1780,7 @@ fn main() -> Int { even(3, 5) + even(2, 7) }
 enum Maybe<T> { Nothing, Just(T) }
 trait Show { fn show(Self) -> Int }
 impl Show for Int { fn show(x: Int) -> Int { x } }
-fn show_both<A, B>(a: A, b: B) -> Int { show(a) * 10 + show(b) }
+fn show_both<A, B>(a: A, b: B) -> Int where A: Show, B: Show { show(a) * 10 + show(b) }
 impl<T> Show for Maybe<T> where T: Show { fn show(o: Maybe<T>) -> Int { match(o) { Just(v) => show(v) + 1, Nothing => 0 } } }
 fn main() -> Int { show_both(4, Just(1)) }
 #### expect
@@ -4281,7 +4281,7 @@ error: in `describe`: `T` is not said to have `Named`: write `T: Named`
 trait Named { fn name(Self) -> Int }
 impl Named for Int { fn name(n: Int) -> Int { n } }
 fn f<T: Named>(x: T) -> Int { name(x) }
-fn g<T>(x: T) -> Int { name(x) }
+fn g<T>(x: T) -> Int where T: Named { name(x) }
 fn main() -> Int { f(1) + g(2) }
 #### expect
 3
@@ -4424,7 +4424,7 @@ fn main() -> Int { let mut c = Count(0); sum(&mut c) }
 trait Iter { type Item; fn next(&mut Self) -> Option<Item> }
 struct Count(Int)
 impl Iter for Count { type Item = Int; fn next(c: &mut Count) -> Option<Int> { let n = (*c).0; match(n < 3) { Ok(_) => (*c).0 = n + 1; Some(n), Err(_) => None } } }
-fn total<I>(it: &mut I, acc: I::Item) -> I::Item where I: Iter { match(next(it)) { Some(n) => total(it, acc + n), None => acc } }
+fn total<I>(it: &mut I, acc: I::Item) -> I::Item where I: Iter, I::Item: Add { match(next(it)) { Some(n) => total(it, acc + n), None => acc } }
 fn main() -> Int { let mut c = Count(0); total(&mut c, 10) }
 #### expect
 13
@@ -5108,7 +5108,7 @@ error: 4:40: in `main`: `Int` does not implement `Add<Result<(), ()>>`
 #### case
 #### `std::hash`: hashing, and a map that finds a key in a step or two.
 use std::hash::{HashMap};
-fn get(m: &HashMap<&str, Int>, key: &str) -> Option<Int> { match(m.get(&key)) { Some(v) => Some(*v), None => None } }
+fn get<'a>(m: &HashMap<&'a str, Int>, key: &'a str) -> Option<Int> { match(m.get(&key)) { Some(v) => Some(*v), None => None } }
 fn main() -> Int {
     let mut m = HashMap::from([("one", 1), ("two", 2), ("three", 3)]);
     say_debug(get(&m, "two"));
@@ -10452,7 +10452,7 @@ fn ping<A>(x: A, n: Int) -> A { if(n <= 0) { x } else { pong(x, n - 1) } }
 fn pong<B>(x: B, n: Int) -> B { ping(x, n) }
 fn main() -> Int { ping(7, 3) }
 #### expect
-error: 1:57: in `ping`: argument 1 of `pong`: expected `B`, found `A` (`ping` and `pong` call each other: a type parameter is one type to both only where both give it the same name)
+error: 2:33: in `pong`: argument 1 of `ping`: expected `A`, found `B` (`pong` and `ping` call each other: a type parameter is one type to both only where both give it the same name)
 #### case
 #### The parts of a name's value, each taken as a value of its own.
 struct Ticket(Int);
@@ -11914,7 +11914,7 @@ impl Num for Int { fn num(x: &Int) -> Int { *x } }
 struct P { a: Int }
 impl Num for P { fn num(p: &P) -> Int { p.a } }
 impl<T: Num> Double for T { fn double(x: &T) -> Int { num(x) * 2 } }
-fn twice<T: Num>(t: &T) -> Int { double(t) }
+fn twice<T: Num>(t: &T) -> Int where T: Double { double(t) }
 fn main() -> Int { twice(&4) + twice(&P { a: 10 }) }
 #### expect
 28
@@ -11926,7 +11926,7 @@ impl Num for Int { fn num(x: &Int) -> Int { *x } }
 impl Num for P { fn num(x: &P) -> Int { x.a } }
 impl<T: Num> Describe for T { fn describe(x: &T) -> Int { num(x) } }
 impl Describe for Int { fn describe(x: &Int) -> Int { 1000 } }
-fn via<T: Num>(t: &T) -> Int { describe(t) }
+fn via<T: Num>(t: &T) -> Int where T: Describe { describe(t) }
 fn main() -> Int { describe(&5) + describe(&P { a: 7 }) + via(&5) * 10000 + via(&P { a: 3 }) * 100000 }
 #### expect
 10301007
@@ -13683,7 +13683,7 @@ fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> 
     let mut column = first;
     handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
-fn main() -> Int / {Store} { store(Vec::from_array([1]), { let b = take<String>(); b.len() }) }
+fn main() -> Int / {Store<String>} { store(Vec::from_array([1]), { let b = take<String>(); b.len() }) }
 #### expect
 error: `main` performs effects that nothing handles: {Store<String>}
 #### case

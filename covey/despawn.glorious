@@ -22,7 +22,7 @@ struct Life(Int)
 struct Tick
 
 // Every tick, each entity has one less; one with none left ends.
-fn age<S>(lives: &mut Column<Life>, commands: &mut Commands<S>) {
+fn age<S>(lives: &mut Column<Life>, commands: &mut Commands<S>) where S: ecs::Columns, S: ecs::Unlinks<S> {
     let mut i = 0;
     while({ i < len_at(&lives.dense) }) {
         lives.dense[i] = Life(lives.dense[i].0 - 1);

@@ -160,7 +160,7 @@ pub fn scan(lines: Vec<&str>, target: Target) -> (Code, Bool) {
 }
 
 // How many of the instructions pass a test.
-fn count_of(code: &Code, test: fn(&str) -> Bool) -> Int {
+fn count_of<'a>(code: &'a Code, test: fn(&'a str) -> Bool) -> Int {
     let mut n = 0;
     let mut k = 0;
     while({ k < code.instructions.len() }) { if(test(code.instructions[k].as_str())) { n = n + 1 } else { () }; k = k + 1 };

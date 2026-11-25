@@ -29,7 +29,7 @@ impl OneOf for Walking { type Groups = (Locomotion, Life); }
 impl OneOf for Running { type Groups = (Locomotion,); }
 impl OneOf for Dead { type Groups = (Life,); }
 
-fn has<T, S>(world: &ecs::World<S>, e: Entity) -> Int where S: ecs::Get<T> {
+fn has<T, S>(world: &ecs::World<S>, e: Entity) -> Int where S: ecs::Get<T>, T: ecs::Visible {
     match(world.get<T>(e)) { Some(_) => 1, None => 0 }
 }
 

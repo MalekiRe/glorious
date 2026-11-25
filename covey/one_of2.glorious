@@ -43,7 +43,7 @@ impl OneOf for Dead { type Groups = (Life,); }
 struct Rider
 impl Requires for Rider { type Required = (Walking,); }
 
-fn has<T, S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<T> { match(world.get<T>(e)) { Some(_) => 1, None => 0 } }
+fn has<T, S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<T>, T: ecs::Visible { match(world.get<T>(e)) { Some(_) => 1, None => 0 } }
 
 fn replaced(t: &OnReplace<Running>, q: &mut Query<(Entity, &Running), ()>) { match(q.get_mut(t.entities[0])) { Some((_, r)) => say(String::from("replace running ") + r.0.to_string().as_str()), None => () } }
 fn removed(t: &OnRemove<Running>, q: &mut Query<(Entity, &Running), ()>) { match(q.get_mut(t.entities[0])) { Some((_, r)) => say(String::from("remove running ") + r.0.to_string().as_str()), None => () } }

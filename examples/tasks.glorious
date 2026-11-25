@@ -57,7 +57,7 @@ fn run_task<F>(queue: &mut List, task: F) where F: Fn<(), Output = (), Effects =
 }
 
 // The queue ends empty; the cleanup says what happens to a task if it does not.
-fn run(main_task: fn() -> () / {Task}) {
+fn run<F>(main_task: F) where F: Fn<(), Output = (), Effects = {Task}>, F: Returns {
     let mut queue = Nil;
     defer run_all(replace(&mut queue, Nil));
     run_task(&mut queue, main_task)

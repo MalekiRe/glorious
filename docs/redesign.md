@@ -221,6 +221,13 @@ So, in order (hardest that does not make the same work be done twice first):
 7. **Locals as places, and Sema writing typed Core** (sections 4 and 5):
    designed when 1–6 have landed.
 
+Landed beside these: signatures whole, as Rust's. Each body is checked once,
+from every signature, side by side, and refused where it needs more of its
+callers than its signature says (`schemeWithin`): the passes that checked
+bodies again from their bodies' types until they settled are gone, and with
+them the state each pass carried to the next. What a merge puts together is
+now only what each body adds.
+
 ## Expected size
 
 Estimates, to be replaced by measurements as each step lands.

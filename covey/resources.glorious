@@ -78,7 +78,7 @@ fn needs(score: Res<Score>, speed: ResMut<Speed>, tally: ResMut<Tally>) {
 fn either(score: Option<Res<Score>>, tally: ResMut<Tally>) {
     tally.saw = tally.saw + match(score) { Some(s) => s.0, None => 100 }
 }
-fn tally_of<S, L>(app: &App<S, L>) {
+fn tally_of<S, L>(app: &App<S, L>) where S: ecs::Holds<Tally> {
     match(app.world.resource<Tally>()) { Some(t) => say(t.ran); say(t.saw), None => () }
 }
 fn skipping() {
@@ -101,7 +101,7 @@ fn skipping() {
 }
 
 // `commands_insert_and_remove_resources_when_applied`
-fn toggle<S>(commands: &mut Commands<S>, score: Option<Res<Score>>, speed: Option<Res<Speed>>) {
+fn toggle<S>(commands: &mut Commands<S>, score: Option<Res<Score>>, speed: Option<Res<Speed>>) where S: ecs::Holds<Score>, S: ecs::NotAState<Score>, S: ecs::Holds<Speed>, S: ecs::NotAState<Speed> {
     match((score, speed)) {
         (None, _) => commands.insert_resource(Score(1)),
         (Some(_), None) => commands.insert_resource(Speed(2)),

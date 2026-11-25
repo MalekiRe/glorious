@@ -8348,10 +8348,27 @@ could, which left a program not lowered (laid out by its types):
 - What a lifetime holds through one the type does not have is shown as what
   that one holds (`schemeShape`): a borrow made in the body of what the
   type's lifetimes borrow is those lifetimes.
-- Of the 281 functions whose body's type differed from their signature's,
-  52 are left: traits the body asks that the signature does not say,
-  lifetimes related beyond what elision gives (`std::parse`, `ecs::World`),
-  what a callable running in an environment is asked (`else`, `and`, `or`),
-  what a callable a function gives back holds, and callables given by a
-  `Fn` bound whose effects are not written. Each is next, as Rust's rules
-  have it: written in the signature.
+- No body is checked again: each is checked once, from the signatures,
+  side by side, and one that needs more of its callers than its signature
+  says is refused, with what to write ("in `f`: its body asks `Show` of a
+  type its signature says nothing of: write it after `where`"). As Rust's:
+  - the traits a body asks are written (`where T: Show`); one asked of a
+    type at arguments not yet known is the written one's, and its
+    dictionary;
+  - a callable given by a `Fn` bound with no `Effects` performs nothing;
+  - a callable a function gives back holds what the function was given, as
+    Rust 2024's `impl Fn` captures what is in scope;
+  - what holds a reference holds what that reference is to (`&'r mut Q<'w>`:
+    `'w`), and a lifetime written twice is one;
+  - lifetimes elision does not relate are written (`asm::count_of`,
+    `fn get<'a>(m: &HashMap<&'a str, Int>, key: &'a str)`);
+  - a group's functions written whole are known to each other's bodies by
+    their signatures before any body is read.
+- A function a callable of which runs in an environment it is given
+  (`else`, `and`, `or`), or that is given a label to jump to (`ensure`),
+  has its body for its signature, as a constant has its value's type: which
+  of the callables runs, and how often, is what its callers are held to,
+  and no signature says it. These are read after the other signatures.
+- Programs that relied on traits and lifetimes found from bodies write
+  them: covey's despawn, commands, resources, one_of, one_of2, asm; the
+  tasks example's `run` takes `F: Fn<..>, F: Returns`; six cases.

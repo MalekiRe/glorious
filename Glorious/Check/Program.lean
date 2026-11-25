@@ -174,6 +174,10 @@ partial def refCapsOf : Ty → List Nat
   | .tuple args => args.flatMap refCapsOf
   | _ => []
 
+/-- The `k`-th lifetime of a type, as `schemeShape` writes it: with no digit,
+which it numbers anew. -/
+def lifeAt (k : Nat) : String := "life" ++ String.ofList (List.replicate (k + 1) '\'')
+
 /-- A function's type as callers see it: the type, with its variables
 numbered in order; how many bounds, of what; and for each capture of the
 type, what it holds in the end, through captures the type does not have
@@ -193,20 +197,21 @@ def schemeShape (s : Scheme) : String :=
     | fuel + 1 =>
       (s.edges.filter (·.1 == c)).flatMap fun (_, w) => match w with
         | .ty (.ref (.con "'" []) (.tuple []) c') => match place c' with
-          | some k => [s!"life#{k}"]
+          | some k => [lifeAt k]
           | none => if seen.contains c' then [] else holds fuel (c' :: seen) c'
         -- (A value held whose type is a reference with a lifetime of the
         -- type's own: as that lifetime held, which is what a signature says
         -- of a borrow of what it is given.)
         -- (Of a lifetime the type does not have, what that one holds: a
         -- borrow made in the body, of what the type's lifetimes borrow.)
-        | .ty t => match refCapsOf t with
-          | [] => [s!"ty {showTy t}"]
-          | cs => if cs.all (fun c' => (place c').isSome) then cs.filterMap fun c' => (place c').map (s!"life#{·}")
-            else if (freeTys t).isEmpty then cs.flatMap fun c' => match place c' with
-              | some k => [s!"life#{k}"]
+        | .ty t => match capsOf t with
+          -- (A value of a type with no variable and no lifetime holds
+          -- nothing of the caller's: an `Int` a callable keeps.)
+          | [] => if (freeTys t).isEmpty then [] else [s!"ty {showTy t}"]
+          | cs => if cs.all (fun c' => (place c').isSome) then cs.filterMap fun c' => (place c').map (lifeAt ·)
+            else cs.flatMap fun c' => match place c' with
+              | some k => [lifeAt k]
               | none => if seen.contains c' then [] else holds fuel (c' :: seen) c'
-            else [s!"ty {showTy t}"]
         | .inner _ => if quiet then [] else ["inner"]
         | .brand _ => ["brand"]
         | .once => ["once"]
@@ -258,12 +263,47 @@ def schemeWithin (body sig : Scheme) : Bool :=
     if i == 0 then part else match part.splitOn "}" with
       | inner :: rest => "}".intercalate (", ".intercalate ((inner.splitOn ", ").mergeSort (· ≤ ·)) :: rest)
       | [] => part) |> "{".intercalate
+  -- (What holds a reference holds what it is to holds, as Rust's implied
+  -- bounds have it: `&'a mut Q<'w>` held, `'w` is.)
+  let caps := capsOf sig.ty
+  let rec implied : Ty → List (Nat × List Nat)
+    | .ref how t c => (c, capsOf t) :: implied how ++ implied t
+    | .fn ps r _ _ _ => ps.flatMap implied ++ implied r
+    | .con _ args | .tuple args => args.flatMap implied
+    | .var _ => []
+  let within := (implied sig.ty).filterMap fun (c, inner) =>
+    (caps.idxOf? c).map fun k => (lifeAt k, inner.filterMap fun c' => (caps.idxOf? c').map lifeAt)
+  let close := fun (h : List String) => h ++ h.flatMap fun x => ((within.lookup x).getD [])
   match parts (schemeShape body), parts (schemeShape sig) with
   | some (t, bs, cs, hs), some (t', bs', cs', hs') =>
-    rows t == rows t' && bs.all (fun b => bs.count b ≤ bs'.count b)
+    -- (The traits asked are the signature's, in its order: a caller gives a
+    -- dictionary for each, where the signature says.)
+    rows t == rows t' && bs.all bs'.contains && body.bounds.map (·.1) == sig.bounds.map (·.1)
       && (cs.zip cs').all (fun (a, b) => a ≤ b) && hs.length == hs'.length
-      && (hs.zip hs').all fun (h, h') => h.all h'.contains
+      -- (A lifetime is any place the signature has it: `'a` twice.)
+      && ((hs.zip hs').zipIdx).all fun ((h, h'), i) =>
+        let same := caps.zipIdx.filterMap fun (c, j) => if caps[i]? == some c then some (lifeAt j) else none
+        h.all (close (lifeAt i :: same ++ h')).contains
   | _, _ => false
+
+/-- What a body needs that its signature does not say, as an error: what to
+write (`schemeWithin`). -/
+def beyondSignature (name : String) (sig body : Scheme) : String :=
+  let ty := fun (s : Scheme) => (schemeShape s).splitOn " b" |>.headD ""
+  let traits := body.bounds.filterMap fun (tr, _) =>
+    if (body.bounds.filter (·.1 == tr)).length > (sig.bounds.filter (·.1 == tr)).length then some tr else none
+  let what :=
+    if ty body != ty sig then s!"its body is found to have the type `{ty body}`, and its signature says `{ty sig}`"
+    else if !traits.isEmpty then
+      s!"its body asks {", ".intercalate (traits.eraseDups.map (s!"`{·}`"))} of a type its signature says nothing of: write it after `where`"
+    else if body.dups.length > sig.dups.length then
+      "its body uses something it is given more than once, which its signature does not say: write `T: Use<[0, *]>` of its type parameter"
+    else if body.drops.length > sig.drops.length then
+      "its body lets go of something it is given unused, which its signature does not say: write `T: Use<[0, 1]>` of its type parameter"
+    else if body.stays.length > sig.stays.length then
+      "its body calls a callable it is given while it holds what has to be used: write `F: Returns` of its type parameter"
+    else "what it gives back borrows or holds what its signature does not say: write its lifetimes"
+  s!"in `{name}`: {what}"
 
 /-- A type with its variables and captures numbered (to see where two differ). -/
 partial def showTyCaps : Ty → String
@@ -706,50 +746,47 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           if let some st' := applyDelta none cur d then
             set st'
             sigsKept := some d
-    -- (A function whose signature says too little to be checked from has
-    -- none: its callers wait for its body's type, below.)
+    -- (A function a callable of which runs in an environment it is given,
+    -- `else`: what the environment is asked, which of the callables runs
+    -- and how, is its body's, as a constant's type is its value's; and one
+    -- given a label to jump to, `ensure`, whose call gives whatever is
+    -- wanted where it is made. So its body is its signature, read after the
+    -- others' signatures.)
+    let ofEnvironment := fun (d : FnDecl) => d.bounds.any fun b => b.trait == "Environment" || b.trait == "Label"
     if sigsKept.isNone then
       for (g, _) in rest do
-        for d in g do tryCatchThe Elab.Said (checkGroup [d] (signature := true)) fun _ => pure ()
+        for d in g do
+          unless ofEnvironment d do tryCatchThe Elab.Said (checkGroup [d] (signature := true)) fun _ => pure ()
+      for (g, _) in rest do
+        for d in g do
+          if ofEnvironment d then tryCatchThe Elab.Said (checkGroup [d]) fun _ => pure ()
     -- Then every body checked from those, side by side, none waiting for
-    -- another's; and again from the types the bodies have, while one is
-    -- not what it was checked from: each time, those whose callees are each
-    -- what was checked from are settled, a level of calls more at least.
-    -- A group refused where all before it were settled: one after another,
-    -- then callees first.
+    -- another's: each is to need no more of its callers than its signature
+    -- says, as Rust's (`schemeWithin`). A group refused where all before it
+    -- need no more: one after another, then callees first.
     -- (Each group kept as the signatures are, `checkGroupKept`: what it
     -- read of the others, held or not, says whether it is checked again.)
     let failMark := "%refused "
-    let depth := (sorted.map (·.1)).foldl max 0
-    let mut from' ← get
+    let fromSt ← get
+    let sigFrom := mixHash 1 (hash [fromSt.tys.size, fromSt.rows.size, fromSt.caps.size, fromSt.capEdges.size,
+      fromSt.loans.size, fromSt.rigidKeys.size, fromSt.brands, fromSt.dropAsked])
+    -- (A group refused leaves what it did, the state not put back, which
+    -- would hold it twice: what comes after it is checked again.)
+    let one := fun ((g, k) : List FnDecl × Nat) => do
+      let got : Except Elab.Said (Array (UInt64 × KeptGroup)) ← attempt (match deltas with
+          | some kept => checkGroupKept kept fromSt (mixHash ((ownKeyAt[k]?).getD 0) (mixHash sigFrom (hash k)))
+              k g ((calleesAt[k]?).getD []) localFns
+          | none => do checkMaybe g; pure #[])
+      match got with
+      | .ok made => pure made
+      | .error e =>
+        modify fun s => { s with refusals := s.refusals.push s!"{failMark}{k} {e.msg}" }
+        pure #[]
     let mut settled := rest.isEmpty
-    let mut passes := 0
     let mut together := false
     while !settled do
-      passes := passes + 1
-      set from'
-      let fromSt := from'
-      let sigFrom := mixHash 1 (hash [fromSt.tys.size, fromSt.rows.size, fromSt.caps.size, fromSt.capEdges.size,
-        fromSt.loans.size, fromSt.rigidKeys.size, fromSt.brands, fromSt.dropAsked])
-      -- (A group refused leaves what it did, the state not put back, which
-      -- would hold it twice: what comes after it is checked again.)
-      let one := fun ((g, k) : List FnDecl × Nat) => do
-        let got : Except Elab.Said (Array (UInt64 × KeptGroup)) ← attempt (match deltas with
-            | some kept => checkGroupKept kept fromSt (mixHash ((ownKeyAt[k]?).getD 0) (mixHash sigFrom (hash k)))
-                k g ((calleesAt[k]?).getD []) localFns
-            | none => do checkMaybe g; pure #[])
-        match got with
-        | .ok made => pure made
-        | .error e =>
-          modify fun s => { s with refusals := s.refusals.push s!"{failMark}{k} {e.msg}" }
-          pure #[]
-      -- (Each group kept numbers from a place of its own, `checkGroupKept`;
-      -- otherwise each run does. A group not kept is checked from the
-      -- bodies' types one after another, seeing what those before it found:
-      -- side by side, from them, covey/tasks named a copy the elaborator
-      -- did not make.)
-      let oneByOne := together || (deltas.isNone && passes > 1)
-      let checked ← if oneByOne then rest.toList.foldlM (fun acc x => do pure (acc ++ (← one x))) #[]
+      set fromSt
+      let checked ← if together then rest.toList.foldlM (fun acc x => do pure (acc ++ (← one x))) #[]
         else checkSideBySideWith rest.toList (jump := deltas.isNone) one
       let now ← get
       let refused : Std.HashSet Nat := (now.refusals.extract fromSt.refusals.size now.refusals.size).foldl
@@ -760,83 +797,63 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           else s) {}
       -- (A constant's type is its value's, which no signature says.)
       let isSettled := fun (g : List FnDecl) => g.all fun d =>
-        Syntax.isConstFn d.name || match fromSt.fns[d.name]?, now.fns[d.name]? with
+        Syntax.isConstFn d.name || ofEnvironment d || match fromSt.fns[d.name]?, now.fns[d.name]? with
         | some a, some b => schemeWithin b a
         | _, _ => false
       let firstRefused := rest.toList.find? fun (_, k) => refused.contains k
       let before := rest.toList.takeWhile fun (_, k) => !refused.contains k
-      -- (The types the bodies before the first refused have.)
-      let bodies := before.foldl (fun m (g, _) => g.foldl (fun m d =>
-          match now.fns[d.name]? with
-          | some s => m.insert d.name s
-          | none => m) m) fromSt.fns
-      -- (Each time settles a level of calls more: as many as there are, and
-      -- one to see it.)
-      if passes > depth + 2 then
-        throw "the types of a unit's functions did not settle, checked again from their bodies' once for each level of calls; this is a compiler defect"
-      if before.all (isSettled ·.1) then
-        settled := true
-        if firstRefused.isSome then
-          -- A refusal where all before it are settled: from a group checked
-          -- before it that is not its callee (a field's type its body
-          -- found), so once more one after another; or the program's,
-          -- said as callees first say it, from before the signatures.
-          if !together then
-            together := true
-            settled := false
+      -- A body that needs more of its callers than its signature says: said,
+      -- as Rust's is, with what to write.
+      let mut beyond : Array String := #[]
+      for (g, _) in before do
+        unless isSettled g do
+          for d in g do
+            match fromSt.fns[d.name]?, now.fns[d.name]? with
+            | some a, some b => unless schemeWithin b a do beyond := beyond.push (beyondSignature d.name a b)
+            | _, _ => beyond := beyond.push s!"in `{d.name}`: its signature says too little to check its callers with: write it whole"
+      unless beyond.isEmpty do throw (sortedErrors beyond.toList)
+      settled := true
+      if firstRefused.isSome then
+        -- A refusal where all before it are settled: from a group checked
+        -- before it that is not its callee (a field's type its body
+        -- found), so once more one after another; or the program's,
+        -- said as callees first say it, from before the signatures.
+        if !together then
+          together := true
+          settled := false
+          continue
+        -- Each group again, callees first, from before the signatures:
+        -- what each refuses is said, as callees first say it (a
+        -- function's calls of itself are at the one type it is being
+        -- found to have, and see less of what a signature says than its
+        -- callers do). One that calls a refused one is not asked: what it
+        -- would say follows from that.
+        set pre
+        let mut errors : Array String := #[]
+        let mut failed : Std.HashSet String := {}
+        for (g, k) in rest do
+          if ((calleesAt[k]?).getD []).any failed.contains then
+            for d in g do failed := failed.insert d.name
             continue
-          -- Each group again, callees first, from before the signatures:
-          -- what each refuses is said, as callees first say it (a
-          -- function's calls of itself are at the one type it is being
-          -- found to have, and see less of what a signature says than its
-          -- callers do). One that calls a refused one is not asked: what it
-          -- would say follows from that.
-          set pre
-          let mut errors : Array String := #[]
-          let mut failed : Std.HashSet String := {}
-          for (g, k) in rest do
-            if ((calleesAt[k]?).getD []).any failed.contains then
-              for d in g do failed := failed.insert d.name
-              continue
-            match ← attempt (checkMaybe g) with
-            | .ok _ => pure ()
-            | .error e =>
-              errors := errors.push e.msg
-              for d in g do failed := failed.insert d.name
-          if errors.isEmpty then
-            let said := (now.refusals.find? (·.startsWith failMark)).getD ""
-            errors := errors.push (match (said.drop failMark.length).toString.splitOn " " with
-              | _ :: rest => " ".intercalate rest
-              | [] => said)
-          throw (sortedErrors errors.toList)
-        if deltas.isSome then
-          match sigsKept, passes with
-          | some d, 1 => groupDeltas := groupDeltas.push (sigKey, (d, #[]))
-          | _, _ => if let some d := diffStates pre fromSt then groupDeltas := groupDeltas.push (sigKey, (d, #[]))
-        set now
-        groupDeltas := groupDeltas ++ checked
-        if let some (_, last) := rest.back? then
-          made := (keys[last]!, forKeeping (← get)) :: made
-      else
-        if Trace.groupsTraced then
-          for (g, _) in before do
-            unless isSettled g do
-              for d in g do
-                if let (some a, some b) := (fromSt.fns[d.name]?, now.fns[d.name]?) then
-                  unless schemeShape a == schemeShape b do
-                    (dbgTrace s!"signature differs: {d.name}: {schemeShape a} / {schemeShape b}\n  sig {schemeDetail a}\n  body {schemeDetail b}" fun _ => (pure () : M Unit))
-        -- (The next time from the types the bodies have: those that were
-        -- not refused; with what a caller reads beside each type, kept by
-        -- the function's name: how many dictionaries it is given, which of
-        -- its variables a type written at a call is, `f<T>(..)`, and the
-        -- environments its callables run in.)
-        let next : St := { fromSt with
-          fns := bodies, fnBounds := now.fnBounds, typeParams := now.typeParams, writtenArgs := now.writtenArgs
-          fnRunsIn := now.fnRunsIn, fnGroups := now.fnGroups, envMust := now.envMust }
-        -- (Numbered past what every run of this time numbered, which the
-        -- bodies' types may name: none of it is taken, as what one group
-        -- found of a type the declarations share is not another's.)
-        from' := jumpedFor next (sideThreads + 1) runGap
+          match ← attempt (checkMaybe g) with
+          | .ok _ => pure ()
+          | .error e =>
+            errors := errors.push e.msg
+            for d in g do failed := failed.insert d.name
+        if errors.isEmpty then
+          let said := (now.refusals.find? (·.startsWith failMark)).getD ""
+          errors := errors.push (match (said.drop failMark.length).toString.splitOn " " with
+            | _ :: rest => " ".intercalate rest
+            | [] => said)
+        throw (sortedErrors errors.toList)
+      if deltas.isSome then
+        match sigsKept with
+        | some d => groupDeltas := groupDeltas.push (sigKey, (d, #[]))
+        | none => if let some d := diffStates pre fromSt then groupDeltas := groupDeltas.push (sigKey, (d, #[]))
+      set now
+      groupDeltas := groupDeltas ++ checked
+      if let some (_, last) := rest.back? then
+        made := (keys[last]!, forKeeping (← get)) :: made
     if let some k := keys.getLast? then key := k
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.

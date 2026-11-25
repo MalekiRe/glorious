@@ -19,7 +19,7 @@ struct Value(Int)
 struct Link(Entity)
 struct Seen(Vec<Int>)
 
-fn spawn_pair<S>(spawners: &Column<Spawner>, commands: &mut Commands<S>) {
+fn spawn_pair<S>(spawners: &Column<Spawner>, commands: &mut Commands<S>) where S: ecs::Get<Value>, S: ecs::Get<Link> {
     let child = commands.spawn((Value(1),));
     let parent = commands.spawn((Value(2),));
     commands.insert(child, (Link(parent),));

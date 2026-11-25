@@ -794,6 +794,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
       if ordinary.isEmpty then pure inferred
       else
         let mut written : List (String × Nat × Ty) := []
+        let mut fittedKeys : Array (String × Nat) := #[]
         for (b, at_) in ordinary.zipIdx do
           let t := Ty.con s!"'{b.subject}@{rigidOwner decls d}" []
           if (seen.lookup s!"'{b.subject}@{rigidOwner decls d}").isSome then
@@ -835,11 +836,13 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
                           for (a, b) in args.zip wargs do unify a b
                           fitted := true
                         catch _ => set saved
-              if fitted then written := written ++ [(tr, k, t)]
+              -- (Its dictionary is the written one's: the need is met by it,
+              -- its key spelled again, `settleBounds`.)
+              if fitted then fittedKeys := fittedKeys.push (tr, k)
               else
                 throw (inFunction d.name s!"`{bareName n}` is not said to have `{tr}`: write `{bareName n}: {tr}`")
         pure (written ++ inferred.filter fun (tr, k, _) =>
-          !written.any (fun w => w.1 == tr && w.2.1 == k))
+          !written.any (fun w => w.1 == tr && w.2.1 == k) && !fittedKeys.contains (tr, k))
   -- As the function's type has them: a trait with arguments is asked of
   -- the type together with them, so that each use says them anew.
   let mut bounds : List (String × Ty) := []
@@ -1236,8 +1239,16 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
    let now := waiting
    waiting := []
    for b in now do
-    let b ← timedM "bounds: rekey" (rekey b)
     let givens := (givensOf.lookup b.owner).getD []
+    -- (A need at arguments decided since, by a written bound, `T: Unlinks<?>`
+    -- with `T: Unlinks<T>` written: that bound's, its key spelled again.)
+    let b ← if b.args.isEmpty || givens.any (·.1 == b.trait) then pure b else do
+      match ← keyOf b.ty with
+      | some k =>
+        let again ← traitKey (Syntax.traitBase b.trait) b.args
+        pure (if givens.contains (again, k) then { b with trait := again } else b)
+      | none => pure b
+    let b ← timedM "bounds: rekey" (rekey b)
     -- What `Traits.coherent` asks of the assumptions.
     unless Traits.distinct givens do
       throw (inFunction b.owner s!"{b.pos}a bound is assumed twice; this is a compiler defect")
