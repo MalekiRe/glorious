@@ -8247,10 +8247,22 @@ could, which left a program not lowered (laid out by its types):
   closure by the function that first makes it (`St.sids`), text literals by
   their bytes: not by where they stand in Core, which an edit to `main`
   changes for all (the copies are reached from it in another order).
-- Measured on covey fleet, an edit to `main` after another: 9.4 s, of which
-  checking `main` 2.1 s, inferring it 1.9 s, the typed lowering 1.9 s (not
-  kept), running it 2.1 s. Inferring `main` infers every group under it
-  again: a group's scheme is kept only where it names no variable of
-  another group's (`freeze`), and on fleet 16,821 of 17,260 do (types,
-  rows and classes alike). Keeping them would need schemes made whole of
-  their own variables.
+- Of two unknowns made one, the older stands for both: a declaration's
+  stays the declaration's, and a group's scheme names it, as kept, by the
+  number every compile gives it. (The newer stood for both: on covey fleet
+  16,821 of 17,260 groups then named an unknown of an earlier group's, a
+  declaration's under another name, and none of them was kept.)
+- A group is kept only where it decided nothing of the declarations' types:
+  of their own unknowns or of what those were found to have in them
+  (`St.declInner`, counted in `declDecided`), as taking the scheme back
+  would not decide it again.
+- Each function's typed lowering at a signature is kept too (`TypedKept`),
+  with the uses it asked for, each function by name (`Ask`).
+- Measured on covey fleet, an edit to `main` after another: 6.3 s (12.9 s
+  before any of this), of which checking `main` 2.1 s, inference 0.6 s, the
+  typed lowering 0.6 s, running it 2.1 s.
+- Not yet: a function's instantiation kept by key (`Remembered`) gives its
+  signatures again but not what inferring it decided of the declarations'
+  unknowns; an operation's result one decided is then left undecided, and
+  the certificate's declared types differ from the compile before's (the
+  typed lowering's keys with them, once).

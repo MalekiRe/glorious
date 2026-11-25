@@ -179,8 +179,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   let prefixes ← do
     let s ← get
     pure (if s.remember && key != 0 then
-      some (s.tys.extract 0 s.globalTys, s.rows.extract 0 s.globalRows,
-        s.clss.extract 0 s.globalClss, s.accs.extract 0 s.globalAccs, s.closureRanks)
+      some (s.declDecided, s.accs.extract 0 s.globalAccs, s.closureRanks)
     else none)
   -- (The group's functions, as certifyM found them once.)
   let st0 ← get
@@ -430,10 +429,9 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   -- declarations' and decided nothing left waiting by others: then the
   -- scheme, and what of its own it leaves waiting, is all it made.)
   let now ← get
-  if let some (tys, rows, clss, accs, ranks) := prefixes then
+  if let some (decided, accs, ranks) := prefixes then
     let waiting := ranks.size
-    if samePrefix now.tys tys now.globalTys && samePrefix now.rows rows now.globalRows
-        && samePrefix now.clss clss now.globalClss && samePrefix now.accs accs now.globalAccs
+    if now.declDecided == decided && samePrefix now.accs accs now.globalAccs
         && samePrefix now.closureRanks ranks waiting then
       if let some fz ← freeze sch (now.closureRanks.extract waiting now.closureRanks.size).toList then
         -- (Its functions by name, `St.sids`.)

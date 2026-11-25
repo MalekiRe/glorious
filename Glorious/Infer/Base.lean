@@ -117,6 +117,30 @@ def ITy.parts : ITy → List ITy
   | .ref _ t => [t]
   | _ => []
 
+/-- The variables of a resolved type: of types, of rows and of classes. -/
+structure Vars where
+  tys : Std.HashSet Nat := {}
+  rows : Std.HashSet Nat := {}
+  clss : Std.HashSet Nat := {}
+
+def Vars.size (v : Vars) : Nat := v.tys.size + v.rows.size + v.clss.size
+
+partial def varsOf (t : ITy) (acc : Vars) : Vars :=
+  let acc := match t with
+    | .var id => { acc with tys := acc.tys.insert id }
+    | .fn _ _ _ tail cls _ _ =>
+      let acc := match tail with
+        | some v => { acc with rows := acc.rows.insert v }
+        | none => acc
+      match cls with
+      | .var c => { acc with clss := acc.clss.insert c }
+      | .lit _ => acc
+    | _ => acc
+  t.parts.foldl (fun a f => varsOf f a) acc
+
+def varsOfRow (r : IRow) (acc : Vars) : Vars :=
+  varsOf (.fn [] .int r.ops r.tail (.lit false) .never 0) acc
+
 def ITy.func (ps : List ITy) (ret : ITy) (row : IRow) (cls : ICls) (env : ITy) (acc : Nat) : ITy :=
   .fn ps ret row.ops row.tail cls env acc
 
@@ -321,6 +345,12 @@ structure St where
   /-- Whether a type nothing determined is `anyName`'s (for the typed
   lowering) rather than unit (for the checker). -/
   anyUnknown : Bool := false
+  /-- The unknowns the declarations' types were found to have in them
+  beyond their own (`declUnknown`), and how many times one of either was
+  decided: a group that decides one is not kept (`freeze`), as taking it
+  back would not decide it again. -/
+  declInner : Vars := {}
+  declDecided : Nat := 0
   /-- The types of numbers written out: a whole number's, or a scalar's, as
   what they are given to says; `Int` where nothing does. -/
   numeric : Std.HashSet Nat := {}
@@ -736,13 +766,26 @@ partial def findCls (c : ICls) : M ICls := do
     | _ => pure c
   | .lit _ => pure c
 
+/-- Of an unknown decided: if it is one of the declarations' types', what
+it now has in it is too (`St.declInner`). -/
+def decided (decl : Bool) (now : Vars → Vars) : M Unit :=
+  if decl then modify fun s => { s with declInner := now s.declInner, declDecided := s.declDecided + 1 }
+  else pure ()
+
+def bindCls (id : Nat) (c : ICls) : M Unit := do
+  let s ← get
+  decided (id < s.globalClss || s.declInner.clss.contains id) fun v => match c with
+    | .var k => { v with clss := v.clss.insert k }
+    | .lit _ => v
+  modify fun s => { s with clss := s.clss.set! id (some c), gen := s.gen + 1 }
+
 def unifyCls (a b : ICls) : M Unit := do
   match ← findCls a, ← findCls b with
   | .var i, .var j =>
     unless i == j do
-      modify fun s => { s with clss := s.clss.set! i (some (.var j)), gen := s.gen + 1 }
-  | .var i, c => modify fun s => { s with clss := s.clss.set! i (some c), gen := s.gen + 1 }
-  | c, .var j => modify fun s => { s with clss := s.clss.set! j (some c), gen := s.gen + 1 }
+      if i < j then bindCls j (.var i) else bindCls i (.var j)
+  | .var i, c => bindCls i c
+  | c, .var j => bindCls j c
   | .lit x, .lit y =>
     unless x == y do
       throw "a callable that can be called only once is used where it may be called again"
@@ -793,12 +836,16 @@ partial def showTy (t : ITy) : M String := do
 
 def bindTy (id : Nat) (t : ITy) : M Unit := do
   if ← occurs id t then throw s!"a type would contain itself: ?{id} in {← showTy t}"
+  let s ← get
+  decided (id < s.globalTys || s.declInner.tys.contains id) (varsOf t)
   modify fun s => { s with tys := s.tys.set! id (some t), gen := s.gen + 1 }
   -- (A number written out is still one where its type is another unknown.)
   if let .var j := t then
     if (← get).numeric.contains id then modify fun s => { s with numeric := s.numeric.insert j }
 
-def bindRow (id : Nat) (r : IRow) : M Unit :=
+def bindRow (id : Nat) (r : IRow) : M Unit := do
+  let s ← get
+  decided (id < s.globalRows || s.declInner.rows.contains id) (varsOfRow r)
   modify fun s => { s with rows := s.rows.set! id (some r), gen := s.gen + 1 }
 
 mutual
@@ -807,7 +854,9 @@ partial def unify (a b : ITy) : M Unit := do
   let a ← find a
   let b ← find b
   match a, b with
-  | .var i, .var j => if i == j then pure () else bindTy i b
+  -- (Of two unknowns, the older stands for both: one a declaration's stays
+  -- the declaration's, `freeze`.)
+  | .var i, .var j => if i == j then pure () else if i < j then bindTy j a else bindTy i b
   | .var i, t => bindTy i t
   | t, .var j => bindTy j t
   | .param i, .param j =>
@@ -864,7 +913,8 @@ partial def unifyRow (a b : IRow) : M Unit := do
     if va == vb then
       unless onlyA.isEmpty && onlyB.isEmpty || lenient do
         throw "a set of operations would contain itself"
-    else if onlyA.isEmpty && onlyB.isEmpty then bindRow va ⟨[], some vb⟩
+    else if onlyA.isEmpty && onlyB.isEmpty then
+      if va < vb then bindRow vb ⟨[], some va⟩ else bindRow va ⟨[], some vb⟩
     else
       let rest ← freshRow
       bindRow va ⟨onlyB, rest.tail⟩

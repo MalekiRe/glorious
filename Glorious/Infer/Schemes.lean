@@ -41,30 +41,6 @@ def resolveHint : IHint → M IHint
   | .result r b => do pure (.result (← resolve r) (← resolve b))
   | .rgns acc actuals => do pure (.rgns (← findAcc acc) (← actuals.mapM findRg))
 
-/-- The variables of a resolved type: of types, of rows and of classes. -/
-structure Vars where
-  tys : Std.HashSet Nat := {}
-  rows : Std.HashSet Nat := {}
-  clss : Std.HashSet Nat := {}
-
-def Vars.size (v : Vars) : Nat := v.tys.size + v.rows.size + v.clss.size
-
-partial def varsOf (t : ITy) (acc : Vars) : Vars :=
-  let acc := match t with
-    | .var id => { acc with tys := acc.tys.insert id }
-    | .fn _ _ _ tail cls _ _ =>
-      let acc := match tail with
-        | some v => { acc with rows := acc.rows.insert v }
-        | none => acc
-      match cls with
-      | .var c => { acc with clss := acc.clss.insert c }
-      | .lit _ => acc
-    | _ => acc
-  t.parts.foldl (fun a f => varsOf f a) acc
-
-def varsOfRow (r : IRow) (acc : Vars) : Vars :=
-  varsOf (.fn [] .int r.ops r.tail (.lit false) .never 0) acc
-
 def varsOfSig (s : ISig) (acc : Vars) : Vars :=
   varsOf (.fn (s.caps ++ s.params) s.ret s.row.ops s.row.tail (.lit false) .never 0) acc
 
