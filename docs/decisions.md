@@ -8006,6 +8006,38 @@ What it took of the compiler:
   those.
 - Scalars, `f64` and `f32` are `Clone`.
 
+## Known defects found while moving text off `Str`
+
+- A dot call of a name that is both a type's own function and a trait's
+  (`len` of `String` and of `Len`) is checked against one and its receiver
+  borrowed for the other: a value is read as a reference. `Len` is not
+  implemented for `&str` or `String` (Rust's `len` is their own).
+- A program that is not lowered reads a `String`'s text through `&str`
+  wrongly: there every value in memory is a slot naming one the machine
+  holds, and a `Vec<u8>` is not bytes. (`String::to_str` and `Display`
+  read the bytes as the `Vec`'s elements, which is right on both.)
+
+## Every program laid out: types inference can see
+
+Found where the certificate's inference could not type what the checker
+could, which left a program not lowered (laid out by its types):
+
+- `[T; 0]` holds no `T`: it is decided whatever `T` is (`undecided`), it
+  has nothing of `T` to use twice (`tyHoldsVar`) or to destroy (`walkTy`).
+- The machine's cells (`heap_new`, `heap_take`, `heap_put`) are each given
+  a `[T; 0]` of what the cell holds, by which inference types them;
+  `std::thread` keeps cells as `Held<T> { cell, of: [T; 0] }`. A handle
+  said to be used any number of times is never destroyed, and what it names
+  is not looked into for a `drop` (`tyHasDrop`).
+- A pointer made of an address alone is of whatever is asked of it; one
+  made beside another, `ptr_mut_beside(base, address)`, is of the base's
+  type. A slice's `sub`, `split_at` and `split_first` make theirs so: a
+  `&[&str]` cut from another read its elements at the wrong size where
+  nothing else said what they were.
+- A coercion is reached with the function it is applied in, not made a
+  root of every program: `str_text` had made every program read memory,
+  and none had a certificate.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

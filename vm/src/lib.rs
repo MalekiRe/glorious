@@ -2153,14 +2153,14 @@ impl Vm {
                         Value::Int(callback(self, callee.clone(), *arity as usize)? as i128)
                     }
                     // The cells every machine shares.
-                    (6, [v]) => Value::Int(self.heap.make(v.clone()) as i128),
-                    (7, [Value::Int(at)]) => {
+                    (6, [v, _]) => Value::Int(self.heap.make(v.clone()) as i128),
+                    (7, [Value::Int(at), _]) => {
                         let at = usize::try_from(*at).map_err(|_| Stop::Wrong)?;
                         // (Waiting, what this machine wrote is seen first.)
                         self.out.flush().expect("cannot write to standard output");
                         self.heap.take(at)?
                     }
-                    (8, [Value::Int(at), v]) => {
+                    (8, [Value::Int(at), v, _]) => {
                         let at = usize::try_from(*at).map_err(|_| Stop::Wrong)?;
                         self.heap.put(at, v.clone())?;
                         unit()

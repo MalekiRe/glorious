@@ -125,18 +125,18 @@ def call (w : World) (id : Nat) (args : List Value) : Option (Value × World) :=
     | _ => none
   else if id = 6 then
     match args with
-    | [v] => some (.int w.heap.length, { w with heap := w.heap ++ [some v] })
+    | [v, _] => some (.int w.heap.length, { w with heap := w.heap ++ [some v] })
     | _ => none
   else if id = 7 then
     match args with
-    | [.int n] =>
+    | [.int n, _] =>
       match w.heap[n.toNat]? with
       | some (some v) => if 0 ≤ n then some (v, { w with heap := w.heap.set n.toNat none }) else none
       | _ => none
     | _ => none
   else if id = 8 then
     match args with
-    | [.int n, v] =>
+    | [.int n, v, _] =>
       if 0 ≤ n ∧ n.toNat < w.heap.length then some (.data 0 [], { w with heap := w.heap.set n.toNat (some v) }) else none
     | _ => none
   else if id = 14 then

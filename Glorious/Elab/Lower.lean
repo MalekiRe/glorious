@@ -164,6 +164,19 @@ def Lowering.start (L : Lowering) : Lowered :=
 would be made than `copyFuel`. -/
 def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Option Lowered := Id.run do
   let tr := L.blocks.traits
+  -- (The coercions applied in a function are reached with it: by the calls
+  -- and callables they are applied at, and by its results.)
+  let (byCall, byClosure, byFn) := L.blocks.coercions.fold
+    (init := (({} : Std.HashMap Nat (List String)), ({} : Std.HashMap Nat (List String)), ({} : Std.HashMap String (List String))))
+    fun (c, k, f) site fn => match site with
+      | .arg call _ => (c.insert call (fn :: c.getD call []), k, f)
+      | .result closure _ => (c, k.insert closure (fn :: k.getD closure []), f)
+      | .fnResult name _ => (c, k, f.insert name (fn :: f.getD name []))
+  let coercedIn := fun (name : String) (b : Flat.Body) =>
+    (byFn.getD ((name.splitOn "⟨").headD name) []) ++ b.exprs.toList.flatMap fun
+      | .call id _ _ | .tailCall id _ _ => byCall.getD id []
+      | .closure id _ => byClosure.getD id []
+      | _ => []
   let mut st := { st with roots := st.roots ++ roots }
   let mut todo : Array String := roots.reverse.toArray
   while !todo.isEmpty do
@@ -196,7 +209,7 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
           st := { st with copies, made := st.made + k.made, chain, keptMade := st.keptMade.insert x k }
           if let some (.fn name ps annots ret b) := k.item then
             st := { st with done := st.done.push (.fn name ps annots ret b) }
-            todo := todo ++ (b.fvClauses b.roots).reverse.toArray
+            todo := todo ++ (b.fvClauses b.roots).reverse.toArray ++ (coercedIn x b).toArray
           continue
     let (pool0, asked0) := (st.copies.byId.size, st.copies.asked.size)
     -- A copy for known implementations, made from the function it is of; or
@@ -231,7 +244,7 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
       st := { st with keptMade := st.keptMade.insert x { key, item := lowered, pool, asked, made := madeHere } }
     if let some (.fn name ps annots ret b) := lowered then
       st := { st with done := st.done.push (.fn name ps annots ret b) }
-      todo := todo ++ (b.fvClauses b.roots).reverse.toArray
+      todo := todo ++ (b.fvClauses b.roots).reverse.toArray ++ (coercedIn x b).toArray
   some st
 
 /-- Lowered on from `st`, through what `roots` reach. -/

@@ -30,7 +30,11 @@ partial def undecided (C : Cert) (seen : List (Nat × List Ty)) : Ty → Bool
   | .tuple fs => fs.any (undecided C seen)
   | .data name args =>
     if name == anyName then true
-    else if name == fixedName then args.take 1 |>.any (undecided C seen)
+    -- (A `[T; 0]`, a type parameter only named, is no bytes whatever `T` is.)
+    else if name == fixedName then
+      match args with
+      | [t, .data len []] => len != lenBase && undecided C seen t
+      | _ => args.take 1 |>.any (undecided C seen)
     else if seen.contains (name, args) || holdsItself C name args then false
     else match findData C.datas name args with
       | some ctors => ctors.any fun (_, fs) => fs.any (undecided C ((name, args) :: seen))

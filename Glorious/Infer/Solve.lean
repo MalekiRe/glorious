@@ -743,9 +743,14 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
       | 1, [] => pure (ITy.tuple [.int, .int])
       | 2, _ => do ts.forM int; pure .int
       | 5, [_, n] => do int n; pure (.scalar (-64))
-      | 6, [_] => pure .int
-      | 7, [c] => do int c; freshTy
-      | 8, [c, _] => do int c; pure .unit
+      -- (A cell's, by the `[T; 0]` each is given of what it holds.)
+      | 6, [v, of] => do unify of (.data fixedName [v, .data lenBase []]); pure .int
+      | 7, [c, of] => do
+        int c
+        let v ← freshTy
+        unify of (.data fixedName [v, .data lenBase []])
+        pure v
+      | 8, [c, v, of] => do int c; unify of (.data fixedName [v, .data lenBase []]); pure .unit
       | 9, [v, i] => do int i; pure (ITy.tuple [.int, v])
       | 10, [] => pure (ITy.tuple [.int, .int])
       -- (`transmute`: the value, of another type.)

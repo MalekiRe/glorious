@@ -940,12 +940,15 @@ def compileSource (src : String) (check : Bool := true)
   -- program's own functions say is looked at wherever they are: one that
   -- `main` does not reach is elaborated too, for what the elaborator alone
   -- refuses, and then left out.
-  let roots := "main" :: ((blocks.map (·.coercions.toList)).getD []).map (·.2)
+  -- (A coercion is reached with the function it is applied in.)
+  let roots := ["main"]
   let (all, lowered) := Trace.timed "lower what main reaches" fun _ =>
     match lowering with
     | some L =>
       let st := L.reach { L.start with kept := lowerKept.getD {} } roots
-      (Elab.reachable roots (L.items st), some st)
+      -- (And the coercions applied in what they reach.)
+      let coerced : List String := L.blocks.coercions.fold (fun acc _ fn => if st.seen.contains fn then fn :: acc else acc) []
+      (Elab.reachable (roots ++ coerced.eraseDups) (L.items st), some st)
     | none => (Elab.reachable roots all, none)
   -- (Only they and what they reach: what `main` reaches is elaborated below.
   -- Taken from the first of them, as a program is from `main`; beside what
@@ -968,8 +971,10 @@ def compileSource (src : String) (check : Bool := true)
   let aside : Task (Except String Unit) := Task.spawn fun _ =>
     match missing.isEmpty, lowering, lowered with
     | false, some L, some st =>
+      let st' := L.reach st missing
+      let coerced : List String := L.blocks.coercions.fold (fun acc _ fn => if st'.seen.contains fn then fn :: acc else acc) []
       match Trace.timed "elaborate what main does not reach" fun _ =>
-          elaborate (Elab.reachable (roots.drop 1 ++ missing) (L.items (L.reach st missing))) blocks
+          elaborate (Elab.reachable (missing ++ coerced.eraseDups) (L.items st')) blocks
             (root := missing.headD "main") with
       | .error e => .error e
       | .ok _ => .ok ()

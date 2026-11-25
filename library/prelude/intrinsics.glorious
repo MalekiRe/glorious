@@ -58,9 +58,11 @@
 // Cells more than one holder reaches, by number: a new one holding a value,
 // the value taken out of one, and one put in. The checker does not see what
 // a cell holds: the library's shared values and threads are made of them.
-#[intrinsic] unsafe fn heap_new<T>(value: T) -> Int where T: Use<[1, 1]>;
-#[intrinsic] unsafe fn heap_take<T>(cell: Int) -> T;
-#[intrinsic] unsafe fn heap_put<T>(cell: Int, value: T) where T: Use<[1, 1]>;
+// (Each is given a `[T; 0]` of what the cell holds, which is nothing: by it
+// the certificate's inference knows the type, which a number does not say.)
+#[intrinsic] unsafe fn heap_new<T>(value: T, of: [T; 0]) -> Int where T: Use<[1, 1]>;
+#[intrinsic] unsafe fn heap_take<T>(cell: Int, of: [T; 0]) -> T;
+#[intrinsic] unsafe fn heap_put<T>(cell: Int, value: T, of: [T; 0]) where T: Use<[1, 1]>;
 // A machine is to start for a thread of the system's that C is about to start.
 #[intrinsic] unsafe fn heap_machine_coming() -> (Int, Int);
 // Memory, by address: a new block of so many bytes at a multiple of an

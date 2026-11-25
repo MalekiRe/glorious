@@ -4423,7 +4423,7 @@ fn main() -> Int { let mut p = P { xs: [1, 2], n: 0 }; p.xs[1] = 9; p.xs[0] + p.
 #### expect
 10
 #### case
-fn main() -> Int { let s = "héllo"; len(s) + len([s, s]) }
+fn main() -> Int { let s = "héllo"; s.len() + len([s, s]) }
 #### expect
 8
 #### case
@@ -15002,7 +15002,7 @@ fn main() -> Int { let f = { (a, b) => a.0 }; f(pair()) }
 #### expect
 error: 10:47: `f` lets go of what it is given, whatever type that is, and is used here at a type with something to destroy, which it has no way to: say the type where `f` takes it, `fn(value: Type) { .. }`
 #### case
-fn main() -> Int { let first = { (a, b) => a }; first((1, 2)) + len(first(("x", "y"))) }
+fn main() -> Int { let first = { (a, b) => a }; first((1, 2)) + first(("x", "y")).len() }
 #### expect
 2
 #### case
@@ -15135,7 +15135,7 @@ fn main() -> Int { Counter { n: 0 }.bump().bump().total() }
 #### A trait's function with type parameters of its own, `fn twice<T>(Self, T)`.
 trait Pairing { fn twice<T>(Self, T) -> (T, T) where T: Use<[0, *]> }
 impl Pairing for Int { fn twice<T>(n: Int, x: T) -> (T, T) { (x, x) } }
-fn main() -> Int { let p = twice(1, "a"); let q = twice(2, 5); q.0 + q.1 + len(p.0) }
+fn main() -> Int { let p = twice(1, "a"); let q = twice(2, 5); q.0 + q.1 + p.0.len() }
 #### expect
 11
 #### case
@@ -15248,7 +15248,7 @@ use std::vec::{Vec};
 trait Lend { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }
 struct Words(Vec<&'static str>)
 impl Lend for Words { type Item<'a> = (Int, &'a &'static str); fn next(w: &mut Words) -> Option<(Int, &&'static str)> { Some((len_at(&(*w).0), &(*w).0[0])) } }
-fn main() -> Int { let mut w = Words(Vec::from_array(["hey"])); match(next(&mut w)) { Some(p) => p.0 + len(*(p.1)), None => 0 } }
+fn main() -> Int { let mut w = Words(Vec::from_array(["hey"])); match(next(&mut w)) { Some(p) => p.0 + (*(p.1)).len(), None => 0 } }
 #### expect
 4
 #### case

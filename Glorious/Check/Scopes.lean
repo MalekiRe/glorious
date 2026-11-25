@@ -824,6 +824,10 @@ partial def walkTy {α : Type} (atCon : String → M (Option α)) (atFn : List S
   | .tuple args => args.findSomeM? (walkTy atCon atFn visiting · stop)
   | .fn _ _ _ _ cap => atFn visiting cap
   | .con name args => do
+    -- (A `[T; 0]` holds no `T`.)
+    if name == "Fixed" then
+      if let [_, len] := args then
+        if numberOf (← zonk len) == some 0 then return none
     if let some a ← atCon name then return some a
     if ← stop name then return none
     if let some a ← args.findSomeM? (walkTy atCon atFn visiting · stop) then return some a
@@ -887,6 +891,10 @@ partial def tyHoldsVar (visiting : List String) (id : Nat) (t : Ty) : M Bool := 
   | .var v => pure (v == id)
   | .tuple args => args.anyM (tyHoldsVar visiting id)
   | .fn _ _ _ _ _ | .ref _ _ _ => pure false
+  -- (A `[T; 0]` holds no `T`.)
+  | .con "Fixed" [elem, len] => do
+    if numberOf (← zonk len) == some 0 then return false
+    tyHoldsVar visiting id elem
   | .con name args => do
     if visiting.contains name then return false
     match (← get).types[name]? with
@@ -920,6 +928,9 @@ partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) :=
       if let .ty held := what then
         if let some name ← tyHasDrop visiting held then return some name
     return none) visiting t
+    -- (A handle, said to be used any number of times, is never destroyed:
+    -- what it names is not looked into.)
+    (stop := usedAnyNumber)
 
 def checkDups (dups : Array (Ty × String)) : M Unit := do
   for (t, why) in dups do

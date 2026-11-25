@@ -75,10 +75,7 @@ impl PathBuf {
         let parts = names(PathBuf::as_str(p));
         let n = Vec::len(&parts);
         if(n == 0) { None } else {
-            let mut front = Vec::new();
-            let mut i = 0;
-            while({ i < n - 1 }) { Vec::push(&mut front, *Vec::index(&parts, i)); i = i + 1 };
-            let before = join(front, "/");
+            let before = match(Vec::as_slice(&parts).sub(0, n - 1)) { Some(names) => join(names, "/"), None => String::new() };
             let mut text = String::new();
             if(PathBuf::is_absolute(p)) { String::push_str(&mut text, "/") } else { () };
             String::push_str(&mut text, String::as_str(&before));
