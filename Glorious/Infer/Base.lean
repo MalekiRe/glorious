@@ -171,7 +171,10 @@ structure Incl where
   sub : IRow
   under : IOps
   sup : IRow
-  deriving Hashable
+  /-- The function it was found in: only to say where. -/
+  fn : Nat
+
+instance : Hashable Incl := ⟨fun c => mixHash (hash c.sub) (mixHash (hash c.under) (hash c.sup))⟩
 
 /-- A function of an inferred group: its signature, the hints of each clause,
 and the functions outside the group it refers to, each at the type it uses. -/
@@ -361,9 +364,11 @@ structure St where
   /-- What each function a program wrote says of its parameters: its type
   parameters, and the written type of each parameter where it is written.
   A function's signature starts from these (`declaredParams`). -/
-  declared : Std.HashMap Nat (List String × List (Option TypeExpr)) := {}
+  declared : Std.HashMap Nat (List String × List (Option TypeExpr) × Option TypeExpr) := {}
   /-- The group being inferred, and the signatures of its functions. -/
   curScc : Option Nat := none
+  /-- The function whose body is being looked at: only to say where. -/
+  curFn : Nat := 0
   /-- Callables made where what they are given was not yet known: whether
   each binds the region of a reference it is given is decided once it is. -/
   closureRanks : Array (List ITy × List ITy × Nat) := #[]
@@ -861,7 +866,10 @@ def requireOp (r : IRow) (op : Nat) (targs : List ITy) : M Unit := do
     | some v =>
       let rest ← freshRow
       bindRow v ⟨[(op, targs)], rest.tail⟩
-    | none => throw s!"operation {op} is performed where nothing handles it"
+    -- (For the typed lowering, which reads no effects, it need not be: a
+    -- callable given up is said to perform what it could, where the
+    -- function giving it up says nothing of that, `drop` of a system.)
+    | none => unless (← get).anyUnknown do throw s!"operation {op} is performed where nothing handles it"
 
 /-- Replace a declaration's type parameters by arguments. -/
 partial def subst (args : List ITy) : ITy → ITy
@@ -981,7 +989,7 @@ def widenTy (t : ITy) : M ITy := do
   pure b
 
 def needs (sub : IRow) (under : IOps) (sup : IRow) : M Unit :=
-  modify fun s => { s with incls := s.incls.push ⟨sub, under, sup⟩ }
+  modify fun s => { s with incls := s.incls.push ⟨sub, under, sup, s.curFn⟩ }
 
 mutual
 

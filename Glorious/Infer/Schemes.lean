@@ -30,7 +30,7 @@ def resolveSig (s : ISig) : M ISig := do
 
 def resolveIncl (c : Incl) : M Incl := do
   pure ⟨← resolveRow c.sub, ← c.under.mapM fun (op, targs) => do pure (op, ← targs.mapM resolve),
-    ← resolveRow c.sup⟩
+    ← resolveRow c.sup, c.fn⟩
 
 def resolveHint : IHint → M IHint
   | .ty t => do pure (.ty (← resolve t))
@@ -111,7 +111,7 @@ def renHint : IHint → m IHint
   | .result r b => do pure (.result (← renTy f r) (← renTy f b))
   | .rgns acc actuals => do pure (.rgns (← f.acc acc) (← actuals.mapM f.rg))
 
-def renIncl (c : Incl) : m Incl := do pure ⟨← renRow f c.sub, ← renOps f c.under, ← renRow f c.sup⟩
+def renIncl (c : Incl) : m Incl := do pure ⟨← renRow f c.sub, ← renOps f c.under, ← renRow f c.sup, c.fn⟩
 
 def renPlace (p : ITy × Nat × ITy) : m (ITy × Nat × ITy) := do pure (← renTy f p.1, p.2.1, ← renTy f p.2.2)
 
@@ -607,7 +607,9 @@ partial def settle : M Unit := do
     for (op, targs) in sub.ops do
       match c.under.lookup op with
       | some targs' => unifyList targs targs'
-      | none => requireOp c.sup op targs
+      | none =>
+        try requireOp c.sup op targs
+        catch e => throw (if (e.splitOn "(in function ").length > 1 then e else s!"{e} (in function {c.fn})")
   let waiting := (← get).places
   modify fun s => { s with places := #[] }
   -- (One field of one subject is one type: a read waiting as another did

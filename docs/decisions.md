@@ -8037,6 +8037,15 @@ could, which left a program not lowered (laid out by its types):
 - A coercion is reached with the function it is applied in, not made a
   root of every program: `str_text` had made every program read memory,
   and none had a certificate.
+- Inference starts a function's result, as its parameters, from the type
+  written: `std::ptr::as_ref<T>(p: Ptr<T>) -> &T` makes its reference of a
+  number, and its `T` is the one it is given (an ECS query's items).
+- The types for the lowering need no effects: a callable given up is said,
+  in Core, to perform what a call of it could (`cancel`), which a function
+  dropping an app with a system that waits does not say; the certificate
+  is refused it, the lowering is not.
+- An inclusion of effects says the function it was found in, for the
+  message.
 
 ## Other standing decisions
 

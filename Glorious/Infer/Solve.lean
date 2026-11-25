@@ -64,13 +64,15 @@ partial def writtenTy (vars : List (String × ITy)) : TypeExpr → M ITy
   | .ref _ t _ => do pure (.ref (← freshRg) (← writtenTy vars t))
   | _ => freshTy
 
-/-- What the function says of its parameters, where it says it: each
-parameter's type starts as the one written. -/
-def declaredParams (f : Nat) (params : List ITy) : M Unit := do
-  let some (tparams, annots) := (← get).declared[f]? | return
+/-- What the function says of its parameters and its result, where it says
+it: each type starts as the one written, of the same type parameters (the
+result of `std::ptr::as_ref<T>(p: Ptr<T>) -> &T` is of the `T` it is
+given, though its body makes it of a number). -/
+def declaredParams (f : Nat) (params : List ITy) (ret : ITy) : M Unit := do
+  let some (tparams, annots, written) := (← get).declared[f]? | return
   unless annots.length == params.length do return
   let vars ← tparams.mapM fun p => do pure (p, ← freshTy)
-  for (p, annot) in params.zip annots do
+  for (p, annot) in (params ++ [ret]).zip (annots ++ [written]) do
     if let some te := annot then
       -- (A type that says nothing here, a callable's, is not taken.)
       if says te then
@@ -189,7 +191,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       | _ => 0
     let sig : ISig :=
       ⟨← freshTys (ncaps[f]?.getD 0), ← freshTys arity, ← freshTy, ← freshRow, ← freshAcc⟩
-    declaredParams f sig.params
+    declaredParams f sig.params sig.ret
     cur := cur ++ [(f, sig)]
   modify fun s =>
     { s with
@@ -198,7 +200,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   let mut raw : List Member := []
   for (f, sig) in cur do
     let F := (allFns[f]?).getD ⟨[]⟩
-    modify fun s => { s with refs := #[] }
+    modify fun s => { s with refs := #[], curFn := f }
     let mut hints : Array (Array IHint) := #[]
     for c in F.clauses do
       modify fun s => { s with hints := #[] }
