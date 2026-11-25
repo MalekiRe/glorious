@@ -2592,16 +2592,24 @@ fn sibling(vm: &Vm) -> Vm {
 
 /// Run to the end and say how it ended, as the process's exit code.
 fn finish(vm: &mut Vm, bodies: &[Option<native::Body>]) -> u8 {
+    // Run for `glorious run` (`GLORIOUS_RUN`): a `main` that gives nothing
+    // shows nothing, and what went wrong is said by the compiler, which
+    // finds where.
+    let for_run = std::env::var_os("GLORIOUS_RUN").is_some();
     match vm.run(bodies) {
         Stop::Halt(v) => {
             let line = show(&vm.names, &v);
-            writeln!(vm.out, "{line}").expect("cannot write to standard output");
+            if !(for_run && line == "()") {
+                writeln!(vm.out, "{line}").expect("cannot write to standard output");
+            }
             vm.out.flush().expect("cannot write to standard output");
             0
         }
         Stop::Wrong | Stop::Back(_) => {
             vm.out.flush().expect("cannot write to standard output");
-            eprintln!("the program went wrong");
+            if !for_run {
+                eprintln!("the program went wrong");
+            }
             2
         }
     }

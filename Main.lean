@@ -959,6 +959,31 @@ def parseInput (args : List String) : Except String (List Int) :=
     | some n => pure n
     | none => throw s!"input `{a}` is not an integer"
 
+/-- Where the VM and its library are: `GLORIOUS_VM_DIR`, or where the
+repository builds them. -/
+def vmDir : IO System.FilePath := do
+  match ← IO.getEnv "GLORIOUS_VM_DIR" with
+  | some d => pure (System.FilePath.mk d)
+  | none =>
+    let root := ((((← IO.appPath).parent.bind (·.parent)).bind (·.parent)).bind (·.parent)).getD "."
+    pure (root / "vm" / "target" / "release")
+
+/-- A program's bytecode run on the Rust VM, where it is built: it compiles
+the bytecode to machine code, and runs in a third of the time of the Lean
+machine, which the suite holds it to. What its `main` gives is shown, unless
+that is `()`; where it went wrong, it says nothing, and its code is 2. None
+where there is no VM, or `GLORIOUS_MACHINE=lean` asks for the Lean machine. -/
+def runOnVm (bytes : ByteArray) (input : List Int) : IO (Option UInt32) := do
+  let vm := (← vmDir) / "glorious-vm"
+  if (← IO.getEnv "GLORIOUS_MACHINE") == some "lean" || !(← vm.pathExists) then return none
+  let file := (← IO.getEnv "TMPDIR").getD "/tmp" ++ s!"/glorious-run-{← IO.monoNanosNow}.gbc"
+  IO.FS.writeBinFile file bytes
+  let child ← IO.Process.spawn
+    { cmd := vm.toString, args := #[file] ++ (input.map toString).toArray, env := #[("GLORIOUS_RUN", some "1")] }
+  let rc ← Trace.timedIO "run" child.wait
+  IO.FS.removeFile file
+  pure (some rc)
+
 /-- Compile the program at `path` again whenever its text or a module of it
 changes, and run it, each compile as `compileFile` makes one: from what the
 build directory keeps. -/
@@ -982,22 +1007,19 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
           kept := c.checkKept
           let compiled ← IO.monoMsNow
           IO.println s!"-- compiled in {compiled - start} ms"
-          let bytecode := compile c.core
-          match ← runStreaming c.ctorNames bytecode (Bytecode.initIO bytecode input) 0 with
-          | .halt r => IO.println (showValue c.ctorNames r.value)
-          | _ => IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
+          let wrong := fun (_ : Unit) =>
+            IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
+          match ← runOnVm (bytecodeBytes c) input with
+          | some 2 => wrong ()
+          | some _ => pure ()
+          | none =>
+            let bytecode := compile c.core
+            match ← runStreaming c.ctorNames bytecode (Bytecode.initIO bytecode input) 0 with
+            | .halt r => IO.println (showValue c.ctorNames r.value)
+            | _ => wrong ()
         (← IO.getStdout).flush
     IO.sleep 100
   pure 0
-
-/-- Where the VM and its library are: `GLORIOUS_VM_DIR`, or where the
-repository builds them. -/
-def vmDir : IO System.FilePath := do
-  match ← IO.getEnv "GLORIOUS_VM_DIR" with
-  | some d => pure (System.FilePath.mk d)
-  | none =>
-    let root := ((((← IO.appPath).parent.bind (·.parent)).bind (·.parent)).bind (·.parent)).getD "."
-    pure (root / "vm" / "target" / "release")
 
 def main (args : List String) : IO UInt32 := do
   let code ← Trace.timedIO "glorious" (command args)
@@ -1152,6 +1174,14 @@ where
         | .error e =>
           IO.eprintln (errorLines s!"{path}: " e)
           return 1
+      if let some rc ← runOnVm (builtBytes b) input then
+        unless rc == 2 do return rc
+        -- (It went wrong: where, and why, as below.)
+        match ← compileFile path with
+        | .ok c =>
+          IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
+        | .error e => IO.eprintln s!"the program went wrong; compiled again: {e}"
+        return 2
       match ← Trace.timedIO "run" (runStreaming b.ctorNames b.bytecode (Bytecode.initIO b.bytecode input) 0) with
       | .halt r =>
         -- (A `main` that gives nothing, `fn main() { .. }`, shows nothing.)

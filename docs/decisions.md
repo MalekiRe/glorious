@@ -8472,3 +8472,13 @@ the group is done (`St.capUndo`). So no merge changes one in place.
 `std::generator::Coroutine`, covey's `TaskStep` and `TaskState`, and a
 case's `Coroutine` say `impl Use<[0, 1]>`; covey's `start_task` takes its
 body as `B: Fn<..>, B: Use<[0, 1]>`.
+
+## `glorious run` and `watch` run on the Rust VM
+
+Where the Rust VM is built (`vmDir`), `run` and `watch` run the program's
+bytecode on it: it compiles the bytecode to machine code, and runs covey's
+fleet in 0.6 s where the Lean machine takes 2.1 s. The suite holds the two
+to the same output for every program. `GLORIOUS_MACHINE=lean` runs on the
+Lean machine; so does a build with no VM. Told `GLORIOUS_RUN`, the VM shows
+nothing of a `main` that gives `()` and says nothing where the program went
+wrong: the compiler says where, from Core, as for the Lean machine.
