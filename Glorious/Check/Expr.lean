@@ -1563,6 +1563,23 @@ partial def derefReceiver (scope : Scope) (amb : Row) (args : Array Flat.ExprId)
   let given ← flatIn given
   return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
 
+/-- A dot call of a field of what a name points to, where the function
+borrows its receiver (`k` of `receiverKinds`) and the resolver could not
+tell to: the field, borrowed where it is, as Rust's receiver is
+(`fuel.0.to_string()`). Its type; none where the receiver is no such
+field. -/
+partial def borrowFieldReceiver (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (alt : String)
+    (kind : Option Nat) (call : Nat) : M (Option Ty) := do
+  let some k := kind | return none
+  if k == 0 then return none
+  let some a := args[0]? | return none
+  let some (v, path, fid) ← fieldThroughRef scope a | return none
+  let bt := Expr.refField fid (k == 2) v path true
+  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
+                           argsChosen := ((call, 0), bt) :: s.argsChosen }
+  let given ← flatIn bt
+  return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+
 /-- A dot call taken as the function of the value's type: its type; none
 where it is not taken so (`inferCall`). -/
 partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Array Flat.ExprId)
@@ -1582,14 +1599,8 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
         match (← receiverKinds x x).2 with
         | some 0 =>
           if let some t ← derefReceiver scope amb args x call then return some t
-        | some k =>
-          if let some a := args[0]? then
-            if let some (v, path, fid) ← fieldThroughRef scope a then
-              let bt := Expr.refField fid (k == 2) v path true
-              modify fun s => { s with dotChosen := (call, x, 0) :: s.dotChosen,
-                                       argsChosen := ((call, 0), bt) :: s.argsChosen }
-              let given ← flatIn bt
-              return some (← inferCall scope amb (← pushE (.name none x)) (#[given] ++ args.extract 1 args.size) call)
+        | some _ =>
+          if let some t ← borrowFieldReceiver scope amb args x (← receiverKinds x x).2 call then return some t
         | none => pure ()
         return none
       if let some a := args[0]? then
@@ -1598,6 +1609,7 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
             let (mine, theirs) ← receiverKinds x alt
             if theirs == some 0 then
               if let some t ← derefReceiver scope amb args alt call then return some t
+            if let some t ← borrowFieldReceiver scope amb args alt theirs call then return some t
             if mine.isSome && mine == theirs then
               modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
               return some (← inferCall scope amb (← pushE (.name none alt)) args call)

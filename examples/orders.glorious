@@ -14,7 +14,7 @@ use std::vec::{collect};
 use std::map::{Map};
 use std::fmt::{Display, format};
 
-struct Order { customer: Str, item: Str, cents: Int, count: Int }
+struct Order { customer: &'static str, item: &'static str, cents: Int, count: Int }
 
 trait Priced { fn total(&Self) -> Int }
 impl Priced for Order { fn total(o: &Order) -> Int { o.cents * o.count } }
@@ -22,18 +22,18 @@ impl Priced for Order { fn total(o: &Order) -> Int { o.cents * o.count } }
 // A sum of money, written with its pence.
 struct Money(Int)
 impl Add for Money { type Output = Money; fn +(a: Money, b: Money) -> Money { Money(a.0 + b.0) } }
-fn shown(m: Money) -> Str {
+fn shown(m: Money) -> String {
     let pence = m.0 % 100;
-    show(m.0 / 100) ++ "." ++ (if(pence < 10) { "0" } else { "" }) ++ show(pence)
+    (m.0 / 100).to_string() + "." + (if(pence < 10) { "0" } else { "" }) + pence.to_string().as_str()
 }
 
 // A ledger: closing it is said, once, however it is let go.
-struct Ledger { name: Str, lines: Int }
-impl Drop for Ledger { fn drop(l: &mut Ledger) { say("closed " ++ l.name ++ " after " ++ show(l.lines) ++ " lines") } }
+struct Ledger { name: &'static str, lines: Int }
+impl Drop for Ledger { fn drop(l: &mut Ledger) { say(String::from("closed ") + l.name + " after " + l.lines.to_string().as_str() + " lines") } }
 
-fn record(ledger: &mut Ledger, text: Str) { say(text); ledger.lines = ledger.lines + 1; }
+fn record(ledger: &mut Ledger, text: String) { say(text); ledger.lines = ledger.lines + 1; }
 
-fn totals(orders: &Vec<Order>, i: Int, so_far: Map<Str, Int>) -> Map<Str, Int> {
+fn totals(orders: &Vec<Order>, i: Int, so_far: Map<&'static str, Int>) -> Map<&'static str, Int> {
     match(element(orders, i)) {
         None => so_far,
         Some(order) =>
@@ -58,7 +58,7 @@ fn main() -> Int {
     let mut it = std::vec::Vec::into_iter(names);
     let written = fold(&mut it, 0, { (n, name) =>
         let cents = match(std::map::get(by_customer, name)) { Some(c) => c, None => 0 };
-        record(&mut ledger, name ++ ": " ++ shown(Money(cents)));
+        record(&mut ledger, String::from(name) + ": " + shown(Money(cents)).as_str());
         n + 1 });
     let big = collect(&mut map(filter(into_iter(Vec::from_array([120 * 3, 450, 275 * 2])), { (c) => *c >= 400 }), { (c) => shown(Money(c)) }));
     say_debug(big);

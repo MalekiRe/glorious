@@ -381,9 +381,11 @@ def fitHead (im : ImplDecl) (hargs args : List Ty) (said : Option String := none
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
       unless ← fit (← fixedAt at_ want) got do return none
-  -- (Those only in the trait's arguments are what it is asked at.)
-  for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
-    unless ← fit want got do return none
+  -- (Those only in the trait's arguments are what it is asked at; their
+  -- lifetimes this use's own, `+ &str` of `impl<'a> Add<&'a str> for String`
+  -- once with each text.)
+  for (want, got) in im.targs.zip args do
+    unless ← fit (← fixedAt at_ want) got do return none
   pure (some at_)
 
 /-- Whether a type has the variable in it. -/

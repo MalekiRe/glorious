@@ -8112,3 +8112,20 @@ could, which left a program not lowered (laid out by its types):
   made the same: the lowering reads neither (`remote`, `plugins` lowered).
 - `std::iter::of` says its element is the array's (`T: Index<Elem = U>`):
   it was decided only by its body.
+
+## Tests and examples over `String` and `&str`
+
+- Every case in `tests/*.cases` and the examples are written over `String`
+  and `&str` (`to_string`, `String::from(..) + ..`, `impl Display` with a
+  `Formatter`); `main` gives a number, and says its text. (`enum Str` in a
+  case is a program's own type.) A program's `main` giving text was `Str`'s.
+- An implementation fitted to a use (`fitHead`) gives its trait arguments'
+  lifetimes anew for each use: `s + b + c.as_str()` had made `b` live as
+  long as `c`'s borrow, through `impl<'a> Add<&'a str> for String`.
+- A dot call of a field through a reference a name holds is borrowed where
+  the function chosen for it, by name or by type, borrows (`pair.0.as_str()`
+  of `Some(pair)` from a `&Vec<(String, Json)>`).
+- Not yet: a value a pattern binds that has a `drop` is not destroyed on a
+  path that does not use it, as Rust's would be (`examples/json` keeps the
+  name in `let mut name`). Reading `Token<'s>` through `&'a Spot<'s>` was
+  said to depend on `'a` (the calculator takes one lifetime).

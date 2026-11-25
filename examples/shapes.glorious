@@ -15,13 +15,13 @@ use std::iterator::{Iterator, take, next};
 use std::vec::{collect};
 use std::vec::{Vec};
 
-trait Shape { fn area(&Self) -> Int; fn name(s: &Self) -> Str { "shape" } }
+trait Shape { fn area(&Self) -> Int; fn name(s: &Self) -> &'static str { "shape" } }
 struct Square(Int)
 struct Rect { w: Int, h: Int }
-impl Shape for Square { fn area(s: &Square) -> Int { s.0 * s.0 } fn name(s: &Square) -> Str { "square" } }
+impl Shape for Square { fn area(s: &Square) -> Int { s.0 * s.0 } fn name(s: &Square) -> &'static str { "square" } }
 impl Shape for Rect { fn area(r: &Rect) -> Int { r.w * r.h } }
 
-fn describe<S: Shape>(s: &S) -> Str { name(s) ++ " of " ++ show(area(s)) }
+fn describe<S: Shape>(s: &S) -> String { String::from(name(s)) + " of " + area(s).to_string().as_str() }
 
 // A stack that says when it is asked for more than it has.
 effect Empty { empty() -> ! }
@@ -33,12 +33,12 @@ impl<T> Stack<T> {
     fn len(s: &Self) -> Int { Vec::len(&s.items) }
 }
 
-effect Log { log(Str) }
+effect Log { log(String) }
 
 fn sum_all(s: &mut Stack<Int>, total: Int) -> Int / {Empty, Log} {
     if(Stack::len(&*s) == 0) { total } else {
         let top = Stack::pop(s);
-        log("took " ++ show(top));
+        log(String::from("took ") + top.to_string().as_str());
         sum_all(s, total + top)
     }
 }

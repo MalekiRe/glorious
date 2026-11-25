@@ -3438,7 +3438,7 @@ went wrong
 #### case
 #### Characters and text. A text is its characters one after another; `say`
 #### writes a value as text.
-fn main() -> Str { say(42); say(-7); say("hi" ++ " there"); say('x'); say(100u8 + 27u8); say_debug(("a\"b", 1)); "done\n" }
+fn main() -> Int { say(42); say(-7); say(String::from("hi") + " there"); say('x'); say(100u8 + 27u8); say_debug(("a\"b", 1)); say("done"); 0 }
 #### expect
 42
 -7
@@ -3447,7 +3447,7 @@ x
 127
 ("a\"b", 1)
 done
-
+0
 #### case
 fn f(c: char) -> Int { match(c) { 'a' => 1, 'b' => 2, _ => 0 } }
 fn main() -> Int { say(f('b') + f('\n')); say(int('\u{1F600}')); say(char(955) else { '?' }); say(char(55296) else { '?' }); if('a' < 'b') { 1 } else { 0 } }
@@ -3458,9 +3458,9 @@ fn main() -> Int { say(f('b') + f('\n')); say(int('\u{1F600}')); say(char(955) e
 ?
 1
 #### case
-fn shout(text: Str) -> Str { match(text) { StrEnd => "!", StrChar(c, rest) => StrChar(c, shout(rest)) } }
-fn greet(s: Str) -> Int { match(s) { "hi" => 1, "" => 2, _ => 0 } }
-fn main() -> Int { say(shout("hey")); say(length("h\u{e9}llo")); say("caf\u{e9} \"x\""); if("ab" ++ "c" == "abc") { greet("hi") + greet("") } else { 0 } }
+fn shout(text: &str) -> String { String::from(text) + "!" }
+fn greet(s: &str) -> Int { if(s == "hi") { 1 } else if(s == "") { 2 } else { 0 } }
+fn main() -> Int { say(shout("hey")); say(std::iterator::count(&mut "h\u{e9}llo".chars())); say("caf\u{e9} \"x\""); if(String::from("ab") + "c" == String::from("abc")) { greet("hi") + greet("") } else { 0 } }
 #### expect
 hey!
 5
@@ -4124,7 +4124,7 @@ fn main() -> Int { match(Rgb(255, 128, 0)) { Rgb(r, g, b) => int(r) + int(g) + i
 383
 #### case
 #### Tuples and `Result` have `Show` if their parts do.
-fn pair() -> Result<Int, Str> { Ok(3) }
+fn pair() -> Result<Int, String> { Ok(3) }
 fn main() -> Int { say_debug((1, 2.5)); say_debug(((), 'x', "s")); say_debug(pair()); say(1 < 2); say(()); 0 }
 #### expect
 (1, 2.5)
@@ -4681,7 +4681,7 @@ q
 65
 #### case
 use std::vec::*;
-fn main() -> Int { let a = [5, 3, 9, 1, 3]; say_debug(sort(a)); say_debug(map(a, { x => x * 2 })); say_debug(filter(a, { x => x > 3 })); say_debug(reverse(a)); say_debug(range(2, 6)); say(sum(a)); say_debug(maximum(a)); say_debug(zip(a, [true, false])); say_debug(enumerate([7, 8])); say_debug(binary_search(sort(a), 5)); say_debug(binary_search(sort(a), 4)); say_debug(dedup(sort(a))); say_debug(take(a, 2)); say_debug(drop(a, 3)); say(contains(a, 9)); say_debug(position(a, { x => x == 9 })); say_debug(concat([Vec::from_array([1]), Vec::from_array([2, 3]), Vec::new()])); say_debug(swap(a, 0, 4)); say_debug(sort_by(["pear", "fig", "apple"], fn(x, y) { length(x) < length(y) })); count(a, { x => x == 3 }) }
+fn main() -> Int { let a = [5, 3, 9, 1, 3]; say_debug(sort(a)); say_debug(map(a, { x => x * 2 })); say_debug(filter(a, { x => x > 3 })); say_debug(reverse(a)); say_debug(range(2, 6)); say(sum(a)); say_debug(maximum(a)); say_debug(zip(a, [true, false])); say_debug(enumerate([7, 8])); say_debug(binary_search(sort(a), 5)); say_debug(binary_search(sort(a), 4)); say_debug(dedup(sort(a))); say_debug(take(a, 2)); say_debug(drop(a, 3)); say(contains(a, 9)); say_debug(position(a, { x => x == 9 })); say_debug(concat([Vec::from_array([1]), Vec::from_array([2, 3]), Vec::new()])); say_debug(swap(a, 0, 4)); say_debug(sort_by(["pear", "fig", "apple"], fn(x, y) { x.len() < y.len() })); count(a, { x => x == 3 }) }
 #### expect
 [1, 3, 3, 5, 9]
 [10, 6, 18, 2, 6]
@@ -4832,10 +4832,10 @@ fn main() -> Bool { say_debug("h\u{e9}\u{20ac}".as_bytes().to_vec()); say_debug(
 Some("hi")
 Ok(())
 #### case
-extern "C" { fn f(x: Str) -> Int; }
+extern "C" { fn f(x: String) -> Int; }
 fn main() { 0 }
 #### expect
-error: 1:35: a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`), not `Str`, found `}`
+error: 1:38: a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`), not `String`, found `}`
 #### case
 #### An array a variable holds is changed where it is; an array of values with
 #### `Drop` is destroyed element by element, the last first.
@@ -5381,8 +5381,8 @@ fn main() -> Int { P::get(P(4)) }
 4
 #### case
 pub struct W<T>(T)
-impl<T> W<T> { pub fn shown(w: &Self) -> Str where T: Show { show(w.0) } }
-fn main() -> Int { let mut w = W(5); len(W::shown(&w)) }
+impl<T> W<T> { pub fn shown(w: &Self) -> String where T: Display { w.0.to_string() } }
+fn main() -> Int { let mut w = W(5); W::shown(&w).len() }
 #### expect
 1
 #### case
@@ -6078,41 +6078,41 @@ fn main() -> Int { ap(dbl) }
 8
 #### case
 #### What a declared type asks of its parameters is asked where one is built.
-struct W<T: Show>(T)
-fn main() -> Int { let w = W(5); len(show(w.0)) }
+struct W<T: Display>(T)
+fn main() -> Int { let w = W(5); format(&w.0).len() }
 #### expect
 1
 #### case
-struct NoShow(Int)
-struct W<T: Show>(T)
-fn main() -> Int { let w = W(NoShow(1)); 0 }
+struct NoDisplay(Int)
+struct W<T: Display>(T)
+fn main() -> Int { let w = W(NoDisplay(1)); 0 }
 #### expect
-error: 3:20: in `main`: `NoShow` does not implement `Show`
+error: 3:20: in `main`: `NoDisplay` does not implement `Display`
 #### case
-struct NoShow(Int)
-struct W<T> where T: Show { v: T }
-fn main() -> Int { let w = W { v: NoShow(1) }; 0 }
+struct NoDisplay(Int)
+struct W<T> where T: Display { v: T }
+fn main() -> Int { let w = W { v: NoDisplay(1) }; 0 }
 #### expect
-error: 3:20: in `main`: `NoShow` does not implement `Show`
+error: 3:20: in `main`: `NoDisplay` does not implement `Display`
 #### case
-struct NoShow(Int)
-enum E<T: Show> { A(T), B }
-fn main() -> Int { let e = A(NoShow(1)); 0 }
+struct NoDisplay(Int)
+enum E<T: Display> { A(T), B }
+fn main() -> Int { let e = A(NoDisplay(1)); 0 }
 #### expect
-error: 3:20: in `main`: `NoShow` does not implement `Show`
+error: 3:20: in `main`: `NoDisplay` does not implement `Display`
 #### case
 struct H<'a, T: 'a>(&'a T)
 fn main() -> Int { let mut x = 3; match(H(&x)) { H(r) => *r } }
 #### expect
 3
 #### case
-struct W<T>(T) where T: Show;
+struct W<T>(T) where T: Display;
 fn main() -> Int { W(3).0 }
 #### expect
 3
 #### case
-struct W<T: Show>(T)
-fn wrap<T>(t: T) -> W<T> where T: Show { W(t) }
+struct W<T: Display>(T)
+fn wrap<T>(t: T) -> W<T> where T: Display { W(t) }
 fn main() -> Int { wrap(5).0 }
 #### expect
 5
@@ -6279,16 +6279,16 @@ fn main() -> Int { f(m::W(6)) }
 6
 #### case
 #### What is asked of an effect's parameter is asked where an operation is performed; operations need no separator.
-effect Out<T> where T: Show { put(T) }
-fn main() -> Int { handle { put(5); 0 }() { put(v, k) => len(show(v)) } }
+effect Out<T> where T: Display { put(T) }
+fn main() -> Int { handle { put(5); 0 }() { put(v, k) => format(&v).len() } }
 #### expect
 1
 #### case
-struct NoShow(Int)
-effect Out<T> where T: Show { put(T) }
-fn main() -> Int { handle { put(NoShow(1)); 0 }() { put(v, k) => 1 } }
+struct NoDisplay(Int)
+effect Out<T> where T: Display { put(T) }
+fn main() -> Int { handle { put(NoDisplay(1)); 0 }() { put(v, k) => 1 } }
 #### expect
-error: 3:29: in `main`: `NoShow` does not implement `Show`
+error: 3:29: in `main`: `NoDisplay` does not implement `Display`
 #### case
 effect Console {
     read() -> Int
@@ -6298,11 +6298,11 @@ fn main() -> Int { handle { write(read() + 1); 0 }() { read(k) => k(4), write(v,
 #### expect
 5
 #### case
-struct NoShow(Int)
-effect Out<T: Show> { put(T) }
-fn main() -> Int { handle { put(NoShow(1)); 0 }() { put(v, k) => 1 } }
+struct NoDisplay(Int)
+effect Out<T: Display> { put(T) }
+fn main() -> Int { handle { put(NoDisplay(1)); 0 }() { put(v, k) => 1 } }
 #### expect
-error: 3:29: in `main`: `NoShow` does not implement `Show`
+error: 3:29: in `main`: `NoDisplay` does not implement `Display`
 #### case
 #### A clause never reached, and a reference given back that could last as long as either of two given, are errors.
 fn main() -> Int { let o: Option<Int> = Some(1); match(o) { _ => 0, Some(x) => x } }
@@ -7003,10 +7003,10 @@ fn main() -> Int { let mut c = Count { n: 0, end: 5 }; sum_all(&mut c, 0) }
 #### A trait's `Self::Item` is each implementation's own answer: two iterated things with different values in one program.
 trait Iterator { type Item; fn next(&mut Self) -> Option<Self::Item>; }
 struct A { n: Int }
-struct B { s: Str }
+struct B { s: &'static str }
 impl Iterator for A { type Item = Int; fn next(a: &mut A) -> Option<Int> { Some(a.n) } }
-impl Iterator for B { type Item = Str; fn next(b: &mut B) -> Option<Str> { Some(b.s) } }
-fn main() -> Int { let mut a = A { n: 4 }; let mut b = B { s: "x" }; let x = match(next(&mut a)) { Some(n) => n, None => 0 }; let y = match(next(&mut b)) { Some(s) => length(s), None => 0 }; x + y }
+impl Iterator for B { type Item = &'static str; fn next(b: &mut B) -> Option<&'static str> { Some(b.s) } }
+fn main() -> Int { let mut a = A { n: 4 }; let mut b = B { s: "x" }; let x = match(next(&mut a)) { Some(n) => n, None => 0 }; let y = match(next(&mut b)) { Some(s) => s.len(), None => 0 }; x + y }
 #### expect
 5
 #### case
@@ -7014,7 +7014,7 @@ use std::vec::{Vec};
 trait Iterator { type Item; fn next(&mut Self) -> Option<Self::Item>; }
 struct It<T> { items: Vec<T> }
 impl<T> Iterator for It<T> { type Item = T; fn next(it: &mut It<T>) -> Option<T> { it.items.remove(0) } }
-fn main() -> Int { let mut it = It { items: Vec::from_array([5, 6]) }; let mut st = It { items: Vec::from_array(["a"]) }; let x = match(next(&mut it)) { Some(x) => x, None => 0 }; let y = match(next(&mut st)) { Some(s) => length(s), None => 0 }; x + y }
+fn main() -> Int { let mut it = It { items: Vec::from_array([5, 6]) }; let mut st = It { items: Vec::from_array(["a"]) }; let x = match(next(&mut it)) { Some(x) => x, None => 0 }; let y = match(next(&mut st)) { Some(s) => s.len(), None => 0 }; x + y }
 #### expect
 6
 #### case
@@ -7035,7 +7035,7 @@ fn main() -> Int {
     let mut r = range(0, 5);
     say_debug(map_collect(&mut r, { (x) => x * x }));
     let mut texts = into_iter(Vec::from_array(["a", "bb", "ccc"]));
-    say_debug(find_map(&mut texts, { (t) => if(length(t) == 2) { Some(t) } else { None } }));
+    say_debug(find_map(&mut texts, { (t) => if(t.len() == 2) { Some(t) } else { None } }));
     say(count(&mut texts));
     let mut total = 0;
     let mut again = range(1, 4);
@@ -7205,7 +7205,7 @@ fn main() -> Int { let mut p = P { x: 1, y: 2 }; let r = pick(&mut p, true); *r 
 #### callable is of, and none of one written in place.
 use std::any::fn_name;
 fn mover(x: Int) -> Int { x + 1 }
-fn named<F>(f: F) -> Str where F: Fn<(Int,), Output = Int> { let (n, g) = fn_name(f); discard(g(1)); n }
+fn named<F>(f: F) -> String where F: Fn<(Int,), Output = Int> { let (n, g) = fn_name(f); discard(g(1)); n }
 fn main() -> Int { say(named(mover)); say(named(fn(x: Int) -> Int { x })); 0 }
 #### expect
 mover
@@ -7345,8 +7345,8 @@ fn main() -> Int {
     let mut r = range(0, 50);
     say_debug(find(&mut r, { (n) => *n * *n > 200 }));
     let mut words = into_iter(["a", "bb", "ccc"]);
-    say_debug(find(&mut words, { (w) => length(*w) == 2 }));
-    say_debug(find(&mut words, { (w) => length(*w) == 9 }));
+    say_debug(find(&mut words, { (w) => w.len() == 2 }));
+    say_debug(find(&mut words, { (w) => w.len() == 9 }));
     0 }
 #### expect
 Some(15)
@@ -7692,10 +7692,10 @@ fn main() -> Bool { true == Some(()) }
 Ok(())
 #### case
 #### Library conformance S02: no convert.
-fn f(r: Result<(), Str>) -> Int { 0 }
+fn f(r: Result<(), String>) -> Int { 0 }
 fn main() -> Int { f(true) }
 #### expect
-error: 2:20: in `main`: argument 1 of `f`: expected `Result<(), Str>`, found `Result<(), ()>`
+error: 2:20: in `main`: argument 1 of `f`: expected `Result<(), String>`, found `Result<(), ()>`
 #### case
 #### Library conformance S03: none generic.
 use std::vec::{Vec};
@@ -7781,9 +7781,9 @@ fn main() -> Int { let a = Just(3); match(a) { Just(n) => n, None => 0 } }
 3
 #### case
 let Just: fn(_) -> Result<_, ()> = Ok;
-fn main() -> Int { let a: Result<Int, Str> = Just(3); 0 }
+fn main() -> Int { let a: Result<Int, String> = Just(3); 0 }
 #### expect
-error: 2:20: in `main`: the value of a `let` with a type: expected `Result<Int, Str>`, found `Result<Int, ()>`
+error: 2:20: in `main`: the value of a `let` with a type: expected `Result<Int, String>`, found `Result<Int, ()>`
 #### case
 #### An operation that says nothing can be stopped early; one declared `[1, 1]` is always resumed, so a value that has to be used can wait across it.
 effect Yield { yield(Int) }
@@ -8047,7 +8047,7 @@ error: 1:52: in `main`: argument 2 of `swap`: expected `&mut Int`, found `&mut &
 #### case
 #### The specification's small things: `take`, `Default`, `Either`, `identity`.
 use core::value::{take, Default, Either, identity};
-fn main() -> Int { let mut n = 7; let was = take(&mut n); let mut o = Some(3); let had = take(&mut o); let e: Either<Int, Str> = Either::Left(identity(1)); was * 100 + n * 10 + match(had) { Some(v) => v, None => 0 } + match(o) { Some(_) => 50, None => 0 } }
+fn main() -> Int { let mut n = 7; let was = take(&mut n); let mut o = Some(3); let had = take(&mut o); let e: Either<Int, String> = Either::Left(identity(1)); was * 100 + n * 10 + match(had) { Some(v) => v, None => 0 } + match(o) { Some(_) => 50, None => 0 } }
 #### expect
 703
 #### case
@@ -8802,7 +8802,7 @@ fn main() -> Int {
     let mut r = range(0, 5);
     say_debug(map_collect(&mut r, { (x) => x * x }));
     let mut texts = into_iter(Vec::from_array(["a", "bb", "ccc"]));
-    say_debug(find_map(&mut texts, { (t) => if(length(t) == 2) { Some(t) } else { None } }));
+    say_debug(find_map(&mut texts, { (t) => if(t.len() == 2) { Some(t) } else { None } }));
     say(count(&mut texts));
     let mut total = 0;
     let mut again = range(1, 4);
@@ -9169,7 +9169,7 @@ struct Name;
 fn ids<Tag>(found: std::vec::Vec<Id<Tag>>, i: Int, out: Vec<Int>) -> Vec<Int> { if(i >= len_at(&found)) { out } else { let n = Id::index(found[i]); let mut out = out; out.push(n); ids(found, i + 1, out) } }
 fn id<Tag>(n: Int) -> Id<Tag> { match(Id::at(n)) { Ok(found) => found, Err(_) => Id::from_u32(0u32) } }
 fn main() -> Int {
-    let mut names: IndexVec<Function, Str> = IndexVec::new();
+    let mut names: IndexVec<Function, &'static str> = IndexVec::new();
     let a = match(IndexVec::push(&mut names, "main")) { Ok(found) => found, Err(_) => id(99) };
     let b = match(IndexVec::push(&mut names, "helper")) { Ok(found) => found, Err(_) => id(99) };
     say(Id::index(b));
@@ -9183,7 +9183,7 @@ fn main() -> Int {
     say_debug(match(Arena::rollback_take(&mut arena, mark)) { Ok(taken) => taken, Err(_) => std::vec::Vec::new() });
     say(Arena::len(&arena));
     // A place used again refuses its old name.
-    let mut pool: GenArena<Function, Str> = GenArena::new();
+    let mut pool: GenArena<Function, &'static str> = GenArena::new();
     match(GenArena::insert(&mut pool, "one")) {
         Ok(first) =>
             say(match(GenArena::remove(&mut pool, first)) { Some(text) => text, None => "?" });
@@ -9766,7 +9766,7 @@ fn main() -> Int {
     say(size_of<Shape>());
     say(size_of<Bool>());
     say(size_of<Wrap<i32>>());
-    say(size_of<Str>());
+    say(size_of<String>());
     say(size_of<(u8, u16, u8)>());
     say(size_of<&Point>());
     0
@@ -9782,7 +9782,7 @@ fn main() -> Int {
 40
 1
 8
-16
+24
 6
 8
 0
@@ -9957,7 +9957,7 @@ fn main() -> Int {
     };
     say(level);
     say(DepthBudget::depth(&depth));
-    let mut log: UndoLog<Str> = UndoLog::new();
+    let mut log: UndoLog<&'static str> = UndoLog::new();
     UndoLog::push(&mut log, "a");
     let mark = UndoLog::mark(&log);
     UndoLog::push(&mut log, "b");
@@ -10021,7 +10021,7 @@ fn main() -> Int {
     };
     say(level);
     say(DepthBudget::depth(&depth));
-    let mut log: UndoLog<Str> = UndoLog::new();
+    let mut log: UndoLog<&'static str> = UndoLog::new();
     UndoLog::push(&mut log, "a");
     let mark = UndoLog::mark(&log);
     UndoLog::push(&mut log, "b");
@@ -10187,11 +10187,11 @@ trait Graph { type Node; fn first(&Self) -> Self::Node }
 struct G(Int)
 impl Graph for G { type Node = Int; fn first(g: &G) -> Int { g.0 } }
 struct H(Int)
-impl Graph for H { type Node = Str; fn first(h: &H) -> Str { "x" } }
+impl Graph for H { type Node = &'static str; fn first(h: &H) -> &'static str { "x" } }
 fn h<N: Tag, X: Graph<Node = N>>(g: &X) -> Int { tag(first(g)) }
 fn main() -> Int { h(&H(4)) }
 #### expect
-error: 9:20: in `main`: `Str` does not implement `Tag`
+error: 9:20: in `main`: `&str` does not implement `Tag`
 #### case
 #### Two constructors of one name in a module are refused as that.
 struct Cycle { n: Int }
@@ -10527,7 +10527,7 @@ error: 3:20: in `main`: `Plus` is a constructor of more than one type here: writ
 #### case
 #### An operation has no type parameters of its own.
 effect Choose { pick<T>(a: T, b: T) -> T }
-fn main() -> Int { handle (pick(1, 2) + length(pick("a", "bcd"))) { pick(a, b, k) => k(b) } }
+fn main() -> Int { handle (pick(1, 2) + pick("a", "bcd").len()) { pick(a, b, k) => k(b) } }
 #### expect
 error: 1:21: the operation `pick` cannot have type parameters of its own: an operation has one type wherever its effect is handled. Give the effect the parameter, `effect Choose<T> { pick(..) }`, found `<`
 #### case
@@ -10535,11 +10535,11 @@ error: 1:21: the operation `pick` cannot have type parameters of its own: an ope
 use std::task::{Task, TaskError, CancelOutcome, Spawn, TaskControl, spawn, join, cancel_task, run_inline, yield_now, round_robin};
 use std::generator::{Yield, Coroutine, generator};
 
-fn worker(name: Str, steps: Int) -> Coroutine<(), (), Int> {
+fn worker(name: &'static str, steps: Int) -> Coroutine<(), (), Int> {
     generator({ count(name, steps, 0) })
 }
-fn count(name: Str, steps: Int, i: Int) -> Int / {Yield<(), ()>} {
-    if(i >= steps) { length(name) * 100 + steps } else { say(name ++ show(i)); yield_now(); count(name, steps, i + 1) }
+fn count(name: &'static str, steps: Int, i: Int) -> Int / {Yield<(), ()>} {
+    if(i >= steps) { name.len() * 100 + steps } else { say(String::from(name) + i.to_string().as_str()); yield_now(); count(name, steps, i + 1) }
 }
 fn main() -> Int {
     // Work spawned and joined.
@@ -10570,11 +10570,11 @@ ccc2
 use std::task::{Task, TaskError, CancelOutcome, Spawn, TaskControl, spawn, join, cancel_task, run_inline, yield_now, round_robin};
 use std::generator::{Yield, Coroutine, generator};
 
-fn worker(name: Str, steps: Int) -> Coroutine<(), (), Int> {
+fn worker(name: &'static str, steps: Int) -> Coroutine<(), (), Int> {
     generator({ count(name, steps, 0) })
 }
-fn count(name: Str, steps: Int, i: Int) -> Int / {Yield<(), ()>} {
-    if(i >= steps) { length(name) * 100 + steps } else { say(name ++ show(i)); yield_now(); count(name, steps, i + 1) }
+fn count(name: &'static str, steps: Int, i: Int) -> Int / {Yield<(), ()>} {
+    if(i >= steps) { name.len() * 100 + steps } else { say(String::from(name) + i.to_string().as_str()); yield_now(); count(name, steps, i + 1) }
 }
 fn main() -> Int {
     // Work spawned and joined.
@@ -10651,9 +10651,9 @@ trait Source { type Out; fn get(&Self) -> Self::Out; }
 struct Seven
 impl Source for Seven { type Out = Int; fn get(s: &Seven) -> Int { 7 } }
 struct Hi
-impl Source for Hi { type Out = Str; fn get(s: &Hi) -> Str { "hi" } }
+impl Source for Hi { type Out = &'static str; fn get(s: &Hi) -> &'static str { "hi" } }
 effect Fetch<S: Source> { fetch(S) -> S::Out }
-fn main() -> Int { let a = handle fetch(Seven) + 1 { fetch(s, k) => k(get(&s)) }; let b = handle length(fetch(Hi)) { fetch(s, k) => k(get(&s)) }; a * 10 + b }
+fn main() -> Int { let a = handle fetch(Seven) + 1 { fetch(s, k) => k(get(&s)) }; let b = handle fetch(Hi).len() { fetch(s, k) => k(get(&s)) }; a * 10 + b }
 #### expect
 82
 #### case
@@ -10675,7 +10675,7 @@ fn main() -> Int { 0 }
 #### expect
 error: 1:15: `impl Trait` is a parameter's type, standing for a type parameter of its own with the trait; a result's is not built: write the type, found `impl`
 #### case
-fn f(x: impl Show) -> Str { show(x) ++ "!" }
+fn f(x: impl Display) -> String { x.to_string() + "!" }
 fn main() -> Int { say(f(1)); say(f("a")); 0 }
 #### expect
 1!
@@ -10815,7 +10815,7 @@ fn main() -> Int { let c = Circle(2); let q = Square(5); area(Some(&c)) + area(S
 #### expect
 37
 #### case
-enum Token { Let, Name(Str), Num(Int) }
+enum Token { Let, Name(&'static str), Num(Int) }
 fn kind(t: Option<&Token>) -> Int { match(t) { Some(&Token::Let) => 1, Some(&Token::Num(n)) => 100 + *n, _ => 0 - 1 } }
 fn main() -> Int { let a = Token::Let; let b = Token::Num(7); let c = Token::Name("x"); kind(Some(&a)) * 1000000 + kind(Some(&b)) * 1000 + kind(Some(&c)) + kind(None) }
 #### expect
@@ -11056,7 +11056,7 @@ fn main() -> Int { let mut p = (1, 2); let x = bump(&mut p.0) + p.0 * 10 + bump(
 use std::vec::{Vec};
 struct Counter { n: Int, log: Vec<Int> }
 impl Counter { fn tick(c: &mut Self) -> Int { c.n = c.n + 1; Vec::push(&mut c.log, c.n); c.n } }
-struct App { counter: Counter, name: Str }
+struct App { counter: Counter, name: &'static str }
 fn main() -> Int { let mut app = App { counter: Counter { n: 0, log: Vec::new() }, name: "x" }; let a = Counter::tick(&mut app.counter); let b = Counter::tick(&mut app.counter); a + b * 10 + app.counter.n * 100 + app.counter.log.len() * 1000 }
 #### expect
 2221
@@ -11183,22 +11183,24 @@ fn main() -> Int { let a = Vec::from_array([1, 2, 3]); let b = clone(&a); let p 
 use std::vec::{Vec};
 
 enum Status { Open, Done }
-struct Task { id: Int, title: Str, status: Status, priority: Int }
+struct Task { id: Int, title: &'static str, status: Status, priority: Int }
 
-impl Show for Status { fn fmt(s: &Status) -> Str { match(s) { Open => "open", Done => "done" } } }
-impl Show for Task { fn fmt(t: &Task) -> Str { "#" ++ show(t.id) ++ " " ++ t.title ++ " [" ++ fmt(&t.status) ++ "]" } }
+impl Display for Status { fn fmt(s: &Status, f: &mut Formatter) { f.write_str(match(s) { Open => "open", Done => "done" }) } }
+impl Display for Task {
+    fn fmt(t: &Task, f: &mut Formatter) { f.write_str("#"); Display::fmt(&t.id, f); f.write_str(" "); f.write_str(t.title); f.write_str(" ["); Display::fmt(&t.status, f); f.write_str("]") }
+}
 
-effect Log { log(Str) }
+effect Log { log(String) }
 
 struct Board { tasks: Vec<Task>, next: Int }
 
 impl Board {
     fn new() -> Board { Board { tasks: Vec::new(), next: 1 } }
-    fn add(b: &mut Board, title: Str, priority: Int) -> Int / { Log } {
+    fn add(b: &mut Board, title: &'static str, priority: Int) -> Int / { Log } {
         let id = b.next;
         b.next = b.next + 1;
         b.tasks.push(Task { id: id, title: title, status: Open, priority: priority });
-        log("added " ++ title);
+        log(String::from("added ") + title);
         id
     }
     fn finish(b: &mut Board, id: Int) -> Result<(), &'static str> / { Log } {
@@ -11209,7 +11211,7 @@ impl Board {
                     Done => return(Err("already done"), @finish),
                     Open => b.tasks[i].status = Done
                 };
-                log("finished " ++ show(id));
+                log(String::from("finished ") + id.to_string().as_str());
                 return(Ok(()), @finish)
             } else { () };
             i = i + 1
@@ -11265,12 +11267,12 @@ fn main() -> Int { let mut v = Vec::new(); v.push(3); v.push(1); v.push(2); v.so
 #### case
 #### `T::f()` of a type parameter: the trait's function at `T`, as
 #### `<T as Trait>::f()` is.
-trait Named { fn name() -> Str; fn size(s: &Self) -> Int; }
+trait Named { fn name() -> &'static str; fn size(s: &Self) -> Int; }
 struct A
 struct B(Int)
-impl Named for A { fn name() -> Str { "a" } fn size(s: &A) -> Int { 1 } }
-impl Named for B { fn name() -> Str { "b" } fn size(s: &B) -> Int { s.0 } }
-fn get<T: Named>(x: &T) -> Str { say(T::size(x)); T::name() }
+impl Named for A { fn name() -> &'static str { "a" } fn size(s: &A) -> Int { 1 } }
+impl Named for B { fn name() -> &'static str { "b" } fn size(s: &B) -> Int { s.0 } }
+fn get<T: Named>(x: &T) -> &'static str { say(T::size(x)); T::name() }
 fn main() -> Int { say(get(&A)); say(get(&B(7))); 0 }
 #### expect
 1
@@ -11295,7 +11297,7 @@ error: 3:46: in `main`: reading through a reference copies the value (`replace` 
 #### case
 #### A capitalized name that is no type, in a declaration, is a mistake, not
 #### a field type to infer.
-effect A { boom(Str) -> Never }
+effect A { boom(&'static str) -> Never }
 fn main() -> Int { handle { boom("x"); 1 }() { boom(m, k) => 0 } }
 #### expect
 error: unknown type `Never`: what does not return is written `!`
@@ -11414,9 +11416,9 @@ Ok(5)
 #### reference: `hs.len()` is the `Vec`'s own, given the reference as it is.
 use std::vec::{Vec};
 
-effect Emit { emit(Str) }
+effect Emit { emit(String) }
 
-struct Listener { name: Str, threshold: Int }
+struct Listener { name: &'static str, threshold: Int }
 
 trait Handler {
     fn on_value(h: &Self, value: Int) -> Bool / { Emit };
@@ -11424,7 +11426,7 @@ trait Handler {
 
 impl Handler for Listener {
     fn on_value(l: &Listener, value: Int) -> Bool / {Emit} {
-        if(value >= l.threshold) { emit(l.name ++ " saw " ++ show(value)); true } else { false }
+        if(value >= l.threshold) { emit(String::from(l.name) + " saw " + value.to_string().as_str()); true } else { false }
     }
 }
 
@@ -11449,7 +11451,7 @@ fn main() -> Int {
         emit(m, k) => log.push(m); k(())
     };
     let mut i = 0;
-    while({ i < log.len() }) { say(log[i]); i = i + 1 };
+    while({ i < log.len() }) { say(&log[i]); i = i + 1 };
     total
 }
 
@@ -11465,11 +11467,11 @@ fn main() -> Int { f(Some(1)) }
 error: 1:47: `tail` is a word of the language: what is bound here is named otherwise, found `tail`
 #### case
 #### What an implementation asks of its parameters, written in them.
-trait Both { fn both(x: &Self) -> Str; }
+trait Both { fn both(x: &Self) -> String; }
 struct P<A, B>(A, B)
-impl<A: Show, B: Show> Both for P<A, B> { fn both(p: &P<A, B>) -> Str { show(p.0) ++ show(p.1) } }
+impl<A: Display, B: Display> Both for P<A, B> { fn both(p: &P<A, B>) -> String { p.0.to_string() + p.1.to_string().as_str() } }
 struct W<T>(T)
-impl<T: Show> W<T> { fn describe(w: &W<T>) -> Str { "W:" ++ show(w.0) } }
+impl<T: Display> W<T> { fn describe(w: &W<T>) -> String { String::from("W:") + w.0.to_string().as_str() } }
 fn main() -> Int { say(both(&P(1, "x"))); let w = W(5); say(w.describe()); 0 }
 #### expect
 1x
@@ -11541,10 +11543,10 @@ fn main() -> Int { let mut v = Vec::new(); v.push(4); v.push(5); match(v.first()
 use std::vec::{Vec};
 use std::text::{join};
 
-struct Student { name: Str, scores: Vec<Int> }
+struct Student { name: &'static str, scores: Vec<Int> }
 
 impl Student {
-    fn new(name: Str) -> Self { Student { name, scores: Vec::new() } }
+    fn new(name: &'static str) -> Self { Student { name, scores: Vec::new() } }
     fn add(s: &mut Self, score: Int) { s.scores.push(score) }
     fn average(s: &Self) -> Int {
         if(s.scores.is_empty()) { 0 } else {
@@ -11554,7 +11556,7 @@ impl Student {
             total / s.scores.len()
         }
     }
-    fn grade(s: &Self) -> Str {
+    fn grade(s: &Self) -> &'static str {
         let a = s.average();
         if(a >= 90) { "A" } else { if(a >= 80) { "B" } else { if(a >= 70) { "C" } else { "F" } } }
     }
@@ -11563,7 +11565,7 @@ impl Student {
 struct Class { students: Vec<Student> }
 
 impl Class {
-    fn top(s: &Self) -> Option<Str> {
+    fn top(s: &Self) -> Option<&'static str> {
         let mut best = 0 - 1;
         let mut who = None;
         let mut i = 0;
@@ -11588,7 +11590,7 @@ fn main() -> Int {
     let mut i = 0;
     while({ i < class.students.len() }) {
         let s = &class.students[i];
-        Vec::push(&mut lines, s.name ++ ": " ++ show(s.average()) ++ " " ++ s.grade());
+        Vec::push(&mut lines, String::from(s.name) + ": " + s.average().to_string().as_str() + " " + s.grade());
         i = i + 1
     };
     say(join(lines, "; "));
@@ -11727,7 +11729,7 @@ fn main() -> Int { if(Some(3) is Some(n)) { f(&n) } else { 0 } }
 #### case
 #### `#[derive(..)]` and macros are refused.
 #[derive(Clone, Debug, PartialEq)]
-struct P { x: Int, name: Str }
+struct P { x: Int, name: String }
 fn main() -> Int { let a = P { x: 1, name: "a" }; let b = a.clone(); say(b); if a == b { 1 } else { 0 } }
 #### expect
 error: 2:1: `#[derive]` is not known: `#[non_exhaustive]`, `#[repr(C)]`, `#[repr(transparent)]` and `#[export_name = ".."]` are, found `struct`
@@ -11949,11 +11951,11 @@ fn main() -> Int {
 #### (A type a trait with arguments leaves to its implementations, named of
 #### a type parameter the trait is written of, and with the trait said.)
 trait Tr<S> { type Had; fn had(Self) -> Self::Had }
-impl<S> Tr<S> for Int { type Had = Str; fn had(x: Int) -> Str { "a" } }
-impl<S> Tr<S> for Str { type Had = Int; fn had(x: Str) -> Int { 5 } }
+impl<S> Tr<S> for Int { type Had = &'static str; fn had(x: Int) -> &'static str { "a" } }
+impl<'a, S> Tr<S> for &'a str { type Had = Int; fn had(x: &'a str) -> Int { 5 } }
 fn go<B, S>(b: B) -> B::Had where B: Tr<S> { <B as Tr<S>>::had(b) }
 fn again<B, S>(b: B) -> <B as Tr<S>>::Had where B: Tr<S> { <B as Tr<S>>::had(b) }
-fn main() -> Int { say(go<Int, ()>(3)); say(again<Int, Int>(4)); go<Str, Int>("x") + again<Str, ()>("y") }
+fn main() -> Int { say(go<Int, ()>(3)); say(again<Int, Int>(4)); go<&str, Int>("x") + again<&str, ()>("y") }
 #### expect
 a
 a
@@ -12003,7 +12005,7 @@ struct W<F> { f: F, n: Int }
 impl<E, ..P, F> Into2<E> for F where F: Fn<(..P), Output = Int> { type Out = W<F>; fn into2(f: F) -> W<F> { W { f: f, n: 5 } } }
 impl<E, X, Y> Into2<E> for (X, Y) where X: Into2<E>, Y: Into2<E> { type Out = (<X as Into2<E>>::Out, <Y as Into2<E>>::Out); fn into2(p: (X, Y)) -> (<X as Into2<E>>::Out, <Y as Into2<E>>::Out) { let (x, y) = p; (<X as Into2<E>>::into2(x), <Y as Into2<E>>::into2(y)) } }
 impl<E> Into2<E> for Int { type Out = W<Int>; fn into2(f: Int) -> W<Int> { W { f: f, n: 7 } } }
-fn mk<T: Into2<Str>>(t: T) -> <T as Into2<Str>>::Out { <T as Into2<Str>>::into2(t) }
+fn mk<T: Into2<String>>(t: T) -> <T as Into2<String>>::Out { <T as Into2<String>>::into2(t) }
 fn one() -> Int { 1 }
 fn main() -> Int { let w = mk((1, one)); w.0.n + w.1.n + (w.1.f)() }
 #### expect
@@ -12136,14 +12138,14 @@ fn main() -> Int {
 #### (An implementation says every type it gives: `type Out = _;` is refused.)
 trait Make { type Out; fn make(Self) -> Self::Out; }
 struct A
-impl Make for A { type Out = _; fn make(a: A) -> (Int, Str) { (1, "x") } }
+impl Make for A { type Out = _; fn make(a: A) -> (Int, &'static str) { (1, "x") } }
 trait Wrap<S> { type Out; fn wrap(Self, S) -> Self::Out; }
 struct B
 fn helper<T>(t: T) -> [T; 1] { [t] }
 impl<S> Wrap<S> for B { type Out = _; fn wrap(b: B, s: S) -> _ { helper(s) } }
 trait Shout<S> { type Out; fn shout(Self, S) -> Self::Out; }
 struct C
-impl<S> Shout<S> for C { type Out = _; fn shout(c: C, s: S) -> _ { show(s) ++ "!" } }
+impl<S> Shout<S> for C { type Out = _; fn shout(c: C, s: S) -> _ { format(&s) + "!" } }
 fn main() -> Int { let (n, s) = A.make(); say(s); say(C.shout(7)); let xs = B.wrap(5); let ys = B.wrap("a"); n + len_at(&xs) + len_at(&ys) }
 #### expect
 error: `impl Make for A`: `type Out = _;`: an implementation says what each type it gives is: write it, `type Out = ..;`
@@ -12177,7 +12179,7 @@ impl<H, Rest> All for (H, Rest) where H: Touches, Rest: All, <H as Touches>::Lis
     type List = <<H as Touches>::List as Concat<<Rest as All>::List>>::Out;
 }
 fn count<L, Ts>(f: fn(L) -> ()) -> Int where L: All<List = Ts>, Ts: Len { <Ts as Len>::len() }
-fn main() -> Int { count(fn(l: (Qy<(&Int, &mut Str)>, (W<Int>, ()))) { () }) }
+fn main() -> Int { count(fn(l: (Qy<(&Int, &mut String)>, (W<Int>, ()))) { () }) }
 #### expect
 3
 #### case
@@ -12370,16 +12372,16 @@ after
 drop b
 1
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn main() -> Int { let o = Some(T { name: "o" }); match(o) { Some(t) => say("got " ++ t.name); 1, None => 0 } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn main() -> Int { let o = Some(T { name: "o" }); match(o) { Some(t) => say(String::from("got ") + t.name); 1, None => 0 } }
 #### expect
 got o
 drop o
 1
 #### case
-struct Noisy { id: Int, name: Str }
-impl Drop for Noisy { fn drop(p: &mut Noisy) { say("drop " ++ p.name) } }
+struct Noisy { id: Int, name: &'static str }
+impl Drop for Noisy { fn drop(p: &mut Noisy) { say(String::from("drop ") + p.name) } }
 fn main() -> Int { let n = Noisy { id: 4, name: "n" }; say(n.name); say(n.id); n.id + 1 }
 #### expect
 n
@@ -12426,8 +12428,8 @@ fn main() -> Int { let h = Holder { item: Inner(5) }; let v = h.item; done(v) }
 9
 #### case
 #### What a reference points to is destroyed when it is written over, as what a variable holds is.
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct H { t: T }
 fn main() -> Int { let mut h = H { t: T { name: "old" } }; h.t = T { name: "new" }; say("set"); 0 }
 #### expect
@@ -12436,8 +12438,8 @@ set
 drop new
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn put(r: &mut T) { *r = T { name: "new" }; }
 fn main() -> Int { let mut a = T { name: "old" }; put(&mut a); say("set"); 0 }
 #### expect
@@ -12446,8 +12448,8 @@ set
 drop new
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct H { t: T }
 fn put(h: &mut H) { h.t = T { name: "new" }; }
 fn main() -> Int { let mut h = H { t: T { name: "old" } }; put(&mut h); say("set"); 0 }
@@ -12457,8 +12459,8 @@ set
 drop new
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn main() -> Int { let mut a = T { name: "old" }; a = T { name: "new" }; say("set"); 0 }
 #### expect
 drop old
@@ -12466,16 +12468,16 @@ set
 drop new
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn main() -> Int { let mut o = Some(T { name: "old" }); o = None; say("set"); 0 }
 #### expect
 drop old
 set
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn main() -> Int { let mut xs = [T { name: "old" }]; xs[0] = T { name: "new" }; say("set"); 0 }
 #### expect
 drop old
@@ -12483,8 +12485,8 @@ set
 drop new
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn main() -> Int { let a = T { name: "a" }; let b = T { name: "b" }; say("body"); 0 }
 #### expect
 body
@@ -12492,8 +12494,8 @@ drop b
 drop a
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct Pair { x: T, y: T }
 fn main() -> Int { let p = Pair { x: T { name: "x" }, y: T { name: "y" } }; say("body"); 0 }
 #### expect
@@ -12502,8 +12504,8 @@ drop y
 drop x
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn main() -> Int { let xs = [T { name: "0" }, T { name: "1" }]; say(len_at(&xs)); 0 }
 #### expect
 2
@@ -12511,17 +12513,17 @@ drop 1
 drop 0
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn make(n: Str) -> T { T { name: n } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn make(n: &'static str) -> T { T { name: n } }
 fn main() -> Int { make("tmp"); say("next"); 0 }
 #### expect
 drop tmp
 next
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 effect Stop { stop() -> ! }
 fn work() -> Int / {Stop} { let a = T { name: "a" }; stop() }
 fn main() -> Int { handle work() { stop() => say("stopped"); 7 } }
@@ -12530,8 +12532,8 @@ drop a
 stopped
 7
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn main() -> Int { let a = T { name: "1" }; let a = T { name: "2" }; say("body"); 0 }
 #### expect
 body
@@ -12570,7 +12572,7 @@ fn main() -> Int { let xs = fold(Vec::from_array([1, 2]), Vec::new(), { (acc, x)
 2
 #### case
 fn wrap<T>(x: T) -> Option<T> { Some(x) }
-fn main() -> Int { match(wrap("a")) { Some(s) => length(s), None => 0 } + match(Some(2)) { Some(n) => n, None => 0 } }
+fn main() -> Int { match(wrap("a")) { Some(s) => s.len(), None => 0 } + match(Some(2)) { Some(n) => n, None => 0 } }
 #### expect
 3
 #### case
@@ -12581,8 +12583,8 @@ fn main() -> Int { let p = P { a: Vec::from_array([1, 2]), b: Vec::from_array([3
 #### expect
 21
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct P { a: T, b: T }
 fn eat(t: T) -> Int { 1 }
 fn main() -> Int { let p = P { a: T { name: "a" }, b: T { name: "b" } }; let n = eat(p.a); say("mid"); n }
@@ -12592,8 +12594,8 @@ mid
 drop b
 1
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct P { a: T, b: T }
 fn eat(t: T) -> Int { 1 }
 fn main() -> Int { let p = P { a: T { name: "a" }, b: T { name: "b" } }; let n = eat(p.b) + eat(p.a); say("mid"); n }
@@ -12603,8 +12605,8 @@ drop a
 mid
 2
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn eat(t: T) -> Int { 1 }
 fn main() -> Int { let p = (T { name: "a" }, 5, T { name: "c" }); let n = eat(p.2) + p.1; say("mid"); n }
 #### expect
@@ -12613,8 +12615,8 @@ mid
 drop a
 6
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct I { t: T, n: Int }
 struct O { i: I, k: Int }
 fn eat(t: T) -> Int { 1 }
@@ -12624,8 +12626,8 @@ drop t
 mid
 10
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct P { a: T, b: T, n: Int }
 fn main() -> Int { let p = P { a: T { name: "a" }, b: T { name: "b" }, n: 3 }; match(p) { P { n, .. } => say("in"); n } }
 #### expect
@@ -12634,8 +12636,8 @@ drop b
 drop a
 3
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct P { a: T, n: Int }
 fn eat(t: T) -> Int { 1 }
 fn f(c: Bool) -> Int { let p = P { a: T { name: "a" }, n: 3 }; if(c) { eat(p.a) } else { p.n } }
@@ -12643,7 +12645,7 @@ fn main() -> Int { f(true) }
 #### expect
 error: 5:24: in `f`: `p` is used on one path and not on another, and a `T` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut p`), which is destroyed where it was not used
 #### case
-struct P { a: Int, s: Str }
+struct P { a: Int, s: &'static str }
 fn main() -> Int { let p = P { a: 2, s: "hi" }; say(p.s); say(p.s); p.a + p.a }
 #### expect
 hi
@@ -12743,8 +12745,8 @@ fn main() -> Int { pick(1) + pick(2) + pick(3) + pick(4) }
 #### expect
 100
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct Holder<X> { item: X, tag: Int }
 fn tag_of<X>(h: &Holder<X>) -> Int { h.tag }
 fn main() -> Int { let h = Holder { item: T { name: "in" }, tag: 7 }; let n = tag_of(&h); say("mid"); n }
@@ -12753,8 +12755,8 @@ mid
 drop in
 7
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 use std::vec::{Vec};
 fn main() -> Int { let mut v = Vec::new(); Vec::push(&mut v, T { name: "a" }); Vec::push(&mut v, T { name: "b" }); say(Vec::len(&v)); 0 }
 #### expect
@@ -12763,9 +12765,9 @@ drop b
 drop a
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn main() -> Int { let mut slot = Some(T { name: "s" }); let got = replace(&mut slot, None); say("took"); match(got) { Some(t) => say("have " ++ t.name); 1, None => 0 } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn main() -> Int { let mut slot = Some(T { name: "s" }); let got = replace(&mut slot, None); say("took"); match(got) { Some(t) => say(String::from("have ") + t.name); 1, None => 0 } }
 #### expect
 took
 have s
@@ -12850,8 +12852,8 @@ fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4])
 #### case
 #### `a[i] = v` writes the element where it is: what was there is destroyed, through a reference too.
 use std::vec::{Vec};
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn put(xs: &mut Vec<T>) { (*xs)[1] = T { name: "new" }; }
 fn main() -> Int { let mut xs = Vec::from_array([T { name: "a" }, T { name: "b" }]); put(&mut xs); say("set"); len_at(&xs) }
 #### expect
@@ -12861,8 +12863,8 @@ drop new
 drop a
 2
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct H { xs: [T; 1], n: Int }
 fn main() -> Int { let mut h = H { xs: [T { name: "a" }], n: 0 }; h.xs[0] = T { name: "z" }; h.n = 5; say("set"); h.n }
 #### expect
@@ -12951,8 +12953,8 @@ fn report(sources: &SourceMap, id: SourceId, elsewhere: SourceId) -> Int {
     let mut bag = DiagnosticBag::new(2);
     let a = match(DiagnosticBag::push(&mut bag, unknown)) { Ok(_) => "kept", Err(_) => "given back" };
     let b = match(DiagnosticBag::push(&mut bag, unused)) { Ok(_) => "kept", Err(_) => "given back" };
-    let c = match(DiagnosticBag::push(&mut bag, lost)) { Ok(_) => "kept", Err(d) => "given back: " ++ Diagnostic::message(&d) };
-    say(a ++ ", " ++ b ++ ", " ++ c);
+    let c = match(DiagnosticBag::push(&mut bag, lost)) { Ok(_) => String::from("kept"), Err(d) => String::from("given back: ") + Diagnostic::message(&d) };
+    say(String::from(a) + ", " + b + ", " + c.as_str());
     say(DiagnosticBag::has_errors(&bag));
     let n = DiagnosticBag::len(&bag);
     let all = DiagnosticBag::into_vec(bag);
@@ -13018,7 +13020,7 @@ fn main() -> Int { let l = L { n: 4 }; apply({ p => p.n }, &l) }
 #### `std::random`: the seeded generator against xoshiro256** worked out outside, a seed of zeros, numbers below a bound drawn without bias, a bound of nothing refused.
 use std::random::{SeededRng, RandomSource, RandomError, random_u64, random_below, fill};
 fn zeros(n: Int, out: std::vec::Vec<u8>) -> std::vec::Vec<u8> { if(n == 0) { out } else { let mut out = out; out.push(0u8); zeros(n - 1, out) } }
-fn shown(r: Result<u64, RandomError>) -> Str { match(r) { Ok(n) => show(n), Err(RandomError::InvalidRange) => "no such range", Err(_) => "failed" } }
+fn shown(r: Result<u64, RandomError>) -> String { match(r) { Ok(n) => n.to_string(), Err(RandomError::InvalidRange) => String::from("no such range"), Err(_) => String::from("failed") } }
 fn main() -> Int {
     let mut rng = SeededRng::from_seed([1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8, 32u8]);
     say(SeededRng::next_u64(&mut rng));
@@ -13054,21 +13056,21 @@ no such range
 use std::time::{Duration, Instant, TimeError, Clock, monotonic_now};
 use std::cmp::{Ordering};
 fn dur(s: u64, n: u32) -> Duration { match(Duration::from_parts(s, n)) { Ok(d) => d, Err(_) => Duration::zero() } }
-fn text(d: Duration) -> Str { show(Duration::seconds(d)) ++ "s+" ++ show(Duration::subsec_nanos(d)) ++ "ns" }
-fn why(e: TimeError) -> Str { match(e) { TimeError::Overflow => "overflow", TimeError::BeforeOrigin => "before", TimeError::DifferentClock => "another clock", TimeError::Unsupported => "unsupported" } }
+fn text(d: Duration) -> String { Duration::seconds(d).to_string() + "s+" + Duration::subsec_nanos(d).to_string().as_str() + "ns" }
+fn why(e: TimeError) -> String { String::from(match(e) { TimeError::Overflow => "overflow", TimeError::BeforeOrigin => "before", TimeError::DifferentClock => "another clock", TimeError::Unsupported => "unsupported" }) }
 fn main() -> Int {
-    say(match(Duration::from_parts(1u64, 1000000000u32)) { Ok(_) => "taken", Err(e) => why(e) });
-    say(match(Duration::checked_add(dur(1u64, 600000000u32), dur(2u64, 700000000u32))) { Some(d) => text(d), None => "none" });
-    say(match(Duration::checked_sub(dur(5u64, 100u32), dur(2u64, 200u32))) { Some(d) => text(d), None => "none" });
-    say(match(Duration::checked_sub(dur(1u64, 0u32), dur(1u64, 1u32))) { Some(d) => text(d), None => "none" });
-    say(match(Duration::checked_add(dur(18446744073709551615u64, 999999999u32), dur(0u64, 1u32))) { Some(d) => text(d), None => "none" });
+    say(match(Duration::from_parts(1u64, 1000000000u32)) { Ok(_) => String::from("taken"), Err(e) => why(e) });
+    say(match(Duration::checked_add(dur(1u64, 600000000u32), dur(2u64, 700000000u32))) { Some(d) => text(d), None => String::from("none") });
+    say(match(Duration::checked_sub(dur(5u64, 100u32), dur(2u64, 200u32))) { Some(d) => text(d), None => String::from("none") });
+    say(match(Duration::checked_sub(dur(1u64, 0u32), dur(1u64, 1u32))) { Some(d) => text(d), None => String::from("none") });
+    say(match(Duration::checked_add(dur(18446744073709551615u64, 999999999u32), dur(0u64, 1u32))) { Some(d) => text(d), None => String::from("none") });
     let a = Instant::at(0u32, dur(10u64, 0u32));
     let b = Instant::at(0u32, dur(12u64, 500u32));
     let other = Instant::at(1u32, dur(12u64, 500u32));
     say(match(Instant::duration_since(b, a)) { Ok(d) => text(d), Err(e) => why(e) });
     say(match(Instant::duration_since(a, b)) { Ok(d) => text(d), Err(e) => why(e) });
     say(match(Instant::duration_since(other, a)) { Ok(d) => text(d), Err(e) => why(e) });
-    say(match(Instant::compare(a, b)) { Ok(Ordering::Less) => "earlier", Ok(_) => "not earlier", Err(e) => why(e) });
+    say(match(Instant::compare(a, b)) { Ok(Ordering::Less) => String::from("earlier"), Ok(_) => String::from("not earlier"), Err(e) => why(e) });
     // A clock answered by the program: each look at it is a second and a half later.
     let mut ticks = 0;
     let elapsed = handle {
@@ -13175,8 +13177,8 @@ error: 5:91: in `main`: `c.xs` is given away while `r` holds a reference to it
 #### case
 #### A parameter with a `drop` that the function only borrows is destroyed when the function is done, once.
 use std::vec::{Vec};
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct H { t: T, xs: Vec<Int> }
 fn size(h: &H) -> Int { len_at(&h.xs) }
 fn f(h: H) -> Int { size(&h) }
@@ -13187,8 +13189,8 @@ after
 2
 #### case
 use std::vec::{Vec};
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct H { t: T, xs: Vec<Int> }
 fn f(h: H) -> Int { len_at(&h.xs) }
 fn main() -> Int { let n = f(H { t: T { name: "t" }, xs: Vec::from_array([1, 2]) }); say("after"); n }
@@ -13197,9 +13199,9 @@ drop t
 after
 2
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn look(t: &T) -> Int { length(t.name) }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn look(t: &T) -> Int { t.name.len() }
 fn eat(t: T) -> Int { 1 }
 fn f(t: T) -> Int { let n = look(&t); n + eat(t) }
 fn main() -> Int { let n = f(T { name: "abc" }); say("after"); n }
@@ -13208,9 +13210,9 @@ drop abc
 after
 4
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn look(t: &T) -> Int { length(t.name) }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn look(t: &T) -> Int { t.name.len() }
 fn f(a: T, b: T) -> Int { look(&a) * 10 + look(&b) }
 fn main() -> Int { let n = f(T { name: "a" }, T { name: "bb" }); say("after"); n }
 #### expect
@@ -13219,20 +13221,20 @@ drop a
 after
 12
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn look(t: &T) -> Int { length(t.name) }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn look(t: &T) -> Int { t.name.len() }
 fn main() -> Int { let (a, n) = (T { name: "ab" }, 5); let k = look(&a); say("after"); k + n }
 #### expect
 after
 drop ab
 7
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn eat(t: T) -> Int { 1 }
-fn look(t: &T) -> &Str { &t.name }
-fn main() -> Int { let t = T { name: "t" }; let r = look(&t); let n = eat(t); length(*r) + n }
+fn look(t: &T) -> &&'static str { &t.name }
+fn main() -> Int { let t = T { name: "t" }; let r = look(&t); let n = eat(t); r.len() + n }
 #### expect
 error: 5:63: in `main`: `t` is given away while `r` holds a reference to it
 #### case
@@ -13245,8 +13247,8 @@ fn main() -> Int { let c = C { n: 1, xs: Vec::from_array([4, 5]) }; let r = firs
 error: 5:88: in `main`: `c` is given away while `r` holds a reference to it
 #### case
 #### Hand-checked: a value with `drop` bound each way a value can be, and let go each way one can.
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 effect Give { give(T) }
 fn work() -> Int / {Give} { give(T { name: "p" }); 1 }
 fn main() -> Int { let n = handle work() { give(t, k) => k(()) }; say("after"); n }
@@ -13255,8 +13257,8 @@ drop p
 after
 1
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 effect Stop { stop() -> ! }
 fn work() -> Int / {Stop} { let a = T { name: "a" }; let b = T { name: "b" }; stop() }
 fn main() -> Int { let n = handle work() { stop() => 7 }; say("after"); n }
@@ -13266,8 +13268,8 @@ drop a
 after
 7
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn id<X>(x: X) -> X { x }
 fn main() -> Int { let t = id(T { name: "g" }); say("mid"); 0 }
 #### expect
@@ -13275,8 +13277,8 @@ mid
 drop g
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn forget<X>(x: X) -> Int { 1 }
 fn main() -> Int { let n = forget(T { name: "g" }); say("after"); n }
 #### expect
@@ -13284,8 +13286,8 @@ drop g
 after
 1
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn f(o: Option<T>) -> Int { match(o) { Some(t) => 1, None => 0 } }
 fn main() -> Int { let n = f(Some(T { name: "o" })) + f(None); say("after"); n }
 #### expect
@@ -13293,23 +13295,23 @@ drop o
 after
 1
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn main() -> Int { let xs = [T { name: "0" }, T { name: "1" }]; let n = fold(xs, 0, { (acc, t) => acc + 1 }); say("after"); n }
 #### expect
 error: 3:65: in `main`: `fold` may use what it is given more than once, but a `T` has a `drop`, which would then run once for each
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn make(n: Str) -> T { let t = T { name: n }; t }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn make(n: &'static str) -> T { let t = T { name: n }; t }
 fn main() -> Int { let t = make("r"); say("have"); 0 }
 #### expect
 have
 drop r
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct W { t: T, n: Int }
 fn unwrap(w: W) -> T { match(w) { W { t, n } => t } }
 fn main() -> Int { let t = unwrap(W { t: T { name: "w" }, n: 1 }); say("have"); 0 }
@@ -13318,17 +13320,17 @@ have
 drop w
 0
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn main() -> Int { let mut i = 0; while({ i < 2 }) { let t = T { name: show(i) }; i = i + 1; }; say("after"); i }
+struct T { name: String }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name.as_str()) } }
+fn main() -> Int { let mut i = 0; while({ i < 2 }) { let t = T { name: i.to_string() }; i = i + 1; }; say("after"); i }
 #### expect
 drop 0
 drop 1
 after
 2
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn main() -> Int { let a = T { name: "a" }; let n = { let b = T { name: "b" }; say("inner"); 1 }(); say("outer"); n }
 #### expect
 inner
@@ -13337,8 +13339,8 @@ outer
 drop a
 1
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn f(c: Bool) -> Int { @out { let a = T { name: "a" }; if(c) { @out(1) }; say("kept going"); 2 } }
 fn main() -> Int { f(true) * 10 + f(false) }
 #### expect
@@ -13357,26 +13359,26 @@ drop new
 after
 1
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 fn main() -> Int { let f = fn(t: T) -> Int { 1 }; let n = f(T { name: "a" }); say("after"); n }
 #### expect
 drop a
 after
 1
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn look(t: &T) -> Int { length(t.name) }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn look(t: &T) -> Int { t.name.len() }
 fn main() -> Int { let f = fn(t: T) -> Int { look(&t) }; let n = f(T { name: "ab" }); say("after"); n }
 #### expect
 drop ab
 after
 2
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn look(t: &T) -> Int { length(t.name) }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn look(t: &T) -> Int { t.name.len() }
 fn apply(f: fn(T) -> Int, t: T) -> Int { f(t) }
 fn main() -> Int { let n = apply({ t => look(&t) }, T { name: "abc" }); say("after"); n }
 #### expect
@@ -13384,9 +13386,9 @@ drop abc
 after
 3
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn look(t: &T) -> Int { length(t.name) }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn look(t: &T) -> Int { t.name.len() }
 fn f(o: Option<T>) -> Int { match(o) { Some(t) => look(&t), None => 0 } }
 fn main() -> Int { let n = f(Some(T { name: "abcd" })); say("after"); n }
 #### expect
@@ -13394,9 +13396,9 @@ drop abcd
 after
 4
 #### case
-struct T { name: Str }
-impl Drop for T { fn drop(t: &mut T) { say("drop " ++ t.name) } }
-fn look(t: &T) -> Int { length(t.name) }
+struct T { name: &'static str }
+impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
+fn look(t: &T) -> Int { t.name.len() }
 effect Give { give(T) -> Int }
 fn work() -> Int / {Give} { give(T { name: "pq" }) }
 fn main() -> Int { let n = handle work() { give(t, k) => k(look(&t)) }; say("after"); n }
@@ -13428,7 +13430,7 @@ fn main() -> Int { let mut a = 1; let mut b = 5; let p = &mut a; *p = val(&b); a
 value
 6
 #### case
-fn f(n: Int, s: Str) -> Int { say(s); n }
+fn f(n: Int, s: &'static str) -> Int { say(s); n }
 fn add3(a: Int, b: &Int, c: Int) -> Int { a + *b + c }
 fn main() -> Int { let mut x = 10; add3(f(1, "first"), &x, f(2, "second")) }
 #### expect
@@ -13441,7 +13443,7 @@ fn main() -> Int { let mut xs = [1, 2, 3]; bump(&mut xs[len(xs) - 1]) * 10 + xs[
 #### expect
 44
 #### case
-fn note(s: Str) -> Int { say(s); 1 }
+fn note(s: &'static str) -> Int { say(s); 1 }
 fn two(a: Int, b: &mut Int) -> Int { *b = *b + a; *b }
 fn main() -> Int { let mut x = 1; let n = two(note("a"), &mut x) + two(note("b"), &mut x); n * 10 + x }
 #### expect
@@ -13468,7 +13470,7 @@ fn main() -> Int { let mut xs = [1, 2, 3]; xs[len(xs) - 1] = 9; xs[0] * 100 + xs
 129
 #### case
 use std::vec::{Vec};
-fn note(s: Str, n: Int) -> Int { say(s); n }
+fn note(s: &'static str, n: Int) -> Int { say(s); n }
 fn set(i: Int, r: &mut Vec<Int>, v: Int) -> Int { (*r)[i] = v; v }
 fn main() -> Int { let mut xs = Vec::from_array([1, 2, 3]); let n = note("a", 1) + set(note("b", 0), &mut xs, note("c", 7)) + note("d", xs[0]); n }
 #### expect
@@ -13479,7 +13481,7 @@ d
 15
 #### case
 fn bump(r: &mut Int) -> Int { *r = *r + 1; *r }
-fn note(s: Str, n: Int) -> Int { say(s); n }
+fn note(s: &'static str, n: Int) -> Int { say(s); n }
 fn main() -> Int { let mut x = 1; let f = { r => bump(r) }; f(&mut x) * 10 + note("after", x) }
 #### expect
 after
@@ -13577,9 +13579,9 @@ fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> 
     let mut column = first;
     handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
-fn main() -> Int / {Store} { store(Vec::from_array([1]), { let b = take<Str>(); len(b) }) }
+fn main() -> Int / {Store} { store(Vec::from_array([1]), { let b = take<String>(); b.len() }) }
 #### expect
-error: `main` performs effects that nothing handles: {Store<Str>}
+error: `main` performs effects that nothing handles: {Store<String>}
 #### case
 use std::vec::{Vec};
 effect Store<C> { take() -> Vec<C>, put(Vec<C>) }
@@ -13886,7 +13888,7 @@ fn main() -> Int { pick((3, 4), false) }
 #### case
 trait Twin { type Item; fn second(Self) -> Self::Item }
 impl<A> Twin for (A, A) { type Item = A; fn second(p: (A, A)) -> A { p.1 } }
-fn main() -> Int { second((3, 4)) + length(second(("a", "bcd"))) }
+fn main() -> Int { second((3, 4)) + second(("a", "bcd")).len() }
 #### expect
 7
 #### case
@@ -13914,7 +13916,7 @@ fn main() -> Int { kind(Wrap(5)) * 10 + kind(Wrap("s")) }
 trait SameTy { const VALUE: Int; }
 impl<A, B> SameTy for (A, B) { const VALUE: Int = 0; }
 impl<A> SameTy for (A, A) { const VALUE: Int = 1; }
-fn main() -> Int { <(Int, Int) as SameTy>::VALUE * 100 + <(Int, Str) as SameTy>::VALUE * 10 + <(Str, Str) as SameTy>::VALUE }
+fn main() -> Int { <(Int, Int) as SameTy>::VALUE * 100 + <(Int, String) as SameTy>::VALUE * 10 + <(String, String) as SameTy>::VALUE }
 #### expect
 101
 #### case
@@ -14025,7 +14027,7 @@ trait System { fn arity(Self) -> Int }
 impl<P, R> System for fn(P) -> R { fn arity(f: fn(P) -> R) -> Int { 1 } }
 impl<P, Q, R> System for fn(P, Q) -> R { fn arity(f: fn(P, Q) -> R) -> Int { 2 } }
 fn tick(n: Int) -> Int { n }
-fn both(a: Int, b: Str) -> Int { a }
+fn both(a: Int, b: &'static str) -> Int { a }
 fn main() -> Int { arity(tick) * 10 + arity(both) }
 #### expect
 12
@@ -14149,7 +14151,7 @@ use std::vec::{Vec};
 struct Bag<T> { items: Vec<T> }
 fn empty<T>(seed: Int) -> Bag<T> { Bag { items: Vec::new() } }
 fn widen<T, U>(bag: Bag<T>) -> Int { len(bag.items) }
-fn main() -> Int { let b: Bag<Int> = empty(0); b.widen<Int, Str>() + 3 }
+fn main() -> Int { let b: Bag<Int> = empty(0); b.widen<Int, String>() + 3 }
 #### expect
 3
 #### case
@@ -14573,7 +14575,7 @@ fn main() -> Int { apply(add, (3, 4)) + apply(neg, (2,)) + apply({ => 10 }, ()) 
 #### case
 use std::tuple::{Tuple, Concat, Count, nest, flat, concat};
 fn joined<A, B, X, Y, J, T>(a: A, b: B) -> T where A: Tuple<Nested = X>, B: Tuple<Nested = Y>, X: Concat<Y, Joined = J>, T: Tuple<Nested = J> { flat(concat(nest(a), nest(b))) }
-fn main() -> Int { let t: (Int, Str, Int, Int) = joined((1, "two"), (3, 4)); t.0 + t.2 + t.3 }
+fn main() -> Int { let t: (Int, &'static str, Int, Int) = joined((1, "two"), (3, 4)); t.0 + t.2 + t.3 }
 #### expect
 8
 #### case
@@ -14595,16 +14597,17 @@ struct Changed<A>(A)
 struct Read<A>(A)
 impl<A> Kind for &mut [A] { type Marker = Changed<A>; }
 impl<A> Kind for &[A] { type Marker = Read<A>; }
-trait Name { fn name() -> Str }
-impl<A> Name for Changed<A> { fn name() -> Str { "changed" } }
-impl<A> Name for Read<A> { fn name() -> Str { "read" } }
-trait Describe { fn describe(&Self) -> Str }
-impl<P, M> Describe for fn(P) -> () where P: Kind<Marker = M>, M: Name { fn describe(f: &fn(P) -> ()) -> Str { <M as Name>::name() } }
+trait Name { fn name() -> &'static str }
+impl<A> Name for Changed<A> { fn name() -> &'static str { "changed" } }
+impl<A> Name for Read<A> { fn name() -> &'static str { "read" } }
+trait Describe { fn describe(&Self) -> &'static str }
+impl<P, M> Describe for fn(P) -> () where P: Kind<Marker = M>, M: Name { fn describe(f: &fn(P) -> ()) -> &'static str { <M as Name>::name() } }
 fn grow(xs: &mut [Int]) { () }
 fn look(xs: &[Int]) { () }
-fn main() -> Str { let g = grow; let l = look; describe(&g) ++ " " ++ describe(&l) }
+fn main() -> Int { let g = grow; let l = look; say(String::from(describe(&g)) + " " + describe(&l)); 0 }
 #### expect
 changed read
+0
 #### case
 #### A condition on a type made from an implementation's type parameters, `where (M, ()): Fetch<..>`, is what the implementation's functions are given: a system's parameters, each fetched by what it asks for, for any shape of parameter list.
 use std::vec::{Vec};
@@ -14686,7 +14689,7 @@ struct Arrays
 struct Options
 impl<T> Family<T> for Arrays { type Of = Vec<T>; fn single(x: T) -> Vec<T> { Vec::from_array([x]) } }
 impl<T> Family<T> for Options { type Of = Option<T>; fn single(x: T) -> Option<T> { Some(x) } }
-fn both<F>(a: Int, b: Str) -> Int where F: Family<Int>, F: Family<Str> { let x = <F as Family<Int>>::single(a); let y = <F as Family<Str>>::single(b); 2 }
+fn both<F>(a: Int, b: &'static str) -> Int where F: Family<Int>, F: Family<&'static str> { let x = <F as Family<Int>>::single(a); let y = <F as Family<&'static str>>::single(b); 2 }
 fn main() -> Int { both<Arrays>(3, "x") }
 #### expect
 2
@@ -15215,18 +15218,18 @@ fn main() -> Int { let mut c = Cell(1); let a = next(&mut c); let b = next(&mut 
 error: 4:63: in `main`: `c` is borrowed with `&mut` while `a` holds a `&mut` reference to it
 #### case
 trait View { type Part<'a>; fn part<'a>(&'a Self) -> Part<'a> }
-struct Pair(Int, Str)
-impl View for Pair { type Part<'a> = &'a Str; fn part(p: &Pair) -> &Str { &(*p).1 } }
-fn main() -> Int { let p = Pair(1, "abc"); let s = part(&p); len(*s) }
+struct Pair(Int, String)
+impl View for Pair { type Part<'a> = &'a String; fn part(p: &Pair) -> &String { &(*p).1 } }
+fn main() -> Int { let p = Pair(1, String::from("abc")); let s = part(&p); s.len() }
 #### expect
 3
 #### case
 trait View { type Part<'a>; fn part<'a>(&'a Self) -> Part<'a> }
-struct Pair(Int, Str)
-impl View for Pair { type Part<'a> = &'a Str; fn part<'a>(p: &'a Pair) -> &'a Str { (*p).0 } }
+struct Pair(Int, String)
+impl View for Pair { type Part<'a> = &'a String; fn part<'a>(p: &'a Pair) -> &'a String { (*p).0 } }
 fn main() -> Int { 1 }
 #### expect
-error: 3:85: in `View::part@Pair`: the result of a clause: expected `&Str`, found `Int`
+error: 3:91: in `View::part@Pair`: the result of a clause: expected `&String`, found `Int`
 #### case
 trait Lend { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }
 struct Cell(Int)
@@ -15299,7 +15302,7 @@ fn main() -> Int { let mut a = 1; let mut b = 2; let c = 3 < 4; let r = if(c) { 
 trait Size { const SIZE: Int; }
 impl Size for () { const SIZE: Int = 0; }
 impl<H, ..R> Size for (H, ..R) where (..R): Size { const SIZE: Int = 1 + <(..R) as Size>::SIZE; }
-fn main() -> Int { <(Int, Str, Int) as Size>::SIZE * 10 + <(Int,) as Size>::SIZE }
+fn main() -> Int { <(Int, String, Int) as Size>::SIZE * 10 + <(Int,) as Size>::SIZE }
 #### expect
 31
 #### case
@@ -15344,10 +15347,21 @@ fn main() -> Int { let w = wrap((1, "a", 3)); match(w.2) { Some(n) => n, None =>
 3
 #### case
 use std::vec::{Vec};
-trait Texts { fn texts(Self) -> Vec<Str> }
-impl Texts for () { fn texts(t: ()) -> Vec<Str> { Vec::new() } }
-impl<H, ..R> Texts for (H, ..R) where H: Show, (..R): Texts { fn texts(t: (H, ..R)) -> Vec<Str> { let (h, ..r) = t; let rest = texts((..r)); let mut out = Vec::new(); out.push(show(h)); let mut i = 0; while({ i < rest.len() }) { out.push(rest[i]); i = i + 1 }; out } }
-fn main() -> Int { let xs = texts((1, "b", 3)); print(xs[1]); xs.len() }
+trait Texts { fn texts(Self) -> Vec<String> }
+impl Texts for () { fn texts(t: ()) -> Vec<String> { Vec::new() } }
+impl<H, ..R> Texts for (H, ..R) where H: Display, (..R): Texts {
+    fn texts(t: (H, ..R)) -> Vec<String> {
+        let (h, ..r) = t;
+        let rest = texts((..r));
+        let mut out = Vec::new();
+        out.push(format(&h));
+        let mut each = rest.into_iter();
+        let mut more = true;
+        while({ more }) { match(each.next()) { Some(x) => out.push(x), None => more = false } };
+        out
+    }
+}
+fn main() -> Int { let xs = texts((1, "b", 3)); say(&xs[1]); xs.len() }
 #### expect
 b
 3
@@ -15913,7 +15927,7 @@ fn main() -> Int { let o = Some(4); if(o is Some(x)) { x } else { 0 } }
 #### program's start; a `String`'s bytes are in memory it owns, borrowed as
 #### `&str`, and grown by another's.
 use std::text::{String};
-fn greet(s: &str) -> Int { say(show(s)); s.len() }
+fn greet(s: &str) -> Int { say(s); s.len() }
 fn main() -> Int {
     let t: &str = "héllo";
     let mut owned = String::from_str("ab");
