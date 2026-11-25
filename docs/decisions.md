@@ -8266,3 +8266,17 @@ could, which left a program not lowered (laid out by its types):
   unknowns; an operation's result one decided is then left undecided, and
   the certificate's declared types differ from the compile before's (the
   typed lowering's keys with them, once).
+
+## Dot-call receivers: where each is decided
+
+- Measured over the suite, the ways the checker gives a dot call's receiver
+  where the resolver could not decide it: the type's own function taking it
+  as the one in scope does, 16,029; through a reference to what it points
+  to (`derefReceiver`), 1,782; a reference given as it is, 3,104 and 697; a
+  variable borrowed, 233; a field through a reference (`borrowFieldReceiver`),
+  43; read again with it borrowed (`Decision.receiver`), 454. Deciding every
+  receiver by reading the function again, in place of the resolver and the
+  checker's own ways, would read functions again some 20,000 times more, so
+  each stays where it is. A field through a reference in place of the type's
+  own function that borrows it was taken by none: it is read again
+  (`Decision.receiver`), as other receivers the checker cannot give are.

@@ -1699,13 +1699,6 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
                 if isRef then
                   modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
                   return some (← inferCall scope amb (← pushE (.name none alt)) args call)
-                -- (A field of what a name points to: borrowed where it is.)
-                if let some (x, path, fid) ← fieldThroughRef scope a then
-                  let bt := Expr.refField fid (k == 2) x path true
-                  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
-                                           argsChosen := ((call, 0), bt) :: s.argsChosen }
-                  let given ← flatIn bt
-                  return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
                 -- (Else: read again with the receiver borrowed where it is,
                 -- as the resolver borrows one, `g[0].push(5)`, `v[0].s.len()`.)
                 throwThe Elab.Said { msg := s!"the receiver of `{alt}` is borrowed", decision := some (← receiverDecision call alt) }

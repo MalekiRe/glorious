@@ -434,27 +434,8 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
         | .call _ rm #[r] => if b.bare? rm == some receiverMark then some r else none
         | _ => none
       if args0.all (marked · |>.isNone) then return ← plain ()
-      -- The name a path of fields starts at, and the path.
-      let rec place (e : ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
-        match fuel with
-        | 0 => none
-        | fuel + 1 =>
-        match b.expr e with
-        | .name none x => if (known.lookup x).any (fun k => k != 0 && k != 3) then some (x, [], 0) else none
-        | .fieldOf fid e field => (place e fuel).map fun (x, path, _) => (x, path ++ [field], fid)
-        | .proj e n => (place e fuel).map fun (x, path, fid) => (x, path ++ [toString n], fid)
-        | _ => none
-      -- (A field of what a `&mut` parameter points to, `p.items`.)
-      let rec throughRef (e : ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
-        match fuel with
-        | 0 => none
-        | fuel + 1 =>
-        match b.expr e with
-        | .fieldOf fid inner field =>
-          match b.bare? inner with
-          | some x => if known.lookup x == some 3 then some (x, [field], fid) else none
-          | none => (throughRef inner fuel).map fun (x, path, _) => (x, path ++ [field], fid)
-        | _ => none
+      let place := placeOf b known
+      let throughRef := throughRefOf b known
       -- (`v[i].f()` where `f` takes a reference: the element, borrowed
       -- where it is.)
       let rec element (uniq : Bool) (fuel : Nat) (e : ExprId) : Build (Option ExprId) := do
