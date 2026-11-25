@@ -19,102 +19,23 @@ state (`applyDelta`): on the state of a check that went on from the same
 one, side by side (`mergeStates`), or, of the program's own groups, on the
 state of a later compile where nothing the group reads changed (`Check.reuse`).
 
-Where the check changed what it began with (a variable bound, a list
-grown at an entry that was there), the delta says what the entry was and
-is; put where that entry is still what it was, it is changed, and where both
-changed it, only if the two can be put together (`Absorb`): a variable both
-bound alike, what a capture variable captures grown by both. Where the other
-state is at hand (`p`, side by side) what it changed is told by whether an
-entry is the same object; without it (a later compile), only one unchanged
-or that can absorb the change takes it. -/
+A check changes nothing it began with (a signature is not changed by a
+body, a capture made before a group is put back when it is done,
+`St.capUndo`): where one did, there is no delta, and what it checked is
+checked again after the others, or not kept. A list may grow at an entry
+that was there (`MapLD`). Where the other state is at hand (`p`, side by
+side) what it changed is told by whether an entry is the same object. -/
 
 unsafe def samePtrImpl {α : Type} (a b : α) : Bool := ptrAddrUnsafe a == ptrAddrUnsafe b
 
 /-- Are these the same object? (Taken to be not, where that cannot be asked.) -/
 @[implemented_by samePtrImpl] def samePtr {α : Type} (_ _ : α) : Bool := false
 
-/-- How an entry two checks both changed is put together: from what it was,
-what one made it, and what the other did. -/
-class Absorb (α : Type) where
-  absorb : α → α → α → Option α
-
-instance (priority := low) {α : Type} : Absorb α := ⟨fun _ _ _ => none⟩
-/-- (A variable bound by one, or both bound to what is the same.) -/
-instance {β : Type} [BEq β] : Absorb (Option β) := ⟨fun _ x y => match x, y with
-  | none, y => some y
-  | some a, some b => if a == b then some x else none
-  | some _, none => some x⟩
-/-- (A type variable both bound to the same type, written alike with nothing
-unknown in it.) -/
-instance : Absorb (Option Ty) := ⟨fun _ x y => match x, y with
-  | none, y => some y
-  | some a, some b => let s := showTy a; if s == showTy b && !s.contains '?' then some x else none
-  | some _, none => some x⟩
-/-- (A row variable both bound to the same effects, with no row after.) -/
-instance : Absorb (Option Row) := ⟨fun _ x y => match x, y with
-  | none, y => some y
-  | some a, some b =>
-    if a.tail.isNone && b.tail.isNone && showEffs a.effs == showEffs b.effs && !(showEffs a.effs).contains '?' then some x
-    else none
-  | some _, none => some x⟩
-/-- (What a capture variable captures, grown by both: what each added after
-what was there, first's first.) -/
-instance : Absorb (Array Nat) := ⟨fun z x y =>
-  if x.size ≥ z.size && y.size ≥ z.size && y.extract 0 z.size == z then some (x ++ y.extract z.size y.size)
-  else none⟩
-
-/-- (A function's body as a check wrote a decision into it: where it is what
-it was, written alike.) -/
-instance : Absorb Flat.Body := ⟨fun z x y => if x == z then some y else if x == y then some x else none⟩
-
-/-- (Written alike, all it holds: its variables, captures and reasons too.) -/
-partial def tyEq : Ty → Ty → Bool
-  | .var a, .var b => a == b
-  | .con n as, .con m bs => n == m && listEq as bs
-  | .tuple as, .tuple bs => listEq as bs
-  | .fn ps r es t c, .fn qs s fs u d =>
-    listEq ps qs && tyEq r s && t == u && c == d && es.length == fs.length
-      && (es.zip fs).all fun ((n, as), (m, bs)) => n == m && listEq as bs
-  | .ref h t c, .ref h' t' c' => tyEq h h' && tyEq t t' && c == c'
-  | _, _ => false
-where
-  listEq (as bs : List Ty) : Bool := as.length == bs.length && (as.zip bs).all fun (a, b) => tyEq a b
-
-def capturedEq : Captured → Captured → Bool
-  | .brand a, .brand b => a == b
-  | .ty a, .ty b => tyEq a b
-  | .once, .once => true
-  | .must, .must => true
-  | .loan a, .loan b => a == b
-  | .touch a w, .touch b v => a == b && w == v
-  | .inner a, .inner b => a == b
-  | _, _ => false
-
-def schemeEq (a b : Scheme) : Bool :=
-  let tys := fun (xs ys : List Ty) => tyEq.listEq xs ys
-  let why := fun (xs ys : List (Ty × String)) => xs.length == ys.length && (xs.zip ys).all fun ((t, w), (u, v)) => w == v && tyEq t u
-  a.tvars == b.tvars && a.rvars == b.rvars && a.cvars == b.cvars && tyEq a.ty b.ty
-    && a.edges.length == b.edges.length && (a.edges.zip b.edges).all (fun ((n, c), (m, d)) => n == m && capturedEq c d)
-    && why a.dups b.dups && why a.drops b.drops && why a.stays b.stays && why a.statics b.statics && why a.quiets b.quiets
-    && tys a.sites b.sites && a.ranked == b.ranked
-    && a.bounds.length == b.bounds.length && (a.bounds.zip b.bounds).all (fun ((n, t), (m, u)) => n == m && tyEq t u)
-    && a.assocs.length == b.assocs.length
-    && (a.assocs.zip b.assocs).all (fun ((n, t, k, u), (m, t', k', u')) => n == m && k == k' && tyEq t t' && tyEq u u')
-    && a.incls.length == b.incls.length && (a.incls.zip b.incls).all (fun ((t, u), (t', u')) => tyEq t t' && tyEq u u')
-
-instance : BEq Scheme := ⟨schemeEq⟩
-
-/-- (A function's type as its signature gives it, made again by this compile:
-the same as the one the kept check began with, if it is equal to it.) -/
-instance : Absorb Scheme := ⟨fun z x y => if x == z then some y else if x == y then some x else none⟩
-
-/-- What a check did to a store: segments of its own, entries pushed onto a
-segment that was there (its start, how many it had, and those), and entries
-changed (where, what it was, what it is). -/
+/-- What a check did to a store: segments of its own, and entries pushed onto
+a segment that was there (its start, how many it had, and those). -/
 structure StoreD (α : Type) where
   segs : Array (Seg α) := #[]
   grown : Array (Nat × Nat × Array α) := #[]
-  sets : Array (Nat × α × α) := #[]
 
 /-- What a check did to an array: entries after the first `start`, or all
 of it made anew. -/
@@ -129,9 +50,8 @@ inductive ListD (α : Type) where
   | back (start : Nat) (xs : List α)
   | whole (all : List α)
 
-/-- What a check did to a map: each entry it made or changed, with what was
-there. -/
-abbrev MapD (κ ν : Type) := Array (κ × Option ν × ν)
+/-- What a check did to a map: each entry it made. -/
+abbrev MapD (κ ν : Type) := Array (κ × ν)
 
 /-- What a check did to a map of lists: each list it made or grew. -/
 abbrev MapLD (κ ν : Type) := Array (κ × Option (List ν) × ListD ν)
@@ -145,12 +65,6 @@ class Delta (α : Type) (δ : outParam Type) where
   /-- Would `apply` put it on: read only, so that it can be put on in place
   after, the value held once. -/
   fits : Option α → α → δ → Bool
-
-/-- An entry of `a` changed to `now` by a check that found it `was`. -/
-@[inline] def putEntry {α : Type} [Absorb α] (cur was now : α) : Option α :=
-  if samePtr cur was then some now
-  else if samePtr cur now then some cur
-  else Absorb.absorb was cur now
 
 namespace StoreD
 
@@ -175,13 +89,14 @@ def diff (p b : Store α) : Option (StoreD α) := do
         -- (Most are the same object: nothing changed in them.)
         if samePtr sb sp then continue
         if sb.count < sp.count then none
+        -- (One it began with, changed: no delta.)
         for c in [0:sb.pieces.size] do
           let pb := sb.pieces.getD c #[]
           let pp := sp.pieces.getD c #[]
           unless samePtr pb pp do
             for j in [0:min pb.size pp.size] do
               match pb[j]?, pp[j]? with
-              | some x, some z => unless samePtr x z do d := { d with sets := d.sets.push (sp.base + 64 * c + j, z, x) }
+              | some x, some z => unless samePtr x z do none
               | _, _ => pure ()
         if sb.count > sp.count then
           let pushed := ((List.range (sb.count - sp.count)).filterMap fun i => sb.get? (sp.count + i)).toArray
@@ -193,21 +108,20 @@ def diff (p b : Store α) : Option (StoreD α) := do
     k := k + 1
   pure d
 
-def apply [Absorb α] (a : Store α) (d : StoreD α) : Option (Store α) := do
-  if d.segs.isEmpty && d.grown.isEmpty && d.sets.isEmpty then return a
+def apply (a : Store α) (d : StoreD α) : Option (Store α) := do
+  if d.segs.isEmpty && d.grown.isEmpty then return a
   -- (Mostly segments of its own, after all of `a`'s: put after them, the
   -- rest of `a` let be.)
   -- (What it pushed onto `a`'s last segment, begun with as many: pushed.)
   let onLast := d.grown.foldl (init := some a) fun st (base, before, pushed) => st.bind fun st =>
     if base == st.last.base && st.last.count == before then some { st with last := pushed.foldl Seg.push st.last }
     else none
-  if d.sets.isEmpty then
-    let after := d.segs.foldl (init := onLast) fun st s => st.bind fun st =>
-      if s.base == st.last.base && st.last.count == 0 then some { st with last := s }
-      else if s.base ≥ st.last.base + st.last.count && s.base > st.last.base then
-        some (if st.last.count == 0 then { st with last := s } else { older := st.older.push st.last, last := s })
-      else none
-    if let some st := after then return st
+  let after := d.segs.foldl (init := onLast) fun st s => st.bind fun st =>
+    if s.base == st.last.base && st.last.count == 0 then some { st with last := s }
+    else if s.base ≥ st.last.base + st.last.count && s.base > st.last.base then
+      some (if st.last.count == 0 then { st with last := s } else { older := st.older.push st.last, last := s })
+    else none
+  if let some st := after then return st
   let mut segs := a.segs
   for (base, before, pushed) in d.grown do
     match segs.findIdx? (·.base == base) with
@@ -234,41 +148,35 @@ def apply [Absorb α] (a : Store α) (d : StoreD α) : Option (Store α) := do
   -- (An empty one before the last is dropped: nothing is numbered in it.)
   let n := segs.size
   let kept := segs.zipIdx.filterMap fun (s, i) => if s.count != 0 || i + 1 == n then some s else none
-  let mut st : Store α := match kept.back? with
+  pure (match kept.back? with
     | some last => { older := kept.pop, last }
-    | none => {}
-  for (i, was, now) in d.sets do
-    match st.get? i with
-    | some cur => st := st.set! i (← putEntry cur was now)
-    | none => none
-  pure st
+    | none => {})
 
 end StoreD
 
 /-- Would `apply` put `d` on `a`: where only its last segment grows and new
 ones come after, by where each starts and how many it has; else tried. -/
-def StoreD.fits {α : Type} [Absorb α] (a : Store α) (d : StoreD α) : Bool := Id.run do
-  if d.segs.isEmpty && d.grown.isEmpty && d.sets.isEmpty then return true
-  if d.sets.isEmpty then
-    let mut base := a.last.base
-    let mut count := a.last.count
-    let mut quick := true
-    for (b, before, pushed) in d.grown do
-      if b == base && count == before then count := count + pushed.size
+def StoreD.fits {α : Type} (a : Store α) (d : StoreD α) : Bool := Id.run do
+  if d.segs.isEmpty && d.grown.isEmpty then return true
+  let mut base := a.last.base
+  let mut count := a.last.count
+  let mut quick := true
+  for (b, before, pushed) in d.grown do
+    if b == base && count == before then count := count + pushed.size
+    else quick := false
+  if quick then
+    for s in d.segs do
+      if s.base == base && count == 0 then
+        base := s.base
+        count := s.count
+      else if s.base ≥ base + count && s.base > base then
+        base := s.base
+        count := s.count
       else quick := false
-    if quick then
-      for s in d.segs do
-        if s.base == base && count == 0 then
-          base := s.base
-          count := s.count
-        else if s.base ≥ base + count && s.base > base then
-          base := s.base
-          count := s.count
-        else quick := false
-      if quick then return true
+    if quick then return true
   return (StoreD.apply a d).isSome
 
-instance {α : Type} [Absorb α] : Delta (Store α) (StoreD α) where
+instance {α : Type} : Delta (Store α) (StoreD α) where
   diff := StoreD.diff
   apply _ a d := StoreD.apply a d
   fits _ a d := StoreD.fits a d
@@ -376,7 +284,7 @@ def changedEntries {κ ν : Type} [BEq κ] [Hashable κ] (p b : Std.HashMap κ �
       | _, _ => pure ()
     pure (some acc)
 
-/-- The entries of `b` that are not `p`'s. -/
+/-- The entries of `b` that are not `p`'s, with what `p` had there. -/
 def newEntries {κ ν : Type} [BEq κ] [Hashable κ] (p b : Std.HashMap κ ν) : List (κ × ν × Option ν) :=
   let es := match changedEntries p b with
     | some es => es
@@ -385,23 +293,19 @@ def newEntries {κ ν : Type} [BEq κ] [Hashable κ] (p b : Std.HashMap κ ν) :
     | some pv => if samePtr pv v then none else some (k, v, some pv)
     | none => some (k, v, none)
 
-instance (priority := low) {κ ν : Type} [BEq κ] [Hashable κ] [Absorb ν] : Delta (Std.HashMap κ ν) (MapD κ ν) where
-  diff p b := if samePtr p b then some #[] else some ((newEntries p b).map fun (k, v, was) => (k, was, v)).toArray
-  apply p a d := d.foldlM (init := a) fun m (k, was, v) =>
-    match was, m.get? k with
-    | some pv, some cur => (putEntry cur pv v).map (m.insert k ·)
-    -- (Made by both: the same, as both took it from what is the same.)
-    | none, some cur => if samePtr cur v then some m else
-        match p with
-        | some _ | none => none
-    | none, none => some (m.insert k v)
-    | some _, none => none
-  fits _ a d := d.all fun (k, was, v) =>
-    match was, a.get? k with
-    | some pv, some cur => (putEntry cur pv v).isSome
-    | none, some cur => samePtr cur v
-    | none, none => true
-    | some _, none => false
+instance (priority := low) {κ ν : Type} [BEq κ] [Hashable κ] : Delta (Std.HashMap κ ν) (MapD κ ν) where
+  -- (One it began with, changed: no delta.)
+  diff p b := if samePtr p b then some #[] else
+    (newEntries p b).toArray.mapM fun (k, v, was) => if was.isSome then none else some (k, v)
+  -- (Made by both: the same, as both took it from what is the same.)
+  apply _ a d := d.foldlM (init := a) fun m (k, v) =>
+    match m.get? k with
+    | some cur => if samePtr cur v then some m else none
+    | none => some (m.insert k v)
+  fits _ a d := d.all fun (k, v) =>
+    match a.get? k with
+    | some cur => samePtr cur v
+    | none => true
 
 instance {κ ν : Type} [BEq κ] [Hashable κ] : Delta (Std.HashMap κ (List ν)) (MapLD κ ν) where
   diff p b := if samePtr p b then some #[] else

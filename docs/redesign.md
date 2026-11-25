@@ -227,25 +227,18 @@ callers than its signature says (`schemeWithin`): the passes that checked
 bodies again from their bodies' types until they settled are gone, and with
 them the state each pass carried to the next.
 
-What merges still change in place, measured on covey/fleet after this
-(entries a delta changes rather than adds): `fns` 638 (a function's type is
-its body's once checked, which callers in later units read: the effect
-sites, `Scheme.sites`, are its body's), `tys` 234, `caps` 77 and `capOut`
-65 (edges put on captures declared before, the prelude's among them), `rows`
-39, `runFns` 20. So `StoreD.sets`, `Absorb` and `putEntry` stay until a
-function's own type is its signature's alone, with what its body found of
-effect sites kept beside it.
-
-Tried: `fns` kept the signature's after a body is checked (the body's beside
-it, for `schemeWithin`), with the signature's type parameter numbers. 374
-programs then fail, all but a few on one rule: a callable parameter written
-`fn(..)` may, as its signature says, be called any number of times, and
-`std::thread::run_thread` gives `push_waiting` a block that holds a
-resumption, which runs once. Rust says so with `FnOnce`, and a callable kept
-in a `Vec` is `Box<dyn FnOnce()>`; Glorious has no way to write it of a
-callable that is not a type parameter, so a caller now reads what the
-callee's body needs (fewer uses), as before. Writing that a callable is run
-once (`fn once() -> ()`, or `Use` of a value parameter) comes first.
+Merges only add. What made them change entries another state had, each
+taken away, on covey/fleet: a function's type its body's (`fns`, 638: kept
+its signature's, how a call is made beside it, `St.fnCalls`); declared
+associated types answered by the first body (`tys`, 234: before any body);
+an implementation's callables with open rows (`rows`, 39: they perform what
+is written); captures made before a group, `'static`'s and declared types'
+(`caps`, `capOut`, 142: each group's own, put back, `St.capUndo`; a
+declared type's callable is Rust's `Box<dyn Fn()>`, or `FnOnce` where the
+type is used once); bodies as written and as decided (`runFns`, 20: apart,
+`St.declFns`). `StoreD.sets`, `Absorb` and `putEntry` are gone: a check
+that changes what it began with has no delta, and is checked again after
+the others (side by side) or not kept.
 
 ## Expected size
 
