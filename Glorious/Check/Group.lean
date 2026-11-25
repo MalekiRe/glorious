@@ -371,11 +371,12 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
             pats.findIdx? fun
               | .var y => y == x
               | _ => false
-          if must then modify fun s => { s with envMust := d.name :: s.envMust }
-          modify fun s =>
-            { s with
-              fnGroups := (d.name, places :: ((s.fnGroups.lookup d.name).getD []))
-                :: s.fnGroups.filter (·.1 != d.name) }
+          if must && !(← get).envMust.contains d.name then modify fun s => { s with envMust := d.name :: s.envMust }
+          unless (((← get).fnGroups.lookup d.name).getD []).contains places do
+            modify fun s =>
+              { s with
+                fnGroups := (d.name, places :: ((s.fnGroups.lookup d.name).getD []))
+                  :: s.fnGroups.filter (·.1 != d.name) }
   -- The parameters said to run in an environment, and of them those given
   -- one argument of a type parameter's type: a caller's block for one
   -- of those runs in the place of what it is given, where that is a
@@ -388,7 +389,8 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
           | [.name x []] => (genericParams d.params).contains x
           | _ => false)
     | _ => none
-  unless runsIn.isEmpty do
+  -- (Once: its signature's and its body's are the same.)
+  unless runsIn.isEmpty || (← get).fnRunsIn.lookup d.name == some runsIn do
     modify fun s => { s with fnRunsIn := (d.name, runsIn) :: s.fnRunsIn.filter (·.1 != d.name) }
   -- `After = E2`: the environment a callable leaves, in which others run
   -- only once it has.
