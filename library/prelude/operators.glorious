@@ -40,16 +40,28 @@ infix 4 >=
 infix 4 ==
 infix 4 !=
 // A type says what `==` and `<` are; the rest follow, unless it says them too.
+// `eq` and `lt` compare what two references are to, nothing copied, as
+// Rust's `PartialEq::eq` and `PartialOrd::lt` do: of a value that is
+// copied, as `==` and `<` say; a type that is not says its own.
 trait Eq {
     fn ==(Self, Self) -> Bool
     fn !=(a: Self, b: Self) -> Bool { not (a == b) }
+    fn eq(a: &Self, b: &Self) -> Bool { *a == *b }
+    fn ne(a: &Self, b: &Self) -> Bool { not eq(a, b) }
 }
 trait Ord: Eq {
     fn <(Self, Self) -> Bool
     fn >(a: Self, b: Self) -> Bool { b < a }
     fn <=(a: Self, b: Self) -> Bool { not (b < a) }
     fn >=(a: Self, b: Self) -> Bool { not (a < b) }
+    fn lt(a: &Self, b: &Self) -> Bool { *a < *b }
+    fn gt(a: &Self, b: &Self) -> Bool { lt(b, a) }
+    fn le(a: &Self, b: &Self) -> Bool { not lt(b, a) }
+    fn ge(a: &Self, b: &Self) -> Bool { not lt(a, b) }
 }
+// What references are to, compared: `a > b` of two `&Int`s.
+impl<'a, T> Eq for &'a T where T: Eq { fn ==(a: &'a T, b: &'a T) -> Bool { eq(a, b) } }
+impl<'a, T> Ord for &'a T where T: Ord { fn <(a: &'a T, b: &'a T) -> Bool { lt(a, b) } }
 
 impl Add for Int { type Output = Int; fn +(a: Int, b: Int) -> Int { int_add(a, b) } }
 impl Sub for Int { fn -(a: Int, b: Int) -> Int { int_sub(a, b) } }

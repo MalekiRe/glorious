@@ -589,6 +589,17 @@ mutual
 partial def nameBorrowsE (e : ExprId) : StateT (Array StmtId) Build ExprId := do
   let b ← getThe Body
   match b.expr e with
+  -- (A field borrowed through what an expression points to,
+  -- `%through(base, (steps), uniq)`: the base named first.)
+  | .call id f #[base, steps, uniq] =>
+    if b.bare? f != some throughMark then return ← nameBorrowsChildren e
+    let (.tuple steps, .int uniq) := (b.expr steps, b.expr uniq) | nameBorrowsChildren e
+    let base' ← nameBorrowsE base
+    let name := s!"%through{id}"
+    let st ← (pushStmt (.let_ (.var name) base') : Build StmtId)
+    modify (·.push st)
+    let path := steps.toList.filterMap b.bare?
+    (pushExpr (.refField id (uniq == 1) name path true) : Build ExprId)
   | .call id f #[x] =>
     match b.bare? f with
     | some mark =>

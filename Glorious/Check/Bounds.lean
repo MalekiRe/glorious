@@ -478,12 +478,18 @@ end
 
 /-- A dot call of a trait's function, of a value whose type does not
 implement the trait but has a function of the name of its own: that one,
-decided where it is found (`Elab.Decision.receiver`). -/
-def dotOwnInstead (call : Nat) (ty : Ty) (said : String) : M Unit := do
+decided where it is found (`Elab.Decision.receiver`). Of a reference to a
+value whose type implements it: of that value (`Elab.Decision.derefReceiver`),
+as Rust's receiver is dereferenced, `first(&v).abs()`. -/
+def dotOwnInstead (call : Nat) (trait : String) (ty : Ty) (said : String) : M Unit := do
   if let some alts := dotAltsOf (← get).modules call then
     if let some h ← headName 8 ty then
       if let some alt := alts.find? (·.startsWith (h ++ "::")) then
         throwThe Elab.Said { msg := said, decision := some (← receiverDecision call alt) }
+    if let .ref _ inner _ ← find ty then
+      if let some h ← headName 8 inner then
+        if (← get).kimpls.has (Syntax.traitBase trait) h then
+          throwThe Elab.Said { msg := said, decision := some (.derefReceiver call) }
 
 /-- A bound as its trait's implementations for the type it now has are told
 apart: one whose type was not known when the bounds were keyed, or that
@@ -1128,7 +1134,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let ls ← try (timedM "bounds: leaves" (if (← get).patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait b.ty b.args b.owner
         else (·.map fun (tr, k, t) => (tr, k, t, [])) <$> leaves b.pos b.trait b.ty)) catch e =>
       if b.trait == Syntax.destroyTrait then pure [] else do
-        dotOwnInstead b.call b.ty e
+        dotOwnInstead b.call b.trait b.ty e
         throw (inFunction b.owner e)
     for (tr, k, t, args) in ls do
       -- (One at arguments, `S: Get<Value>` that a condition comes down to,
@@ -1264,7 +1270,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- (A dot call of a trait's function, of a value whose type does not
       -- implement the trait but has a function of the name of its own: that
       -- one, and the program read again.)
-      dotOwnInstead b.call b.ty s!"{b.pos}`{b.trait}` is not implemented"
+      dotOwnInstead b.call b.trait b.ty s!"{b.pos}`{b.trait}` is not implemented"
       for (tr, k, t) in ← leaves b.pos b.trait b.ty do
         unless givens.contains (tr, k) do
           match t with

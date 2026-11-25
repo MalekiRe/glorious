@@ -53,7 +53,10 @@ impl<'a> Add<&'a str> for String {
     fn +(a: String, b: &'a str) -> String { let mut a = a; String::push_str(&mut a, b); a }
 }
 impl Clone for String { fn clone(s: &String) -> String { String { bytes: clone(&s.bytes) } } }
-impl Eq for String { fn ==(a: String, b: String) -> Bool { a.bytes == b.bytes } }
+impl Eq for String {
+    fn ==(a: String, b: String) -> Bool { a.bytes == b.bytes }
+    fn eq(a: &String, b: &String) -> Bool { a.as_str() == b.as_str() }
+}
 
 // A character's code as UTF-8, put after `out`.
 fn string_encode(code: Int, out: &mut Vec<u8>) {
@@ -161,7 +164,7 @@ impl<'a> StrRef<'a> {
     pub fn lines(s: Self) -> Vec<&'a str> {
         let mut out = StrRef::split(s, "\n");
         let n = Vec::len(&out);
-        if(n > 0 and { (*Vec::index(&out, n - 1)).is_empty() }) { discard(Vec::pop(&mut out)) } else { () };
+        if(n > 0 and { out[n - 1].is_empty() }) { discard(Vec::pop(&mut out)) } else { () };
         out
     }
     // Its characters, one after another.
@@ -369,7 +372,10 @@ impl<'a> Ord for StrRef<'a> {
         if(i < n) { int(a.byte(i)) < int(b.byte(i)) } else { a.len < b.len }
     }
 }
-impl Ord for String { fn <(a: String, b: String) -> Bool { String::as_str(&a) < String::as_str(&b) } }
+impl Ord for String {
+    fn <(a: String, b: String) -> Bool { String::as_str(&a) < String::as_str(&b) }
+    fn lt(a: &String, b: &String) -> Bool { a.as_str() < b.as_str() }
+}
 
 // What a value is written as, by `Display` and by `Debug`.
 fn format<T: Display>(value: &T) -> String where T: Use<[1, 1]> {

@@ -157,7 +157,8 @@ fn politics(ships: &mut Query<(&Name, (To<Allied, (&Name,)>, From<Allied, (&Name
         let names = fn(l: std::vec::Vec<(&Name,)>) -> Vec<&'static str> { (std::vec::map(l, fn(x: (&Name,)) -> &'static str { let (n,) = x; n.0 })) };
         Vec::push(&mut lines, String::from("  ") + ship.0 + ": allies " + list((std::vec::sort(names(allies)))).as_str() + ", allied by " + list((std::vec::sort(names(allied_by)))).as_str() + ", hunted by " + list((std::vec::sort(names(hunters)))).as_str());
     };
-    say_all(std::text::sort_strings(lines))
+    lines.sort();
+    say_all(lines)
 }
 // Every ship's status, reading its flagship through the fragmenting join.
 fn status(ships: &mut Query<(&Name, (&Fuel, &Hull, &Pos), To<InFleet, (&Name,)>), ()>) {
@@ -166,7 +167,8 @@ fn status(ships: &mut Query<(&Name, (&Fuel, &Hull, &Pos), To<InFleet, (&Name,)>)
         let fleet: &str = match(flagship) { Some((f,)) => f.0, None => "-" };
         Vec::push(&mut lines, String::from("  ") + pad_end(ship.0, 9, ' ').as_str() + " fuel " + pad_start(fuel.0.to_string().as_str(), 3, ' ').as_str() + "  hull " + pad_start(hull.0.to_string().as_str(), 3, ' ').as_str() + "  pos " + pad_start(pos.0.to_string().as_str(), 4, ' ').as_str() + "  fleet " + fleet);
     };
-    say_all(std::text::sort_strings(lines))
+    lines.sort();
+    say_all(lines)
 }
 
 fn main() -> Int {

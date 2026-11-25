@@ -155,15 +155,8 @@ pub fn scan(lines: Vec<&str>, target: Target) -> (Code, Bool) {
         } else { () };
         i = i + 1
     };
-    // (In order of their texts.)
-    let mut order: Vec<&str> = Vec::new();
-    let mut k = 0;
-    while({ k < len_at(&symbols) }) { Vec::push(&mut order, symbols[k].as_str()); k = k + 1 };
-    order.sort();
-    let mut sorted = Vec::new();
-    let mut k = 0;
-    while({ k < len_at(&order) }) { Vec::push(&mut sorted, String::from(order[k])); k = k + 1 };
-    (Code { instructions: instructions, symbols: sorted }, saw_lines)
+    symbols.sort();
+    (Code { instructions: instructions, symbols: symbols }, saw_lines)
 }
 
 // How many of the instructions pass a test.

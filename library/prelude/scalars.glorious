@@ -636,11 +636,11 @@ impl<T, E> Result<T, E> {
 }
 fn assert(condition: Result<(), ()>) { match(condition) { Ok(_) => (), Err(_) => abort("assertion failed") } }
 fn assert_message(condition: Result<(), ()>, message: &str) { match(condition) { Ok(_) => (), Err(_) => abort(message) } }
-fn assert_eq<T>(left: &T, right: &T) where T: Eq, T: Debug, T: Use<[0, *]> {
-    match(*left == *right) { Ok(_) => (), Err(_) => abort((format_debug(left) + " is not " + format_debug(right).as_str()).as_str()) }
+fn assert_eq<T>(left: &T, right: &T) where T: Eq, T: Debug {
+    match(eq(left, right)) { Ok(_) => (), Err(_) => abort((format_debug(left) + " is not " + format_debug(right).as_str()).as_str()) }
 }
-fn assert_ne<T>(left: &T, right: &T) where T: Eq, T: Debug, T: Use<[0, *]> {
-    match(*left == *right) { Ok(_) => abort((format_debug(left) + " is what it should not be").as_str()), Err(_) => () }
+fn assert_ne<T>(left: &T, right: &T) where T: Eq, T: Debug {
+    match(eq(left, right)) { Ok(_) => abort((format_debug(left) + " is what it should not be").as_str()), Err(_) => () }
 }
 
 
@@ -648,9 +648,11 @@ fn assert_ne<T>(left: &T, right: &T) where T: Eq, T: Debug, T: Use<[0, *]> {
 impl Eq for () { fn ==(a: (), b: ()) -> Bool { true } }
 impl<A, B> Eq for (A, B) where A: Eq, B: Eq {
     fn ==(x: (A, B), y: (A, B)) -> Bool { match((x, y)) { ((a, b), (c, d)) => a == c and { b == d } } }
+    fn eq(x: &(A, B), y: &(A, B)) -> Bool { eq(&x.0, &y.0) and { eq(&x.1, &y.1) } }
 }
 impl<A, B, C> Eq for (A, B, C) where A: Eq, B: Eq, C: Eq {
     fn ==(x: (A, B, C), y: (A, B, C)) -> Bool { match((x, y)) { ((a, b, c), (d, e, f)) => a == d and { b == e } and { c == f } } }
+    fn eq(x: &(A, B, C), y: &(A, B, C)) -> Bool { eq(&x.0, &y.0) and { eq(&x.1, &y.1) } and { eq(&x.2, &y.2) } }
 }
 impl<T, E> Eq for Result<T, E> where T: Eq, E: Eq {
     fn ==(x: Result<T, E>, y: Result<T, E>) -> Bool {
@@ -660,9 +662,16 @@ impl<T, E> Eq for Result<T, E> where T: Eq, E: Eq {
             _ => false
         }
     }
+    fn eq(x: &Result<T, E>, y: &Result<T, E>) -> Bool {
+        match(x) {
+            &Ok(a) => match(y) { &Ok(b) => eq(a, b), _ => false },
+            &Err(a) => match(y) { &Err(b) => eq(a, b), _ => false }
+        }
+    }
 }
 impl<T, N> Eq for Fixed<T, N> where T: Eq, T: Use<[0, *]>, N: Known {
     fn ==(a: Fixed<T, N>, b: Fixed<T, N>) -> Bool { fixed_same(&a, &b, 0) }
+    fn eq(a: &Fixed<T, N>, b: &Fixed<T, N>) -> Bool { fixed_same(a, b, 0) }
 }
 fn fixed_same<T, N>(a: &Fixed<T, N>, b: &Fixed<T, N>, i: Int) -> Bool where T: Eq, T: Use<[0, *]>, N: Known {
     match(int_lt(i, N::VALUE)) {
@@ -675,6 +684,7 @@ fn fixed_same<T, N>(a: &Fixed<T, N>, b: &Fixed<T, N>, i: Int) -> Bool where T: E
 // dictionary of character codes.
 impl<A, B> Ord for (A, B) where A: Ord, B: Ord, A: Use<[0, *]> {
     fn <(x: (A, B), y: (A, B)) -> Bool { match((x, y)) { ((a, b), (c, d)) => a < c or { a == c and { b < d } } } }
+    fn lt(x: &(A, B), y: &(A, B)) -> Bool { lt(&x.0, &y.0) or { eq(&x.0, &y.0) and { lt(&x.1, &y.1) } } }
 }
 
 

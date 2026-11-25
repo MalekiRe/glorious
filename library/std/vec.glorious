@@ -182,11 +182,11 @@ pub fn swap<T>(a: T, i: Int, j: Int) -> T where T: Index, T: Use<[0, *]> {
 
 // The elements in order, by `<`. Elements that are equal stay as they were
 // to each other.
-pub fn sort<A, T>(a: A) -> Vec<T> where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> { sort_by(a, fn(x, y) { x < y }) }
+pub fn sort<A, T>(a: A) -> Vec<T> where A: Indexed<Element = T>, T: Ord, T: Use<[0, *]> { sort_by(a, fn(x, y) { lt(x, y) }) }
 
-// The elements in the order `before` gives: `before(x, y)` says `x` comes
-// before `y`.
-pub fn sort_by<A, T, e: EffectRow>(a: A, before: fn(T, T) -> Bool / {| e}) -> Vec<T> / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> {
+// The elements in the order `before` gives: `before(x, y)` says what `x`
+// is to comes before what `y` is.
+pub fn sort_by<A, T, e: EffectRow>(a: A, before: fn(&T, &T) -> Bool / {| e}) -> Vec<T> / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> {
     let held = a;
     let mut out = between(&held, 0, size_at(&held));
     Vec::sort_by(&mut out, before);

@@ -49,16 +49,3 @@ fn char_count(text: &str) -> Int {
     while({ it.next().is_some() }) { n = n + 1 };
     n
 }
-
-// Texts in order of their bytes. (Sorted by their views: a `String` is not
-// copied to be compared.)
-pub fn sort_strings(texts: Vec<String>) -> Vec<String> {
-    let mut views: Vec<&str> = Vec::new();
-    let mut i = 0;
-    while({ i < len_at(&texts) }) { let text = &texts[i]; Vec::push(&mut views, text.as_str()); i = i + 1 };
-    views.sort();
-    let mut out = Vec::new();
-    let mut k = 0;
-    while({ k < len_at(&views) }) { Vec::push(&mut out, String::from(views[k])); k = k + 1 };
-    out
-}

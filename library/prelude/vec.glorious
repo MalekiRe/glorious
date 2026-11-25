@@ -51,7 +51,7 @@ pub struct Vec<T> { at: *mut T, cap: Int, len: Int }
 
 // The elements from `lo` up to `hi` in order: each half in order, then
 // merged into `scratch` and moved back, each element's bytes.
-fn vec_sort_range<T, e: EffectRow>(v: &mut Vec<T>, scratch: usize, lo: Int, hi: Int, before: fn(T, T) -> Bool / {| e}) / {| e} where T: Use<[0, *]> {
+fn vec_sort_range<T, e: EffectRow>(v: &mut Vec<T>, scratch: usize, lo: Int, hi: Int, before: fn(&T, &T) -> Bool / {| e}) / {| e} {
     if(hi - lo > 1) {
         let mid = (lo + hi) / 2;
         vec_sort_range(v, scratch, lo, mid, before);
@@ -61,7 +61,7 @@ fn vec_sort_range<T, e: EffectRow>(v: &mut Vec<T>, scratch: usize, lo: Int, hi: 
         let mut j = mid;
         let mut k = 0;
         while({ i < mid and { j < hi } }) {
-            let from = if(before(*vec_at_ref(&*v, j), *vec_at_ref(&*v, i))) { j = j + 1; j - 1 } else { i = i + 1; i - 1 };
+            let from = if(before(vec_at_ref(&*v, j), vec_at_ref(&*v, i))) { j = j + 1; j - 1 } else { i = i + 1; i - 1 };
             unsafe { mem_copy(usize_of(usize_bits(scratch) + k * size), vec_slot(&*v, from), usize_of(size)) };
             k = k + 1
         };
@@ -183,12 +183,13 @@ impl<T> IndexedMut for Vec<T> where T: Use<[1, 1]> {
 }
 // Written as an array is: `[a, b]`.
 // Equal where each element is.
-impl<T> Eq for Vec<T> where T: Eq, T: Use<[0, *]> {
-    fn ==(a: Vec<T>, b: Vec<T>) -> Bool {
+impl<T> Eq for Vec<T> where T: Eq {
+    fn ==(a: Vec<T>, b: Vec<T>) -> Bool { eq(&a, &b) }
+    fn eq(a: &Vec<T>, b: &Vec<T>) -> Bool {
         if(a.len != b.len) { false } else {
             let mut i = 0;
             let mut same = true;
-            while({ same and { i < a.len } }) { same = *vec_at_ref(&a, i) == *vec_at_ref(&b, i); i = i + 1 };
+            while({ same and { i < a.len } }) { same = eq(vec_at_ref(a, i), vec_at_ref(b, i)); i = i + 1 };
             same
         }
     }
@@ -274,8 +275,8 @@ impl<T> Vec<T> {
     }
     // In order, by `<`, equal ones as they were to each other; or in the
     // order `before` gives.
-    pub fn sort(value: &mut Self) where T: Ord, T: Use<[0, *]> { Vec::sort_by(value, { (a, b) => a < b }) }
-    pub fn sort_by<e: EffectRow>(value: &mut Self, before: fn(T, T) -> Bool / {| e}) / {| e} where T: Use<[0, *]> {
+    pub fn sort(value: &mut Self) where T: Ord { Vec::sort_by(value, fn(a, b) { lt(a, b) }) }
+    pub fn sort_by<e: EffectRow>(value: &mut Self, before: fn(&T, &T) -> Bool / {| e}) / {| e} {
         // (Merged a half at a time through memory of the same size, each
         // element moved as its bytes: stable, n log n.)
         let n = value.len;
@@ -376,10 +377,10 @@ impl<T> Vec<T> {
         } else { Err(Vec { at: parts.at, cap: parts.cap, len: parts.len }) }
     }
     // Is a value equal to one of the elements?
-    pub fn contains(value: &Self, item: &T) -> Bool where T: Eq, T: Use<[0, *]> {
+    pub fn contains(value: &Self, item: &T) -> Bool where T: Eq {
         let mut i = 0;
         let mut found = false;
-        while({ i < value.len and { not found } }) { if(*vec_at_ref(value, i) == *item) { found = true } else { () }; i = i + 1 };
+        while({ i < value.len and { not found } }) { if(eq(vec_at_ref(value, i), item)) { found = true } else { () }; i = i + 1 };
         found
     }
     // (Of anything `ToVec`: a `Vec`, `[a, b]`.)

@@ -99,12 +99,12 @@ fn fields(r: &mut Reader, out: &mut Vec<(String, Json)>) -> Result<(), ParseErro
             Err(e) => Err(e),
             Ok(_) => match(text(r, String::new())) {
                 Err(e) => Err(e),
-                Ok(name) => let mut name = name; match(expect(r, ':', "`:`")) {
+                Ok(name) => match(expect(r, ':', "`:`")) {
                     Err(e) => Err(e),
                     Ok(_) => match(value(r)) {
                         Err(e) => Err(e),
                         Ok(item) =>
-                            out.push((replace(&mut name, String::new()), item));
+                            out.push((name, item));
                             skip_spaces(r);
                             match(peek(&*r)) {
                                 Some(',') => r.at = r.at + 1; fields(r, out),

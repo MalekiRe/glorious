@@ -8060,9 +8060,16 @@ could, which left a program not lowered (laid out by its types):
   implementation decides (`convert(Both(1, "xy"))`'s `(s, n)`, `s.len()`),
   and of the field reads that waited for a type (`pair.0` of `let pair =
   &fs[0]`) once they are settled.
-- Not yet: a call's result is not dereferenced for a dot call on it
-  (`(*v.index(i)).is_empty()` is written so); reading it again for that
-  made chains of calls exponential.
+- A dot call's receiver that is a field of an element, `v[0].s.len()`,
+  `v[0].i.to_string()`, is borrowed where it is, through the element's
+  reference named first (`%through`, as `&v[0].s` is); the checker, where
+  the type's own function borrows and the one in scope does not, has the
+  receiver borrowed so by reading again (`Decision.receiver`), not by a
+  borrow of its own.
+- A receiver that is a reference, of a type that does not implement the
+  trait of the function called where what it points to does, is read
+  through (`Decision.derefReceiver`): `first(&v).abs()`. `v.index(i)` is
+  `v[i]`; `&&p` is a borrow of `&p`.
 - The machine's cells are declared beside `[T; N]`: a program that is not
   checked has no `Fixed`.
 - `debugtext`, `reflected`, `described`, `asm`, the `mcp` JSON and tools
@@ -8125,10 +8132,12 @@ could, which left a program not lowered (laid out by its types):
 - A dot call of a field through a reference a name holds is borrowed where
   the function chosen for it, by name or by type, borrows (`pair.0.as_str()`
   of `Some(pair)` from a `&Vec<(String, Json)>`).
-- Not yet: a value a pattern binds that has a `drop` is not destroyed on a
-  path that does not use it, as Rust's would be (`examples/json` keeps the
-  name in `let mut name`). Reading `Token<'s>` through `&'a Spot<'s>` was
-  said to depend on `'a` (the calculator takes one lifetime).
+- A value a clause's pattern binds that has a `drop`, used on one path and
+  not on another, is kept in a variable where the clause starts
+  (`Decision.letMut` at the statement the clause is in), and so destroyed
+  where it was not used, as Rust's drop flags do: `examples/json` gives
+  its `name` away on one path. Not yet: reading `Token<'s>` through `&'a
+  Spot<'s>` was said to depend on `'a` (the calculator takes one lifetime).
 
 ## The ECS and its devtools over `String` and `&str`
 
@@ -8155,8 +8164,6 @@ could, which left a program not lowered (laid out by its types):
 
 - Every covey program says its texts as `String`s joined with `+`,
   numbers with `to_string`, vectors with `format_debug`.
-- `std::text::sort_strings`: `String`s in order, compared by their views
-  (`Ord` takes its values whole, and a `String` is not copied to compare).
 - `GLORIOUS_LOWER` also names the functions one of whose signatures has
   what nothing decided.
 - Not yet: `bundles` and `behavior` are not lowered (`ecs::column_remove`
@@ -8194,3 +8201,21 @@ could, which left a program not lowered (laid out by its types):
 - A constant is worked out with its program's texts in their blocks
   (`internStatics` before `runConst`): `"ab".len()` at compile time.
 - `assert_eq` and `assert_ne` say their values as `Debug` does.
+
+## `eq` and `lt` by reference
+
+- `Eq` has `eq` and `ne`, `Ord` has `lt`, `gt`, `le` and `ge`, each of two
+  references, nothing copied, as Rust's `PartialEq` and `PartialOrd` take
+  `&self`: of a type that is copied, as `==` and `<` say (the defaults read
+  through the references); `String`, `Vec`, tuples, `Result` and `[T; N]`
+  say their own. `==` and `<` stay of values, so that comparing numbers
+  borrows nothing.
+- `&T` is `Eq` and `Ord` where `T` is, as Rust's: `{ a, b => a > b }` of
+  two `&Int`s.
+- `Vec::sort` asks only `T: Ord` and `sort_by` gives references, `fn(&T,
+  &T) -> Bool`: a `Vec<String>` sorts in place (`std::text::sort_strings`
+  is gone; fleet and asm sort theirs). `Vec::contains`, `==` of `Vec`s,
+  `assert_eq` and `assert_ne` compare by `eq`, the elements not copied.
+- `size_of<T>()` stays `Layout`'s: a function's type reaches what it calls
+  only through values (a dictionary here), and `size_of<T>()` is given none
+  of `T`, so the lowering cannot say it.

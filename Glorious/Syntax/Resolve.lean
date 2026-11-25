@@ -419,6 +419,10 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
     -- then still the prelude's, `%prelude::index`.)
     | .name q "index", [a, i] =>
       if q.isSome && q != some "%prelude" then plain () else
+      -- (`v.index(i)` as `v[i]` is.)
+      let a := match b.expr a with
+        | .call _ rm #[r] => if b.bare? rm == some receiverMark then r else a
+        | _ => a
       match ← elementRead b known id a i with
       | some e => pure e
       | none => plain ()
@@ -491,6 +495,34 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
             match ← element uniq 8 receiver with
             | some e => pure e
             | none =>
+              -- (A field of an element, `v[0].i.to_string()`: borrowed
+              -- through the element's reference, named first.)
+              let rec ofElement (e : ExprId) (fuel : Nat) : Option (ExprId × List String) :=
+                match fuel, b.expr e with
+                | 0, _ => none
+                | fuel + 1, .fieldOf _ inner field =>
+                  let r := match b.expr inner with
+                    | .deref r => r
+                    | _ => inner
+                  match b.expr r with
+                  | .call _ g _ => if (b.name? g).map (·.2) == some "element_at" then some (r, [field]) else none
+                  | _ => (ofElement inner fuel).map fun (r, path) => (r, path ++ [field])
+                | _, _ => none
+              if let some (r, path) := ofElement receiver 16 then
+                -- (For writing, the element's place: `place_at`.)
+                let r ← if !uniq then pure (some r) else match b.expr r with
+                  | .call cid _ #[a, i] =>
+                    match b.expr a with
+                    | .ref _ x => do pure (some (← pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, ← pushExpr (.ref true x)])))
+                    | .refField fid _ x path star => do
+                      pure (some (← pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, ← pushExpr (.refField fid true x path star)])))
+                    | _ => pure none
+                  | _ => pure none
+                if let some r := r then
+                  let steps ← pushExpr (.tuple (← path.toArray.mapM fun s => pushExpr (.name none s)))
+                  let through ← pushExpr (.call (id + 600000) (← pushExpr (.name none throughMark))
+                    #[r, steps, ← pushExpr (.int (if uniq then 1 else 0))])
+                  return ← pushExpr (.call id (← pushExpr (.name q name)) (#[through] ++ rest.toArray))
               -- (A value made where it is called on, `half(4).is_ok()`:
               -- given a name first, and borrowed.)
               match b.expr receiver with

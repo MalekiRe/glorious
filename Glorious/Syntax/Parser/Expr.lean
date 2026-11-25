@@ -240,36 +240,13 @@ partial def parseUnary (noBlock : Bool) : P ExprId := do
       if t == .op "-" then failAt "operator `-` has no prefix fixity"
       else if t == .op "&" then
         advance
-        let uniq := (← peek) == .ident "mut"
-        if uniq then advance
-        if (← peek) == .op "*" then
-          advance
-          mk (.reborrow uniq (← parseUnary noBlock))
-        else
-          let id := (← read).base + (← get) + 1
-          let mark := if uniq then borrowMutMark else borrowMark
-          -- `&x`, `&x.0.1`, `&(*p).0`, or `&f().0` through what an
-          -- expression gives.
-          let e ← parsePostfix true
-          match ← node e with
-          -- (A name written with a capital is a constructor or a constant, a
-          -- value and no variable: it is borrowed as any value is, below.)
-          | .name none x =>
-            if x.front.isUpper then callOf id none mark #[e]
-            else mk (.ref uniq x)
-          | _ =>
-            if let some at_ ← elementBorrow uniq e then return at_
-            match ← fieldRoot e with
-            -- (A field of an array's element, `&a[i].f`: through a borrow of
-            -- the element.)
-            | some (.through b, path) =>
-              match ← elementBorrow uniq b with
-              | some r => fieldBorrow id uniq (.through r) path
-              | none => fieldBorrow id uniq (.through b) path
-            | some (root, path) => fieldBorrow id uniq root path
-            -- A value with no name: it is given one where the statement
-            -- starts, and that is borrowed.
-            | none => callOf id none mark #[e]
+        parseBorrow noBlock
+      else if t == .op "&&" then
+        -- `&&e`, which the lexer reads as one symbol: a borrow of a borrow,
+        -- the inner a value with no name.
+        let id := (← read).base + (← get) + 1
+        advance
+        callOf id none borrowMark #[← parseBorrow noBlock]
       else if t == .op "&*" then
         -- `&*e`, which the lexer reads as one symbol.
         advance
@@ -293,6 +270,39 @@ partial def parseUnary (noBlock : Bool) : P ExprId := do
           else parsePostfix noBlock
         | _ => parsePostfix noBlock
   | none => parsePostfix noBlock
+
+/-- What follows `&`: `mut`, and the place or value borrowed. -/
+partial def parseBorrow (noBlock : Bool) : P ExprId := do
+  let uniq := (← peek) == .ident "mut"
+  if uniq then advance
+  if (← peek) == .op "*" then
+    advance
+    mk (.reborrow uniq (← parseUnary noBlock))
+  else
+    let id := (← read).base + (← get) + 1
+    let mark := if uniq then borrowMutMark else borrowMark
+    -- `&x`, `&x.0.1`, `&(*p).0`, or `&f().0` through what an
+    -- expression gives.
+    let e ← parsePostfix true
+    match ← node e with
+    -- (A name written with a capital is a constructor or a constant, a
+    -- value and no variable: it is borrowed as any value is, below.)
+    | .name none x =>
+      if x.front.isUpper then callOf id none mark #[e]
+      else mk (.ref uniq x)
+    | _ =>
+      if let some at_ ← elementBorrow uniq e then return at_
+      match ← fieldRoot e with
+      -- (A field of an array's element, `&a[i].f`: through a borrow of
+      -- the element.)
+      | some (.through b, path) =>
+        match ← elementBorrow uniq b with
+        | some r => fieldBorrow id uniq (.through r) path
+        | none => fieldBorrow id uniq (.through b) path
+      | some (root, path) => fieldBorrow id uniq root path
+      -- A value with no name: it is given one where the statement
+      -- starts, and that is borrowed.
+      | none => callOf id none mark #[e]
 
 partial def parsePostfix (noBlock : Bool) : P ExprId := do
   let mut e ← parsePrimary noBlock

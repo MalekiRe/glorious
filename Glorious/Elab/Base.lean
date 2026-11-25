@@ -227,6 +227,8 @@ inductive Decision where
   value shows, and the value's type implements `Deref`: it is of what
   `Deref::deref` (`DerefMut::deref_mut`) gives (`Mut<T>` as its `T`). -/
   | derefField (id : Nat) (uniq : Bool)
+  /-- The dot call `call`'s receiver, a reference, is of what it points to. -/
+  | derefReceiver (call : Nat)
 
 /-- What the checker says where it stops: why, and what it found to decide,
 where it stops for that; `result`
@@ -246,7 +248,7 @@ otherwise: a match found to be of a reference, or a dot call's function or
 receiver found? -/
 def Said.passOn (s : Said) : Bool :=
   match s.decision with
-  | some (.refPats ..) | some (.receiver ..) | some (.derefField ..) => true
+  | some (.refPats ..) | some (.receiver ..) | some (.derefField ..) | some (.derefReceiver _) => true
   | _ => false
 
 /-- What the checker tells the elaborator about the blocks of a program, each

@@ -26,6 +26,55 @@ fn main() -> Int { let a = A { n: 1 }; first(&a) }
 #### expect
 4
 #### case
+#### Dot calls on what is not a plain name, as Rust's: a field of an
+#### element borrowed where it is, for reading and for writing; `&&p`; a
+#### call's result, a reference, given as it is or read through for a trait
+#### its pointee has; `v.index(i)` as `v[i]`.
+struct P { i: Int, s: String }
+fn first(v: &Vec<Int>) -> &Int { &v[0] }
+fn main() -> Int {
+    let mut v: Vec<P> = Vec::new();
+    v.push(P { i: 3, s: String::from("hey") });
+    v[0].s.push_str("!");
+    say(v[0].i.to_string() + " " + v[0].s.as_str());
+    say(v[0].s.len());
+    say(v[0].s.is_empty());
+    let mut p: Vec<(Int, Int)> = Vec::new();
+    p.push((1, -2));
+    let q = &&p;
+    say(q[0].0);
+    let mut ns: Vec<Int> = Vec::new();
+    ns.push(-4);
+    say(first(&ns).abs());
+    say(v.index(0).s.len());
+    0
+}
+#### expect
+3 hey!
+4
+false
+1
+4
+4
+0
+#### case
+#### A name a clause's pattern binds, with a `drop` to run, used on one path
+#### and not on another: kept in a variable where the clause starts, which
+#### destroys it where it was not used, as Rust's drop flags do.
+enum E { A(String, Int), B }
+fn f(e: E) -> Int {
+    match(e) {
+        A(name, n) => if(n > 0) { say(name); 1 } else { 0 },
+        B => 2
+    }
+}
+fn main() -> Int { say(f(A(String::from("x"), 1))); say(f(A(String::from("y"), 0))); 0 }
+#### expect
+x
+1
+0
+0
+#### case
 #### A field by number of an element that is a reference: read through it.
 struct P(Int)
 fn total(ps: &[&P]) -> Int { let mut s = 0; let mut i = 0; while({ i < ps.len() }) { s = s + ps[i].0; i = i + 1 }; s }

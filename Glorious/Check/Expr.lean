@@ -842,19 +842,6 @@ partial def dotBorrows (b : Flat.Body) (x : String) (t : Ty) (rest : List Flat.S
     | (some 0, some k) => pure (if k != 0 then some (a, k == 2) else none)
     | _ => pure none
 
-/-- `x.f.g` where `x` is a mutable variable that holds no reference: the
-name, the path of fields, and the identity of the last read. -/
-partial def cellField (b : Flat.Body) (scope : Scope) (e : Flat.ExprId) : Option (String × List String × Nat) :=
-  match b.expr e with
-  | .fieldOf fid inner field =>
-    match b.bare? inner with
-    | some x =>
-      match scope.lookup x with
-      | some (.cell _ _) => some (x, [field], fid)
-      | _ => none
-    | none => (cellField b scope inner).map fun (x, path, _) => (x, path ++ [field], fid)
-  | _ => none
-
 /-- `x.f.g` where `x` holds a reference: the name, the path of fields, and the
 identity of the last read. -/
 partial def fieldThroughRef (scope : Scope) (e : Flat.ExprId) : M (Option (String × List String × Nat)) := do
@@ -896,10 +883,16 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
         unless (← get).assocUses.isEmpty do settleAssocsAll
         -- (Which clauses' first patterns are of a value: a constructor, a
         -- tuple, a constructor without fields written as a name.)
+        -- (Not a tuple that is each of several parameters, `{ (a, b) => .. }`
+        -- given two.)
+        let arity := match ← find p with
+          | .fn ps .. => ps.length
+          | _ => 0
         let mut valuePats : List Nat := []
         for (c, k) in clauses.zipIdx do
           match c with
           | .mk (.ctor n _ _ :: _) _ => if !n.startsWith "%" then valuePats := valuePats ++ [k]
+          | .mk [.tuple _] _ => if arity ≤ 1 then valuePats := valuePats ++ [k]
           | .mk (.tuple _ :: _) _ => valuePats := valuePats ++ [k]
           -- (Or a constant that is a constructor's other name, `None`.)
           | .mk (.var x :: _) _ =>
@@ -1687,33 +1680,16 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
                 if isRef then
                   modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
                   return some (← inferCall scope amb (← pushE (.name none alt)) args call)
-                -- (A field of what a name points to, or of a mutable
-                -- variable: borrowed where it is. An element read where it
-                -- is, `g[0].push(5)`: the element's place, borrowed.)
-                let body := (← get).body
-                let elementPlace : Option Expr := match body.expr a with
-                  | .deref r => match body.expr r with
-                    | .call cid g #[base, i] =>
-                      if (body.name? g).map (·.2) != some "element_at" then none else
-                      let base' : Option Expr := match body.expr base with
-                        | .ref _ x => some (.ref (k == 2) x)
-                        | .refField fid _ x path star => some (.refField fid (k == 2) x path star)
-                        | _ => none
-                      base'.map fun bs =>
-                        if k == 2 then Expr.call cid (.name none "place_at") [Flat.treeExpr body i, bs]
-                        else Expr.call cid (.name none "element_at") [bs, Flat.treeExpr body i]
-                    | _ => none
-                  | _ => none
-                let borrowed ← match elementPlace with
-                  | some e => pure (some e)
-                  | none => match ← fieldThroughRef scope a with
-                    | some (x, path, fid) => pure (some (Expr.refField fid (k == 2) x path true))
-                    | none => pure ((cellField (← get).body scope a).map fun (x, path, fid) => Expr.refField fid (k == 2) x path false)
-                if let some bt := borrowed then
+                -- (A field of what a name points to: borrowed where it is.)
+                if let some (x, path, fid) ← fieldThroughRef scope a then
+                  let bt := Expr.refField fid (k == 2) x path true
                   modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
                                            argsChosen := ((call, 0), bt) :: s.argsChosen }
                   let given ← flatIn bt
                   return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+                -- (Else: read again with the receiver borrowed where it is,
+                -- as the resolver borrows one, `g[0].push(5)`, `v[0].s.len()`.)
+                throwThe Elab.Said { msg := s!"the receiver of `{alt}` is borrowed", decision := some (← receiverDecision call alt) }
   pure none
 
 /-- Apply a callee of a given type in the ambient effects. -/

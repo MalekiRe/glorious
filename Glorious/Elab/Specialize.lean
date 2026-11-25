@@ -599,22 +599,39 @@ def etaBody (owner x : String) (arity : Nat) (b : Flat.Body) : Flat.Body :=
   let (roots, b) := (b.roots.mapM (etaClauseF x arity base)).run b
   { b with roots }
 
+/-- A clause whose patterns bind `x` that starts by keeping it in a variable,
+written at the place of its first statement (`letMutRewriteF`). -/
+def heldFirst (x : String) : Flat.FRewrite where
+  onClause go b c :=
+    let ⟨pats, body⟩ := b.clause c
+    if !(pats.flatMap patVars).contains x then none else some (do
+      let body ← go.stmts body.toList
+      match body with
+      | first :: rest =>
+        match (← get).stmt first with
+        | .located l c _ =>
+          let held ← Flat.pushStmt (.letMut x (← Flat.pushExpr (.name none x)))
+          Flat.pushClause ⟨pats, ((← Flat.pushStmt (.located l c held)) :: first :: rest).toArray⟩
+        | _ => Flat.pushClause ⟨pats, body.toArray⟩
+      | [] => Flat.pushClause ⟨pats, #[]⟩)
+
 /-- A value with a `drop` to run that one path uses and another does not is
 kept in a variable, as `let mut` keeps it: where it was not used, the variable
 destroys it. The checker says which `let`: the `let x` at `line:col` written
-`let mut x`; a name a pattern binds kept in a variable straight after. At
-place `0:0`, a clause that takes `x` as a parameter (or a name its patterns
-bind) starts by keeping it in a variable, written at the place of its first
-statement. -/
+`let mut x`; a name a pattern binds kept in a variable straight after, or
+where a clause of the statement there that binds it starts. At place `0:0`,
+a clause that takes `x` as a parameter (or a name its patterns bind) starts
+by keeping it in a variable, written at the place of its first statement. -/
 def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
   onStmts go b ss :=
     match ss with
     | s :: rest =>
       match b.stmt s with
       | .located l c inner =>
+        if l != line || c != col then none else
         match b.stmt inner with
         | .let_ pat value =>
-          if l != line || c != col then none else some (do
+          some (do
             let value ← go.ex value
             let rest ← go.stmts rest
             match pat with
@@ -627,21 +644,13 @@ def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
                 let held ← Flat.pushStmt (.letMut x (← Flat.pushExpr (.name none x)))
                 pure (first :: (← Flat.pushStmt (.located l c held)) :: rest)
               else pure (first :: rest))
-        | _ => none
+        -- (A name a clause in the statement binds, `A(name, n) => ..` of a
+        -- `match`: kept in a variable where the clause starts.)
+        | _ => some (do pure ((← (heldFirst x).st s) :: (← go.stmts rest)))
       | _ => none
     | [] => none
   onClause go b c :=
-    let ⟨pats, body⟩ := b.clause c
-    if line != 0 || col != 0 || !(pats.flatMap patVars).contains x then none else some (do
-      let body ← go.stmts body.toList
-      match body with
-      | first :: rest =>
-        match (← get).stmt first with
-        | .located l c _ =>
-          let held ← Flat.pushStmt (.letMut x (← Flat.pushExpr (.name none x)))
-          Flat.pushClause ⟨pats, ((← Flat.pushStmt (.located l c held)) :: first :: rest).toArray⟩
-        | _ => Flat.pushClause ⟨pats, body.toArray⟩
-      | [] => Flat.pushClause ⟨pats, #[]⟩)
+    if line != 0 || col != 0 then none else (heldFirst x).onClause go b c
 
 /-- The callable `id`'s clauses the checker's (`refPats`). -/
 def refPatsBody (id : Nat) (clauses : List Clause) (b : Flat.Body) : Flat.Body :=
@@ -801,6 +810,13 @@ def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) 
   | .refPats id clauses => refPatsBody id clauses b
   | .receiver call fn borrow => receiverBody call fn borrow annots b
   | .derefField id uniq => derefBody id uniq annots b
+  | .derefReceiver call =>
+    ({ onExpr := fun go b e => match b.expr e with
+        | .call i f args =>
+          if i != call || args.isEmpty then none else some (do
+            let args ← args.mapM go.ex
+            Flat.pushExpr (.call i (← go.ex f) (args.set! 0 (← Flat.pushExpr (.deref args[0]!)))))
+        | _ => none } : Flat.FRewrite).body b
 
 /-- Every function of an item with what the checker decided written in, each
 under the name it is checked by. -/
@@ -835,6 +851,7 @@ def Decided.of (b : Blocks) : Decided := Id.run do
       | .refPats id _ => { d with closures := d.closures.insert id }
       | .receiver call _ _ => { d with calls := d.calls.insert call }
       | .derefField id _ => { d with fields := d.fields.insert id }
+      | .derefReceiver call => { d with calls := d.calls.insert call }
   for (call, _) in b.dotChosen do d := { d with calls := d.calls.insert call }
   for ((call, _), _) in b.argsChosen do d := { d with calls := d.calls.insert call }
   pure d
