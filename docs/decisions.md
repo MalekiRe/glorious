@@ -8239,3 +8239,18 @@ could, which left a program not lowered (laid out by its types):
 - `size_of<T>()` stays `Layout`'s: a function's type reaches what it calls
   only through values (a dictionary here), and `size_of<T>()` is given none
   of `T`, so the lowering cannot say it.
+
+## What a compile keeps of inference, by name
+
+- What inference keeps is keyed by what each function is made of, each
+  function known by its name and which of those of the name it is, a
+  closure by the function that first makes it (`St.sids`), text literals by
+  their bytes: not by where they stand in Core, which an edit to `main`
+  changes for all (the copies are reached from it in another order).
+- Measured on covey fleet, an edit to `main` after another: 9.4 s, of which
+  checking `main` 2.1 s, inferring it 1.9 s, the typed lowering 1.9 s (not
+  kept), running it 2.1 s. Inferring `main` infers every group under it
+  again: a group's scheme is kept only where it names no variable of
+  another group's (`freeze`), and on fleet 16,821 of 17,260 do (types,
+  rows and classes alike). Keeping them would need schemes made whole of
+  their own variables.
