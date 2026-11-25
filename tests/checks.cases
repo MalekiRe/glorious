@@ -1,6 +1,6 @@
 #### case 8 diagnose
 #### When a program goes wrong, the diagnosis names the cause in the program's terms.
-effect Ask { ask(x) }  fn main() / {Ask} { ask(1) }
+effect Ask { ask(Int) }  fn main() / {Ask} { ask(1) }
 #### expect
 operation `ask` is performed, but no handler for it is installed
 #### case 9 diagnose
@@ -327,7 +327,7 @@ some true
 #### case 62 borrowChecked
 #### What the region rules have no type for compiles as before, without that
 #### proof: a variable that holds something that uses the variable.
-effect Yield { yield(Int) }
+effect Yield { yield(Int) -> Int }
     fn main() -> Int { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 };
       match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }
 #### expect

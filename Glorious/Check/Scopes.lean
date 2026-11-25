@@ -777,10 +777,6 @@ def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb
     for a in args do
       if ← holds a then escape s!"it is passed to a handler of `{e}` outside"
   let s ← get
-  for id in s.mono do
-    if ← holds (.var id) then
-      escape "it is stored in a declaration whose field types are inferred; \
-        give that declaration a type parameter"
   if let some cap := s.staticCap then
     if ← capHolds brand cap then
       escape "it is borrowed for `'static`, and no variable lasts that long"

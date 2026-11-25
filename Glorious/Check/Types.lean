@@ -507,9 +507,6 @@ structure St where
   bindLoans : Std.HashMap Nat Nat := {}
   tys : Store (Option Ty) := {}
   rows : Store (Option Row) := {}
-  /-- Variables standing for the inferred types of declarations: never generalised. -/
-  mono : List Nat := []
-  monoRows : List Nat := []
   /-- Capture variables of function types written in declarations. -/
   monoCaps : List Nat := []
   /-- Capture variables, merged as function types are unified. -/
@@ -1695,19 +1692,11 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   -- A local callable is used at one type where a trait is needed of it: the
   -- evidence is found for the function it is written in, once.
   let bounded := if top then [] else s.bounds.toList.map (·.ty)
-  for m in keep ++ bounded ++ s.mono.map Ty.var do
+  for m in keep ++ bounded do
     let m ← zonk m
     fixedTys := (freeTys m).foldl (·.insert ·) fixedTys
     fixedRows := (freeRows m).foldl (·.insert ·) fixedRows
     fixedCaps := (freeCaps m).foldl (·.insert ·) fixedCaps
-  for id in s.monoRows do
-    let r ← zonkRow ⟨[], some id⟩
-    fixedRows := r.tail.toList.foldl (·.insert ·) fixedRows
-    for (_, args) in r.effs do
-      for a in args do
-        fixedTys := (freeTys a).foldl (·.insert ·) fixedTys
-        fixedRows := (freeRows a).foldl (·.insert ·) fixedRows
-        fixedCaps := (freeCaps a).foldl (·.insert ·) fixedCaps
   -- What must be free to use more than once is part of the function's
   -- contract, so the capture variables it mentions are generalised too.
   let mut dups : Array (Ty × String) := #[]

@@ -5,7 +5,7 @@
 // An operation that says nothing may be resumed or not: whoever handles
 // `yield` can stop the generator early. (`[1, 1] yield(value)` would be a
 // generator that is always run to its end.)
-effect Yield { yield(value) }
+effect Yield { yield(Int) }
 
 // Yield the integers from `i` up to but not including `to`.
 fn count(i: Int, to: Int) -> () / {Yield} {

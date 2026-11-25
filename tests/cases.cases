@@ -175,7 +175,7 @@ fn main() -> Int { let (a, (b, c)) = (1, (2, 3)); a + b * c }
 #### expect
 7
 #### case
-struct Point(x, y)  fn main() -> Int { let Point(x, y) = Point(3, 4); x * x + y * y }
+struct Point(Int, Int)  fn main() -> Int { let Point(x, y) = Point(3, 4); x * x + y * y }
 #### expect
 25
 #### case
@@ -378,47 +378,47 @@ fn even(n: Int) -> Bool { match(n) { 0 => true, _ => tail odd(n - 1) } }
 Ok(())
 #### case
 #### Effects: terminal operations, resumptions, completion clauses, forwarding.
-effect Fail { fail(error) -> ! }
+effect Fail { fail(Int) -> ! }
   fn main() -> Int { handle 1 + fail(7) { fail(e) => e * 2 } }
 #### expect
 14
 #### case
-effect Ask { ask(x) }
+effect Ask { ask(Int) -> Int }
   fn main() -> Int { handle ask(1) + ask(2) { ask(x) => x * 10 } }
 #### expect
 30
 #### case
-effect Ask { ask(x) }
+effect Ask { ask(Int) -> Int }
   fn main() -> Int { handle ask(1) + ask(2) { r => r + 1000, ask(x, k) => k(x * 10) } }
 #### expect
 1030
 #### case
-effect Ask { ask(x) }
+effect Ask { ask(Int) -> Int }
   fn main() -> Int { handle ask(1) + 5 { ask(x, k) => 99 } }
 #### expect
 99
 #### case
-effect Ask { ask(x) }
+effect Ask { ask(Int) -> Int }
   fn main() -> Int { handle (handle ask(1) + ask(2) { ask(1) => 100 }) { ask(x) => x * 10 } }
 #### expect
 120
 #### case
-effect Ask { ask(x) }  effect Fail { fail(e) -> ! }
+effect Ask { ask(Int) -> Int }  effect Fail { fail(Int) -> ! }
   fn main() -> Int { handle (handle ask(3) { fail(e) => 0 }) { ask(x) => x + 1 } }
 #### expect
 4
 #### case
-effect Ask { ask(x) }
+effect Ask { ask(Int) -> Int }
   fn main() -> Int { handle ask(1) { ask(x, k) => k(x) + k(x) } }
 #### expect
 error: 2:22: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once
 #### case
-effect Ask { ask(x) }  fn main() / {Ask} { ask(1) }
+effect Ask { ask(Int) }  fn main() / {Ask} { ask(1) }
 #### expect
 error: `main` performs effects that nothing handles: {Ask}
 #### case
 #### State threaded through resumptions: a counter written with a handler.
-effect Counter { next() }
+effect Counter { next() -> Int }
   fn counting<T, e: EffectRow>(body: fn() -> T / {Counter | e}, start: Int) -> (T, Int) / {| e} {
       let run = handle body() {
           result => { n => (result, n) },
@@ -453,7 +453,7 @@ fn main() { let l = @out { @out }; l(1) }
 error: 1:13: in `main`: the result of the scope `@out`: expected `_`, found `fn(_) -> _` (this would need a type that contains itself)
 #### case
 #### Loops are a handler, a tail call and two terminal operations.
-effect State { get(), put(value) }
+effect State { get() -> (Int, Int), put((Int, Int)) }
   fn with_state<T, e: EffectRow>(initial: (Int, Int), body: fn() -> T / {State | e}) -> T / {| e} {
       let run = handle body() {
           result => { s => result },
@@ -494,7 +494,7 @@ fn sum_input(total: Int) -> Int { match(read()) { Some(n) => tail sum_input(tota
 10
 20
 #### case
-effect Fail { fail(e) -> ! }
+effect Fail { fail(Int) -> ! }
   fn work() -> Int / {Fail} { print(1); fail(2); print(3); 0 }
   fn main() -> Int { handle work() { fail(e) => print(e * 10); 0 } }
 #### expect
@@ -539,7 +539,7 @@ fn main() -> Int { let r = @out { defer print(1); @out(5); print(99); 0 }; print
 5
 0
 #### case
-effect Fail { fail(e) -> ! }
+effect Fail { fail(Int) -> ! }
   fn inner() / {Fail} { defer print(1); fail(7); print(99) }
   fn outer() -> Int / {Fail} { defer print(2); inner(); print(98); 0 }
   fn main() -> Int { handle outer() { fail(e) => print(e); 0 } }
@@ -569,7 +569,7 @@ fn apply<T, U, e: EffectRow>(f: fn(T) -> U / {| e}, x: T) -> U / {| e} { f(x) }
 #### case
 #### A resumptive operation does not run the cleanups it captures: they run when
 #### the resumed computation finally leaves, exactly once.
-effect Ask { ask() }
+effect Ask { ask() -> Int }
   fn work() -> Int / {Ask} { defer print(1); let x = ask(); print(x); x }
   fn main() -> Int { handle work() { ask(k) => print(0); k(42) } }
 #### expect
@@ -613,14 +613,14 @@ effect Ask { ask() }
 1
 7
 #### case
-effect Ask { ask() }
+effect Ask { ask() -> Int }
   fn work() -> Int / {Ask} { defer print(1); ask() }
   fn main() -> Int { handle work() { ask(k) => cancel(k); k(1) } }
 #### expect
 error: 3:22: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once
 #### case
 #### A resource bracket, written in the language.
-effect Fail { fail(e) -> ! }
+effect Fail { fail(Int) -> ! }
   fn with_resource<T, e: EffectRow>(id: Int, use: fn(Int) -> T / {| e}) -> T / {| e} { print(id); defer print(0 - id); use(id) }
   fn main() -> Int {
       handle (with_resource(1) { a => with_resource(2) { b => fail(a + b) } }) {
@@ -678,24 +678,24 @@ error: 1:24: in `main`: `x` is not a mutable variable, so it cannot be borrowed
 #### case
 #### A resumption is one-shot: it is resumed once or cancelled once, and the
 #### checker rejects a second use.
-effect Choice { choose() }
+effect Choice { choose() -> Bool }
   fn main() -> Int { handle (if(choose()) { 1 } else { 2 }) * 10 { choose(k) => k(true) } }
 #### expect
 10
 #### case
-effect Choice { choose() }
+effect Choice { choose() -> Bool }
   fn main() -> Bool { handle choose() { choose(k) => k(true); k(false) } }
 #### expect
 error: 2:23: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once
 #### case
-effect Choice { choose() }
+effect Choice { choose() -> Bool }
   fn main() -> Bool { handle choose() { choose(k) => cancel(k); k(true) } }
 #### expect
 error: 2:23: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once
 #### case
 effect Choice { [2, 2] choose() }  fn main() { 0 }
 #### expect
-error: operation `choose`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`
+error: in `Choice`: operation `choose`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`
 #### case
 #### Types and effects are inferred. Mistakes that used to surface when a program
 #### ran are now reported before it does.
@@ -731,11 +731,11 @@ fn main() { if(1) { 2 } }
 #### expect
 error: 1:13: in `main`: argument 1 of `if`: expected `Result<_, _>`, found `Int`
 #### case
-effect Fail { fail(e) -> ! }  fn risky() / {Fail} { fail(1) }  fn main() / {Fail} { risky() }
+effect Fail { fail(Int) -> ! }  fn risky() / {Fail} { fail(1) }  fn main() / {Fail} { risky() }
 #### expect
 error: `main` performs effects that nothing handles: {Fail}
 #### case
-effect Ask { ask(x) }  fn main() -> Int / {Ask} { handle ask(1) { ask(1) => 2 } }
+effect Ask { ask(Int) -> Int }  fn main() -> Int / {Ask} { handle ask(1) { ask(1) => 2 } }
 #### expect
 error: `main` performs effects that nothing handles: {Ask}
 #### case
@@ -747,11 +747,12 @@ fn incr(p: &mut Int) { *p = *p + 1 }  fn main() { incr(5) }
 #### expect
 error: 1:51: in `main`: argument 1 of `incr`: expected `&mut Int`, found `Int`
 #### case
-#### A declaration with inferred fields has one type throughout the program; one
-#### with type parameters is polymorphic.
+#### A declaration writes its fields' types, as a signature does: nothing that
+#### uses it decides them, so what a program finds does not depend on the order
+#### its functions are checked in.
 enum Wrap { Wrap(v) }  fn main() { (Wrap(1), Wrap((1, 2))) }
 #### expect
-error: 1:36: in `main`: argument 1 of constructor `Wrap`: expected `Int`, found `(Int, Int)`
+error: in `Wrap`: unknown type `v`: a declaration writes the type of each of its fields and operations' arguments, as a function's signature does (`Int`, or a type parameter it declares, `<T>`); nothing that uses it decides it
 #### case
 enum Wrap<T> { Wrap(T) }  fn main() -> (Wrap<Int>, Wrap<(Int, Int)>) { (Wrap(1), Wrap((1, 2))) }
 #### expect
@@ -1089,10 +1090,10 @@ fn main() { let mut cell = { v => 0 }; @out { let g = { v => @out(v) }; cell = g
 #### expect
 error: 1:40: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `cell`, which outlives the scope, could hold it
 #### case
-enum Box { Box(inner) }
-  fn main() { @out { let b = Box({ @out(1) }); 0 } }
+enum Box<T> { Box(T) }
+  fn main() -> Int { let mut kept = None; @out { kept = Some(Box({ @out(1) })); 0 }; 0 }
 #### expect
-error: 2:15: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is stored in a declaration whose field types are inferred; give that declaration a type parameter
+error: 2:43: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `kept`, which outlives the scope, could hold it
 #### case
 struct Callback(run: fn() -> Int)
   fn main() { @out { let c = Callback({ @out(1) }); 0 } }
@@ -1115,7 +1116,7 @@ fn find(each: fn(fn(Int) -> Result<(), fn(()) -> ()>) -> (), target: Int) -> Int
 error: in `find`: a callable that jumps to `@find` could be called after `@find` has ended: the caller could hold it through a parameter
 #### case
 #### A resumption is not tied to a scope: it may be kept and called later.
-effect Yield { yield(Int) }
+effect Yield { yield(Int) -> Int }
   fn main() -> Int { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 }; match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }
 #### expect
 42
@@ -1390,7 +1391,7 @@ error: 2:22: in `main`: `k` is used more than once, but a value that holds a res
 #### case
 #### A mutable variable can hold a resumption, but reading it would copy it:
 #### `replace` takes the value out and leaves another in its place.
-effect Yield { yield(Int) }
+effect Yield { yield(Int) -> Int }
   fn main() -> Int { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 }; match(saved) { Some(k) => k(41), None => 0 } }
 #### expect
 error: 2:105: in `main`: reading the variable `saved` copies its value (`replace` takes it out instead), but a value that holds a resumption can be used only once
@@ -1537,11 +1538,11 @@ effect A { a() -> Int }
 #### case
 effect A { a() -> Int }
   effect H { h() -> Int }
-  effect G { give(k) -> Int }
+  effect G { give(fn(Int) -> Int / {A, G}) -> Int }
   fn work() -> Int / {H, A} { let r = @out { defer @out(1); h() }; r + a() }
   fn main() -> Int / {A, G} { handle (handle (handle work() { h(k) => give(k) }) { a(k2) => k2(100) }) { give(k, kg) => cancel(k); 7 } }
 #### expect
-error: `main` performs effects that nothing handles: {A, G}
+error: 5:121: in `main`: `cancel` cannot be called here: effect `A` is not handled here
 #### case
 #### Borrows. `&x` borrows a mutable variable for reading and `&mut x` for
 #### writing too, for as long as what holds the reference may still be used.
@@ -2294,7 +2295,7 @@ error: 2:20: in `main`: the mutable variable `saved` lets go of what it holds wh
 effect Ask { [1, 1] ask() -> ! }
 fn main() { 0 }
 #### expect
-error: operation `ask` does not return, so it has no resumption to say this of
+error: in `Ask`: operation `ask` does not return, so it has no resumption to say this of
 #### case
 #### A callable that holds such a value has to be called, wherever it goes.
 struct File(Int)
@@ -7701,7 +7702,7 @@ fn main() -> Int { handle (handle { log(ask()); ask() }() { log(v, k) => k(()) }
 effect Twice { [2, 2] both() -> Int }
 fn main() -> Int { handle (both() + 1) { both() => 5 } }
 #### expect
-error: operation `both`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`
+error: in `Twice`: operation `both`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`
 #### case
 #### Conformance L33: cancel linear.
 struct Ticket(Int);
@@ -11402,7 +11403,7 @@ error: 3:46: in `main`: reading through a reference copies the value (`replace` 
 effect A { boom(&'static str) -> Never }
 fn main() -> Int { handle { boom("x"); 1 }() { boom(m, k) => 0 } }
 #### expect
-error: unknown type `Never`: what does not return is written `!`
+error: in `A`: unknown type `Never`: what does not return is written `!`
 #### case
 #### `else` binds loosest of all: the refusal says so.
 fn main() -> Int { let s = String::from("a") + if(1 < 2) { "b" } else { "c" }; s.len() }

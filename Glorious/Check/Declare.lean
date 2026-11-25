@@ -10,14 +10,6 @@ open Syntax
 
 /-! ## Declarations -/
 
-/-- A type left to be inferred from how the program uses a declaration. -/
-def inferredTy : M Ty := do
-  let t ← freshTy
-  match t with
-  | .var id => modify fun s => { s with mono := id :: s.mono }
-  | _ => pure ()
-  pure t
-
 /-- What `tr` leaves as `name` to the implementation for `subject`: kept as
 written where `self` mentions a type parameter of an implementation whose
 types are being read, to be answered at each use; else a fresh type found
@@ -190,7 +182,8 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         | none =>
           -- (A name written with a capital is a type's, not a field's: one
           -- that is not known is a mistake, not a type to infer.)
-          if decl && args.isEmpty && !(Syntax.lastSegment x).front.isUpper then inferredTy
+          if decl && args.isEmpty && !(Syntax.lastSegment x).front.isUpper then
+            throw s!"unknown type `{x}`: a declaration writes the type of each of its fields and operations' arguments, as a function's signature does (`Int`, or a type parameter it declares, `<T>`); nothing that uses it decides it"
           else if x == "Never" then throw s!"unknown type `Never`: what does not return is written `!`"
           else throw s!"unknown type `{x}`"
   | .tuple args => do
@@ -223,7 +216,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
     let cap ← lifetimeCap params decl life
     pure (.ref (if uniq then .uniq else .shared) (← resolveType params decl t) cap)
   | .never => throw "`!` can only be the result of an operation"
-  | .hole => if decl then inferredTy else freshTy
+  | .hole => if decl then throw "`_` in a declaration: a declaration writes each type, as a function's signature does; nothing that uses it decides it" else freshTy
 
 /-- The capture variable a written lifetime stands for. Unwritten, or `'_`,
 it is a new one, to be inferred; in a declaration that is one for every value
@@ -410,6 +403,10 @@ def declareEffect (items : List Item) (name : String) (params : List String) (op
         | _ => 0]
       lifetimes := lifetimes ++ [some cap]
     | _ => pure ()
+  -- (Known before its operations are read: one may take or give a callable
+  -- that performs it, `spawn(fn() -> () / {Task})`.)
+  modify fun s =>
+    { s with effects := (name, ⟨ids, ops.map (·.name), lifetimes.map (·.isSome)⟩) :: s.effects }
   for op in ops do
     -- (Its own lifetimes, and those it does not write: not the
     -- declaration's, but each use's.)
@@ -433,7 +430,7 @@ def declareEffect (items : List Item) (name : String) (params : List String) (op
     let result ← if op.terminal then pure none
       else match op.result with
         | some t => some <$> resolveType opMap true t
-        | none => some <$> resolveType opMap true .hole
+        | none => pure (some Ty.unit)
     modify fun s => { s with projecting := projecting, paramTraits := [] }
     -- (Of references only: a callable it is given or gives is held to
     -- what the declaration says, as before.)
@@ -464,8 +461,6 @@ def declareEffect (items : List Item) (name : String) (params : List String) (op
                runOps := s.runOps.insert op.name result.isSome,
                runExact := if must && result.isSome then s.runExact.insert op.name
                  else s.runExact.erase op.name }
-  modify fun s =>
-    { s with effects := (name, ⟨ids, ops.map (·.name), lifetimes.map (·.isSome)⟩) :: s.effects }
 
 /-- A trait's declaration read: its functions' signatures (`declareTraits`). -/
 def declareTrait (items : List Item) (name : String) (methods : List (String × List TypeExpr × Option TypeExpr)) : M Unit := do
@@ -976,19 +971,19 @@ def declare (items : List Item) : M Unit := do
       let kinds := (genericParams params).map isLifetime
       let result := Ty.con name (pmap.map (·.2))
       for (c, fields) in ctors do
-        let fields ← fields.mapM (resolveType pmap true)
+        let fields ← tryCatch (fields.mapM (resolveType pmap true)) fun e => throw s!"in `{c}`: {e}"
         modify fun s =>
           { s with ctors := s.ctors.insert c ⟨name, ids, fields, result, caps, kinds⟩,
                    runCtors := s.runCtors.insert c }
     | .struct name params fields =>
       let (pmap, ids, caps) ← freshParams params
       let kinds := (genericParams params).map isLifetime
-      let fields ← fields.mapM (resolveType pmap true)
+      let fields ← tryCatch (fields.mapM (resolveType pmap true)) fun e => throw s!"in `{name}`: {e}"
       modify fun s =>
         { s with ctors := s.ctors.insert name ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩,
                  runCtors := s.runCtors.insert name }
     | .effect name params ops =>
-      declareEffect items name params ops
+      tryCatch (declareEffect items name params ops) fun e => throw s!"in `{name}`: {e}"
     | .use head lower upper =>
       unless ((← get).types[head]?).isSome do
         throw s!"`impl Use` for `{head}`: there is no such declared type"

@@ -1367,8 +1367,6 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   let mut sources : List Nat := []
   if let .fn ps _ _ _ _ ← zonk fnTy then
     sources := ps.flatMap freeRows
-  for id in s.monoRows do
-    sources := sources ++ (← zonkRow ⟨[], some id⟩).tail.toList
   -- A callable the function was given holds whatever its caller gave it: it
   -- comes back only if that holds no label.
   let mut given : List Nat := []

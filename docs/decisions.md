@@ -8280,3 +8280,35 @@ could, which left a program not lowered (laid out by its types):
   each stays where it is. A field through a reference in place of the type's
   own function that borrows it was taken by none: it is read again
   (`Decision.receiver`), as other receivers the checker cannot give are.
+
+## A declaration writes its types
+
+- A declaration's fields, and an operation's arguments, are written with
+  their types, as a function's signature is: an unknown name there, or `_`,
+  is an error that says so. Nothing that uses a declaration decides it, so
+  what a program is found to be does not depend on the order its functions
+  are checked in (`docs/redesign.md`, 3). Before, `struct Point(x, y)` and
+  `effect Ask { ask(x) }` had their types decided by the first use checked;
+  with them went the declarations' unknowns never generalised (`mono`,
+  `monoRows`) and the error of a callable stored in a declaration whose
+  field types are inferred. (What is asked again at the end of the program,
+  `lateDups` and the rest, stays: an implementation's condition is asked of
+  the type a later use gives, `impl<T> Twice for W<T> where T: Use<[0, *]>`
+  used at a `Ticket`; asked once every function is checked, it does not
+  depend on their order.)
+- An operation with no result written gives `()`, as a function does.
+- An effect is known before its operations are read: an operation may take
+  or give a callable that performs it (`spawn(fn() -> () / {Task})`).
+- An error in a declaration names it: ``in `Wrap`: unknown type `v`: ..``.
+- Programs edited for it: 25 cases in `tests/cases.cases` and 2 in
+  `tests/checks.cases`, and the `generators`, `lists` and `tasks` examples;
+  four expected messages now name the effect they are in.
+
+## Lean build time
+
+- `Check/Merge.lean`'s parts of the checker state, each made by the
+  `delta_part` macro, are files of their own (`Check/Merge/Part0`..`Part9`,
+  with the macro and the deltas in `Check/Merge/Delta`, which imports
+  `Check.Types`, not `Check.Expr`): they compile side by side and beside the
+  checker. A change to `St` rebuilt in 110 s, of which `Merge` alone was
+  76 s; now 61 s.

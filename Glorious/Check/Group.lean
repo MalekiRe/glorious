@@ -626,9 +626,10 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
                  match m[d.name]? with
                  | some fb => m.insert d.name (Elab.coerceFn cs d.name fb)
                  | none => m) s.runFns }
-  -- A later function can still decide a requirement made here, through a
-  -- declaration whose field types are inferred, so each is checked again at
-  -- the end of the program.
+  -- A later function can still decide a requirement made here: of a type an
+  -- implementation's condition says, at the type a later use gives it
+  -- (`impl<T> Twice for W<T> where T: Use<[0, *]>`, used at a `Ticket`), so
+  -- each is checked again at the end of the program.
   let owner := (decls.head?.map (·.name)).getD "the program"
   -- (Each type once, the first: two alike now are alike whatever is found
   -- later, and what is said is of the first, `checkDrops`.)

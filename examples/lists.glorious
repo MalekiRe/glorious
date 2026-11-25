@@ -4,7 +4,7 @@
 // Cons(1, Cons(4, Cons(9, Cons(16, Cons(25, Nil)))))
 // 13579
 
-enum List { Nil, Cons(head, tail) }
+enum List { Nil, Cons(Int, List) }
 
 fn append(a: List, b: List) -> List {
     match(a) {
