@@ -87,6 +87,157 @@ fn string_continued(bytes: &Vec<u8>, i: Int, left: Int) -> Bool {
     }
 }
 
+// Borrowed text's own functions, as Rust's `str` has them. Places are of
+// bytes; what is cut out is borrowed from the same text.
+impl<'a> StrRef<'a> {
+    pub fn as_bytes(s: &Self) -> &'a [u8] { unsafe { slice_at(ptr_mut_at(s.at), s.len) } }
+    // The bytes from `from` up to `to`, which must be there.
+    pub fn slice(s: &Self, from: Int, to: Int) -> &'a str {
+        if(from < 0 or { to > s.len } or { from > to }) { abort("a part of a text that is not there") } else { () };
+        unsafe { str_at(usize_of(usize_bits(s.at) + from), to - from) }
+    }
+    pub fn starts_with(s: &Self, start: &str) -> Bool { start.len() <= s.len and { str_same_at(s, &start, 0) } }
+    pub fn ends_with(s: &Self, end: &str) -> Bool { end.len() <= s.len and { str_same_at(s, &end, s.len - end.len()) } }
+    // Where another first is in it.
+    pub fn find(s: &Self, part: &str) -> Option<Int> {
+        let mut at = 0;
+        let mut found = None;
+        while({ found.is_none() and { at + part.len() <= s.len } }) {
+            if(str_same_at(s, &part, at)) { found = Some(at) } else { () };
+            at = at + 1
+        };
+        found
+    }
+    pub fn contains(s: &Self, part: &str) -> Bool { StrRef::find(s, part).is_some() }
+    // Without the white space at its ends.
+    pub fn trim(s: &Self) -> &'a str { let t = StrRef::trim_start(s); StrRef::trim_end(&t) }
+    pub fn trim_start(s: &Self) -> &'a str {
+        let mut i = 0;
+        while({ i < s.len and { str_space(s.byte(i)) } }) { i = i + 1 };
+        StrRef::slice(s, i, s.len)
+    }
+    pub fn trim_end(s: &Self) -> &'a str {
+        let mut n = s.len;
+        while({ n > 0 and { str_space(s.byte(n - 1)) } }) { n = n - 1 };
+        StrRef::slice(s, 0, n)
+    }
+    // The parts between each place another is.
+    pub fn split(s: &Self, between: &str) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        let mut at = 0;
+        while({ at + between.len() <= s.len and { between.len() > 0 } }) {
+            if(str_same_at(s, &between, at)) {
+                Vec::push(&mut out, StrRef::slice(s, start, at));
+                at = at + between.len();
+                start = at
+            } else { at = at + 1 }
+        };
+        Vec::push(&mut out, StrRef::slice(s, start, s.len));
+        out
+    }
+    // The parts between white space, none of them empty.
+    pub fn split_whitespace(s: &Self) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while({ i < s.len }) {
+            while({ i < s.len and { str_space(s.byte(i)) } }) { i = i + 1 };
+            let start = i;
+            while({ i < s.len and { not(str_space(s.byte(i))) } }) { i = i + 1 };
+            if(i > start) { Vec::push(&mut out, StrRef::slice(s, start, i)) } else { () }
+        };
+        out
+    }
+    // Each line, without what ends it.
+    pub fn lines(s: &Self) -> Vec<&'a str> {
+        let mut out = StrRef::split(s, "\n");
+        let n = Vec::len(&out);
+        if(n > 0 and { Vec::index(&out, n - 1).is_empty() }) { discard(Vec::pop(&mut out)) } else { () };
+        out
+    }
+    // Its characters, one after another.
+    pub fn chars(s: &Self) -> Chars<'a> { Chars { text: *s, at: 0 } }
+    pub fn to_uppercase(s: &Self) -> String { str_mapped(s, 97, 122, -32) }
+    pub fn to_lowercase(s: &Self) -> String { str_mapped(s, 65, 90, 32) }
+    pub fn repeat(s: &Self, n: Int) -> String {
+        let mut out = String::new();
+        let mut i = 0;
+        while({ i < n }) { String::push_str(&mut out, *s); i = i + 1 };
+        out
+    }
+    pub fn to_owned(s: &Self) -> String { String::from(*s) }
+    // The whole number it writes, if it is one: `-12`.
+    pub fn parse_int(s: &Self) -> Option<Int> {
+        let negative = s.len > 0 and { int(s.byte(0)) == 45 };
+        let first = if(negative) { 1 } else { 0 };
+        if(s.len <= first) { None } else {
+            let mut i = first;
+            let mut n = 0;
+            let mut ok = true;
+            while({ ok and { i < s.len } }) {
+                let d = int(s.byte(i)) - 48;
+                if(d < 0 or { d > 9 }) { ok = false } else { n = n * 10 + d };
+                i = i + 1
+            };
+            if(ok) { Some(if(negative) { 0 - n } else { n }) } else { None }
+        }
+    }
+}
+// Is another text there, from a place on?
+fn str_same_at(s: &StrRef, part: &StrRef, at: Int) -> Bool {
+    let mut i = 0;
+    let mut same = true;
+    while({ same and { i < part.len() } }) { same = s.byte(at + i) == part.byte(i); i = i + 1 };
+    same
+}
+fn str_space(b: u8) -> Bool { let c = int(b); c == 32 or { c == 10 } or { c == 9 } or { c == 13 } }
+// Its bytes, each from `low` to `high` moved by `by`: ASCII letters' case.
+fn str_mapped(s: &StrRef, low: Int, high: Int, by: Int) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while({ i < s.len() }) {
+        let c = int(s.byte(i));
+        String::push_str_byte(&mut out, u8(if(c >= low and { c <= high }) { c + by } else { c }));
+        i = i + 1
+    };
+    out
+}
+
+// A text's characters, decoded from UTF-8 one at a time.
+struct Chars<'a> { text: &'a str, at: Int }
+impl<'a> Iterator for Chars<'a> {
+    type Item = char;
+    fn next(it: &mut Chars<'a>) -> Option<char> {
+        let s = it.text;
+        if(it.at >= s.len()) { None } else {
+            let b0 = int(s.byte(it.at));
+            let n = if(b0 < 128) { 1 } else { if(b0 < 224) { 2 } else { if(b0 < 240) { 3 } else { 4 } } };
+            let mut code = if(n == 1) { b0 } else { if(n == 2) { b0 - 192 } else { if(n == 3) { b0 - 224 } else { b0 - 240 } } };
+            let mut k = 1;
+            while({ k < n }) { code = code * 64 + (int(s.byte(it.at + k)) - 128); k = k + 1 };
+            it.at = it.at + n;
+            Some(char_of(code))
+        }
+    }
+}
+
+impl String {
+    // Its characters, one after another.
+    pub fn chars<'a>(value: &'a Self) -> Chars<'a> { StrRef::chars(&String::as_str(value)) }
+    // The last character taken off, if there is one.
+    pub fn pop(value: &mut Self) -> Option<char> {
+        let n = Vec::len(&value.bytes);
+        if(n == 0) { None } else {
+            let mut start = n - 1;
+            while({ start > 0 and { int(*Vec::index(&value.bytes, start)) >= 128 and { int(*Vec::index(&value.bytes, start)) < 192 } } }) { start = start - 1 };
+            let mut last = StrRef::chars(&StrRef::slice(&String::as_str(value), start, n));
+            let c = match(Iterator::next(&mut last)) { Some(c) => c, None => abort("a text that is not UTF-8") };
+            Vec::truncate(&mut value.bytes, start);
+            Some(c)
+        }
+    }
+}
+
 // What a value is written as for a reader, `{}`, as Rust's `Display`; and for
 // a programmer, `{:?}`, as Rust's `Debug`. Each writes into a `Formatter`.
 trait Display { fn fmt(&Self, &mut Formatter) }

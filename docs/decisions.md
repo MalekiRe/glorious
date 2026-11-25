@@ -7978,7 +7978,13 @@ the bytes), `String + &str` (`impl<'a> Add<&'a str> for String`), a
 `format_debug` and `to_string`. Every scalar, `char`, `&str`, `String`,
 `()` and truth has both; a `Vec`, a slice, a `[T; N]`, a tuple and a
 `Result` have `Debug`, with Rust's quoting (`["a", "b"]`). `std::fmt` and
-`std::text` name them again. `Show`, `Str` and `++` are still there;
+`std::text` name them again. Borrowed text has Rust's functions (byte
+places; parts borrowed from the same text): `as_bytes`, `slice(from, to)`
+(for `&s[from..to]`), `starts_with`, `ends_with`, `find`, `contains`,
+`trim`, `trim_start`, `trim_end`, `split`, `split_whitespace` and `lines`
+(each a `Vec<&str>`), `chars` (a `Chars` iterator), `to_uppercase`,
+`to_lowercase`, `repeat`, `to_owned` and `parse_int`; `String` has `chars`
+and `pop` too. `Show`, `Str` and `++` are still there;
 `Formatter::write_text` takes a `Str` until they go.
 
 What it took of the compiler:
