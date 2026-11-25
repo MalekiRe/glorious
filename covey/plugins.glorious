@@ -51,13 +51,13 @@ fn spawner<S>(spawned: &mut Local<Int>, commands: &mut Commands<S>) where S: ecs
 }
 fn looker<S>(q: &mut Query<(&Pos,), ()>, commands: &mut Commands<S>) { () }
 
-fn hp_added(trigger: &OnAdd<Hp>) { say("hp added x" ++ show(len_at(&trigger.entities))) }
+fn hp_added(trigger: &OnAdd<Hp>) { say(String::from("hp added x") + len_at(&trigger.entities).to_string().as_str()) }
 fn linked<S>(world: &mut World<S>) where S: ecs::Get<Hp>, S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Get<ecs::Relates<ChildOf>>, S: ecs::Get<ecs::Sources<ChildOf>> {
     let parent = world.spawn_bundle((Hp,));
     let child = world.spawn_bundle((Hp,));
     discard(world.relate(child, ChildOf, parent));
     world.despawn_linked<ChildOf>(parent);
-    say("child alive: " ++ (if(world.contains(child)) { "1" } else { "0" }))
+    say(String::from("child alive: ") + (if(world.contains(child)) { "1" } else { "0" }))
 }
 fn count_up(q: &mut Query<(&mut Spawned,), ()>) -> Int {
     q.for_each() { (mut s,) => s.0 = s.0 + 1; };

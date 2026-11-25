@@ -86,8 +86,8 @@ struct A(Int)
 struct B(Int)
 struct Player
 
-fn before(q: &mut Query<(&A,), ()>) { say("before " ++ show(q.count())) }
-fn after(q: &mut Query<(&A,), (With<Player>,)>) { say("after " ++ show(q.count())) }
+fn before(q: &mut Query<(&A,), ()>) { say(String::from("before ") + q.count().to_string().as_str()) }
+fn after(q: &mut Query<(&A,), (With<Player>,)>) { say(String::from("after ") + q.count().to_string().as_str()) }
 fn spawn_a<S>(commands: &mut Commands<S>) -> Entity where S: ecs::Get<A>, S: ecs::Get<Player>, S: ecs::Columns, S: ecs::Unlinks<S> { commands.spawn((A(5), Player)) }
 fn spawn_a3<S>(commands: &mut Commands<S>) where S: ecs::Get<A>, S: ecs::Columns, S: ecs::Unlinks<S> { discard(commands.spawn((A(3),))) }
 fn wait_for<S>(remote: &Remote<S>, n: Int) / {Threads} { while({ remote.waiting() < n }) { yield_now() } }
@@ -283,7 +283,7 @@ fn main() -> Int {
         join(one);
         join(two)
     });
-    say(show(match(app.world.get<A>(both)) { Some(a) => a.0, None => 0 - 1 }) ++ " " ++ show(match(app.world.get<B>(both)) { Some(b) => b.0, None => 0 - 1 }));
+    say((match(app.world.get<A>(both)) { Some(a) => a.0, None => 0 - 1 }).to_string() + " " + (match(app.world.get<B>(both)) { Some(b) => b.0, None => 0 - 1 }).to_string().as_str());
     say("--");
 
     let meeting = AtomicInt::new(0);
@@ -321,7 +321,7 @@ fn main() -> Int {
         app.emit(&Update);
         join(worker)
     });
-    say(show(match(app.world.get<A>(entity)) { Some(a) => a.0, None => 0 - 1 }) ++ " " ++ show(match(app.world.get<B>(entity)) { Some(b) => b.0, None => 0 - 1 }) ++ " " ++ show(load(&met)));
+    say((match(app.world.get<A>(entity)) { Some(a) => a.0, None => 0 - 1 }).to_string() + " " + (match(app.world.get<B>(entity)) { Some(b) => b.0, None => 0 - 1 }).to_string().as_str() + " " + load(&met).to_string().as_str());
     say("--");
 
     let mut app = App::new().register<A>().register<B>()
@@ -409,6 +409,6 @@ fn main() -> Int {
         discard(replace(&mut held, None));
         say(join(waiter))
     });
-    say(scope(fn(s: &Scope) -> Str / {Threads} { match(remote.bridge(Net, fn(q: &mut Query<(&A,), ()>) { () })) { Err(BridgeError::Closed) => "closed", Err(_) => "invalid", Ok(_) => "ran" } }));
+    say(scope(fn(s: &Scope) -> &'static str / {Threads} { match(remote.bridge(Net, fn(q: &mut Query<(&A,), ()>) { () })) { Err(BridgeError::Closed) => "closed", Err(_) => "invalid", Ok(_) => "ran" } }));
     0
 }

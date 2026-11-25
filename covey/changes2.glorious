@@ -148,11 +148,11 @@ fn cached() {
 }
 
 // `read_only_cursors_do_not_consume_subsequent_system_writes`
-fn before_write(q: &mut Query<(&Value,), (Changed<Value>,)>) { say("before " ++ show(values(q))) }
+fn before_write(q: &mut Query<(&Value,), (Changed<Value>,)>) { say(String::from("before ") + format_debug(&values(q)).as_str()) }
 fn write(value: &mut Single<(&mut Value,), ()>, gate: &mut Single<(&Gate,), ()>) {
     match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 1;, None => () }
 }
-fn after_write(q: &mut Query<(&Value,), (Changed<Value>,)>) { say("after " ++ show(values(q))) }
+fn after_write(q: &mut Query<(&Value,), (Changed<Value>,)>) { say(String::from("after ") + format_debug(&values(q)).as_str()) }
 fn cursors() {
     let mut app = App::new().register<Value>().register<Gate>()
         .add_systems(Update, (before_write, write, after_write).chain()).build();

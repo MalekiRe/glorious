@@ -52,10 +52,10 @@ fn names<S>(world: &World<S>, es: Vec<Entity>) -> Vec<Int> where S: ecs::Get<Nam
     (sort(fold(es, Vec::new(), fn(out: Vec<Int>, e: Entity) -> Vec<Int> { match(world.get<Name>(e)) { Some(n) => pushed(out, n.0), None => out } })))
 }
 fn flag(b: Bool) { say(if(b) { 1 } else { 0 }) }
-fn docked<S>(world: &World<S>, ship: Entity) -> Str where S: ecs::Get<Relates<DockedAt>>, S: ecs::Get<Name> {
+fn docked<S>(world: &World<S>, ship: Entity) -> String where S: ecs::Get<Relates<DockedAt>>, S: ecs::Get<Name> {
     match(world.get<Relates<DockedAt>>(ship)) {
-        Some(d) => show(match(world.get<Name>(d.target)) { Some(n) => n.0, None => 0 - 1 }) ++ " " ++ show(d.relation.berth),
-        None => "none"
+        Some(d) => let name = match(world.get<Name>(d.target)) { Some(n) => n.0, None => 0 - 1 }; name.to_string() + " " + d.relation.berth.to_string().as_str(),
+        None => String::from("none")
     }
 }
 
@@ -106,7 +106,7 @@ fn main() -> Int {
     let mut i = 0;
     while({ i < len_at(&ships) }) {
         let ship = ships[i];
-        say(show(if(is_none(app.world.get<Relates<DockedAt>>(ship))) { 0 } else { 1 }) ++ " " ++ show(if(is_none(app.world.get<Relates<InSquad>>(ship))) { 0 } else { 1 }));
+        say((if(is_none(app.world.get<Relates<DockedAt>>(ship))) { 0 } else { 1 }).to_string() + " " + (if(is_none(app.world.get<Relates<InSquad>>(ship))) { 0 } else { 1 }).to_string().as_str());
         i = i + 1
     };
     say("--");

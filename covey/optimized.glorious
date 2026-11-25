@@ -49,7 +49,7 @@ use std::vec::{Vec};
 struct Update
 struct Tag(Int)
 struct Number(Int)
-struct Label(Str)
+struct Label(&'static str)
 
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 

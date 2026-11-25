@@ -34,13 +34,13 @@ fn changed(query: &mut Query<(&Value,), (Changed<Value>,)>, log: ResMut<Log>) {
     Vec::push(&mut log.changed, -1)
 }
 
-fn shown(name: Str, xs: &Vec<Int>) -> Str {
-    let mut out = name ++ ":";
+fn shown(name: &str, xs: &Vec<Int>) -> String {
+    let mut out = String::from(name) + ":";
     let mut empty = true;
     let mut i = 0;
     while({ i < len_at(xs) }) {
-        if(xs[i] < 0) { out = out ++ (if(empty) { " - |" } else { " |" }); empty = true }
-        else { out = out ++ " " ++ show(xs[i]); empty = false };
+        if(xs[i] < 0) { out.push_str(if(empty) { " - |" } else { " |" }); empty = true }
+        else { out.push_str(" "); out.push_str(xs[i].to_string().as_str()); empty = false };
         i = i + 1
     };
     out
@@ -89,7 +89,7 @@ fn quiet() -> Int {
     match(app.world.get_mut<Value>(a)) { Some(mut m) => m.0 = 2;, None => () };
     app.emit(&Update);
     match(app.world.resource<Seen>()) {
-        Some(seen) => say("single: " ++ show(seen.0[0]) ++ " " ++ show(seen.0[1])); len_at(&seen.0) - 2,
+        Some(seen) => say(String::from("single: ") + (seen.0[0]).to_string().as_str() + " " + (seen.0[1]).to_string().as_str()); len_at(&seen.0) - 2,
         None => 9
     }
 }

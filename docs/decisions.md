@@ -8150,3 +8150,19 @@ could, which left a program not lowered (laid out by its types):
   text and a temporary, an array of one lifetime, is written with `+`.
 - A field through a reference waits for the implementation that decides
   what the reference is to (`settleAssocsAll` in `fieldAtThrough`).
+
+## Covey's programs over `String` and `&str`
+
+- Every covey program says its texts as `String`s joined with `+`,
+  numbers with `to_string`, vectors with `format_debug`.
+- `std::text::sort_strings`: `String`s in order, compared by their views
+  (`Ord` takes its values whole, and a `String` is not copied to compare).
+- `GLORIOUS_LOWER` also names the functions one of whose signatures has
+  what nothing decided.
+- Not yet: `bundles` and `behavior` are not lowered (`ecs::column_remove`
+  is used at what inference does not decide); not lowered, a view of a
+  `String`'s bytes reads the machine's slots, so `bundles` builds its lines
+  with `push_string`, which puts the bytes in as elements. A dot call on a
+  receiver whose type an implementation decides later takes it as the
+  function's parameter (`count.to_string()` of `KeptRun`'s result: written
+  `let n: Int = count`).

@@ -56,7 +56,7 @@ fn orders() {
     say_u32(second.get<u32>(second_number));
     say_u32(second.get<u32>(second_pair));
     say_i16(second.get<i16>(second_pair));
-    first.query<(&u32, &i16)>().for_each() { a, b => say(show(*a) ++ " " ++ show(*b)) };
+    first.query<(&u32, &i16)>().for_each() { a, b => let mut line = a.to_string() + " "; line.push_string(&b.to_string()); say(line) };
     flag(first.despawn(pair));
     flag(first.despawn(first_single));
     flag(first.despawn(reversed));
@@ -68,7 +68,7 @@ fn orders() {
     say_i16(moved.get<i16>(revived[1]))
 }
 
-fn opt<T>(o: Option<T>) -> Str where T: Show { match(o) { Some(x) => show(x), None => "-" } }
+fn opt<T>(o: Option<T>) -> String where T: Display { match(o) { Some(x) => format(&x), None => String::from("-") } }
 
 // Some of `many_bundle_transitions_stay_exact_while_the_cache_grows`, one round.
 fn transitions() {
@@ -78,16 +78,16 @@ fn transitions() {
     let g = world.spawn_bundle((2u32, 10i16, 11u8));
     let i = world.spawn_bundle((14i16, 15u8, 16u64));
     let j = world.spawn_bundle((3u32, 17i16, 18u8, 19u64));
-    match(world.insert_bundle(a, (20u8, 21u64))) { Some(had) => let (x, y) = had; say(opt(x) ++ opt(y)), None => () };
-    match(world.insert_bundle(d, (2u32, 22u64))) { Some(had) => let (x, y) = had; say(opt(x) ++ opt(y)), None => () };
-    match(world.get<u8>(a)) { Some(x) => say(show(1) ++ " " ++ show(*x) ++ " " ++ opt(match(world.get<u64>(a)) { Some(y) => Some(*y), None => None })), None => () };
-    match(world.get<u32>(d)) { Some(x) => say(show(*x) ++ " " ++ opt(match(world.get<u64>(d)) { Some(y) => Some(*y), None => None })), None => () };
+    match(world.insert_bundle(a, (20u8, 21u64))) { Some(had) => let (x, y) = had; let mut line = opt(x); line.push_string(&opt(y)); say(line), None => () };
+    match(world.insert_bundle(d, (2u32, 22u64))) { Some(had) => let (x, y) = had; let mut line = opt(x); line.push_string(&opt(y)); say(line), None => () };
+    match(world.get<u8>(a)) { Some(x) => let mut line = String::from("1 "); line.push_string(&x.to_string()); line.push_str(" "); line.push_string(&opt(match(world.get<u64>(a)) { Some(y) => Some(*y), None => None })); say(line), None => () };
+    match(world.get<u32>(d)) { Some(x) => let mut line = x.to_string() + " "; line.push_string(&opt(match(world.get<u64>(d)) { Some(y) => Some(*y), None => None })); say(line), None => () };
     let (_, ten) = world.remove_bundle<(u32, i16)>(g);
     say(opt(ten));
     let (fourteen, sixteen) = world.remove_bundle<(i16, u64)>(i);
-    say(opt(fourteen) ++ " " ++ opt(sixteen));
+    let mut line = opt(fourteen) + " "; line.push_string(&opt(sixteen)); say(line);
     let (eighteen, nineteen) = world.remove_bundle<(u8, u64)>(j);
-    say(opt(eighteen) ++ " " ++ opt(nineteen));
+    let mut line = opt(eighteen) + " "; line.push_string(&opt(nineteen)); say(line);
     say(world.query<&u32>().count())
 }
 

@@ -40,16 +40,16 @@ fn value_of(query: &mut Query<(Entity, &Health)>, entity: Entity) -> Int {
     match(query.get_mut(entity)) { Some((_, h)) => h.0, None => 0 - 1 }
 }
 
-fn added(trigger: &OnAdd<Health>) { say("add " ++ show(len_at(&trigger.entities))) }
+fn added(trigger: &OnAdd<Health>) { say(String::from("add ") + len_at(&trigger.entities).to_string().as_str()) }
 fn inserted(trigger: &OnInsert<Health>, health: &mut Query<(Entity, &Health)>) {
-    say("insert " ++ show(value_of(health, trigger.entities[0])))
+    say(String::from("insert ") + value_of(health, trigger.entities[0]).to_string().as_str())
 }
 fn again(trigger: &OnInsert<Health>) { say("insert again") }
 fn replaced(trigger: &OnReplace<Health>, health: &mut Query<(Entity, &Health)>) {
-    say("replace " ++ show(value_of(health, trigger.entities[0])))
+    say(String::from("replace ") + value_of(health, trigger.entities[0]).to_string().as_str())
 }
 fn removed(trigger: &OnRemove<Health>, health: &mut Query<(Entity, &Health)>) {
-    say("remove " ++ show(value_of(health, trigger.entities[0])))
+    say(String::from("remove ") + value_of(health, trigger.entities[0]).to_string().as_str())
 }
 
 fn main() -> Int {

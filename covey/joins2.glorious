@@ -22,23 +22,23 @@ impl Relation for InSquad { type Kind = OneToMany; }
 
 // (Both joins in one query: two joins read `Name` of the entities they
 // relate to, and that is apart.)
-fn read<S>(world: &mut World<S>, unit: Entity) -> Str
+fn read<S>(world: &mut World<S>, unit: Entity) -> String
     where S: ecs::Get<Name>, S: ecs::Get<Relates<DockedAt>>, S: ecs::Get<Relates<InSquad>>,
           S: ecs::Hidden<(To<DockedAt, (&Name,)>, To<InSquad, (&Name,)>), ()>, S: ecs::Hidden<(&Name,), ()> {
     match(world.query<(To<DockedAt, (&Name,)>, To<InSquad, (&Name,)>)>().get_mut(unit)) {
         Some((docked, squad)) =>
             let d = match(docked) { Some((n,)) => n.0, None => 0 - 1 };
             let s = match(squad) { Some((n,)) => n.0, None => 0 - 1 };
-            show(d) ++ " " ++ show(s),
-        None => "-1 -1"
+            d.to_string() + " " + s.to_string().as_str(),
+        None => String::from("-1 -1")
     }
 }
-fn crew<S>(world: &mut World<S>, e: Entity) -> Str
+fn crew<S>(world: &mut World<S>, e: Entity) -> String
     where S: ecs::Get<ecs::Sources<DockedAt>>, S: ecs::Get<ecs::Sources<InSquad>>,
           S: ecs::Hidden<(From<DockedAt, Entity>, From<InSquad, Entity>), ()>, S: ecs::Hidden<Entity, ()> {
     match(world.query<(From<DockedAt, Entity>, From<InSquad, Entity>)>().get_mut(e)) {
-        Some((d, s)) => show(len_at(&d)) ++ " " ++ show(len_at(&s)),
-        None => "0 0"
+        Some((d, s)) => len_at(&d).to_string() + " " + len_at(&s).to_string().as_str(),
+        None => String::from("0 0")
     }
 }
 

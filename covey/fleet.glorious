@@ -78,7 +78,7 @@ impl Relation for Aboard { type Kind = OneToMany; }
 impl Linked for Aboard { const LINKED: Bool = true; }
 
 // ---- Components
-struct Name(Str)
+struct Name(&'static str)
 struct Cargo(Int)
 struct Fuel(Int)
 struct Hull(Int)
@@ -89,8 +89,8 @@ struct Speed(Int)
 struct Carrier
 struct Update
 
-fn say_all(lines: Vec<Str>) { let mut i = 0; while({ i < len_at(&lines) }) { say(lines[i]); i = i + 1 } }
-fn list(items: Vec<Str>) -> String { if(len_at(&items) == 0) { String::from("none") } else { join(items, ", ") } }
+fn say_all(lines: Vec<String>) { let mut i = 0; while({ i < len_at(&lines) }) { say(&lines[i]); i = i + 1 } }
+fn list<T>(items: Vec<T>) -> String where T: Display { if(len_at(&items) == 0) { String::from("none") } else { join(items, ", ") } }
 
 // ---- Systems
 // Docked ships unload into their station: one row at a time.
@@ -131,8 +131,8 @@ fn keep_formation(convoy: &mut Query<(To<Follows, (&Pos,)>, (&Gap, &mut Pos))>) 
 // Only ships whose docking changed since this system last ran.
 fn harbor_log(moved: &mut Query<(&Name, &Relates<DockedAt>, To<DockedAt, (&Name,)>), (Relinked<DockedAt>,)>) {
     moved.for_each() { ship, dock, station =>
-        let at = match(station) { Some((s,)) => s.0, None => "?" };
-        say("  harbor: " ++ ship.0 ++ " at " ++ at ++ ", berth " ++ show(dock.relation.berth));
+        let at: &str = match(station) { Some((s,)) => s.0, None => "?" };
+        say(String::from("  harbor: ") + ship.0 + " at " + at + ", berth " + dock.relation.berth.to_string().as_str());
     }
 }
 // Station rosters, two joins deep: docked ships, then each ship's pilot.
@@ -144,29 +144,29 @@ fn rosters(stations: &mut Query<(&Name, &Cargo, From<DockedAt, (&Name, From<Pilo
             let entry = &ships[i];
             let ship = entry.0;
             let pilots = &entry.1;
-            Vec::push(&mut shown, if(len_at(pilots) > 0) { let (p,) = pilots[0]; ship.0 ++ " (" ++ p.0 ++ ")" } else { ship.0 ++ " (no pilot)" });
+            Vec::push(&mut shown, if(len_at(pilots) > 0) { let (p,) = pilots[0]; String::from(ship.0) + " (" + p.0 + ")" } else { String::from(ship.0) + " (no pilot)" });
             i = i + 1
         };
-        if(if(len_at(&shown) > 0) { true } else { cargo.0 > 0 }) { say("  " ++ station.0 ++ " holds " ++ show(cargo.0) ++ " cargo; docked: " ++ list(shown)) } else { () };
+        if(if(len_at(&shown) > 0) { true } else { cargo.0 > 0 }) { say(String::from("  ") + station.0 + " holds " + cargo.0.to_string().as_str() + " cargo; docked: " + list(shown).as_str()) } else { () };
     }
 }
 // Read-only joins both ways.
 fn politics(ships: &mut Query<(&Name, (To<Allied, (&Name,)>, From<Allied, (&Name,)>), From<Hunting, (&Name,)>), (With<Hull>,)>) {
     let mut lines = Vec::new();
     ships.for_each() { ship, (allies, allied_by), hunters =>
-        let names = fn(l: std::vec::Vec<(&Name,)>) -> Vec<Str> { (std::vec::map(l, fn(x: (&Name,)) -> Str { let (n,) = x; n.0 })) };
-        Vec::push(&mut lines, "  " ++ ship.0 ++ ": allies " ++ list((std::vec::sort(names(allies)))) ++ ", allied by " ++ list((std::vec::sort(names(allied_by)))) ++ ", hunted by " ++ list((std::vec::sort(names(hunters)))));
+        let names = fn(l: std::vec::Vec<(&Name,)>) -> Vec<&'static str> { (std::vec::map(l, fn(x: (&Name,)) -> &'static str { let (n,) = x; n.0 })) };
+        Vec::push(&mut lines, String::from("  ") + ship.0 + ": allies " + list((std::vec::sort(names(allies)))).as_str() + ", allied by " + list((std::vec::sort(names(allied_by)))).as_str() + ", hunted by " + list((std::vec::sort(names(hunters)))).as_str());
     };
-    say_all((std::vec::sort(lines)))
+    say_all(std::text::sort_strings(lines))
 }
 // Every ship's status, reading its flagship through the fragmenting join.
 fn status(ships: &mut Query<(&Name, (&Fuel, &Hull, &Pos), To<InFleet, (&Name,)>), ()>) {
     let mut lines = Vec::new();
     ships.for_each() { ship, (fuel, hull, pos), flagship =>
-        let fleet = match(flagship) { Some((f,)) => f.0, None => "-" };
-        Vec::push(&mut lines, "  " ++ pad_end(String::from_text(ship.0).as_str(), 9, ' ') ++ " fuel " ++ pad_start(fuel.0.to_string().as_str(), 3, ' ') ++ "  hull " ++ pad_start(hull.0.to_string().as_str(), 3, ' ') ++ "  pos " ++ pad_start(pos.0.to_string().as_str(), 4, ' ') ++ "  fleet " ++ fleet);
+        let fleet: &str = match(flagship) { Some((f,)) => f.0, None => "-" };
+        Vec::push(&mut lines, String::from("  ") + pad_end(ship.0, 9, ' ').as_str() + " fuel " + pad_start(fuel.0.to_string().as_str(), 3, ' ').as_str() + "  hull " + pad_start(hull.0.to_string().as_str(), 3, ' ').as_str() + "  pos " + pad_start(pos.0.to_string().as_str(), 4, ' ').as_str() + "  fleet " + fleet);
     };
-    say_all((std::vec::sort(lines)))
+    say_all(std::text::sort_strings(lines))
 }
 
 fn main() -> Int {
@@ -180,7 +180,7 @@ fn main() -> Int {
             if(launched.0) { () } else {
                 launched.0 = true;
                 carriers.for_each() { carrier, name =>
-                    say("  " ++ name.0 ++ " launches 2 drones");
+                    say(String::from("  ") + name.0 + " launches 2 drones");
                     discard(commands.spawn((Name("drone-a"), Aboard.to(carrier))));
                     discard(commands.spawn((Name("drone-b"), Aboard.to(carrier))));
                 }
@@ -235,7 +235,7 @@ fn main() -> Int {
     discard(app.world.unlink<Hunting>(vex, kestrel));
     // (The convoy cannot close on itself: relating would abort the program,
     // so it is not tried. Kestrel leads Osprey, which Heron follows.)
-    say("  (Kestrel following Heron would be refused: Follows is acyclic; " ++ show(len_at(&app.world.descendants<Follows>(kestrel))) ++ " follow Kestrel)");
+    say(String::from("  (Kestrel following Heron would be refused: Follows is acyclic; ") + (len_at(&app.world.descendants<Follows>(kestrel))).to_string().as_str() + " follow Kestrel)");
     app.emit(&Update);
 
     say("== frame 3: Dauntless is lost; Ceres closes");
@@ -245,10 +245,10 @@ fn main() -> Int {
     let mut aboard = app.world.query_filtered<(Entity,), (Related<Aboard>,), _>();
     let left = aboard.count();
     discard(aboard);
-    say("  " ++ show(drones) ++ " drones were aboard, " ++ show(left) ++ " remain");
+    say(String::from("  ") + drones.to_string().as_str() + " drones were aboard, " + left.to_string().as_str() + " remain");
     let docked = len_at(&app.world.targets<DockedAt, _>(kestrel)) > 0;
     let at_vesta = len_at(&app.world.sources<DockedAt>(vesta));
-    say("  Kestrel docked: " ++ (if(docked) { "true" } else { "false" }) ++ ", Vesta's ships: " ++ show(at_vesta));
+    say(String::from("  Kestrel docked: ") + (if(docked) { "true" } else { "false" }) + ", Vesta's ships: " + at_vesta.to_string().as_str());
     app.emit(&Update);
     0
 }

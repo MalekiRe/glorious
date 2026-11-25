@@ -19,14 +19,14 @@ use std::vec::{Vec};
 struct Score(Int)
 impl Default for Score { fn default() -> Score { Score(0) } }
 struct Speed(Int)
-struct Log { lines: Vec<Str> }
+struct Log { lines: Vec<String> }
 impl Default for Log { fn default() -> Log { Log { lines: Vec::new() } } }
 
 fn note(trigger: &OnInsert<Score>, score: Res<Score>, log: Option<ResMut<Log>>) {
-    match(log) { Some(log) => Vec::push(&mut log.lines, "score " ++ show(score.0)), None => () }
+    match(log) { Some(log) => Vec::push(&mut log.lines, String::from("score ") + score.0.to_string().as_str()), None => () }
 }
 
-fn say_all(lines: &Vec<Str>) { let mut i = 0; while({ i < len_at(lines) }) { say(lines[i]); i = i + 1 } }
+fn say_all(lines: &Vec<String>) { let mut i = 0; while({ i < len_at(lines) }) { say(&lines[i]); i = i + 1 } }
 
 fn main() -> Int {
     let app = App::new()

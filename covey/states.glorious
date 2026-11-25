@@ -26,8 +26,8 @@ impl State for Playing { type Group = Game; }
 
 fn enter_menu(e: &OnEnter<Menu>) { say("enter menu") }
 fn exit_menu(e: &OnExit<Menu>) { say("exit menu") }
-fn enter_playing(e: &OnEnter<Playing>, playing: &Playing) { say("enter playing " ++ show(playing.level)) }
-fn exit_playing(e: &OnExit<Playing>, playing: &Playing) { say("exit playing " ++ show(playing.level)) }
+fn enter_playing(e: &OnEnter<Playing>, playing: &Playing) { say(String::from("enter playing ") + playing.level.to_string().as_str()) }
+fn exit_playing(e: &OnExit<Playing>, playing: &Playing) { say(String::from("exit playing ") + playing.level.to_string().as_str()) }
 fn menu_to_playing(e: &OnTransition<Menu, Playing>) { say("menu -> playing") }
 fn playing_to_playing(e: &OnTransition<Playing, Playing>) { say("playing -> playing") }
 

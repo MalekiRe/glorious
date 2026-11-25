@@ -52,9 +52,9 @@ use std::vec::{Vec};
 struct Unhandled
 
 // `specialization_filters_types_preserving_order_and_captures`
-fn first_seen(e: &first::Event, count: &mut Local<Int>) { count.0 = count.0 + 1; say("first " ++ show(e.0 * count.0)) }
-fn other_seen(e: &second::Event) { say("other " ++ show(e.0)) }
-fn last_seen(e: &first::Event) { say("last " ++ show(e.0)) }
+fn first_seen(e: &first::Event, count: &mut Local<Int>) { count.0 = count.0 + 1; say(String::from("first ") + (e.0 * count.0).to_string().as_str()) }
+fn other_seen(e: &second::Event) { say(String::from("other ") + e.0.to_string().as_str()) }
+fn last_seen(e: &first::Event) { say(String::from("last ") + e.0.to_string().as_str()) }
 fn events<S, L>(app: App<S, L>) -> App<S, (ecs::On<first::Event, ecs::SharedSystem<<fn(&first::Event) -> () as ecs::IntoSystem<first::Event, S>>::Out>>,
         (ecs::On<second::Event, ecs::SharedSystem<<fn(&second::Event) -> () as ecs::IntoSystem<second::Event, S>>::Out>>,
         (ecs::On<first::Event, ecs::SharedSystem<<fn(&first::Event, &mut Local<Int>) -> () as ecs::IntoSystem<first::Event, S>>::Out>>, L)))> {
@@ -90,11 +90,11 @@ fn count_tagged(q: &mut Query<(&Wide,), (With<Tag>,)>, sum: &mut Single<(&mut To
 
 // `plugins_run_where_they_were_added_in_tuples_of_any_shape`
 struct Tick
-struct Named(Str)
+struct Named(&'static str)
 fn app_first() { say("app first") }
 fn between() { say("between") }
 fn app_last() { say("app last") }
-fn push_named(name: Str) -> fn() -> () { fn() { say(name) } }
+fn push_named(name: &'static str) -> fn() -> () { fn() { say(name) } }
 
 fn main() -> Int {
     let mut app = App::new().add_plugins(events).build();

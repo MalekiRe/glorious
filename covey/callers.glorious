@@ -18,18 +18,18 @@ struct Big(Int)
 fn add_one(value: &mut Single<(&mut Small,), ()>) { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 1;, None => () } }
 fn add_two(value: &mut Single<(&mut Big,), ()>) { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 2;, None => () } }
 
-fn caller(seed: Int) -> Str {
+fn caller(seed: Int) -> String {
     let mut app = App::new().register<Small>().register<Big>().add_systems(Update, parallel((add_one, add_two))).build();
     let entity = app.world.spawn_bundle((Small(seed), Big(0)));
     let mut i = 0;
     while({ i < 30 }) { app.emit(&Update); i = i + 1 };
     let small = match(app.world.get<Small>(entity)) { Some(v) => v.0, None => 0 - 1 };
     let big = match(app.world.get<Big>(entity)) { Some(v) => v.0, None => 0 - 1 };
-    show(small) ++ " " ++ show(big)
+    small.to_string() + " " + big.to_string().as_str()
 }
 
 fn main() -> Int {
-    let (a, b) = scope(fn(s: &Scope) -> (Str, Str) / {Threads} {
+    let (a, b) = scope(fn(s: &Scope) -> (String, String) / {Threads} {
         let first = s.spawn({ caller(10) });
         let second = s.spawn({ caller(1000) });
         (join(first), join(second))

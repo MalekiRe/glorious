@@ -58,6 +58,6 @@ fn main() -> Int {
     let mut alive = 0;
     let mut k = 0;
     while({ k < len_at(&kids) }) { if(world.contains(kids[k])) { alive = alive + 1 } else { () }; k = k + 1 };
-    say(show(alive - (if(world.contains(kids[2])) { 1 } else { 0 })) ++ " " ++ show(if(world.contains(kids[2])) { 1 } else { 0 }));
+    say((alive - (if(world.contains(kids[2])) { 1 } else { 0 })).to_string() + " " + (if(world.contains(kids[2])) { 1 } else { 0 }).to_string().as_str());
     0
 }

@@ -41,13 +41,13 @@ fn main() -> Int {
     discard(app.world.relate(leaf, Attached, mid));
     discard(app.world.relate(mid, Attached, root));
     app.emit(&Update);
-    say(show(global(&app.world, leaf)) ++ " " ++ show(global(&app.world, mid)) ++ " " ++ show(global(&app.world, root)));
+    say(global(&app.world, leaf).to_string() + " " + global(&app.world, mid).to_string().as_str() + " " + global(&app.world, root).to_string().as_str());
     discard(app.world.insert(root, Local(2)));
     app.emit(&Update);
-    say(show(global(&app.world, leaf)) ++ " " ++ show(global(&app.world, mid)) ++ " " ++ show(global(&app.world, root)));
+    say(global(&app.world, leaf).to_string() + " " + global(&app.world, mid).to_string().as_str() + " " + global(&app.world, root).to_string().as_str());
     // (The leaf moved to the root.)
     discard(app.world.relate(leaf, Attached, root));
     app.emit(&Update);
-    say(show(global(&app.world, leaf)) ++ " " ++ show(global(&app.world, mid)) ++ " " ++ show(global(&app.world, root)));
+    say(global(&app.world, leaf).to_string() + " " + global(&app.world, mid).to_string().as_str() + " " + global(&app.world, root).to_string().as_str());
     0
 }

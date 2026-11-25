@@ -32,7 +32,7 @@ fn mark<S>(trigger: &OnAdd<Health>, commands: &mut Commands<S>) where S: ecs::Ge
     let mut i = 0;
     while({ i < len_at(&trigger.entities) }) { commands.insert(trigger.entities[i], (Marker,)); i = i + 1 }
 }
-fn marked(trigger: &OnAdd<Marker>) { say("marked " ++ show(len_at(&trigger.entities))) }
+fn marked(trigger: &OnAdd<Marker>) { say(String::from("marked ") + len_at(&trigger.entities).to_string().as_str()) }
 fn spawner<S>(commands: &mut Commands<S>) where S: ecs::Get<Health>, S: ecs::Columns, S: ecs::Unlinks<S> { discard(commands.spawn((Health(9),))) }
 
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }

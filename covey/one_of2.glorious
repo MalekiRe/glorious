@@ -45,11 +45,11 @@ impl Requires for Rider { type Required = (Walking,); }
 
 fn has<T, S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<T> { match(world.get<T>(e)) { Some(_) => 1, None => 0 } }
 
-fn replaced(t: &OnReplace<Running>, q: &mut Query<(Entity, &Running), ()>) { match(q.get_mut(t.entities[0])) { Some((_, r)) => say("replace running " ++ show(r.0)), None => () } }
-fn removed(t: &OnRemove<Running>, q: &mut Query<(Entity, &Running), ()>) { match(q.get_mut(t.entities[0])) { Some((_, r)) => say("remove running " ++ show(r.0)), None => () } }
+fn replaced(t: &OnReplace<Running>, q: &mut Query<(Entity, &Running), ()>) { match(q.get_mut(t.entities[0])) { Some((_, r)) => say(String::from("replace running ") + r.0.to_string().as_str()), None => () } }
+fn removed(t: &OnRemove<Running>, q: &mut Query<(Entity, &Running), ()>) { match(q.get_mut(t.entities[0])) { Some((_, r)) => say(String::from("remove running ") + r.0.to_string().as_str()), None => () } }
 fn removed_dead(t: &OnRemove<Dead>) { say("remove dead") }
 fn added_walking(t: &OnAdd<Walking>, q: &mut Query<(Entity, Has<Running>, Has<Dead>), ()>) {
-    match(q.get_mut(t.entities[0])) { Some((_, r, d)) => say("add walking " ++ (if(r) { "1" } else { "0" }) ++ " " ++ (if(d) { "1" } else { "0" })), None => () }
+    match(q.get_mut(t.entities[0])) { Some((_, r, d)) => say(String::from("add walking ") + (if(r) { "1" } else { "0" }) + " " + (if(d) { "1" } else { "0" })), None => () }
 }
 fn inserted_walking(t: &OnInsert<Walking>) { say("insert walking") }
 

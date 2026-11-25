@@ -43,6 +43,6 @@ fn main() -> Int {
     let mut agree = true;
     let mut j = 0;
     while({ j < n }) { match(app.world.get<Position>(es[j])) { Some(p) => if(p.0 == positions[j]) { () } else { agree = false }, None => agree = false }; j = j + 1 };
-    say(show(n) ++ " entities, 10 frames: " ++ (if(agree) { "the query and the raw loop agree" } else { "they differ" }));
+    say(n.to_string() + " entities, 10 frames: " + (if(agree) { "the query and the raw loop agree" } else { "they differ" }));
     0
 }

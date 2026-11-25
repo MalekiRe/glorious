@@ -525,8 +525,13 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
             | some fn => s!"{e}: `{c.fnNames[fn]?.getD ""}`"
             | none => e
           IO.eprintln s!"not lowered: {e}"
-        -- (And the functions with no signature, left as they are.)
+        -- (And the functions with no signature, left as they are; and those
+        -- one of whose signatures has what nothing decided.)
         let C := C.withIndex
+        let undecidedIn := (List.range c.checked.fns.size).filter fun f =>
+          (C.sigsOf f).any fun e => (e.sig.params ++ [e.sig.ret]).any (Lower.undecided C [])
+        unless undecidedIn.isEmpty do
+          IO.eprintln s!"with what nothing decided: {undecidedIn.map fun f => c.fnNames[f]?.getD (toString f)}"
         let unsigned := (List.range c.checked.fns.size).filter fun f => (C.sigsOf f).isEmpty
         unless unsigned.isEmpty do
           IO.eprintln s!"no signature: {unsigned.map fun f => c.fnNames[f]?.getD (toString f)}"

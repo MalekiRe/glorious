@@ -40,8 +40,8 @@ struct Health(Int)
 struct Player
 
 // `bridges_run_at_the_tasks_position_and_see_earlier_bridges_effects`
-fn before(q: &mut Query<(&Health,), ()>) { say("before " ++ show(q.count())) }
-fn after(q: &mut Query<(&Health,), (With<Player>,)>) { say("after " ++ show(q.count())) }
+fn before(q: &mut Query<(&Health,), ()>) { say(String::from("before ") + q.count().to_string().as_str()) }
+fn after(q: &mut Query<(&Health,), (With<Player>,)>) { say(String::from("after ") + q.count().to_string().as_str()) }
 fn spawn_player<S>(commands: &mut Commands<S>) -> Entity where S: ecs::Get<Health>, S: ecs::Get<Player>, S: ecs::Columns, S: ecs::Unlinks<S> {
     commands.spawn((Health(10), Player))
 }
@@ -104,7 +104,7 @@ fn kept<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Ge
     let mut going = true;
     while({ going }) {
         match(system.bridge(&mut world, Update)) {
-            Ok((count, ids)) => say(show(count) ++ " " ++ show(ids)),
+            Ok((count, ids)) => let n: Int = count; say(n.to_string() + " " + format_debug(&ids).as_str()),
             Err(_) => going = false
         }
     };
