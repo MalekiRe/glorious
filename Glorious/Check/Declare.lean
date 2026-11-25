@@ -1006,6 +1006,23 @@ def declare (items : List Item) : M Unit := do
       if lower == 1 then modify fun s => { s with anyMust := true }
       modify fun s => { s with useDecls := s.useDecls.insert head (lower == 1, upper == some 1) }
     | _ => pure ()
+  -- A callable kept in a type said to be used at most once is called at
+  -- most once (exactly once, of one used exactly once), as Rust's
+  -- `Box<dyn FnOnce()>`: so said of its capture, for every use of the type.
+  -- (Any other is called any number of times, `Box<dyn Fn()>`: `checkGroup`.)
+  for (head, (must, once)) in (← get).useDecls.toList do
+    if once then
+      let ctors := (((← get).types[head]?).map (·.ctors)).getD []
+      for c in ctors do
+        if let some sig := (← get).ctors[c]? then
+          let rec callables : Ty → List Nat
+            | .fn ps r _ _ cap => cap :: (ps.flatMap callables ++ callables r)
+            | .con _ args | .tuple args => args.flatMap callables
+            | .ref _ t _ => callables t
+            | .var _ => []
+          for cap in sig.fields.flatMap callables do
+            captures cap .once
+            if must then captures cap .must
   -- A type each constructor of which holds a value of the type itself, with
   -- nothing between, has no value that can be built: its layout does not end
   -- (specification 5). A type is founded if one of its constructors holds

@@ -759,6 +759,11 @@ structure St where
   effects : List (String × EffectDecl) := []
   aliases : Std.HashMap String Expr := {}
   fns : Std.HashMap String Scheme := {}
+  /-- How many captures there were when the group being checked began, and
+  what each it changed of those was (`checkGroup`): what a group finds of a
+  capture made before it is its own, and is put back when it is done. -/
+  capsBase : Nat := 0
+  capUndo : Array (Nat × Option Nat × Array Nat) := #[]
   /-- What each body checked needs of its callers, where its signature is
   what they are checked with (`fns`): to be within it (`schemeWithin`). -/
   bodySchemes : Std.HashMap String Scheme := {}
@@ -1113,10 +1118,19 @@ partial def findCap (c : Nat) : M Nat := do
   | some (some parent) => findCap parent
   | _ => pure c
 
+/-- Of a capture made before the group being checked, what it was, kept to
+be put back (`St.capUndo`). -/
+def keepCap (c : Nat) : M Unit := do
+  let s ← get
+  if c < s.capsBase && !(s.capUndo.any (·.1 == c)) then
+    modify fun s => { s with capUndo := s.capUndo.push (c, (s.caps.get? c).join, s.capOut.getD c #[]) }
+
 def unifyCap (a b : Nat) : M Unit := do
   let ra ← findCap a
   let rb ← findCap b
   unless ra == rb do
+    keepCap ra
+    keepCap rb
     let s ← get
     -- A lifetime a function declares stays what it is: it can be what an
     -- unknown one turns out to be, but not another declared one.
@@ -1149,6 +1163,7 @@ def unifyCap (a b : Nat) : M Unit := do
 
 def captures (cap : Nat) (what : Captured) (name : Option (String × Nat) := none) : M Unit := do
   let root ← findCap cap
+  keepCap root
   modify fun s =>
     let at_ := s.capEdges.size
     { s with capEdges := s.capEdges.push (cap, what), capEdgeNames := s.capEdgeNames.push name,

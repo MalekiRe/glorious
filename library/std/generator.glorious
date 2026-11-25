@@ -27,6 +27,8 @@ pub trait Generator {
 
 // A computation that yields, stopped where it last did.
 pub struct Coroutine<Y, R, T>(fn(R) -> GeneratorStep<Y, T, Coroutine<Y, R, T>>)
+// (It holds a resumption, run once: as Rust's `Box<dyn FnOnce(R)>`.)
+impl Use<[0, 1]> for Coroutine<Y, R, T> {}
 
 impl<Y, R, T> Generator for Coroutine<Y, R, T> where T: Use<[1, 1]> {
     type Yield = Y;

@@ -657,13 +657,11 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   -- `f<T>(..)`; what the body needs is kept beside it, `schemeWithin`.)
   let fns := (← get).fns
   let params := (← get).typeParams
-  -- (What `'static` holds, a group's own: what a function's borrows are
-  -- held by is nothing to any other's, and is let go after it.)
-  let staticOut ← match (← get).staticCap with
-    | some c => do
-      let root ← findCap c
-      pure (some (root, (← get).capOut.getD root #[]))
-    | none => pure none
+  -- (What the group finds of a capture made before it is its own: put back
+  -- when it is done, `St.capUndo`.)
+  let outerBase := (← get).capsBase
+  let outerUndo := (← get).capUndo
+  modify fun s => { s with capsBase := s.caps.size, capUndo := #[] }
   -- (A constant's type is its value's.)
   let sigs := if signature then [] else decls.filterMap fun d =>
     if Syntax.isConstFn d.name then none
@@ -709,8 +707,25 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   (fun s => Glorious.Trace.said "loans" fun _ => (timedM "group: loans" (checkLoans loansAt cellsAt) : M Unit).run s : M Unit)
   (fun s => Glorious.Trace.said "bounds" fun _ => (timedM "group: bounds" (settleBounds decls defs) : M Unit).run s : M Unit)
   modify fun s => { s with assocUses := #[] }
-  if let some (root, out) := staticOut then
-    modify fun s => { s with capOut := s.capOut.set! root out }
+  -- A callable kept in a declared type's field with no type parameter of its
+  -- own is called any number of times, as Rust's `Box<dyn Fn()>`; at most
+  -- once where the type says it is used at most once (`Box<dyn FnOnce()>`).
+  let s ← get
+  let saysOnce := fun (out : Array Nat) => out.any fun e => match s.capEdges.get? e with
+    | some (_, .once) => true
+    | _ => false
+  for (c, was, out) in s.capUndo do
+    if was.isNone && s.monoCaps.contains c && !saysOnce out then
+      let now := s.capOut.getD c #[]
+      for e in now.extract (min out.size now.size) now.size do
+        match s.capEdges.get? e with
+        | some (_, .once) | some (_, .must) =>
+          throw s!"in `{s.owner}`: a callable kept in a field of a declared type written `fn(..)` may be called any number of times, as Rust's `Box<dyn Fn()>`, and this one holds what is used once: give the declaration a type parameter for the field, `R: Fn<..>, R: Use<[0, 1]>`, or say the type is used at most once, `impl Use<[0, 1]> for T \{}`, as Rust's `Box<dyn FnOnce()>`"
+        | _ => pure ()
+  modify fun s => { s with
+    caps := s.capUndo.foldl (fun cs (c, was, _) => cs.set! c was) s.caps
+    capOut := s.capUndo.foldl (fun os (c, _, out) => os.set! c out) s.capOut
+    capsBase := outerBase, capUndo := outerUndo }
   for (name, sig, ids) in sigs do
     modify fun s => match s.fns[name]? with
       | some body =>

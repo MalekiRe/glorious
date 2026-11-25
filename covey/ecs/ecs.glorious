@@ -4894,10 +4894,13 @@ pub effect Bridge<S> { reach(Ask<S>) -> (World<S>, Commands<S>) }
 
 pub enum TaskStep<S> { Waiting { ask: Ask<S>, rest: fn((World<S>, Commands<S>)) -> TaskStep<S> }, Ended(AsyncWorld<S>) }
 pub enum TaskState<S> { Fresh(fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}), Paused(Ask<S>, fn((World<S>, Commands<S>)) -> TaskStep<S>), Over }
+// (A waiting task holds its resumption, run once: Rust's `Box<dyn FnOnce>`.)
+impl Use<[0, 1]> for TaskStep<S> {}
+impl Use<[0, 1]> for TaskState<S> {}
 pub struct TaskOf<S> { state: TaskState<S> }
 
 // A task's computation, run until it waits or ends.
-fn start_task<S>(body: fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}, held: Option<(World<S>, Commands<S>)>) -> TaskStep<S> {
+fn start_task<S, B>(body: B, held: Option<(World<S>, Commands<S>)>) -> TaskStep<S> where B: Fn<(AsyncWorld<S>,), Output = AsyncWorld<S>, Effects = {Bridge<S>}>, B: Use<[0, 1]> {
     handle body(AsyncWorld { held: held }) {
         done => TaskStep::Ended(done),
         reach(ask, k) => TaskStep::Waiting { ask: ask, rest: k }

@@ -8452,3 +8452,23 @@ merge then changed in place). covey's `RemoteWithin` for `Waits<F>` says
 What a unit's declarations say of types left to implementations
 (`type Kind = OneToMany`) is answered before any of its functions is read,
 not by the first body that asks.
+
+## A callable kept in a declared type, as Rust's `Box<dyn Fn()>`
+
+A callable in a field of a declared type written `fn(..)`, with no type
+parameter of its own, is called any number of times, as Rust's
+`Box<dyn Fn()>`; one in a type said to be used at most once (`impl Use<[0,
+1]> for Coroutine<Y, R, T> {}`) is called at most once, `Box<dyn
+FnOnce()>`, and so may hold a resumption. Storing one that is used once in
+the first is refused where it is stored, with what to write: a type
+parameter for the field (`R: Fn<..>, R: Use<[0, 1]>`), or the type's `Use`.
+Before, the capture of such a field was one for the whole program, and
+whatever any function stored there made every other's what it was.
+
+What a group of functions finds of a capture made before it (a declared
+type's, an implementation's, `'static`'s) is the group's own: put back when
+the group is done (`St.capUndo`). So no merge changes one in place.
+
+`std::generator::Coroutine`, covey's `TaskStep` and `TaskState`, and a
+case's `Coroutine` say `impl Use<[0, 1]>`; covey's `start_task` takes its
+body as `B: Fn<..>, B: Use<[0, 1]>`.

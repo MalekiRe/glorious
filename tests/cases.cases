@@ -9009,6 +9009,7 @@ trait Generator<R> {
     fn resume(Self, R) -> GeneratorStep<Self::Yield, Self::Return, Self>;
 }
 struct Coroutine<Y, R, T>(fn(R) -> GeneratorStep<Y, T, Coroutine<Y, R, T>>)
+impl Use<[0, 1]> for Coroutine<Y, R, T> {}
 impl<Y, R, T> Generator<R> for Coroutine<Y, R, T> {
     type Yield = Y;
     type Return = T;
