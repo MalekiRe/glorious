@@ -6,7 +6,6 @@
 // machines.
 
 use std::c::{malloc, free, c_string, text_at, write_bytes, read_byte};
-use std::text::{utf8, from_utf8};
 use std::vec::{Vec};
 
 // Why the operating system refused: its number for the reason.
@@ -18,21 +17,21 @@ pub effect Console {
     read_stdin(most: Int) -> Result<Vec<u8>, IoError>
 }
 pub effect FileRead {
-    read_file(path: Str) -> Result<Vec<u8>, IoError>
+    read_file(path: String) -> Result<Vec<u8>, IoError>
 }
 pub effect FileWrite {
-    write_file(path: Str, bytes: Vec<u8>) -> Result<(), IoError>
-    write_file_atomic(path: Str, bytes: Vec<u8>) -> Result<(), IoError>
+    write_file(path: String, bytes: Vec<u8>) -> Result<(), IoError>
+    write_file_atomic(path: String, bytes: Vec<u8>) -> Result<(), IoError>
 }
 pub effect Diagnostic {
-    write_diagnostic(text: Str) -> Result<(), IoError>
+    write_diagnostic(text: String) -> Result<(), IoError>
 }
 pub effect ProcessEnvironment {
-    env(name: Str) -> Result<Option<Str>, IoError>
-    current_dir() -> Result<Str, IoError>
+    env(name: String) -> Result<Option<String>, IoError>
+    current_dir() -> Result<String, IoError>
 }
 pub effect ProcessArgs {
-    args() -> Result<Vec<Str>, IoError>
+    args() -> Result<Vec<String>, IoError>
 }
 pub effect Clock {
     now() -> Int
@@ -92,7 +91,7 @@ unsafe fn read_all(fd: i32, buf: usize, out: &mut Vec<u8>) -> Bool {
     }
 }
 
-unsafe fn read_path(path: Str) -> Result<Vec<u8>, IoError> {
+unsafe fn read_path(path: &str) -> Result<Vec<u8>, IoError> {
     let p = c_string(path);
     let fd = open(p, 0i32, 0i32);
     free(p);
@@ -109,7 +108,7 @@ unsafe fn read_path(path: Str) -> Result<Vec<u8>, IoError> {
 
 // Made if it is not there, emptied if it is, readable by all and writable
 // by its owner.
-unsafe fn write_path(path: Str, bytes: Vec<u8>) -> Result<(), IoError> {
+unsafe fn write_path(path: &str, bytes: Vec<u8>) -> Result<(), IoError> {
     let p = c_string(path);
     let fd = open(p, 577i32, 420i32);
     free(p);
@@ -122,12 +121,12 @@ unsafe fn write_path(path: Str, bytes: Vec<u8>) -> Result<(), IoError> {
 
 // Written beside the file and then given its name, so that the name is
 // never that of half a file.
-unsafe fn write_path_atomic(path: Str, bytes: Vec<u8>) -> Result<(), IoError> {
-    let beside = path ++ ".writing";
-    match(write_path(beside, bytes)) {
+unsafe fn write_path_atomic(path: &str, bytes: Vec<u8>) -> Result<(), IoError> {
+    let beside = String::from(path) + ".writing";
+    match(write_path(String::as_str(&beside), bytes)) {
         Err(e) => Err(e),
         Ok(_) =>
-            let from = c_string(beside);
+            let from = c_string(String::as_str(&beside));
             let to = c_string(path);
             let moved = rename(from, to);
             free(from);
@@ -136,7 +135,7 @@ unsafe fn write_path_atomic(path: Str, bytes: Vec<u8>) -> Result<(), IoError> {
     }
 }
 
-unsafe fn look_up(name: Str) -> Result<Option<Str>, IoError> {
+unsafe fn look_up(name: &str) -> Result<Option<String>, IoError> {
     let n = c_string(name);
     let at = getenv(n);
     free(n);
@@ -145,7 +144,7 @@ unsafe fn look_up(name: Str) -> Result<Option<Str>, IoError> {
     }
 }
 
-unsafe fn where_now() -> Result<Str, IoError> {
+unsafe fn where_now() -> Result<String, IoError> {
     let buf = malloc(4096usize);
     let at = getcwd(buf, 4096usize);
     let got = if(at == 0usize) { Err(refused()) } else {
@@ -159,11 +158,11 @@ unsafe fn where_now() -> Result<Str, IoError> {
 fn pushed(bytes: Vec<u8>, b: u8) -> Vec<u8> { let mut out = bytes; Vec::push(&mut out, b); out }
 
 // The texts between zeros.
-fn between_zeros(bytes: &Vec<u8>, i: Int, word: Vec<u8>, out: &mut Vec<Str>) {
+fn between_zeros(bytes: &Vec<u8>, i: Int, word: Vec<u8>, out: &mut Vec<String>) {
     if(i >= Vec::len(bytes)) { () } else {
         let b = *Vec::index(bytes, i);
         if(int(b) == 0) {
-            let text = match(from_utf8(word)) { Some(t) => t, None => "" };
+            let text = match(String::from_utf8(word)) { Ok(t) => t, Err(_) => String::new() };
             Vec::push(out, text);
             tail between_zeros(bytes, i + 1, Vec::new(), out)
         } else { tail between_zeros(bytes, i + 1, pushed(word, b), out) }
@@ -171,7 +170,7 @@ fn between_zeros(bytes: &Vec<u8>, i: Int, word: Vec<u8>, out: &mut Vec<Str>) {
 }
 
 // What the process was started with, as the operating system has it.
-unsafe fn arguments() -> Result<Vec<Str>, IoError> {
+unsafe fn arguments() -> Result<Vec<String>, IoError> {
     match(read_path("/proc/self/cmdline")) {
         Ok(bytes) => let mut out = Vec::new(); between_zeros(&bytes, 0, Vec::new(), &mut out); Ok(out),
         Err(e) => Err(e)
@@ -202,13 +201,13 @@ pub fn run_host<T, e: EffectRow>(main: fn() -> T / {Console, FileRead, FileWrite
         write_stdout(bytes, k) => k(unsafe { write_all(1i32, bytes) }),
         write_stderr(bytes, k) => k(unsafe { write_all(2i32, bytes) }),
         read_stdin(most, k) => k(unsafe { read_some(0i32, most) }),
-        read_file(path, k) => k(unsafe { read_path(path) }),
-        write_file(path, bytes, k) => k(unsafe { write_path(path, bytes) }),
-        write_file_atomic(path, bytes, k) => k(unsafe { write_path_atomic(path, bytes) }),
+        read_file(path, k) => k(unsafe { read_path(String::as_str(&path)) }),
+        write_file(path, bytes, k) => k(unsafe { write_path(String::as_str(&path), bytes) }),
+        write_file_atomic(path, bytes, k) => k(unsafe { write_path_atomic(String::as_str(&path), bytes) }),
         write_diagnostic(text, k) => k(unsafe {
-            match(write_all(2i32, utf8(text ++ "\n"))) { Ok(_) => Ok(()), Err(e) => Err(e) }
+            match(write_all(2i32, String::into_bytes(text + "\n"))) { Ok(_) => Ok(()), Err(e) => Err(e) }
         }),
-        env(name, k) => k(unsafe { look_up(name) }),
+        env(name, k) => k(unsafe { look_up(String::as_str(&name)) }),
         current_dir(k) => k(unsafe { where_now() }),
         args(k) => k(unsafe { arguments() }),
         now(k) => k(unsafe { clock(0i32) }),
@@ -219,30 +218,31 @@ pub fn run_host<T, e: EffectRow>(main: fn() -> T / {Console, FileRead, FileWrite
 }
 
 // A text on standard output, and the same with a line's end.
-pub fn print(text: Str) / {Console} { write_stdout(utf8(text)); () }
-pub fn println(text: Str) / {Console} { print(text ++ "\n") }
-pub fn eprintln(text: Str) / {Console} { write_stderr(utf8(text ++ "\n")); () }
+pub fn print(text: &str) / {Console} { write_stdout(text.as_bytes().to_vec()); () }
+pub fn println(text: &str) / {Console} { write_stdout(String::into_bytes(String::from(text) + "\n")); () }
+pub fn eprintln(text: &str) / {Console} { write_stderr(String::into_bytes(String::from(text) + "\n")); () }
 
 // A file as text, if it is UTF-8.
-pub fn read_text(path: Str) -> Result<Str, IoError> / {FileRead} {
-    match(read_file(path)) {
-        Ok(bytes) => match(from_utf8(bytes)) { Some(text) => Ok(text), None => Err(IoError { code: 84 }) },
+pub fn read_text(path: &str) -> Result<String, IoError> / {FileRead} {
+    match(read_file(String::from(path))) {
+        Ok(bytes) => match(String::from_utf8(bytes)) { Ok(text) => Ok(text), Err(_) => Err(IoError { code: 84 }) },
         Err(e) => Err(e)
     }
 }
-pub fn write_text(path: Str, text: Str) -> Result<(), IoError> / {FileWrite} { write_file(path, utf8(text)) }
+pub fn write_text(path: &str, text: &str) -> Result<(), IoError> / {FileWrite} { write_file(String::from(path), text.as_bytes().to_vec()) }
 
 // The next line of standard input without its end, or nothing at the end.
-pub fn read_line() -> Option<Str> / {Console} { line_from(Vec::new(), false) }
-fn line_from(line: Vec<u8>, any: Bool) -> Option<Str> / {Console} {
+pub fn read_line() -> Option<String> / {Console} { line_from(Vec::new(), false) }
+fn text_of(bytes: Vec<u8>) -> Option<String> { match(String::from_utf8(bytes)) { Ok(text) => Some(text), Err(_) => None } }
+fn line_from(line: Vec<u8>, any: Bool) -> Option<String> / {Console} {
     match(read_stdin(1)) {
         Err(_) => None,
         Ok(bytes) =>
             if(Vec::len(&bytes) == 0) {
-                if(any) { from_utf8(line) } else { None }
+                if(any) { text_of(line) } else { None }
             } else {
                 let b = *Vec::index(&bytes, 0);
-                if(int(b) == 10) { from_utf8(line) } else { tail line_from(pushed(line, b), true) }
+                if(int(b) == 10) { text_of(line) } else { tail line_from(pushed(line, b), true) }
             }
     }
 }

@@ -615,6 +615,9 @@ structure St where
   the type it is of where a use does not write them: `R` of
   `trait Add<R = Self>`. -/
   selfDefaults : Std.HashMap String (List Nat) := {}
+  /-- A text written is read as a `Str` here, where one is wanted, and not
+  as the `&'static str` it is elsewhere (`inferExpr`). -/
+  textOwned : Bool := false
   /-- A type a trait leaves to its implementations, at a use: the trait, what
   it is asked of (the type, and after it the trait's arguments if it has
   some), which type, the variable that stands for it, the function this is in,

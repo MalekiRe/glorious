@@ -16,9 +16,9 @@ Hi
 0
 #### case
 use std::c::{c_string, text_at, free};
-use std::text::{utf8, from_utf8};
+use std::text::{from_utf8};
 extern "C" { fn puts(s: usize) -> i32; fn toupper(c: i32) -> i32; fn getenv(name: usize) -> usize; }
-fn main() -> i32 { say(utf8("h\u{e9}\u{20ac}")); say(from_utf8(utf8("h\u{e9}llo \u{1F600}")) == Some("h\u{e9}llo \u{1F600}")); unsafe { let s = c_string("hello from C"); puts(s); say(text_at(s)); free(s); let name = c_string("GLORIOUS_TEST"); say(getenv(name) == 0usize); free(name); toupper(97i32) } }
+fn main() -> i32 { say("h\u{e9}\u{20ac}".as_bytes().to_vec()); say(match(from_utf8("h\u{e9}llo \u{1F600}".as_bytes())) { Ok(text) => text == "h\u{e9}llo \u{1F600}", Err(_) => false }); unsafe { let s = c_string("hello from C"); puts(s); say(text_at(s)); free(s); let name = c_string("GLORIOUS_TEST"); say(getenv(name) == 0usize); free(name); toupper(97i32) } }
 #### expect
 [104, 195, 169, 226, 130, 172]
 true
@@ -148,14 +148,14 @@ fn main() -> Int { run_host({
     println("hello, host");
     let wrote = write_text("/tmp/glorious-host-test.txt", "one\ntwo\n");
     let back = read_text("/tmp/glorious-host-test.txt");
-    println(match(back) { Ok(text) => text, Err(e) => "error" });
+    match(back) { Ok(text) => println(text.as_str()), Err(_) => println("error") };
     let missing = read_text("/tmp/glorious-no-such-file");
-    println(match(missing) { Ok(_) => "found", Err(e) => "no file: " ++ show(e.code) });
+    match(missing) { Ok(_) => println("found"), Err(e) => let code = e.code; println((String::from("no file: ") + to_string(&code).as_str()).as_str()) };
     let home = env("HOME");
     println(match(home) { Ok(Some(_)) => "HOME is set", _ => "no HOME" });
     let a = monotonic(); let b = monotonic();
     println(if(b >= a) { "the clock goes on" } else { "the clock went back" });
-    println(match(random_bytes(8)) { Ok(bytes) => show(len(bytes)), Err(_) => "no chance" });
+    match(random_bytes(8)) { Ok(bytes) => println(to_string(&len(bytes)).as_str()), Err(_) => println("no chance") };
     println(match(current_dir()) { Ok(_) => "somewhere", Err(_) => "nowhere" });
     println(match(args()) { Ok(a) => if(a.len() > 0) { "started" } else { "?" }, Err(_) => "?" });
     0 }) }
@@ -176,7 +176,7 @@ started
 use std::io::{println};
 use std::fs::{read_text, write_text};
 use std::host::{run_host};
-fn main() -> Int { run_host({ write_text("/tmp/glorious-ns-test.txt", "names"); println(match(read_text("/tmp/glorious-ns-test.txt")) { Ok(t) => t, Err(_) => "?" }); 0 }) }
+fn main() -> Int { run_host({ write_text("/tmp/glorious-ns-test.txt", "names"); match(read_text("/tmp/glorious-ns-test.txt")) { Ok(t) => println(t.as_str()), Err(_) => println("?") }; 0 }) }
 #### expect
 names
 0

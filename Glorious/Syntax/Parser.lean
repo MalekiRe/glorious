@@ -1646,17 +1646,17 @@ def reflectText (name : String) (params : List String) (isPub : Bool)
     s!"{pattern c fs ns} => let mut fields = std::vec::Vec::new(); {" ".intercalate parts} std::reflect::StructValue({quoted c}, fields)"
   let setArm := fun (c : String) (fs : List TypeExpr) (ns : List String) (ps : List Bool) =>
     let tries := (fs.zip (ns.zip ps)).zipIdx.map fun ((t, n, p), k) =>
-      let set := if t.spell == "Bool" then s!"match(std::reflect::reflect_bool(text)) \{ Some(b) => *f{k} = b; Ok(std::reflect::FlagValue(b)), None => Err(\"not true or false\") }"
-        else if describable t then s!"std::reflect::reflect_set(f{k}, text, all, token)" else s!"Err({quoted ("`" ++ n ++ "` is not set from text")})"
-      s!"if(path == {quoted n}) \{ if({if p then "true" else "all"}) \{ {set} } else \{ Err({quoted ("`" ++ n ++ "` is private: set it with `set_field_unchecked`")}) } } else "
-    let none := s!"Err(\"no field `\" ++ path ++ \"` in `{c}`\")"
+      let set := if t.spell == "Bool" then s!"match(std::reflect::reflect_bool(text)) \{ Some(b) => *f{k} = b; Ok(std::reflect::FlagValue(b)), None => Err(String::from(\"not true or false\")) }"
+        else if describable t then s!"std::reflect::reflect_set(f{k}, text, all, token)" else s!"Err(String::from({quoted ("`" ++ n ++ "` is not set from text")}))"
+      s!"if(path == {quoted n}) \{ if({if p then "true" else "all"}) \{ {set} } else \{ Err(String::from({quoted ("`" ++ n ++ "` is private: set it with `set_field_unchecked`")})) } } else "
+    let none := s!"Err(String::from(\"no field `\") + path + \"` in `{c}`\")"
     if tries.isEmpty then s!"{pattern c fs ns} => {none}" else s!"{pattern c fs ns} => {String.join tries}\{ {none} }"
   let arms := fun (f : String → List TypeExpr → List String → List Bool → String) =>
     ", ".intercalate (ctors.map fun (c, fs, ns, ps) => f c fs ns ps)
   some s!"impl{generics} std::reflect::Reflect for {head}{bounds} \{
     const INFO: std::reflect::TypeInfo = {info};
     fn describe_as(v: &{head}, all: Bool, token: std::reflect::Unchecked) -> std::reflect::Described \{ if(if(all) \{ true } else \{ {if isPub then "true" else "false"} }) \{ match(v) \{ {arms describeArm} } } else \{ std::reflect::OpaqueValue({quoted name}) } }
-    fn set_from(v: &mut {head}, path: Str, text: Str, all: Bool, token: std::reflect::Unchecked) -> Result<std::reflect::Described, Str> \{ match(v) \{ {arms setArm} } }
+    fn set_from(v: &mut {head}, path: &str, text: &str, all: Bool, token: std::reflect::Unchecked) -> Result<std::reflect::Described, String> \{ match(v) \{ {arms setArm} } }
 }
 "
 

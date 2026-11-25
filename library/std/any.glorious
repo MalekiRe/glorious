@@ -3,9 +3,9 @@
 // The name of the function a callable is of, as the program names it (a
 // copy made for types it is given has them after `@`), and the callable
 // back. `""` of one written in place.
-pub fn fn_name<F>(f: F) -> (Str, F) { name_from(f, 0) }
+pub fn fn_name<F>(f: F) -> (String, F) { let mut name = String::new(); let f = name_onto(f, 0, &mut name); (name, f) }
 // (Its characters from a place on, one at a time: `-1` past its end.)
-fn name_from<F>(f: F, i: Int) -> (Str, F) {
+fn name_onto<F>(f: F, i: Int, out: &mut String) -> F {
     let (code, f) = unsafe { host_fn_name(f, i) };
-    if(code < 0) { ("", f) } else { let (rest, f) = name_from(f, i + 1); (StrChar(char_of(code), rest), f) }
+    if(code < 0) { f } else { String::push(out, char_of(code)); tail name_onto(f, i + 1, out) }
 }

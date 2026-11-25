@@ -3347,6 +3347,17 @@ impl<Q, N, St, Rest> TouchNames for (Singling<Q, N, St>, Rest) where Q: ItemTouc
 }
 impl<Rest> TouchNames for (Asking, Rest) where Rest: TouchNames { fn touch_names(names: Vec<Str>) -> Vec<Str> { <Rest as TouchNames>::touch_names(names) } }
 impl<T, Rest> TouchNames for (Localing<T>, Rest) where Rest: TouchNames { fn touch_names(names: Vec<Str>) -> Vec<Str> { <Rest as TouchNames>::touch_names(names) } }
+// A text without its first `n` characters, and whether a text begins with
+// another (of `Str`, while it is the type of these texts).
+fn text_from(text: Str, n: Int) -> Str { if(n <= 0) { text } else { match(text) { StrEnd => text, StrChar(_, rest) => text_from(rest, n - 1) } } }
+fn text_begins(text: Str, start: Str) -> Bool {
+    match((text, start)) {
+        (_, StrEnd) => true,
+        (StrChar(c, rest), StrChar(d, more)) => if(c == d) { text_begins(rest, more) } else { false },
+        _ => false
+    }
+}
+
 // Whether what two systems touch keeps them apart.
 fn touches_apart(a: &Vec<Str>, b: &Vec<Str>) -> Bool {
     let mut apart = true;
@@ -3356,8 +3367,8 @@ fn touches_apart(a: &Vec<Str>, b: &Vec<Str>) -> Bool {
         let mut j = 0;
         while({ j < len_at(b) }) {
             let y = b[j];
-            if(std::text::drop(x, 2) == std::text::drop(y, 2)) {
-                if(std::text::starts_with(x, "w:")) { apart = false } else if(std::text::starts_with(y, "w:")) { apart = false } else { () }
+            if(text_from(x, 2) == text_from(y, 2)) {
+                if(text_begins(x, "w:")) { apart = false } else if(text_begins(y, "w:")) { apart = false } else { () }
             } else { () };
             j = j + 1
         };
@@ -3426,7 +3437,7 @@ fn touched(touches: &Vec<Str>, mark: Str) -> Vec<Str> {
     let mut out = Vec::new();
     let mut i = 0;
     while({ i < len_at(touches) }) {
-        if(std::text::starts_with(touches[i], mark)) { Vec::push(&mut out, std::text::drop(touches[i], 2)) } else { () };
+        if(text_begins(touches[i], mark)) { Vec::push(&mut out, text_from(touches[i], 2)) } else { () };
         i = i + 1
     };
     out
@@ -5459,8 +5470,8 @@ fn within(mine: &Vec<Str>, allowed: &Vec<Str>) -> Bool {
         while({ j < len_at(allowed) }) {
             let y = allowed[j];
             // (A write is allowed by a write; a read by either.)
-            if(std::text::drop(x, 2) == std::text::drop(y, 2)) {
-                if(std::text::starts_with(x, "r:")) { found = true } else if(std::text::starts_with(y, "w:")) { found = true } else { () }
+            if(text_from(x, 2) == text_from(y, 2)) {
+                if(text_begins(x, "r:")) { found = true } else if(text_begins(y, "w:")) { found = true } else { () }
             } else { () };
             j = j + 1
         };
@@ -5779,7 +5790,8 @@ fn closed_mark<S>() -> Request<S> { Request { point: "%closed", touches: Vec::ne
 fn is_closed<S>(queue: &Vec<Request<S>>) -> Bool {
     let mut i = 0;
     let mut found = false;
-    while({ i < len_at(queue) }) { if(queue[i].point == "%closed") { found = true } else { () }; i = i + 1 };
+    let closed: Str = "%closed";
+    while({ i < len_at(queue) }) { if(queue[i].point == closed) { found = true } else { () }; i = i + 1 };
     found
 }
 
@@ -5906,7 +5918,7 @@ impl<S, L> App<S, L> {
             while({ if(k < len_at(&pa)) { if(k < len_at(&pb)) { pa[k] == pb[k] } else { false } } else { false } }) { k = k + 1 };
             let named = "`" ++ infos[a].name ++ "` and `" ++ infos[b].name ++ "`";
             if(if(k < len_at(&pa)) { k < len_at(&pb) } else { false }) {
-                if(std::text::starts_with(pa[k], "chain[")) { Some("chain: " ++ named ++ " are run in the order of a chain") }
+                if(text_begins(pa[k], "chain[")) { Some("chain: " ++ named ++ " are run in the order of a chain") }
                 else { Some("no order: " ++ named ++ " are branches of one parallel group") }
             } else { Some("registration order: " ++ named ++ " are run in the order they were added") }
         }

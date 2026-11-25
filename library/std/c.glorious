@@ -46,8 +46,8 @@ unsafe fn read_onto(at: usize, n: Int, out: &mut Vec<u8>) {
 
 // A text as C has it: its bytes and a zero after them, in memory that is the
 // caller's to `free`.
-pub unsafe fn c_string(text: Str) -> usize {
-    let mut bytes = std::text::utf8(text);
+pub unsafe fn c_string(text: &str) -> usize {
+    let mut bytes = text.as_bytes().to_vec();
     Vec::push(&mut bytes, 0u8);
     let at = malloc(usize(Vec::len(&bytes)));
     write_bytes(at, &bytes);
@@ -55,7 +55,7 @@ pub unsafe fn c_string(text: Str) -> usize {
 }
 
 // The text C has at an address: the bytes up to a zero, if they are UTF-8.
-pub unsafe fn text_at(at: usize) -> Option<Str> { std::text::from_utf8(read_bytes(at, int(strlen(at)))) }
+pub unsafe fn text_at(at: usize) -> Option<String> { match(String::from_utf8(read_bytes(at, int(strlen(at))))) { Ok(text) => Some(text), Err(_) => None } }
 
 // How much memory, and how it has to be placed: the library specification's
 // `Layout` (22.1). Sizes are whole numbers here.
@@ -162,10 +162,6 @@ fn zero_in<A>(bytes: &A, i: Int) -> Option<Int> where A: Indexed<Element = u8> {
     }
 }
 
-fn slice_bytes<'a>(bytes: &'a [u8], i: Int, out: &mut Vec<u8>) {
-    match(bytes.get(i)) { Some(b) => Vec::push(out, *b); tail slice_bytes(bytes, i + 1, out), None => () }
-}
-
 // Bytes that end in a zero and have no other: a text as C reads one, looked
 // at where it is.
 pub struct CStr<'a> { bytes: &'a [u8] }
@@ -187,11 +183,8 @@ impl<'a> CStr<'a> {
     pub fn bytes_with_nul(value: Self) -> &'a [u8] { value.bytes }
     pub fn len(value: &Self) -> Int { value.bytes.len() - 1 }
     // The text, if the bytes are UTF-8.
-    pub fn to_str(value: Self) -> Option<Str> {
-        let found = CStr::bytes(value);
-        let mut out = Vec::new();
-        slice_bytes(found, 0, &mut out);
-        std::text::from_utf8(out)
+    pub fn to_str(value: Self) -> Option<&'a str> {
+        match(std::text::from_utf8(CStr::bytes(value))) { Ok(text) => Some(text), Err(_) => None }
     }
 }
 
@@ -240,8 +233,8 @@ impl CString {
                 Ok(Self { memory: memory, length: n })
         }
     }
-    pub fn from_str(text: Str) -> Result<Self, NulError> {
-        match(CString::from_vec(std::text::utf8(text))) { Ok(found) => Ok(found), Err(rejected) => Err(rejected.error) }
+    pub fn from_str(text: &str) -> Result<Self, NulError> {
+        match(CString::from_vec(text.as_bytes().to_vec())) { Ok(found) => Ok(found), Err(rejected) => Err(rejected.error) }
     }
     // Where C can read it, for as long as this is kept.
     pub fn as_ptr(value: &Self) -> usize { Allocation::as_ptr(&value.memory) }

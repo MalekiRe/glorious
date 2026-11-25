@@ -404,3 +404,20 @@ impl<T> Vec<T> {
 
 // What gives its elements away.
 impl<T> IntoIterator for Vec<T> { type Iter = IntoIter<T>; fn into_iter(v: Vec<T>) -> IntoIter<T> { Vec::into_iter(v) } }
+
+impl<'a, T> SliceRef<'a, T> {
+    // Its elements, each cloned, in a `Vec` of their own.
+    pub fn to_vec(s: &Self) -> Vec<T> where T: Clone {
+        let mut out = Vec::with_capacity(s.len());
+        let mut i = 0;
+        while({ i < s.len() }) { Vec::push(&mut out, clone(element_at(s, i))); i = i + 1 };
+        out
+    }
+}
+impl<T> Vec<T> {
+    // A slice's elements, each cloned, put after these.
+    pub fn extend_from_slice<'a>(value: &mut Self, more: &'a [T]) where T: Clone {
+        let mut i = 0;
+        while({ i < more.len() }) { Vec::push(value, clone(element_at(&more, i))); i = i + 1 }
+    }
+}

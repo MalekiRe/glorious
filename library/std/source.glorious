@@ -3,7 +3,7 @@
 // nothing, as lines and columns are; they are `Int`.
 
 use std::value::{Rejected};
-use std::text::{utf8, from_utf8};
+use std::text::{from_utf8};
 use std::vec::{Vec};
 
 pub struct SourceId(u32);
@@ -19,7 +19,7 @@ pub struct SourceLocation { pub source: SourceId, pub line: Int, pub column_byte
 pub struct Utf16Location { pub line: Int, pub column_units: Int }
 pub enum SourceError { UnknownSource, InvalidRange, InvalidBoundary, IndexOverflow }
 
-struct Source { name: Str, bytes: Vec<u8>, lines: Vec<Int> }
+struct Source { name: String, bytes: Vec<u8>, lines: Vec<Int> }
 
 // Texts, each given a number when it is put in. It reads no files.
 pub struct SourceMap { sources: Vec<Source> }
@@ -34,7 +34,6 @@ fn line_starts(bytes: &Vec<u8>, i: Int, out: &mut Vec<Int>) {
     }
 }
 
-fn piece(bytes: &Vec<u8>, from: Int, upto: Int) -> Vec<u8> { std::vec::take(std::vec::drop(bytes, from), upto - from) }
 
 // Is a place between two characters, and not inside one? A byte that goes
 // on a character begun before it is `10` and six bits.
@@ -88,32 +87,35 @@ fn after_units(bytes: &Vec<u8>, at: Int, limit: Int, units: Int) -> Option<Int> 
 impl SourceMap {
     pub fn new() -> Self { Self { sources: Vec::new() } }
     pub fn len(m: &Self) -> Int { len_at(&m.sources) }
-    pub fn insert(m: &mut Self, name: Str, text: Str) -> Result<SourceId, Rejected<(Str, Str), SourceError>> {
+    pub fn insert(m: &mut Self, name: &str, text: &str) -> Result<SourceId, Rejected<(String, String), SourceError>> {
         let n = len_at(&m.sources);
-        if(n > 4294967295) { Err(Rejected { value: (name, text), error: SourceError::IndexOverflow }) } else {
-            let bytes = utf8(text);
+        if(n > 4294967295) { Err(Rejected { value: (String::from(name), String::from(text)), error: SourceError::IndexOverflow }) } else {
+            let bytes = text.as_bytes().to_vec();
             let mut lines = Vec::new();
             Vec::push(&mut lines, 0);
             line_starts(&bytes, 0, &mut lines);
-            Vec::push(&mut m.sources, Source { name: name, bytes: bytes, lines: lines });
+            Vec::push(&mut m.sources, Source { name: String::from(name), bytes: bytes, lines: lines });
             Ok(SourceId(to(n)))
         }
     }
     fn source<'a>(m: &'a Self, id: SourceId) -> Option<&'a Source> { element(&m.sources, int(id.0)) }
-    pub fn name(m: &Self, id: SourceId) -> Option<Str> {
-        match(SourceMap::source(m, id)) { Some(s) => Some(s.name), None => None }
+    pub fn name<'a>(m: &'a Self, id: SourceId) -> Option<&'a str> {
+        match(SourceMap::source(m, id)) { Some(s) => Some(String::as_str(&s.name)), None => None }
     }
-    pub fn text(m: &Self, id: SourceId) -> Option<Str> {
-        match(SourceMap::source(m, id)) { Some(s) => from_utf8(&s.bytes), None => None }
+    pub fn text<'a>(m: &'a Self, id: SourceId) -> Option<&'a str> {
+        match(SourceMap::source(m, id)) { Some(s) => match(from_utf8(Vec::as_slice(&s.bytes))) { Ok(text) => Some(text), Err(_) => None }, None => None }
     }
     // The text of a stretch, which has to begin and end between characters.
-    pub fn slice(m: &Self, span: SourceSpan) -> Result<Str, SourceError> {
+    pub fn slice<'a>(m: &'a Self, span: SourceSpan) -> Result<&'a str, SourceError> {
         match(SourceMap::source(m, span.source)) {
             None => Err(SourceError::UnknownSource),
             Some(s) =>
                 if(span.start < 0 or { span.end < span.start or { span.end > len_at(&s.bytes) } }) { Err(SourceError::InvalidRange) } else {
                     if(on_boundary(&s.bytes, span.start) and { on_boundary(&s.bytes, span.end) }) {
-                        match(from_utf8(piece(&s.bytes, span.start, span.end))) { Some(text) => Ok(text), None => Err(SourceError::InvalidBoundary) }
+                        match(Vec::as_slice(&s.bytes).sub(span.start, span.end)) {
+                            Some(part) => match(from_utf8(part)) { Ok(text) => Ok(text), Err(_) => Err(SourceError::InvalidBoundary) },
+                            None => Err(SourceError::InvalidRange)
+                        }
                     } else { Err(SourceError::InvalidBoundary) }
                 }
         }

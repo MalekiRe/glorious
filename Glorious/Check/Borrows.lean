@@ -1056,6 +1056,25 @@ def textAt (t : Ty) (e : Flat.ExprId) : M Bool := do
     pure true
   | _ => pure false
 
+/-- Is a `Str` wanted here, of a text written: read as one then. -/
+def ownedTextAt (t : Ty) (e : Flat.ExprId) : M Bool := do
+  if ((← get).body.textCodes e).isNone then return false
+  match ← find t with
+  | .con n [] => pure (Syntax.lastSegment n == "Str")
+  | _ => pure false
+
+/-- `m` with a text written read as a `Str`. -/
+def withTextOwned {α : Type} (m : M α) : M α := do
+  let before := (← get).textOwned
+  modify fun s => { s with textOwned := true }
+  try
+    let r ← m
+    modify fun s => { s with textOwned := before }
+    pure r
+  catch e =>
+    modify fun s => { s with textOwned := before }
+    throw e
+
 /-- The lifetimes a callable type is for every one of, if it is such a type. -/
 def rankedOf (cap : Nat) : M (List (Nat × String)) := do
   let root ← findCap cap

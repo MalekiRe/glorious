@@ -1,173 +1,51 @@
-// Texts: `Str`.
+// Texts: `String`, owned, and `&str`, borrowed, are the prelude's, with their
+// functions (`s.trim()`, `s.split(",")`, `owned.push_str(more)`); what is here
+// is what is a function of neither.
 
-use std::vec;
-use std::vec::{Vec};
+pub use prelude::{String, Chars, AsStr};
 
-pub fn is_empty(text: Str) -> Bool { match(text) { StrEnd => true, _ => false } }
+// Texts one after another, with another between each two: Rust's `join` of
+// a slice of them (of `&str`, of `String`, of anything written as text).
+pub fn join<A, S>(parts: A, between: &str) -> String where A: Indexed<Element = S>, S: Display {
+    let held = parts;
+    let mut out = Formatter::new();
+    let n = size_at(&held);
+    let mut i = 0;
+    while({ i < n }) {
+        if(i > 0) { Formatter::write_str(&mut out, between) } else { () };
+        Display::fmt(element_at(&held, i), &mut out);
+        i = i + 1
+    };
+    match(Formatter::finish(out)) { Ok(text) => text, Err(_) => String::new() }
+}
+pub fn concat<A, S>(parts: A) -> String where A: Indexed<Element = S>, S: Display { join(parts, "") }
 
-pub fn reverse(text: Str) -> Str { reverse_onto(text, "") }
-fn reverse_onto(text: Str, out: Str) -> Str {
-    match(text) { StrEnd => out, StrChar(c, rest) => tail reverse_onto(rest, StrChar(c, out)) }
+// Why bytes are not text.
+pub enum Utf8Error { Invalid }
+
+// Bytes as borrowed text, if they are UTF-8: Rust's `std::str::from_utf8`.
+pub fn from_utf8<'a>(bytes: &'a [u8]) -> Result<&'a str, Utf8Error> {
+    match(str_from_utf8(bytes)) { Some(text) => Ok(text), None => Err(Utf8Error::Invalid) }
 }
 
-// Does a text begin, end, or have somewhere in it, another?
-pub fn starts_with(text: Str, start: Str) -> Bool {
-    match((text, start)) {
-        (_, StrEnd) => true,
-        (StrChar(c, rest), StrChar(d, more)) => if(c == d) { starts_with(rest, more) } else { false },
-        _ => false
-    }
+// A text put to a width, in characters, with a character before it, or
+// after it.
+pub fn pad_start(text: &str, width: Int, with: char) -> String {
+    let mut out = String::new();
+    let mut n = char_count(text);
+    while({ n < width }) { String::push(&mut out, with); n = n + 1 };
+    String::push_str(&mut out, text);
+    out
 }
-pub fn ends_with(text: Str, end: Str) -> Bool { starts_with(reverse(text), reverse(end)) }
-pub fn contains(text: Str, part: Str) -> Bool { match(find(text, part)) { Some(_) => true, None => false } }
-
-// Where a part of a text first begins.
-pub fn find(text: Str, part: Str) -> Option<Int> { find_from(text, part, 0) }
-fn find_from(text: Str, part: Str, at: Int) -> Option<Int> {
-    if(starts_with(text, part)) { Some(at) } else {
-        match(text) { StrEnd => None, StrChar(_, rest) => tail find_from(rest, part, at + 1) }
-    }
+pub fn pad_end(text: &str, width: Int, with: char) -> String {
+    let mut out = String::from(text);
+    let mut n = char_count(text);
+    while({ n < width }) { String::push(&mut out, with); n = n + 1 };
+    out
 }
-
-// The first `n` characters, and the rest.
-pub fn take(text: Str, n: Int) -> Str {
-    if(n <= 0) { "" } else { match(text) { StrEnd => "", StrChar(c, rest) => StrChar(c, take(rest, n - 1)) } }
+fn char_count(text: &str) -> Int {
+    let mut it = StrRef::chars(&text);
+    let mut n = 0;
+    while({ it.next().is_some() }) { n = n + 1 };
+    n
 }
-pub fn drop(text: Str, n: Int) -> Str {
-    if(n <= 0) { text } else { match(text) { StrEnd => "", StrChar(_, rest) => tail drop(rest, n - 1) } }
-}
-
-pub fn char_at(text: Str, i: Int) -> Option<char> {
-    match(text) { StrEnd => None, StrChar(c, rest) => if(i == 0) { Some(c) } else { tail char_at(rest, i - 1) } }
-}
-
-pub fn map<e: EffectRow>(text: Str, f: fn(char) -> char / {| e}) -> Str / {| e} {
-    match(text) { StrEnd => "", StrChar(c, rest) => StrChar(f(c), map(rest, f)) }
-}
-pub fn to_upper(text: Str) -> Str { map(text, std::char::to_upper) }
-pub fn to_lower(text: Str) -> Str { map(text, std::char::to_lower) }
-
-// The text without the spaces at its ends.
-pub fn trim(text: Str) -> Str { reverse(trim_start(reverse(trim_start(text)))) }
-pub fn trim_start(text: Str) -> Str {
-    match(text) {
-        StrEnd => "",
-        StrChar(c, rest) => if(std::char::is_space(c)) { tail trim_start(rest) } else { text }
-    }
-}
-
-// The parts of a text between each two of a character.
-pub fn split(text: Str, at: char) -> Vec<Str> { let mut out = Vec::new(); split_onto(text, at, "", &mut out); out }
-fn split_onto(text: Str, at: char, part: Str, out: &mut Vec<Str>) {
-    match(text) {
-        StrEnd => Vec::push(out, reverse(part)),
-        StrChar(c, rest) =>
-            if(c == at) { Vec::push(out, reverse(part)); tail split_onto(rest, at, "", out) }
-            else { tail split_onto(rest, at, StrChar(c, part), out) }
-    }
-}
-pub fn lines(text: Str) -> Vec<Str> { split(text, '\n') }
-
-// A text's characters, first to last.
-pub fn chars(text: Str) -> Vec<char> { let mut out = Vec::new(); chars_onto(text, &mut out); out }
-fn chars_onto(text: Str, out: &mut Vec<char>) {
-    match(text) {
-        StrEnd => (),
-        StrChar(c, rest) => Vec::push(out, c); tail chars_onto(rest, out)
-    }
-}
-
-// The words of a text: what is between its spaces.
-pub fn words(text: Str) -> Vec<Str> { vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
-
-// Texts one after another, with another between each two.
-// Texts one after another (an array, a `[Str; N]`, a `Vec<Str>`, a
-// slice), as one.
-pub fn join<A>(parts: A, between: Str) -> Str where A: Indexed<Element = Str> {
-    fold(parts, "", fn(out, part) { if(is_empty(out)) { part } else { out ++ between ++ part } })
-}
-pub fn concat<A>(parts: A) -> Str where A: Indexed<Element = Str> { fold(parts, "", fn(out, part) { out ++ part }) }
-
-pub fn repeat(text: Str, n: Int) -> Str { if(n <= 0) { "" } else { text ++ repeat(text, n - 1) } }
-
-// The whole number a text writes, if it writes one: digits, perhaps after `-`.
-pub fn parse_int(text: Str) -> Option<Int> {
-    match(text) {
-        StrChar('-', rest) => match(digits_value(rest, 0, 0)) { Some(n) => Some(0 - n), None => None },
-        _ => digits_value(text, 0, 0)
-    }
-}
-fn digits_value(text: Str, seen: Int, value: Int) -> Option<Int> {
-    match(text) {
-        StrEnd => if(seen > 0) { Some(value) } else { None },
-        StrChar(c, rest) => match(std::char::digit(c)) {
-            Some(d) => tail digits_value(rest, seen + 1, value * 10 + d),
-            None => None
-        }
-    }
-}
-
-// A text put to a width with a character before it, or after it.
-pub fn pad_start(text: Str, width: Int, with: char) -> Str {
-    if(length(text) < width) { tail pad_start(StrChar(with, text), width, with) } else { text }
-}
-pub fn pad_end(text: Str, width: Int, with: char) -> Str {
-    reverse(pad_start(reverse(text), width, with))
-}
-
-// A text as bytes: each character as UTF-8 has it.
-pub fn utf8(text: Str) -> Vec<u8> { let mut out = Vec::new(); utf8_onto(text, &mut out); out }
-fn utf8_onto(text: Str, out: &mut Vec<u8>) {
-    match(text) {
-        StrEnd => (),
-        StrChar(c, rest) => encode(int(c), out); tail utf8_onto(rest, out)
-    }
-}
-fn byte(n: Int) -> u8 { u8(n) }
-fn encode(code: Int, out: &mut Vec<u8>) {
-    if(code < 128) { Vec::push(out, byte(code)) } else {
-        if(code < 2048) { Vec::push(out, byte(192 + code / 64)); Vec::push(out, byte(128 + code % 64)) } else {
-            if(code < 65536) {
-                Vec::push(out, byte(224 + code / 4096)); Vec::push(out, byte(128 + code / 64 % 64)); Vec::push(out, byte(128 + code % 64))
-            } else {
-                Vec::push(out, byte(240 + code / 262144)); Vec::push(out, byte(128 + code / 4096 % 64));
-                Vec::push(out, byte(128 + code / 64 % 64)); Vec::push(out, byte(128 + code % 64))
-            }
-        }
-    }
-}
-
-// The text some bytes one after another are (an array, a `[u8; N]`, a
-// `Vec<u8>`, a slice), if they are UTF-8.
-pub fn from_utf8<A>(bytes: A) -> Option<Str> where A: Indexed<Element = u8> { let held = bytes; decode(&held, size_at(&held), "") }
-// Read from the end, so that the text is built from its last character back.
-fn decode<A>(bytes: &A, end: Int, out: Str) -> Option<Str> where A: Indexed<Element = u8> {
-    if(end == 0) { Some(out) } else {
-        let last = int(*element_at(bytes, end - 1));
-        if(last < 128) { tail decode_one(bytes, end - 1, last, out) } else {
-            if(end < 2) { None } else {
-                let b1 = int(*element_at(bytes, end - 2));
-                if(b1 >= 192) { tail decode_one(bytes, end - 2, (b1 - 192) * 64 + (last - 128), out) } else {
-                    if(end < 3) { None } else {
-                        let b2 = int(*element_at(bytes, end - 3));
-                        if(b2 >= 224) {
-                            tail decode_one(bytes, end - 3, ((b2 - 224) * 64 + (b1 - 128)) * 64 + (last - 128), out)
-                        } else {
-                            if(end < 4) { None } else {
-                                let b3 = int(*element_at(bytes, end - 4));
-                                tail decode_one(bytes, end - 4,
-                                    (((b3 - 240) * 64 + (b2 - 128)) * 64 + (b1 - 128)) * 64 + (last - 128), out)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-fn decode_one<A>(bytes: &A, end: Int, code: Int, out: Str) -> Option<Str> where A: Indexed<Element = u8> {
-    match(char(code)) { Some(c) => tail decode(bytes, end, StrChar(c, out)), None => None }
-}
-
-// `String` is the prelude's (`prelude/string.glorious`), named here again.
-pub use prelude::{String};

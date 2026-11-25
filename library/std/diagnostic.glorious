@@ -2,11 +2,10 @@
 // which code, where, with what beside it) and written out at the end, as the
 // library specification has it (21).
 //
-// Texts are `Str`; what a bag gives back is a `Vec`.
+// What a bag gives back is a `Vec`.
 
 use std::source::{SourceMap, SourceSpan, SourceId};
 use std::fmt::{FormatError};
-use std::text::{utf8};
 use std::vec::{Vec, IntoIter};
 use std::iterator::{Iterator, next};
 
@@ -20,26 +19,28 @@ impl DiagnosticCode {
 }
 
 // A place something is said of: the first is what the diagnostic is about.
-struct Label { span: SourceSpan, text: Str, primary: Bool }
+struct Label { span: SourceSpan, text: String, primary: Bool }
 
-pub struct Diagnostic { severity: Severity, code: DiagnosticCode, message: Str, labels: Vec<Label>, notes: Vec<Str>, helps: Vec<Str> }
+pub struct Diagnostic { severity: Severity, code: DiagnosticCode, message: String, labels: Vec<Label>, notes: Vec<String>, helps: Vec<String> }
 
 impl Diagnostic {
-    pub fn new(severity: Severity, code: DiagnosticCode, message: Str) -> Self {
-        Self { severity: severity, code: code, message: message, labels: Vec::new(), notes: Vec::new(), helps: Vec::new() }
+    pub fn new(severity: Severity, code: DiagnosticCode, message: &str) -> Self {
+        Self { severity: severity, code: code, message: String::from(message), labels: Vec::new(), notes: Vec::new(), helps: Vec::new() }
     }
-    pub fn primary(value: &mut Self, span: SourceSpan, label: Str) { Vec::push(&mut value.labels, Label { span: span, text: label, primary: true }) }
-    pub fn secondary(value: &mut Self, span: SourceSpan, label: Str) { Vec::push(&mut value.labels, Label { span: span, text: label, primary: false }) }
-    pub fn note(value: &mut Self, text: Str) { Vec::push(&mut value.notes, text) }
-    pub fn help(value: &mut Self, text: Str) { Vec::push(&mut value.helps, text) }
+    pub fn primary(value: &mut Self, span: SourceSpan, label: &str) { Vec::push(&mut value.labels, Label { span: span, text: String::from(label), primary: true }) }
+    pub fn secondary(value: &mut Self, span: SourceSpan, label: &str) { Vec::push(&mut value.labels, Label { span: span, text: String::from(label), primary: false }) }
+    pub fn note(value: &mut Self, text: &str) { Vec::push(&mut value.notes, String::from(text)) }
+    pub fn help(value: &mut Self, text: &str) { Vec::push(&mut value.helps, String::from(text)) }
     pub fn is_error(value: &Self) -> Bool { rank(&value.severity) == 0 }
     pub fn code(value: &Self) -> u32 { value.code.0 }
-    pub fn message(value: &Self) -> Str { value.message }
+    pub fn message<'a>(value: &'a Self) -> &'a str { String::as_str(&value.message) }
 }
 
 // Errors first.
 fn rank(s: &Severity) -> Int { match(s) { &Severity::Error => 0, &Severity::Warning => 1, &Severity::Note => 2 } }
-fn word(s: &Severity) -> Str { match(s) { &Severity::Error => "error", &Severity::Warning => "warning", &Severity::Note => "note" } }
+fn word(s: &Severity, out: &mut String) {
+    match(s) { &Severity::Error => String::push_str(out, "error"), &Severity::Warning => String::push_str(out, "warning"), &Severity::Note => String::push_str(out, "note") }
+}
 
 // Where a diagnostic is put among others: by the text its first primary
 // place is in, then how far in, then how bad, then its code. One with no
@@ -108,42 +109,64 @@ pub struct RenderOptions { pub maximum_notes: Int, pub maximum_bytes: Int }
 
 // A place as `name:line:column`, both counted from one; a place that is in
 // no text the map has, or not in it, is `<unknown>`.
-fn place_text(span: &SourceSpan, sources: &SourceMap) -> Str {
+fn place_text(span: &SourceSpan, sources: &SourceMap, out: &mut String) {
     match(SourceMap::name(sources, span.source)) {
-        None => "<unknown>",
+        None => String::push_str(out, "<unknown>"),
         Some(name) => match(SourceMap::locate(sources, span.source, span.start)) {
-            Err(_) => "<unknown>",
-            Ok(at) => name ++ ":" ++ show(at.line + 1) ++ ":" ++ show(at.column_bytes + 1)
+            Err(_) => String::push_str(out, "<unknown>"),
+            Ok(at) =>
+                String::push_str(out, name);
+                String::push_str(out, ":");
+                String::push_str(out, String::as_str(&to_string(&(at.line + 1))));
+                String::push_str(out, ":");
+                String::push_str(out, String::as_str(&to_string(&(at.column_bytes + 1))))
         }
     }
 }
 
-fn labels_text(labels: &Vec<Label>, sources: &SourceMap, i: Int, out: Str) -> Str {
-    match(element(labels, i)) {
-        None => out,
-        Some(label) =>
-            let arrow = if(label.primary) { "  --> " } else { "  ::: " };
-            let said = if(label.text == "") { "" } else { ": " ++ label.text };
-            labels_text(labels, sources, i + 1, out ++ arrow ++ place_text(&label.span, sources) ++ said ++ "\n")
+fn labels_text(labels: &Vec<Label>, sources: &SourceMap, out: &mut String) {
+    let mut i = 0;
+    while({ i < Vec::len(labels) }) {
+        let label = Vec::index(labels, i);
+        String::push_str(out, if(label.primary) { "  --> " } else { "  ::: " });
+        place_text(&label.span, sources, out);
+        if(String::is_empty(&label.text)) { () } else { String::push_str(out, ": "); String::push_str(out, String::as_str(&label.text)) };
+        String::push_str(out, "\n");
+        i = i + 1
     }
 }
 
-fn lines_text(kind: Str, lines: &Vec<Str>, i: Int, most: Int, out: Str) -> Str {
-    match(element(lines, i)) {
-        None => out,
-        Some(text) =>
-            if(i >= most) { out ++ "  (" ++ show(len_at(lines) - most) ++ " more)\n" }
-            else { lines_text(kind, lines, i + 1, most, out ++ "  " ++ kind ++ ": " ++ *text ++ "\n") }
-    }
+fn lines_text(kind: &str, lines: &Vec<String>, most: Int, out: &mut String) {
+    let mut i = 0;
+    let n = Vec::len(lines);
+    while({ i < n and { i < most } }) {
+        String::push_str(out, "  ");
+        String::push_str(out, kind);
+        String::push_str(out, ": ");
+        String::push_str(out, String::as_str(Vec::index(lines, i)));
+        String::push_str(out, "\n");
+        i = i + 1
+    };
+    if(n > most) {
+        String::push_str(out, "  (");
+        String::push_str(out, String::as_str(&to_string(&(n - most))));
+        String::push_str(out, " more)\n")
+    } else { () }
 }
 
 // The diagnostic as text: its severity, code and message, each place, then
 // its notes (as many as are allowed, and how many more there are) and what
 // would help. Longer than is allowed, it is refused, not cut short.
-pub fn render_diagnostic(value: &Diagnostic, sources: &SourceMap, options: RenderOptions) -> Result<Str, FormatError> {
-    let head = word(&value.severity) ++ "[" ++ show(value.code.0) ++ "]: " ++ value.message ++ "\n";
-    let places = labels_text(&value.labels, sources, 0, head);
-    let noted = lines_text("note", &value.notes, 0, options.maximum_notes, places);
-    let all = lines_text("help", &value.helps, 0, len_at(&value.helps), noted);
-    if(Vec::len(&utf8(all)) > options.maximum_bytes) { Err(FormatError::OutputLimit) } else { Ok(all) }
+pub fn render_diagnostic(value: &Diagnostic, sources: &SourceMap, options: RenderOptions) -> Result<String, FormatError> {
+    let mut all = String::new();
+    word(&value.severity, &mut all);
+    String::push_str(&mut all, "[");
+    String::push_str(&mut all, String::as_str(&to_string(&value.code.0)));
+    String::push_str(&mut all, "]: ");
+    String::push_str(&mut all, String::as_str(&value.message));
+    String::push_str(&mut all, "\n");
+    labels_text(&value.labels, sources, &mut all);
+    lines_text("note", &value.notes, options.maximum_notes, &mut all);
+    lines_text("help", &value.helps, Vec::len(&value.helps), &mut all);
+    if(String::len(&all) > options.maximum_bytes) { Err(FormatError::OutputLimit) } else { Ok(all) }
 }

@@ -1032,6 +1032,9 @@ def coerceClause (cs : Std.HashMap Site String) (result : Option String) (c : Fl
 /-- A top-level function's body with its coercions written out. -/
 def coerceFn (cs : Std.HashMap Site String) (name : String) (b : Flat.Body) : Flat.Body :=
   if cs.isEmpty then b else
+  -- (A copy made for the types it is used at, `f⟨2,2⟩'`, is coerced as the
+  -- function it is a copy of.)
+  let name := (name.splitOn "⟨").headD name
   let (roots, b) := (b.roots.toList.zipIdx.toArray.mapM fun (c, j) => coerceClause cs cs[Site.fnResult name j]? c).run b
   { b with roots }
 

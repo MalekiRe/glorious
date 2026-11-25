@@ -13,7 +13,7 @@ impl String {
     pub fn from_text(text: Str) -> Self { let mut s = String::new(); String::push_text(&mut s, text); s }
     // Of bytes that are UTF-8; the bytes given back if they are not.
     pub fn from_utf8(bytes: Vec<u8>) -> Result<Self, Vec<u8>> {
-        match(string_utf8_from(&bytes, 0)) { Ok(_) => Ok(Self { bytes: bytes }), Err(_) => Err(bytes) }
+        match(string_utf8_from(&Vec::as_slice(&bytes), 0)) { Ok(_) => Ok(Self { bytes: bytes }), Err(_) => Err(bytes) }
     }
     pub fn into_bytes(value: Self) -> Vec<u8> { match(value) { String { bytes } => bytes } }
     pub fn as_bytes<'a>(value: &'a Self) -> &'a [u8] { Vec::as_slice(&value.bytes) }
@@ -41,6 +41,13 @@ impl String {
         unsafe { str_at(ptr_mut_address(Vec::as_mut_ptr(&value.bytes)), Vec::len(&value.bytes)) }
     }
 }
+
+// (While `Str` is: borrowed text and a `String` are one wherever one is
+// wanted.)
+coerce str_text
+fn str_text<'a>(s: &'a str) -> Str { let held = s; str_decode(&held, 0, StrEnd) }
+coerce string_text
+fn string_text(s: String) -> Str { let held = s; String::to_str(&held) }
 
 // A `&String` is a `&str` wherever one is wanted, as Rust's is.
 coerce string_as_str
@@ -70,22 +77,32 @@ fn string_encode(code: Int, out: &mut Vec<u8>) {
     }
 }
 // Are the bytes from a place on UTF-8?
-fn string_utf8_from(bytes: &Vec<u8>, i: Int) -> Bool {
-    let n = Vec::len(bytes);
+fn string_utf8_from(bytes: &&[u8], i: Int) -> Bool {
+    let n = bytes.len();
     if(i >= n) { true } else {
-        let b0 = int(*Vec::index(bytes, i));
+        let b0 = int(*element_at(bytes, i));
         let more = if(b0 < 128) { 0 } else { if(b0 < 192) { -1 } else { if(b0 < 224) { 1 } else { if(b0 < 240) { 2 } else { if(b0 < 248) { 3 } else { -1 } } } } };
         if(more < 0 or { i + more >= n }) { false } else {
             if(string_continued(bytes, i + 1, more)) { tail string_utf8_from(bytes, i + more + 1) } else { false }
         }
     }
 }
-fn string_continued(bytes: &Vec<u8>, i: Int, left: Int) -> Bool {
+fn string_continued(bytes: &&[u8], i: Int, left: Int) -> Bool {
     if(left == 0) { true } else {
-        let b = int(*Vec::index(bytes, i));
+        let b = int(*element_at(bytes, i));
         if(b >= 128 and { b < 192 }) { tail string_continued(bytes, i + 1, left - 1) } else { false }
     }
 }
+
+// Bytes as borrowed text, if they are UTF-8 (`std::text::from_utf8`).
+fn str_from_utf8<'a>(bytes: &'a [u8]) -> Option<&'a str> {
+    match(string_utf8_from(&bytes, 0)) { Ok(_) => Some(unsafe { str_at(ptr_mut_address(bytes.as_ptr()), bytes.len()) }), Err(_) => None }
+}
+
+// What is text to borrow: `&str` and `String` (Rust's `AsRef<str>`).
+trait AsStr { fn as_str(&Self) -> &str }
+impl<'a> AsStr for StrRef<'a> { fn as_str(s: &StrRef<'a>) -> &str { *s } }
+impl AsStr for String { fn as_str(s: &String) -> &str { String::as_str(s) } }
 
 // Borrowed text's own functions, as Rust's `str` has them. Places are of
 // bytes; what is cut out is borrowed from the same text.
@@ -315,6 +332,22 @@ impl String {
     // One byte put after these, as it is.
     fn push_str_byte(value: &mut Self, b: u8) { Vec::push(&mut value.bytes, b) }
 }
+
+// Write a value as `Debug` has it, as Rust's `println!("{:?}", value)`.
+fn say_debug<T>(value: T) where T: Debug { let held = value; host_write(String::to_str(&format_debug(&held))) }
+
+// How many bytes, and texts in order of their bytes, as Rust's.
+impl<'a> Len for StrRef<'a> { fn len(s: StrRef<'a>) -> Int { s.len } }
+impl Len for String { fn len(s: String) -> Int { String::len(&s) } }
+impl<'a> Ord for StrRef<'a> {
+    fn <(a: StrRef<'a>, b: StrRef<'a>) -> Bool {
+        let n = if(a.len < b.len) { a.len } else { b.len };
+        let mut i = 0;
+        while({ i < n and { a.byte(i) == b.byte(i) } }) { i = i + 1 };
+        if(i < n) { int(a.byte(i)) < int(b.byte(i)) } else { a.len < b.len }
+    }
+}
+impl Ord for String { fn <(a: String, b: String) -> Bool { String::as_str(&a) < String::as_str(&b) } }
 
 // What a value is written as, by `Display` and by `Debug`.
 fn format<T: Display>(value: &T) -> String where T: Use<[1, 1]> {

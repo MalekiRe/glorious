@@ -145,9 +145,10 @@ mod number_text {
     }
 
     pub fn float_text(negative: Int, wide: Int, held: Int, single: Int, infinite: Int) -> Str {
-        let sign = match(negative) { 0 => "", _ => "-" };
+        let none: Str = "";
+        let sign = match(negative) { 0 => none, _ => StrChar('-', StrEnd) };
         match(f64_eq(wide, wide)) {
-            0 => "NaN",
+            0 => let nan: Str = "NaN"; nan,
             _ => match(int_eq(held, infinite)) {
                 0 => match(held) {
                     0 => sign ++ "0.0",
@@ -192,7 +193,7 @@ impl<T, E> Show for Result<T, E> where T: Show, E: Show {
 // Truth, `Result<(), ()>`, as `true` and `false` (preferred, as the more
 // particular implementation, over the one of every `Result`).
 impl Show for Result<(), ()> {
-    fn fmt(b: &Result<(), ()>) -> Str { match(b) { Ok(_) => "true", Err(_) => "false" } }
+    fn fmt(b: &Result<(), ()>) -> Str { let yes: Str = "true"; let no: Str = "false"; match(b) { Ok(_) => yes, Err(_) => no } }
 }
 
 // The character at a place of the name of the function a callable is of,

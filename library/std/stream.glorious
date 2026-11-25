@@ -5,7 +5,6 @@
 // the host's effect, under the same functions.
 
 use std::host::{IoError, Console, write_stdout, write_stderr, read_stdin};
-use std::text::{utf8};
 use std::vec::{Vec};
 
 pub trait Read {
@@ -120,9 +119,9 @@ pub fn write_all<W: Write, A>(writer: &mut W, bytes: A)
 }
 
 // A text written as its UTF-8 bytes.
-pub fn write_str<W: Write>(writer: &mut W, text: Str)
+pub fn write_str<W: Write>(writer: &mut W, text: &str)
     -> Result<(), WriteAllError> / { | <W as Write>::Effects } where W: Use<[1, 1]> {
-    write_from(writer, &utf8(text), 0)
+    write_from(writer, &text.as_bytes(), 0)
 }
 
 fn read_more<R: Read>(reader: &mut R, out: Vec<u8>, limit: Int)

@@ -3,7 +3,7 @@
 // specification has them (24). Places and lengths are `Int`.
 
 use std::value::{Rejected};
-use std::hash::{Hash, HashMap};
+use std::hash::{Hash, HashMap, hash};
 use std::vec::{Vec};
 pub use std::error::{MarkError, IndexOverflow};
 
@@ -232,17 +232,44 @@ impl<Tag, T> Interner<Tag, T> where T: Eq + Hash {
 }
 
 // Texts kept once each.
-pub struct StringInterner<Tag> { texts: Interner<Tag, Str> }
+// (By the hash of each, the places of those with it: a `String` is not
+// copied to be a key.)
+pub struct StringInterner<Tag> { texts: Vec<String>, places: HashMap<Int, Vec<Int>> }
 
 impl<Tag> StringInterner<Tag> {
-    pub fn new() -> Self { Self { texts: Interner::new() } }
-    pub fn len(i: &Self) -> Int { Interner::len(&i.texts) }
-    pub fn intern(i: &mut Self, text: Str) -> Result<Id<Tag>, IndexOverflow> where Tag: Use<[1, 1]> {
-        match(Interner::intern_discarding(&mut i.texts, text)) { Ok(id) => Ok(id), Err(_) => Err(IndexOverflow) }
+    pub fn new() -> Self { Self { texts: Vec::new(), places: HashMap::new() } }
+    pub fn len(i: &Self) -> Int { Vec::len(&i.texts) }
+    pub fn intern(i: &mut Self, text: &str) -> Result<Id<Tag>, IndexOverflow> where Tag: Use<[1, 1]> {
+        match(StringInterner::find(&*i, text)) {
+            Some(found) => Ok(found),
+            None =>
+                let n = Vec::len(&i.texts);
+                if(n > 4294967295) { Err(IndexOverflow) } else {
+                    Vec::push(&mut i.texts, String::from(text));
+                    let key = hash(text);
+                    let mut at = match(HashMap::get(&i.places, &key)) { Some(places) => clone(places), None => Vec::new() };
+                    Vec::push(&mut at, n);
+                    HashMap::insert(&mut i.places, key, at);
+                    Ok(numbered(n))
+                }
+        }
     }
-    pub fn find(i: &Self, text: Str) -> Option<Id<Tag>> where Tag: Use<[1, 1]> { Interner::find(&i.texts, text) }
-    pub fn get(i: &Self, id: Id<Tag>) -> Option<Str> where Tag: Use<[1, 1]> {
-        match(Interner::get(&i.texts, id)) { Some(text) => Some(*text), None => None }
+    pub fn find(i: &Self, text: &str) -> Option<Id<Tag>> where Tag: Use<[1, 1]> {
+        match(HashMap::get(&i.places, &hash(text))) {
+            None => None,
+            Some(places) =>
+                let mut found = None;
+                let mut k = 0;
+                while({ found.is_none() and { k < Vec::len(places) } }) {
+                    let n = *Vec::index(places, k);
+                    if(String::as_str(Vec::index(&i.texts, n)) == text) { found = Some(numbered(n)) } else { () };
+                    k = k + 1
+                };
+                found
+        }
+    }
+    pub fn get<'a>(i: &'a Self, id: Id<Tag>) -> Option<&'a str> where Tag: Use<[1, 1]> {
+        match(Vec::get(&i.texts, int(id.0))) { Some(text) => Some(String::as_str(text)), None => None }
     }
 }
 

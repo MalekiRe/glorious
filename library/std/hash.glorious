@@ -25,6 +25,17 @@ impl Hash for Str {
 fn hash_text(text: Str, h: Int) -> Int {
     match(text) { StrEnd => h, StrChar(c, rest) => tail hash_text(rest, combine(h, int(c))) }
 }
+// Text by its characters, as `Str`'s is.
+impl<'a> Hash for StrRef<'a> {
+    fn hash(text: StrRef<'a>) -> Int {
+        let mut it = text.chars();
+        let mut h = 5381;
+        let mut going = true;
+        while({ going }) { match(it.next()) { Some(c) => h = combine(h, int(c)), None => going = false } };
+        h
+    }
+}
+impl Hash for String { fn hash(text: String) -> Int { hash(String::as_str(&text)) } }
 impl<A, B> Hash for (A, B) where A: Hash, B: Hash {
     fn hash(p: (A, B)) -> Int { match(p) { (a, b) => combine(hash(a), hash(b)) } }
 }

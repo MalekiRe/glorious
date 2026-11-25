@@ -8,10 +8,10 @@
 use std::vec::{Vec, ToVec, to_vec};
 
 pub enum TypeKind { KindWhole, KindFloat, KindFlag, KindChar, KindText, KindStruct, KindEnum, KindList, KindOpaque }
-pub struct FieldInfo { pub name: Str, pub type_name: Str, pub public: Bool }
-pub struct VariantInfo { pub name: Str, pub fields: Vec<FieldInfo> }
-pub struct TypeInfo { pub name: Str, pub kind: TypeKind, pub public: Bool, pub variants: Vec<VariantInfo> }
-pub enum Described { NoValue, FlagValue(Bool), WholeValue(Int), FloatValue(f64), CharValue(char), TextValue(Str), StructValue(Str, Vec<(Str, Described)>), ListValue(Vec<Described>), OpaqueValue(Str) }
+pub struct FieldInfo { pub name: &'static str, pub type_name: &'static str, pub public: Bool }
+pub struct VariantInfo { pub name: &'static str, pub fields: Vec<FieldInfo> }
+pub struct TypeInfo { pub name: &'static str, pub kind: TypeKind, pub public: Bool, pub variants: Vec<VariantInfo> }
+pub enum Described { NoValue, FlagValue(Bool), WholeValue(Int), FloatValue(f64), CharValue(char), TextValue(String), StructValue(&'static str, Vec<(&'static str, Described)>), ListValue(Vec<Described>), OpaqueValue(&'static str) }
 // (What says a description may see what is not `pub`: made only here, by
 // the unsafe ones, and by the safe ones, which then do not.)
 pub struct Unchecked { none: () }
@@ -19,17 +19,17 @@ impl Use<[0, *]> for Unchecked {}
 pub trait Reflect {
     const INFO: TypeInfo;
     fn describe_as(&Self, Bool, Unchecked) -> Described
-    fn set_from(&mut Self, Str, Str, Bool, Unchecked) -> Result<Described, Str>
+    fn set_from(&mut Self, &str, &str, Bool, Unchecked) -> Result<Described, String>
 }
-pub fn field_info(name: Str, type_name: Str, public: Bool) -> FieldInfo { FieldInfo { name: name, type_name: type_name, public: public } }
+pub fn field_info(name: &'static str, type_name: &'static str, public: Bool) -> FieldInfo { FieldInfo { name: name, type_name: type_name, public: public } }
 // (Of anything `ToVec`: what the compiler writes for a type is a literal.)
-pub fn variant_info<A>(name: Str, fields: A) -> VariantInfo where A: ToVec<Elem = FieldInfo> { VariantInfo { name: name, fields: to_vec(fields) } }
-pub fn type_info_of<A>(name: Str, kind: TypeKind, public: Bool, variants: A) -> TypeInfo where A: ToVec<Elem = VariantInfo> { TypeInfo { name: name, kind: kind, public: public, variants: to_vec(variants) } }
+pub fn variant_info<A>(name: &'static str, fields: A) -> VariantInfo where A: ToVec<Elem = FieldInfo> { VariantInfo { name: name, fields: to_vec(fields) } }
+pub fn type_info_of<A>(name: &'static str, kind: TypeKind, public: Bool, variants: A) -> TypeInfo where A: ToVec<Elem = VariantInfo> { TypeInfo { name: name, kind: kind, public: public, variants: to_vec(variants) } }
 // The fields a struct's description has, in order: what the compiler writes
 // for each, `(name, value)`.
-pub fn fields_of<A>(fields: A) -> Vec<(Str, Described)> where A: ToVec<Elem = (Str, Described)> { to_vec(fields) }
+pub fn fields_of<A>(fields: A) -> Vec<(&'static str, Described)> where A: ToVec<Elem = (&'static str, Described)> { to_vec(fields) }
 pub fn reflect_describe<T>(v: &T, all: Bool, token: Unchecked) -> Described where T: Reflect { <T as Reflect>::describe_as(v, all, token) }
-pub fn reflect_set<T>(v: &mut T, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> where T: Reflect { <T as Reflect>::set_from(v, "", text, all, token) }
+pub fn reflect_set<T>(v: &mut T, text: &str, all: Bool, token: Unchecked) -> Result<Described, String> where T: Reflect { <T as Reflect>::set_from(v, "", text, all, token) }
 // (A description without what is not `pub`.)
 pub fn public_fields(fields: Vec<FieldInfo>) -> Vec<FieldInfo> {
     let mut fields = fields;
@@ -62,24 +62,13 @@ pub unsafe fn type_info_unchecked<T>() -> TypeInfo where T: Reflect { <T as Refl
 pub fn describe<T>(v: &T) -> Described where T: Reflect { <T as Reflect>::describe_as(v, false, Unchecked { none: () }) }
 pub unsafe fn describe_unchecked<T>(v: &T) -> Described where T: Reflect { <T as Reflect>::describe_as(v, true, Unchecked { none: () }) }
 // A field set from text: `"200"`, `"true"`; what it was set to.
-pub fn set_field<T>(v: &mut T, field: Str, text: Str) -> Result<Described, Str> where T: Reflect { <T as Reflect>::set_from(v, field, text, false, Unchecked { none: () }) }
-pub unsafe fn set_field_unchecked<T>(v: &mut T, field: Str, text: Str) -> Result<Described, Str> where T: Reflect { <T as Reflect>::set_from(v, field, text, true, Unchecked { none: () }) }
+pub fn set_field<T>(v: &mut T, field: &str, text: &str) -> Result<Described, String> where T: Reflect { <T as Reflect>::set_from(v, field, text, false, Unchecked { none: () }) }
+pub unsafe fn set_field_unchecked<T>(v: &mut T, field: &str, text: &str) -> Result<Described, String> where T: Reflect { <T as Reflect>::set_from(v, field, text, true, Unchecked { none: () }) }
 // (A whole number written in a text, with a sign or none.)
-pub fn reflect_digits(text: Str, n: Int, any: Bool) -> Option<Int> {
-    match(text) {
-        StrEnd => if(any) { Some(n) } else { None },
-        StrChar(c, rest) => let d = char_bits(c) - 48; if(d < 0) { None } else if(d > 9) { None } else { reflect_digits(rest, n * 10 + d, true) }
-    }
-}
-pub fn reflect_int(text: Str) -> Option<Int> {
-    match(text) {
-        StrChar(c, rest) => if(char_bits(c) == 45) { match(reflect_digits(rest, 0, false)) { Some(n) => Some(0 - n), None => None } } else { reflect_digits(StrChar(c, rest), 0, false) },
-        StrEnd => None
-    }
-}
-pub fn reflect_whole_any(text: Str) -> Result<Int, Str> { match(reflect_int(text)) { Some(n) => Ok(n), None => Err("not a whole number") } }
-pub fn reflect_bool(text: Str) -> Option<Bool> { if(text == "true") { Some(true) } else if(text == "false") { Some(false) } else { None } }
-pub fn reflect_whole(text: Str, low: Int, high: Int) -> Result<Int, Str> {
+pub fn reflect_int(text: &str) -> Option<Int> { text.parse_int() }
+pub fn reflect_whole_any(text: &str) -> Result<Int, &'static str> { match(reflect_int(text)) { Some(n) => Ok(n), None => Err("not a whole number") } }
+pub fn reflect_bool(text: &str) -> Option<Bool> { if(text == "true") { Some(true) } else if(text == "false") { Some(false) } else { None } }
+pub fn reflect_whole(text: &str, low: Int, high: Int) -> Result<Int, &'static str> {
     match(reflect_int(text)) {
         Some(n) => if(n < low) { Err("out of range") } else if(n > high) { Err("out of range") } else { Ok(n) },
         None => Err("not a whole number")
@@ -88,8 +77,8 @@ pub fn reflect_whole(text: Str, low: Int, high: Int) -> Result<Int, Str> {
 impl Reflect for Int {
     const INFO: TypeInfo = TypeInfo { name: "Int", kind: KindWhole, public: true, variants: Vec::new() };
     fn describe_as(v: &Int, all: Bool, token: Unchecked) -> Described { WholeValue(*v) }
-    fn set_from(v: &mut Int, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> {
-        match(reflect_int(text)) { Some(n) => *v = n; Ok(WholeValue(n)), None => Err("not a whole number") }
+    fn set_from(v: &mut Int, path: &str, text: &str, all: Bool, token: Unchecked) -> Result<Described, String> {
+        match(reflect_int(text)) { Some(n) => *v = n; Ok(WholeValue(n)), None => Err(String::from("not a whole number")) }
     }
 }
 // (`Option<T>` is `Result<T, ()>`, and `Bool` is `Result<(), ()>`: one of
@@ -102,29 +91,29 @@ impl<T, E> Reflect for Result<T, E> where T: Reflect, E: Reflect {
             Err(x) => match(reflect_describe(x, all, token)) { NoValue => FlagValue(false), d => StructValue("Err", fields_of([("0", d)])) }
         }
     }
-    fn set_from(v: &mut Result<T, E>, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> {
-        match(v) { Ok(x) => if(path == "0") { reflect_set(x, text, all, token) } else { Err("no field") }, Err(x) => if(path == "0") { reflect_set(x, text, all, token) } else { Err("no field") } }
+    fn set_from(v: &mut Result<T, E>, path: &str, text: &str, all: Bool, token: Unchecked) -> Result<Described, String> {
+        match(v) { Ok(x) => if(path == "0") { reflect_set(x, text, all, token) } else { Err(String::from("no field")) }, Err(x) => if(path == "0") { reflect_set(x, text, all, token) } else { Err(String::from("no field")) } }
     }
 }
 impl Reflect for () {
     const INFO: TypeInfo = TypeInfo { name: "()", kind: KindStruct, public: true, variants: Vec::new() };
     fn describe_as(v: &(), all: Bool, token: Unchecked) -> Described { NoValue }
-    fn set_from(v: &mut (), path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { Err("`()` is not set from text") }
+    fn set_from(v: &mut (), path: &str, text: &str, all: Bool, token: Unchecked) -> Result<Described, String> { Err(String::from("`()` is not set from text")) }
 }
-impl Reflect for Str {
-    const INFO: TypeInfo = TypeInfo { name: "Str", kind: KindText, public: true, variants: Vec::new() };
-    fn describe_as(v: &Str, all: Bool, token: Unchecked) -> Described { TextValue(clone(v)) }
-    fn set_from(v: &mut Str, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { *v = clone(&text); Ok(TextValue(text)) }
+impl Reflect for String {
+    const INFO: TypeInfo = TypeInfo { name: "String", kind: KindText, public: true, variants: Vec::new() };
+    fn describe_as(v: &String, all: Bool, token: Unchecked) -> Described { TextValue(clone(v)) }
+    fn set_from(v: &mut String, path: &str, text: &str, all: Bool, token: Unchecked) -> Result<Described, String> { *v = String::from(text); Ok(TextValue(String::from(text))) }
 }
 impl<T, N> Reflect for [T; N] where T: Reflect, N: Known {
     const INFO: TypeInfo = TypeInfo { name: "Array", kind: KindList, public: true, variants: Vec::new() };
     fn describe_as(v: &[T; N], all: Bool, token: Unchecked) -> Described { ListValue(described_each(v, all, token)) }
-    fn set_from(v: &mut [T; N], path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { Err("an array is not set from text") }
+    fn set_from(v: &mut [T; N], path: &str, text: &str, all: Bool, token: Unchecked) -> Result<Described, String> { Err(String::from("an array is not set from text")) }
 }
 impl<T> Reflect for Vec<T> where T: Reflect {
     const INFO: TypeInfo = TypeInfo { name: "Vec", kind: KindList, public: true, variants: Vec::new() };
     fn describe_as(v: &Vec<T>, all: Bool, token: Unchecked) -> Described { ListValue(described_each(v, all, token)) }
-    fn set_from(v: &mut Vec<T>, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { Err("a list is not set from text") }
+    fn set_from(v: &mut Vec<T>, path: &str, text: &str, all: Bool, token: Unchecked) -> Result<Described, String> { Err(String::from("a list is not set from text")) }
 }
 // Each element described, in order.
 fn described_each<A, T>(v: &A, all: Bool, token: Unchecked) -> Vec<Described> where A: Indexed<Element = T>, T: Reflect {
@@ -136,12 +125,16 @@ fn described_each<A, T>(v: &A, all: Bool, token: Unchecked) -> Vec<Described> wh
 impl Reflect for f64 {
     const INFO: TypeInfo = TypeInfo { name: "f64", kind: KindFloat, public: true, variants: Vec::new() };
     fn describe_as(v: &f64, all: Bool, token: Unchecked) -> Described { FloatValue(*v) }
-    fn set_from(v: &mut f64, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { Err("a float is not set from text") }
+    fn set_from(v: &mut f64, path: &str, text: &str, all: Bool, token: Unchecked) -> Result<Described, String> { Err(String::from("a float is not set from text")) }
 }
 impl Reflect for char {
     const INFO: TypeInfo = TypeInfo { name: "char", kind: KindChar, public: true, variants: Vec::new() };
     fn describe_as(v: &char, all: Bool, token: Unchecked) -> Described { CharValue(*v) }
-    fn set_from(v: &mut char, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> {
-        match(text) { StrChar(c, StrEnd) => *v = c; Ok(CharValue(c)), _ => Err("not one character") }
+    fn set_from(v: &mut char, path: &str, text: &str, all: Bool, token: Unchecked) -> Result<Described, String> {
+        let mut cs = text.chars();
+        match(cs.next()) {
+            Some(c) => match(cs.next()) { None => *v = c; Ok(CharValue(c)), Some(_) => Err(String::from("not one character")) },
+            None => Err(String::from("not one character"))
+        }
     }
 }

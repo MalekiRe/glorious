@@ -6,7 +6,6 @@
 // is not thirty-two); `hash64` over the `Hash` trait is not here.
 
 use std::bytes::{hex_encode, hex_decode, HexError, HexErrorKind};
-use std::text::{utf8};
 use std::vec::{Vec};
 
 fn low32(n: Int) -> Int { bit_and(n, 4294967295) }
@@ -189,8 +188,8 @@ impl Digest256 {
         if(size_at(&held) == 32) { Some(Self { bytes: digest_bytes(&held) }) } else { None }
     }
     pub fn as_bytes<'a>(value: &'a Self) -> &'a [u8; 32] { &value.bytes }
-    pub fn to_hex(value: &Self) -> Str { let bytes = Vec::from_array(value.bytes); hex_encode(Vec::as_slice(&bytes)) }
-    pub fn parse_hex(text: Str) -> Result<Self, HexError> {
+    pub fn to_hex(value: &Self) -> String { let bytes = Vec::from_array(value.bytes); hex_encode(Vec::as_slice(&bytes)) }
+    pub fn parse_hex(text: &str) -> Result<Self, HexError> {
         match(hex_decode(text)) {
             Err(e) => Err(e),
             Ok(bytes) => if(Vec::len(&bytes) == 32) { Ok(Self { bytes: digest_bytes(&bytes) }) }
@@ -219,9 +218,10 @@ impl Blake3 {
 pub struct FingerprintWriter { bytes: Vec<u8> }
 
 impl FingerprintWriter {
-    pub fn new(domain: Str, schema: u32) -> Self {
-        let name = utf8(domain);
-        let mut bytes = utf8("GLORIOUS-FP");
+    pub fn new(domain: &str, schema: u32) -> Self {
+        let name = domain.as_bytes().to_vec();
+        let start: &str = "GLORIOUS-FP";
+        let mut bytes = start.as_bytes().to_vec();
         Vec::push(&mut bytes, 0u8);
         le_onto(&mut bytes, int(schema), 4);
         le_onto(&mut bytes, Vec::len(&name), 8);
@@ -235,8 +235,8 @@ impl FingerprintWriter {
         le_onto(&mut value.bytes, bytes.len(), 8);
         all_onto(&mut value.bytes, bytes, 0)
     }
-    pub fn text(value: &mut Self, text: Str) {
-        let written = utf8(text);
+    pub fn text(value: &mut Self, text: &str) {
+        let written = text.as_bytes().to_vec();
         le_onto(&mut value.bytes, Vec::len(&written), 8);
         each_onto(&mut value.bytes, &written, 0)
     }

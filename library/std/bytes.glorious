@@ -104,12 +104,15 @@ impl<'a> ByteReader<'a> {
         }
     }
     // So many bytes as the text they are in UTF-8.
-    pub fn read_str(r: &mut Self, length: Int) -> Result<Str, DecodeError> {
+    pub fn read_str(r: &mut Self, length: Int) -> Result<&'a str, DecodeError> {
         let start = r.at;
         match(ByteReader::step(r, length)) {
-            Ok(at) => let mut text = Vec::new(); copied(r.bytes, at, at + length, &mut text); match(from_utf8(text)) {
-                Some(text) => Ok(text),
-                None => r.at = start; fails(start, DecodeErrorKind::InvalidUtf8)
+            Ok(at) => match(r.bytes.sub(at, at + length)) {
+                Some(found) => match(from_utf8(found)) {
+                    Ok(text) => Ok(text),
+                    Err(_) => r.at = start; fails(start, DecodeErrorKind::InvalidUtf8)
+                },
+                None => fails(at, DecodeErrorKind::Truncated)
             },
             Err(e) => Err(e)
         }
@@ -125,10 +128,6 @@ impl<'a> ByteReader<'a> {
     pub fn finish(r: Self) -> Result<(), DecodeError> {
         if(ByteReader::remaining_len(&r) == 0) { Ok(()) } else { fails(ByteReader::position(&r), DecodeErrorKind::LimitExceeded) }
     }
-}
-
-fn copied<'a>(bytes: &'a [u8], at: Int, end: Int, out: &mut Vec<u8>) {
-    if(at >= end) { () } else { Vec::push(out, u8(byte_at(bytes, at))); tail copied(bytes, at + 1, end, out) }
 }
 
 fn var_from<'a>(bytes: &'a [u8], at: Int, value: u128, scale: u128, width: Int) -> Result<(u128, Int), DecodeErrorKind> {
@@ -238,16 +237,18 @@ pub struct HexError { pub offset: Int, pub kind: HexErrorKind }
 
 fn hex_digit(n: Int) -> char { match(char(if(n < 10) { 48 + n } else { 87 + n })) { Some(c) => c, None => '0' } }
 
-// (From the last byte back: a text is built from its end.)
-fn hex_onto<'a>(bytes: &'a [u8], at: Int, out: Str) -> Str {
-    if(at <= 0) { out } else {
-        let b = byte_at(bytes, at - 1);
-        tail hex_onto(bytes, at - 1, StrChar(hex_digit(b / 16), StrChar(hex_digit(b % 16), out)))
-    }
-}
-
 // Bytes as text, two digits each, the letters small.
-pub fn hex_encode<'a>(bytes: &'a [u8]) -> Str { hex_onto(bytes, bytes.len(), "") }
+pub fn hex_encode<'a>(bytes: &'a [u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    let mut i = 0;
+    while({ i < bytes.len() }) {
+        let b = byte_at(bytes, i);
+        String::push(&mut out, hex_digit(b / 16));
+        String::push(&mut out, hex_digit(b % 16));
+        i = i + 1
+    };
+    out
+}
 
 fn hex_value(c: char) -> Option<Int> {
     let n = int(c);
@@ -258,26 +259,29 @@ fn hex_value(c: char) -> Option<Int> {
     }
 }
 
-fn hex_from(text: Str, at: Int, out: &mut Vec<u8>) -> Result<(), HexError> {
-    match(text) {
-        StrEnd => Ok(()),
-        StrChar(a, rest) => match(rest) {
-            StrEnd => Err(HexError { offset: at, kind: HexErrorKind::OddLength }),
-            StrChar(b, more) => match(hex_value(a)) {
-                None => Err(HexError { offset: at, kind: HexErrorKind::InvalidDigit }),
-                Some(high) => match(hex_value(b)) {
-                    None => Err(HexError { offset: at + 1, kind: HexErrorKind::InvalidDigit }),
-                    Some(low) => Vec::push(out, u8(high * 16 + low)); tail hex_from(more, at + 2, out)
+// The character a text's byte at a place is, as ASCII has it.
+fn char_at_byte(text: &str, at: Int) -> char { char_of(int(text.byte(at))) }
+
+// The bytes a text of hexadecimal digits says, or where it stops being one
+// (a place of a byte).
+pub fn hex_decode(text: &str) -> Result<Vec<u8>, HexError> {
+    let n = text.len();
+    let mut out = Vec::new();
+    let mut at = 0;
+    let mut failed = None;
+    while({ failed.is_none() and { at < n } }) {
+        if(at + 1 >= n) { failed = Some(HexError { offset: at, kind: HexErrorKind::OddLength }) } else {
+            match(hex_value(char_at_byte(text, at))) {
+                None => failed = Some(HexError { offset: at, kind: HexErrorKind::InvalidDigit }),
+                Some(high) => match(hex_value(char_at_byte(text, at + 1))) {
+                    None => failed = Some(HexError { offset: at + 1, kind: HexErrorKind::InvalidDigit }),
+                    Some(low) => Vec::push(&mut out, u8(high * 16 + low))
                 }
             }
-        }
-    }
-}
-
-// The bytes a text of hexadecimal digits says, or where it stops being one.
-pub fn hex_decode(text: Str) -> Result<Vec<u8>, HexError> {
-    let mut out = Vec::new();
-    match(hex_from(text, 0, &mut out)) { Ok(_) => Ok(out), Err(e) => Err(e) }
+        };
+        at = at + 2
+    };
+    match(failed) { Some(e) => Err(e), None => Ok(out) }
 }
 
 // Bytes as text six bits to a character.
@@ -331,37 +335,33 @@ fn digits64<'a>(bytes: &'a [u8], at: Int, out: &mut Vec<Int>) {
     }
 }
 
-fn padded(n: Int, out: Str) -> Str { if(n % 4 == 0) { out } else { tail padded(n + 1, StrChar('=', out)) } }
-
-fn text64(digits: &Vec<Int>, i: Int, url: Bool, out: Str) -> Str {
-    if(i <= 0) { out } else {
-        tail text64(digits, i - 1, url, StrChar(digit64(match(element(digits, i - 1)) { Some(d) => *d, None => 0 }, url), out))
-    }
-}
-
-pub fn base64_encode<'a>(bytes: &'a [u8], options: Base64Options) -> Str {
+pub fn base64_encode<'a>(bytes: &'a [u8], options: Base64Options) -> String {
     let mut digits = Vec::new();
     digits64(bytes, 0, &mut digits);
     let n = Vec::len(&digits);
-    let end = match(options.padding) { Padding::Required => padded(n, ""), Padding::Optional => padded(n, ""), Padding::Forbidden => "" };
-    text64(&digits, n, is_url(&options), end)
+    let url = is_url(&options);
+    let mut out = String::with_capacity(n + 3);
+    let mut i = 0;
+    while({ i < n }) { String::push(&mut out, digit64(*Vec::index(&digits, i), url)); i = i + 1 };
+    let pads = match(options.padding) { Padding::Required => true, Padding::Optional => true, Padding::Forbidden => false };
+    if(pads) { while({ i % 4 != 0 }) { String::push(&mut out, '='); i = i + 1 } } else { () };
+    out
 }
 
 // The digits a text has before its padding, and how many `=` follow them:
 // or the place of a character that is neither.
-fn read64(text: Str, at: Int, url: Bool, digits: &mut Vec<Int>, pads: Int) -> Result<Int, Base64Error> {
-    match(text) {
-        StrEnd => Ok(pads),
-        StrChar(c, rest) =>
-            if(c == '=') { tail read64(rest, at + 1, url, digits, pads + 1) } else {
-                // A digit after padding is not where one can be.
-                if(pads > 0) { Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidPadding }) } else {
-                    match(value64(c, url)) {
-                        Some(v) => Vec::push(digits, v); tail read64(rest, at + 1, url, digits, 0),
-                        None => Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidDigit })
-                    }
+fn read64(text: &str, at: Int, url: Bool, digits: &mut Vec<Int>, pads: Int) -> Result<Int, Base64Error> {
+    if(at >= text.len()) { Ok(pads) } else {
+        let c = char_at_byte(text, at);
+        if(c == '=') { tail read64(text, at + 1, url, digits, pads + 1) } else {
+            // A digit after padding is not where one can be.
+            if(pads > 0) { Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidPadding }) } else {
+                match(value64(c, url)) {
+                    Some(v) => Vec::push(digits, v); tail read64(text, at + 1, url, digits, 0),
+                    None => Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidDigit })
                 }
             }
+        }
     }
 }
 
@@ -389,7 +389,7 @@ fn bytes64(digits: &Vec<Int>, at: Int, out: &mut Vec<u8>) -> Result<(), Base64Er
 
 // The bytes a text says, or where it stops being one: nothing is skipped,
 // and padding is taken as the options say.
-pub fn base64_decode(text: Str, options: Base64Options) -> Result<Vec<u8>, Base64Error> {
+pub fn base64_decode(text: &str, options: Base64Options) -> Result<Vec<u8>, Base64Error> {
     let mut digits = Vec::new();
     match(read64(text, 0, is_url(&options), &mut digits, 0)) {
         Err(e) => Err(e),

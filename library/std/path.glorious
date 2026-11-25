@@ -3,52 +3,59 @@
 // system: a link is not followed, and a path is not shown to stay inside
 // another.
 
-use std::text::{split, join, starts_with, is_empty};
+use std::text::{join};
 use std::vec::{Vec};
 
 // A path, kept as it is written.
-pub struct PathBuf { text: Str }
+pub struct PathBuf { text: String }
 
-pub enum PathComponent { Root, Current, Parent, Normal(Str) }
+pub enum PathComponent { Root, Current, Parent, Normal(String) }
 pub enum PathError { InvalidEncoding, InvalidComponent, UnsupportedPrefix }
 
 // The names between the `/`s, those that are nothing left out.
-fn names(text: Str) -> Vec<Str> { std::vec::filter(split(text, '/'), { part => not is_empty(part) }) }
-
-fn component(name: Str) -> PathComponent {
-    if(name == ".") { PathComponent::Current } else { if(name == "..") { PathComponent::Parent } else { PathComponent::Normal(name) } }
+fn names<'a>(text: &'a str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let parts = text.split("/");
+    let mut i = 0;
+    while({ i < Vec::len(&parts) }) {
+        let part = *Vec::index(&parts, i);
+        if(part.is_empty()) { () } else { Vec::push(&mut out, part) };
+        i = i + 1
+    };
+    out
 }
 
-fn components_of(parts: &Vec<Str>, i: Int, out: &mut Vec<PathComponent>) {
-    if(i >= Vec::len(parts)) { () } else { Vec::push(out, component(*Vec::index(parts, i))); tail components_of(parts, i + 1, out) }
+fn component(name: &str) -> PathComponent {
+    if(name == ".") { PathComponent::Current } else { if(name == "..") { PathComponent::Parent } else { PathComponent::Normal(String::from(name)) } }
 }
 
 // The place of the last `.` in a name, if it has one after its first
-// character: a name that only begins with one has no extension.
-fn last_dot(name: Str, i: Int, found: Int) -> Int {
-    match(name) {
-        StrEnd => found,
-        StrChar(c, rest) => tail last_dot(rest, i + 1, if(c == '.' and { i > 0 }) { i } else { found })
-    }
+// byte: a name that only begins with one has no extension.
+fn last_dot(name: &str) -> Option<Int> {
+    let mut i = name.len() - 1;
+    let mut found = None;
+    while({ found.is_none() and { i > 0 } }) { if(int(name.byte(i)) == 46) { found = Some(i) } else { () }; i = i - 1 };
+    found
 }
 
 impl PathBuf {
-    pub fn new() -> Self { Self { text: "" } }
-    pub fn from_str(text: Str) -> Self { Self { text: text } }
-    pub fn as_str(p: &Self) -> Str { p.text }
-    pub fn is_absolute(p: &Self) -> Bool { starts_with(p.text, "/") }
+    pub fn new() -> Self { Self { text: String::new() } }
+    pub fn from_str(text: &str) -> Self { Self { text: String::from(text) } }
+    pub fn as_str<'a>(p: &'a Self) -> &'a str { String::as_str(&p.text) }
+    pub fn is_absolute(p: &Self) -> Bool { PathBuf::as_str(p).starts_with("/") }
     // What it is made of, in order: the root if it starts at it, then each
     // name, with `.` and `..` told from the others.
     pub fn components(p: &Self) -> Vec<PathComponent> {
         let mut out = Vec::new();
-        if(starts_with(p.text, "/")) { Vec::push(&mut out, PathComponent::Root) } else { () };
-        let parts = names(p.text);
-        components_of(&parts, 0, &mut out);
+        if(PathBuf::is_absolute(p)) { Vec::push(&mut out, PathComponent::Root) } else { () };
+        let parts = names(PathBuf::as_str(p));
+        let mut i = 0;
+        while({ i < Vec::len(&parts) }) { Vec::push(&mut out, component(*Vec::index(&parts, i))); i = i + 1 };
         out
     }
     // The last name, if the path ends in one.
-    pub fn file_name(p: &Self) -> Option<Str> {
-        let parts = names(p.text);
+    pub fn file_name<'a>(p: &'a Self) -> Option<&'a str> {
+        let parts = names(PathBuf::as_str(p));
         let n = Vec::len(&parts);
         if(n == 0) { None } else {
             let last = *Vec::index(&parts, n - 1);
@@ -56,31 +63,38 @@ impl PathBuf {
         }
     }
     // What follows the last `.` of the last name.
-    pub fn extension(p: &Self) -> Option<Str> {
+    pub fn extension<'a>(p: &'a Self) -> Option<&'a str> {
         match(PathBuf::file_name(p)) {
             None => None,
-            Some(name) =>
-                let at = last_dot(name, 0, 0 - 1);
-                if(at < 0) { None } else { Some(std::text::drop(name, at + 1)) }
+            Some(name) => match(last_dot(name)) { Some(at) => Some(name.slice(at + 1, name.len())), None => None }
         }
     }
     // The path without its last name: none for the root and for a path of
     // no names.
     pub fn parent(p: &Self) -> Option<PathBuf> {
-        let parts = names(p.text);
+        let parts = names(PathBuf::as_str(p));
         let n = Vec::len(&parts);
         if(n == 0) { None } else {
-            let before = join(std::vec::take(&parts, n - 1), "/");
-            Some(PathBuf { text: if(starts_with(p.text, "/")) { "/" ++ before } else { before } })
+            let front = match(Vec::as_slice(&parts).sub(0, n - 1)) { Some(names) => names, None => abort("a path's names are there") };
+            let before = join(front, "/");
+            let mut text = String::new();
+            if(PathBuf::is_absolute(p)) { String::push_str(&mut text, "/") } else { () };
+            String::push_str(&mut text, String::as_str(&before));
+            Some(PathBuf { text: text })
         }
     }
     // Another path after this one; one that starts at the root takes its
     // place.
     pub fn join(p: &Self, other: &Self) -> PathBuf {
-        if(starts_with(other.text, "/") or { is_empty(p.text) }) { PathBuf { text: other.text } } else {
-            if(is_empty(other.text)) { PathBuf { text: p.text } } else {
-                PathBuf { text: if(std::text::ends_with(p.text, "/")) { p.text ++ other.text } else { p.text ++ "/" ++ other.text } }
-            }
+        let mine = PathBuf::as_str(p);
+        let theirs = PathBuf::as_str(other);
+        if(theirs.starts_with("/") or { mine.is_empty() }) { PathBuf::from_str(theirs) } else {
+            let mut text = String::from(mine);
+            if(theirs.is_empty()) { () } else {
+                if(mine.ends_with("/")) { () } else { String::push_str(&mut text, "/") };
+                String::push_str(&mut text, theirs)
+            };
+            PathBuf { text: text }
         }
     }
     pub fn push(p: &mut Self, other: &Self) -> Result<(), PathError> {

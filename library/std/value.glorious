@@ -19,6 +19,7 @@ pub trait Default {
 
 impl Default for Int { fn default() -> Int { 0 } }
 impl Default for Str { fn default() -> Str { "" } }
+impl Default for String { fn default() -> String { String::new() } }
 // (`Bool` is an `Option<()>`: its start is `false`.)
 impl<A> Default for Option<A> { fn default() -> Option<A> { None } }
 
