@@ -225,8 +225,16 @@ Landed beside these: signatures whole, as Rust's. Each body is checked once,
 from every signature, side by side, and refused where it needs more of its
 callers than its signature says (`schemeWithin`): the passes that checked
 bodies again from their bodies' types until they settled are gone, and with
-them the state each pass carried to the next. What a merge puts together is
-now only what each body adds.
+them the state each pass carried to the next.
+
+What merges still change in place, measured on covey/fleet after this
+(entries a delta changes rather than adds): `fns` 638 (a function's type is
+its body's once checked, which callers in later units read: the effect
+sites, `Scheme.sites`, are its body's), `tys` 234, `caps` 77 and `capOut`
+65 (edges put on captures declared before, the prelude's among them), `rows`
+39, `runFns` 20. So `StoreD.sets`, `Absorb` and `putEntry` stay until a
+function's own type is its signature's alone, with what its body found of
+effect sites kept beside it.
 
 ## Expected size
 
