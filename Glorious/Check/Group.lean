@@ -469,6 +469,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
   -- (What is written of its type parameters: `B::Had` of `B: Bundle<S>`
   -- is found by it.)
   modify fun s => { s with paramTraits := d.bounds.map fun b => (b.subject, b.trait, b.args) }
+  modify fun s => { s with closedRows := true }
   let annots ← d.annots.mapM fun
     | some t => some <$> resolveType rigid false t
     | none => pure none
@@ -508,7 +509,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
   let ret ← match retExpr with
     | some t => some <$> resolveType rigid false t
     | none => pure none
-  modify fun s => { s with paramTraits := [], projElided := none }
+  modify fun s => { s with paramTraits := [], projElided := none, closedRows := false }
   -- A function an implementation gives is the function its trait declares,
   -- at the implementation's type. What it is given is known from that
   -- before its clauses are looked at, so they can read a field of it.

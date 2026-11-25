@@ -8321,3 +8321,17 @@ could, which left a program not lowered (laid out by its types):
   more, callees first, from before the signatures, as the first error was
   found before; one that calls a refused function is not asked, as what it
   would say follows from that refusal. (Of a group, its first error.)
+
+## A signature is the whole of it: callables given perform what is written
+
+- A function's signature says all its callers are checked with, as Rust's
+  does: each parameter's type (the parser already asks it), its result, what
+  it performs, and now what a callable it is given performs: one written
+  without effects, `f: fn(Int) -> Int`, performs nothing (`St.closedRows`, as
+  in a declaration). Its body decides nothing of it. Before, the row was left
+  open and the body found it.
+- That made a hole show: with the row open, a value that has to be used
+  held while the callable was called was let pass, though what the caller
+  gives may jump to a label and not come back. Now it is asked as for any
+  callable the function is given: `ecs::bridge_world` and a case's
+  `each_mut` take `F: for<'a> Fn<(&'a mut ..,), Output = ..>, F: Returns`.

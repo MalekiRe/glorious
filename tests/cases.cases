@@ -13636,7 +13636,7 @@ fn store<C, R, e: EffectRow>(first: Vec<C>, app: fn() -> R / {Store<C> | e}) -> 
     let mut column = first;
     handle app() { take(k) => k(replace(&mut column, Vec::new())), put(c, k) => column = c; k(()) }
 }
-fn each_mut<C>(f: for<'a> fn(&'a mut C)) / {Store<C>} {
+fn each_mut<C, F>(f: F) / {Store<C>} where F: for<'a> Fn<(&'a mut C,), Output = ()>, F: Returns {
     let mut column = take<C>();
     let mut i = 0;
     while({ i < len_at(&column) }) { f(&mut column[i]); i = i + 1 };

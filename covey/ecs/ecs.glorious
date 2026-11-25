@@ -4996,7 +4996,7 @@ pub fn until<L, F, O, S>(world: &mut AsyncWorld<S>, label: L, f: F) -> O / {Brid
 }
 
 // Wait for the label `L` and run `f` on the whole world there.
-pub fn bridge_world<L, O, S>(world: &mut AsyncWorld<S>, label: L, f: fn(&mut World<S>) -> O) -> O / {Bridge<S>} where L: Schedule {
+pub fn bridge_world<L, O, S, F>(world: &mut AsyncWorld<S>, label: L, f: F) -> O / {Bridge<S>} where L: Schedule, F: for<'a> Fn<(&'a mut World<S>,), Output = O>, F: Returns {
     discard(label);
     let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None), once: false });
     let mut w = w;

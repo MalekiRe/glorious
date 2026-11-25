@@ -536,6 +536,10 @@ structure St where
   the function takes a reference: the type it is given as, and the type the
   function takes (`checkLateReceivers`). -/
   lateReceivers : Array (Nat × Ty × Ty) := #[]
+  /-- Whether the types being read are a function's signature: a callable
+  among them written without what it performs performs nothing, as in a
+  declaration, so that its body decides nothing of the signature. -/
+  closedRows : Bool := false
   /-- Types whose values must be free to go unused, with the reason; checked
   once the types are known. -/
   drops : Array (Ty × String) := #[]

@@ -208,7 +208,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
       -- where nothing is, as a signature says. (One shared by every function
       -- that uses the type, found from them, would make each depend on the
       -- others' bodies.)
-      if decl then pure (.fn ps r [] none cap)
+      if decl || (← get).closedRows then pure (.fn ps r [] none cap)
       else pure (.fn ps r [] (some (← freshRowVar)) cap)
   | .performs _ _ =>
     throw "what a callable performs is written after its result: `fn(A) -> R / {Effect}`"
