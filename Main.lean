@@ -84,6 +84,10 @@ partial def stuckAt (p : Core.Program) (cfg : Core.Config) : Core.Config :=
   | .next cfg' => stuckAt p cfg'
   | _ => cfg
 
+/-- What a compile refused, each error a line of its own with `pre` before
+it (`Check.sortedErrors`). -/
+def errorLines (pre e : String) : String := "\n".intercalate ((e.splitOn "\n").map (pre ++ ·))
+
 def usage : String :=
   "usage: glorious run FILE [INPUT...]\n       glorious check FILE [INPUT...]\n" ++
   "       glorious watch FILE [INPUT...]   (compile and run again on every change)\n" ++
@@ -143,7 +147,7 @@ structure Outcome where
 def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) : Outcome :=
   match compileSource c.src true files few (known := known) with
-  | .error e => { lean := s!"error: {e}", error := some e }
+  | .error e => { lean := errorLines "error: " e, error := some e }
   | .ok compiled =>
     let has := fun (f : Typing.Cert → Bool) => (compiled.cert.map f).getD false
     -- (An example, a program as long as it needs, is given more steps, and
@@ -818,7 +822,7 @@ def selftest (vm : Option String) : IO UInt32 := do
       -- (One not run on the Lean machines this time: what the compiler
       -- said, where it refused it, is still held to what it should be.)
       if let some e := found[i]?.bind (·.error) then
-        if !expectMatches c.expect s!"error: {e}" then
+        if !expectMatches c.expect (errorLines "error: " e) then
           failures := failures.push (2 * i, s!"compiler: expected\n{c.expect}\ngot\nerror: {e}\nfor\n{c.src}\n")
     else if let some e := found[i]?.bind (·.error) then
       failures := failures.push (2 * i, s!"does not compile: {e}\nfor\n{c.src}\n")
@@ -916,7 +920,7 @@ def certify (path : String) (strict : Bool) : IO UInt32 := do
       pure 1
     else pure 0
   | .error e =>
-    IO.eprintln s!"{path}: {e}"
+    IO.eprintln (errorLines s!"{path}: " e)
     pure 1
 
 /-- The signature of each function a program writes, as the checker found it
@@ -946,7 +950,7 @@ def signatures (path : String) (library : Bool) : IO UInt32 := do
         pure 0
       | none => IO.eprintln "nothing was checked"; pure 1
     | .error e =>
-      IO.eprintln s!"{path}: {e}"
+      IO.eprintln (errorLines s!"{path}: " e)
       pure 1
 
 def parseInput (args : List String) : Except String (List Int) :=
@@ -973,7 +977,7 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
         last := now
         let start ← IO.monoMsNow
         match ← compileFile path kept (search := false) with
-        | .error e => IO.eprintln s!"{path}: {e}"
+        | .error e => IO.eprintln (errorLines s!"{path}: " e)
         | .ok c =>
           kept := c.checkKept
           let compiled ← IO.monoMsNow
@@ -1045,7 +1049,7 @@ where
         IO.println "no certificate"
         pure 1
     | .error e =>
-      IO.eprintln s!"{path}: {e}"
+      IO.eprintln (errorLines s!"{path}: " e)
       pure 1
   | ["native", path, out] =>
     -- A program of its own: the bytecode, a body for every function made by
@@ -1077,7 +1081,7 @@ where
         return 1
       pure 0
     | .error e =>
-      IO.eprintln s!"{path}: {e}"
+      IO.eprintln (errorLines s!"{path}: " e)
       pure 1
   | ["exe", path, out] =>
     -- An executable of the program's own with no other tool: the VM with
@@ -1095,7 +1099,7 @@ where
         return 1
       pure 0
     | .error e =>
-      IO.eprintln s!"{path}: {e}"
+      IO.eprintln (errorLines s!"{path}: " e)
       pure 1
   | ["cases", dir] => do
     -- Every test program as files, for what runs them from outside: the
@@ -1125,7 +1129,7 @@ where
       IO.FS.writeBinFile out (builtBytes b)
       pure 0
     | .error e =>
-      IO.eprintln s!"{path}: {e}"
+      IO.eprintln (errorLines s!"{path}: " e)
       pure 1
   | ["serve"] => serve
   | "watch" :: path :: rest =>
@@ -1146,7 +1150,7 @@ where
       let b ← match ← buildAsked path (search := false) with
         | .ok b => pure b
         | .error e =>
-          IO.eprintln s!"{path}: {e}"
+          IO.eprintln (errorLines s!"{path}: " e)
           return 1
       match ← Trace.timedIO "run" (runStreaming b.ctorNames b.bytecode (Bytecode.initIO b.bytecode input) 0) with
       | .halt r =>
@@ -1165,7 +1169,7 @@ where
     let c ← match ← compileFile path (search := false) with
       | .ok c => pure c
       | .error e =>
-        IO.eprintln s!"{path}: {e}"
+        IO.eprintln (errorLines s!"{path}: " e)
         return 1
     let bytecode := compile c.core
     if command == "check" then

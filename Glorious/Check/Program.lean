@@ -394,6 +394,19 @@ def checkGroupKept (kept : Deltas) (pre : St) (key : UInt64) (i : Nat) (g : List
     if locals.contains f then reads := reads.push (s!"body {f}", ← bodyKey f)
   pure ((Trace.timed "group: delta" fun _ => diffStates st after).toArray.map fun d => (key, (d, reads)))
 
+/-- Errors said together: each once, in the order of where they are in the
+text (`line:col:` first; one that says no place, first of all), a line
+each (`errorLines` writes each as an error). -/
+def sortedErrors (errors : List String) : String :=
+  let place := fun (e : String) => match (e.splitOn ":").take 2 |>.map String.toNat? with
+    | [some l, some c] => (l, c)
+    | _ => (0, 0)
+  let sorted := errors.eraseDups.mergeSort fun a b =>
+    let (la, ca) := place a
+    let (lb, cb) := place b
+    la < lb || (la == lb && ca ≤ cb)
+  "\n".intercalate sorted
+
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
 key is among them is taken from there instead of checked again: the
@@ -730,17 +743,30 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
             together := true
             settled := false
             continue
+          -- Each group again, callees first, from before the signatures:
+          -- what each refuses is said, as callees first say it (a
+          -- function's calls of itself are at the one type it is being
+          -- found to have, and see less of what a signature says than its
+          -- callers do). One that calls a refused one is not asked: what it
+          -- would say follows from that.
           set pre
-          for (g, _) in rest do checkMaybe g
-          -- (Callees first, a function's calls of itself are at the one
-          -- type it is being found to have, and see less of what a
-          -- signature says than its callers do: what the signatures refused
-          -- is what is said.)
-          let said := (now.refusals.find? (·.startsWith failMark)).getD ""
-          let msg := match (said.drop failMark.length).toString.splitOn " " with
-            | _ :: rest => " ".intercalate rest
-            | [] => said
-          throw msg
+          let mut errors : Array String := #[]
+          let mut failed : Std.HashSet String := {}
+          for (g, k) in rest do
+            if ((calleesAt[k]?).getD []).any failed.contains then
+              for d in g do failed := failed.insert d.name
+              continue
+            match ← attempt (checkMaybe g) with
+            | .ok _ => pure ()
+            | .error e =>
+              errors := errors.push e.msg
+              for d in g do failed := failed.insert d.name
+          if errors.isEmpty then
+            let said := (now.refusals.find? (·.startsWith failMark)).getD ""
+            errors := errors.push (match (said.drop failMark.length).toString.splitOn " " with
+              | _ :: rest => " ".intercalate rest
+              | [] => said)
+          throw (sortedErrors errors.toList)
         if deltas.isSome then
           match sigsKept, passes with
           | some d, 1 => groupDeltas := groupDeltas.push (sigKey, (d, #[]))

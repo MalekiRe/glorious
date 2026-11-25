@@ -8312,3 +8312,12 @@ could, which left a program not lowered (laid out by its types):
   `Check.Types`, not `Check.Expr`): they compile side by side and beside the
   checker. A change to `St` rebuilt in 110 s, of which `Merge` alone was
   76 s; now 61 s.
+
+## Every error
+
+- A program's errors are said together, each once, in the order of where
+  they are in the text (`Check.sortedErrors`), each a line of its own with
+  the prefix the command writes (`errorLines`). Each group is asked once
+  more, callees first, from before the signatures, as the first error was
+  found before; one that calls a refused function is not asked, as what it
+  would say follows from that refusal. (Of a group, its first error.)

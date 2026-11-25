@@ -2925,6 +2925,7 @@ fn narrow<'a, 'b: 'a>(s: Sink<'b>) -> Sink<'a> { s }
 fn main() { 0 }
 #### expect
 error: 2:50: in `narrow`: the result of a clause: lifetime `'a` is not known to last as long as `'b`: say `'a: 'b`
+error: 3:13: in `main`: the result of a clause: expected `()`, found `Int`
 #### case
 #### A field of what a reference points to can be borrowed too, written
 #### `&mut (*p).0` or `&mut p.0`, and read without copying the rest. A field can
