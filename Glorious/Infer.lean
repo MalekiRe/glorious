@@ -13,33 +13,13 @@ open Glorious.Typing (Ty FnSig Hint Cert SigEntry DataInst OpInst)
 
 /-! ## Recursive groups -/
 
-partial def tmRefs : Core.Tm → List Nat
-  | .ret _ => []
-  | .let_ rhs body =>
-    (match rhs with
-      | .closure fn _ => [fn]
-      | .rebind _ fn => [fn]
-      | _ => []) ++ tmRefs body
-  | .call _ _ body => tmRefs body
-  | .tail _ _ => []
-  | .handle ret ops _ _ body => ret :: ops.map (·.2) ++ tmRefs body
-  | .handleTail ret ops _ _ => ret :: ops.map (·.2)
-  | .raise _ _ => []
-  | .perform _ _ body | .label _ body => tmRefs body
-  | .labelTail _ => []
-  | .cell _ _ body | .cellL _ _ _ body | .lend _ _ _ _ _ body => tmRefs body
-  | .cellTail _ _ | .cellTailL _ _ _ => []
-  | .guard _ _ body => tmRefs body
-  | .guardTail _ _ => []
-  | .cancel _ body | .mem _ _ body | .host _ _ body => tmRefs body
-
 /-- For each function, the least function it is mutually recursive with:
 the strongly connected parts of what each refers to (Tarjan's way, with a
 stack of its own in place of recursion). -/
 def sccs (fns : Array Core.Fn) : Array Nat := Id.run do
   let n := fns.size
   let refs : Array (Array Nat) := fns.map fun F =>
-    ((F.clauses.flatMap fun c => tmRefs c.body).filter (· < n)).toArray
+    ((F.clauses.flatMap fun c => Core.Tm.fnRefs c.body).filter (· < n)).toArray
   let unseen := n + 1
   let mut index : Array Nat := Array.replicate n unseen
   let mut low : Array Nat := Array.replicate n 0
@@ -239,36 +219,9 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   let givenUpBy : Std.HashMap Nat Nat := st.givenUp.foldl (fun m (f, a) => m.insertIfNew f a) {}
   let dropsBy : Std.HashMap Nat Nat := p.drops.foldl (fun m (f, d) => m.insertIfNew f d) {}
   let anySet : Std.HashSet Nat := st.anyCallable.foldl (·.insert ·) {}
-  -- (Each function by its name, and which of those of the name it is; a
-  -- closure, which has none, by the function that first makes it and which
-  -- of what that one names it is: an edit that moves the others, `main`'s
-  -- reaching more first, keys none of them anew.)
-  let named0 : Array UInt64 := (p.names.foldl (fun (acc : Array UInt64 × Std.HashMap String Nat) nm =>
-      let k := acc.2.getD nm 0
-      (acc.1.push (hash (nm, k)), acc.2.insert nm (k + 1))) (#[], {})).1
-  let sids : Array UInt64 := Id.run do
-    let top := named0.size
-    let mut sids : Array UInt64 := named0 ++ ((List.range (st.fns.size - top)).map fun k => hash (top + k)).toArray
-    let mut known : Std.HashSet Nat := {}
-    let mut queue : Array Nat := (List.range top).toArray
-    let mut i := 0
-    while i < queue.size do
-      let f := queue[i]!
-      i := i + 1
-      -- (And what destroys a closure of it, after what it names.)
-      let refs := (((st.fns[f]?).map fun F => F.clauses.flatMap fun c => tmRefs c.body).getD [])
-        ++ (dropsBy[f]?).toList
-      for (g, j) in refs.zipIdx do
-        if top ≤ g && !known.contains g then
-          known := known.insert g
-          sids := sids.set! g (mixHash sids[f]! (hash j))
-          queue := queue.push g
-    pure sids
+  let sids := p.sids
   let sid := fun (f : Nat) => (sids[f]?).getD (hash f)
-  -- (And each block of bytes by its bytes, not where it is among them.)
-  let statics := p.statics.toArray
-  let named := fun (t : Core.Tm) =>
-    (t.mapFns fun g => (sid g).toNat).mapStatics fun i => (hash (statics[i.toNat]?)).toNat
+  let named := p.keyed sids
   let extra := fun (f : Nat) =>
     hash (st.armFns.contains f, st.ncaps[f]?, givenUpBy[f]?, anySet.contains f,
       (dropsBy[f]?).map sid, (capBy.getD f []).mergeSort (fun (a : Nat × Nat) b => a.1 ≤ b.1))
@@ -284,7 +237,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
     let r := (st.scc[f]?).getD f
     m.insert r ((m.getD r []) ++ [f])) {}
   let outside := members.fold (fun (o : Std.HashMap Nat (List Nat)) r ms =>
-    o.insert r ((ms.flatMap fun f => ((st.fns[f]?).map fun F => F.clauses.flatMap fun c => tmRefs c.body).getD []).filterMap
+    o.insert r ((ms.flatMap fun f => ((st.fns[f]?).map fun F => F.clauses.flatMap fun c => Core.Tm.fnRefs c.body).getD []).filterMap
       (fun g => let rg := (st.scc[g]?).getD g; if rg == r then none else some rg) |>.eraseDups)) {}
   modify fun s =>
     { s with
@@ -299,7 +252,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   let mainKey ← (fun s => Trace.timed "infer: main's key" fun _ => (do
     if !(← get).keyed then pure (0 : UInt64) else do
     let mut k := mixHash st.keyBase (hash (named p.main))
-    for g in ((tmRefs p.main).map fun f => (st.scc[f]?).getD f).eraseDups do
+    for g in ((Core.Tm.fnRefs p.main).map fun f => (st.scc[f]?).getD f).eraseDups do
       k := mixHash k (← faceOf g)
     pure k : M UInt64).run s : M UInt64)
   -- (Kept, where every function it uses has the key it had: what it was

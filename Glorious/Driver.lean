@@ -108,6 +108,8 @@ structure Compiled where
   elabMade : Elab.ElabMemo := {}
   /-- What lowering each function made: for the next compile (`Elab.LowerKept`). -/
   lowerMade : Elab.LowerMemo := {}
+  /-- What lowering each function by its types made (`Lower.TypedMemo`). -/
+  typedMade : Lower.TypedMemo := {}
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -761,13 +763,14 @@ def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
 that is not.) -/
 initialize unlowered : Bool ← do pure (← IO.getEnv "GLORIOUS_UNLOWERED").isSome
 
-/-- The program lowered by its types, where it can be: what the machines run. -/
-def Compiled.lower (c : Compiled) : Compiled :=
+/-- The program lowered by its types, where it can be: what the machines run;
+taking what an earlier compile kept of each function's lowering (`kept`). -/
+def Compiled.lower (kept : Option Lower.TypedMemo) (c : Compiled) : Compiled :=
   -- (The static blocks gathered first: the same for the program lowered.)
   let c := { c with core := c.core.internStatics }
-  match Trace.timed "lower by types" fun _ => if unlowered then none else c.types.get.bind (Lower.program · c.core) with
-  | some (core, copies) =>
-    { c with core, checked := c.core, lowered := true
+  match Trace.timed "lower by types" fun _ => if unlowered then none else c.types.get.bind (Lower.program · c.core kept) with
+  | some (core, copies, typedMade) =>
+    { c with core, checked := c.core, lowered := true, typedMade
              fnNames := c.fnNames ++ (copies.map fun fn => (c.fnNames[fn]?).getD "").toArray }
   | none => { c with checked := c.core }
 
@@ -786,8 +789,8 @@ def compileSource (src : String) (check : Bool := true)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
     (frontKept : Option (Std.HashMap UInt64 (List Syntax.Item)) := none)
     (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
-    (lowerKept : Option Elab.LowerMemo := none) :
-    Except String Compiled := Compiled.lower <$> do
+    (lowerKept : Option Elab.LowerMemo := none) (typedKept : Option Lower.TypedMemo := none) :
+    Except String Compiled := Compiled.lower typedKept <$> do
   -- (Each text lexed, once: each that an earlier compile read as it is,
   -- `texts`, not.)
   let lexed ← Trace.timed "lex" fun _ =>

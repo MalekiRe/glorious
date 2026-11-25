@@ -427,6 +427,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   -- (And each function as lowered, and as elaborated; and each group of the
   -- program's own text's items, as parsed.)
   let lowerKept : Elab.LowerMemo ← keptIn fresh (dir / "lower") "lower" {}
+  let typedKept : Lower.TypedMemo ← keptIn fresh (dir / "typed") "typed" {}
   let elabKept : Elab.ElabMemo ← keptIn fresh (dir / "elab") "elab" {}
   let itemsKept : Syntax.ItemsKept ← keptIn fresh (dir / "items") "items" {}
   let text ← IO.FS.readFile path
@@ -434,7 +435,8 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
     compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept texts
       (groupsKept := some groupsKept) (unitsKept := some unitsKept) (frontKept := some frontKept)
-      (itemsKept := some itemsKept) (elabKept := some elabKept) (lowerKept := some lowerKept))
+      (itemsKept := some itemsKept) (elabKept := some elabKept) (lowerKept := some lowerKept)
+      (typedKept := some typedKept))
   if let .ok c := result then keep <| Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
@@ -490,6 +492,9 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     let changed := fun {κ α : Type} [BEq κ] [Hashable κ] (made kept : Std.HashMap κ α) (key : α → UInt64) =>
       made.size != kept.size || made.fold (fun b n k => b || ((kept[n]?).map key) != some (key k)) false
     if changed c.lowerMade lowerKept (·.key) then saveKept dir "lower" c.lowerMade
+    -- (Each key is of what was lowered: one made that was not kept is new.)
+    if c.typedMade.size != typedKept.size || c.typedMade.fold (fun b k _ => b || !typedKept.contains k) false then
+      saveKept dir "typed" c.typedMade
     if changed c.elabMade elabKept (·.key) then saveKept dir "elab" c.elabMade
     if changed c.itemsMade itemsKept (·.2.1) then saveKept dir "items" c.itemsMade
     -- (Not where the only unit made anew is the one the program's `main` is
