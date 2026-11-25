@@ -31,28 +31,34 @@ fn ramp(q: &mut Query<(&mut Damage,), ()>) { q.for_each() { (mut d,) => d.0 = d.
 fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut hp => hp.0 = hp.0 - d.0; } }
 fn birds(q: &mut Query<(&Bird,), ()>) { () }
 
-fn id_of(infos: &Vec<SystemInfo>, name: Str) -> Int {
+fn id_of(infos: &Vec<SystemInfo>, name: &str) -> Int {
     let mut i = 0;
     let mut found = 0 - 1;
-    while({ i < len_at(infos) }) { if(infos[i].name == name) { found = infos[i].id } else { () }; i = i + 1 };
+    while({ i < len_at(infos) }) { let info = &infos[i]; if(info.name.as_str() == name) { found = info.id } else { () }; i = i + 1 };
     found
 }
-// Whether a text begins with, or has in it, another (of `Str`, while it is
-// the type of the app's texts).
-fn text_begins(text: Str, start: Str) -> Bool {
-    match((text, start)) {
-        (_, StrEnd) => true,
-        (StrChar(c, rest), StrChar(d, more)) => if(c == d) { text_begins(rest, more) } else { false },
-        _ => false
+// Whether one of the reasons has a text in it.
+fn any_says(reasons: &Option<std::vec::Vec<String>>, part: &str) -> Bool {
+    match(reasons) {
+        Some(rs) =>
+            let mut found = false;
+            let mut i = 0;
+            while({ i < len_at(rs) }) { let r = &rs[i]; if(r.as_str().contains(part)) { found = true } else { () }; i = i + 1 };
+            found,
+        None => false
     }
 }
-fn text_contains(text: Str, part: Str) -> Bool {
-    if(text_begins(text, part)) { true } else { match(text) { StrEnd => false, StrChar(_, rest) => text_contains(rest, part) } }
+// Whether one of the reasons begins with a text.
+fn any_begins(reasons: &Option<std::vec::Vec<String>>, start: &str) -> Bool {
+    match(reasons) {
+        Some(rs) =>
+            let mut found = false;
+            let mut i = 0;
+            while({ i < len_at(rs) }) { let r = &rs[i]; if(r.as_str().starts_with(start)) { found = true } else { () }; i = i + 1 };
+            found,
+        None => false
+    }
 }
-fn any_says(reasons: &Option<std::vec::Vec<Str>>, part: Str) -> Bool {
-    match(reasons) { Some(rs) => std::vec::any(clone(rs), fn(r: Str) -> Bool { text_contains(r, part) }), None => false }
-}
-fn shown(b: Bool) -> Str { if(b) { "true" } else { "false" } }
 
 fn main() -> Int {
     let app = App::new().register<Damage>().register<Hp>().register<Wings>().register<Bird>()
@@ -62,14 +68,16 @@ fn main() -> Int {
     let ramp_id = id_of(&infos, "ramp");
     let apply_id = id_of(&infos, "apply_damage");
     let birds_id = id_of(&infos, "birds");
-    say(infos[ramp_id].path);
-    say(std::text::join(infos[ramp_id].writes(), " "));
-    say(shown(match(app.why_order(ramp_id, apply_id)) { Some(why) => text_contains(why, "chain"), None => false }));
-    say(shown(match(app.why_order(apply_id, birds_id)) { Some(why) => text_begins(why, "no order"), None => false }));
-    say(shown(any_says(&app.why_component("Wings"), "`Bird` requires it")));
+    let ramp_info = &infos[ramp_id];
+    say(&ramp_info.path);
+    say(std::text::join(ramp_info.writes(), " "));
+    say(match(app.why_order(ramp_id, apply_id)) { Some(why) => why.as_str().contains("chain"), None => false });
+    say(match(app.why_order(apply_id, birds_id)) { Some(why) => why.as_str().starts_with("no order"), None => false });
+    say(any_says(&app.why_component("Wings"), "`Bird` requires it"));
     let bird = app.why_component("Bird");
-    say(shown(match(&bird) { Some(rs) => std::vec::any(clone(rs), fn(r: Str) -> Bool { text_begins(r, "`register::<Bird>`") }), None => false }));
-    say(shown(any_says(&bird, "uses it: Read")));
-    say(shown(match(app.why_component("Hp")) { Some(rs) => std::vec::any(rs, fn(r: Str) -> Bool { if(text_contains(r, "apply_damage")) { text_contains(r, "Write") } else { false } }), None => false }));
+    say(any_begins(&bird, "`register::<Bird>`"));
+    say(any_says(&bird, "uses it: Read"));
+    let hp = app.why_component("Hp");
+    say(any_says(&hp, "`apply_damage` uses it: Write"));
     0
 }

@@ -120,11 +120,42 @@ def derefAt (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M Unit 
 
 mutual
 
+/-- A value of a type with a `'static` lifetime in it, `&'static str`, read:
+of any lifetime it is asked, as nothing outlives `'static` (Rust's
+`&'static str` where a `&'a str` is wanted). Only of the type's own
+arguments, as `l.names[0] == name` compares a `'static` text with a
+borrowed one. -/
+partial def shortenStatic (t : Ty) : M Ty := do
+  let some st := (← get).staticCap | return t
+  -- (Through what is read only: a `Vec<&'static str>` is one of shorter
+  -- texts, but a `&mut Vec<&'static str>` is written through, and is not.)
+  let rec go (t : Ty) (fuel : Nat) : M Ty := do
+    match fuel with
+    | 0 => pure t
+    | fuel + 1 =>
+    match ← find t with
+    | .ref how inner cap =>
+      match ← find how with
+      | .con "'" [] => if cap == st then pure (.ref how inner (← freshCap)) else pure t
+      | .con "&" [] => pure (.ref how (← go inner fuel) cap)
+      | _ => pure t
+    | .con n args => pure (.con n (← args.mapM (go · fuel)))
+    | .tuple args => pure (.tuple (← args.mapM (go · fuel)))
+    | t => pure t
+  go t 8
+
 partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := do
+  shortenStatic (← inferExprAt scope amb e0)
+
+partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := do
   -- A text written is a `&'static str`: its UTF-8 bytes, where the program
   -- has them from its start (but where a `Str` is wanted, `textOwned`).
+  -- (Of any lifetime it is asked, as Rust's `'static` one is wherever a
+  -- shorter is wanted: `["<", n.to_string().as_str()]`.)
   if !(← get).textOwned && ((← get).body.textCodes e0).isSome then
-    let t ← resolveType [] false (.name "StrRef" [.name "'static" []])
+    let t ← match ← resolveType [] false (.name "StrRef" [.name "'static" []]) with
+      | .con n [_] => pure (Ty.con n [← freshTy])
+      | t => pure t
     if ← textAt t e0 then return t
   -- (Its parts are read as what they are.)
   let n ← node e0
@@ -1574,6 +1605,18 @@ partial def borrowFieldReceiver (scope : Scope) (amb : Row) (args : Array Flat.E
   if k == 0 then return none
   let some a := args[0]? | return none
   let some (v, path, fid) ← fieldThroughRef scope a | return none
+  -- (What the name points to known, as a field borrowed through it is read
+  -- where it is: else the read waits, as it would unborrowed.)
+  let pointee : M Bool := do
+    match scope.lookup v with
+    | some (.val t _) | some (.cell t _) =>
+      match ← find t with
+      | .ref _ inner _ => do pure (match ← find inner with | .var _ => false | _ => true)
+      | _ => pure false
+    | _ => pure false
+  unless ← pointee do
+    unless (← get).assocUses.isEmpty do settleAssocsAll
+    unless ← pointee do return none
   let bt := Expr.refField fid (k == 2) v path true
   modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
                            argsChosen := ((call, 0), bt) :: s.argsChosen }

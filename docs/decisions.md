@@ -8129,3 +8129,24 @@ could, which left a program not lowered (laid out by its types):
   path that does not use it, as Rust's would be (`examples/json` keeps the
   name in `let mut name`). Reading `Token<'s>` through `&'a Spot<'s>` was
   said to depend on `'a` (the calculator takes one lifetime).
+
+## The ECS and its devtools over `String` and `&str`
+
+- A component's name (`Schedule::NAME`, written by `self_name()` as a text
+  literal) is a `&'static str`; the names a world keeps, a system's
+  resources and requirements, a hook's, a label's, are `&'static str`.
+- What a system touches is a `Touch { write, name }`, not a text of a
+  prefix and a name; `SystemInfo::writes` and `reads` are the names.
+- What is made of other texts is a `String`, joined with `+`: a system's
+  name (`fn_name`), its place (`chain[0]`), why it does not run, why the
+  app orders two systems or stores a component, an entity's kind.
+- `explained`, `devtools`, `mcp` and `mcp_session` are written over them.
+- A text literal is of any lifetime it is asked (Rust's `'static` where a
+  shorter is wanted); a value read of a type with `'static` in it, through
+  what is read only, is too (`shortenStatic`): `l.names[0] == name` of a
+  `'static` name and a borrowed one. Not yet: where the type is known only
+  once an implementation is found (`labels[i] == name` of an `Index`) the
+  value is first given a name; `[what, temp.as_str()]` of a parameter's
+  text and a temporary, an array of one lifetime, is written with `+`.
+- A field through a reference waits for the implementation that decides
+  what the reference is to (`settleAssocsAll` in `fieldAtThrough`).

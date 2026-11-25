@@ -682,9 +682,15 @@ def fieldAtThrough (t : Ty) (path : List String) :
   -- it borrows and what it lasts as long as.)
   let mut through : Array (Nat × Ty × Nat) := #[]
   for (step, k) in path.zipIdx do
+    -- (What a trait leaves to an implementation, found first where it is
+    -- what is read through: the element of `let link = &list[i]`.)
+    if let .var _ ← find cur then
+      unless (← get).assocUses.isEmpty do settleAssocsAll
     if let .ref how inner cap ← find cur then
       cur := inner
       through := through.push (k, how, cap)
+    if let .var _ ← find cur then
+      unless (← get).assocUses.isEmpty do settleAssocsAll
     -- A field of one of several constructors: the value was just found to
     -- be made by that one.
     if let some (ctor, idx) := Syntax.splitCtorStep step then

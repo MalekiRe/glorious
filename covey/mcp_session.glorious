@@ -34,26 +34,6 @@ use mcp::{Json, JStr, JNum, JArr, JObj, session_channel, parse_json, field, obje
 use std::reflect::{Described};
 use std::thread::{Receiver, try_recv};
 
-// ---- Texts as `Str`, while that is the type of this program's texts. ----
-fn starts_with(text: Str, start: Str) -> Bool {
-    match((text, start)) {
-        (_, StrEnd) => true,
-        (StrChar(c, rest), StrChar(d, more)) => if(c == d) { starts_with(rest, more) } else { false },
-        _ => false
-    }
-}
-fn contains(text: Str, part: Str) -> Bool { match(find(text, part)) { Some(_) => true, None => false } }
-fn find(text: Str, part: Str) -> Option<Int> { find_from(text, part, 0) }
-fn find_from(text: Str, part: Str, at: Int) -> Option<Int> {
-    if(starts_with(text, part)) { Some(at) } else {
-        match(text) { StrEnd => None, StrChar(_, rest) => tail find_from(rest, part, at + 1) }
-    }
-}
-fn take(text: Str, n: Int) -> Str {
-    if(n <= 0) { "" } else { match(text) { StrEnd => "", StrChar(c, rest) => StrChar(c, take(rest, n - 1)) } }
-}
-
-
 pub struct Update
 impl Use<[0, *]> for Update {}
 pub struct Hp(pub Int)
@@ -65,19 +45,21 @@ fn ramp(q: &mut Query<(&mut Damage,), ()>) { q.for_each() { (mut d,) => d.0 = d.
 fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut hp => hp.0 = hp.0 - d.0; } }
 
 // The text of a tool's reply; whether it is marked an error.
-fn reply_text(r: Receiver<Str>) -> Str {
+fn reply_text(r: Receiver<String>) -> String {
     match(try_recv(&r)) {
-        Some(t) => let reply = parse_json(t); match(field(&reply, "result")) {
+        Some(t) => let reply = parse_json(t.as_str()); match(field(&reply, "result")) {
             Some(result) => match(field(result, "content")) {
-                Some(content) => match(content) { JArr(items) => match(field(&items[0], "text")) { Some(x) => match(x) { JStr(s) => s.to_str(), _ => "" }, None => "" }, _ => "" },
-                None => ""
+                Some(content) => match(content) { JArr(items) => match(field(&items[0], "text")) { Some(x) => match(x) { JStr(s) => s.clone(), _ => String::new() }, None => String::new() }, _ => String::new() },
+                None => String::new()
             },
-            None => ""
+            None => String::new()
         },
-        None => "no reply"
+        None => String::from("no reply")
     }
 }
-fn is_error(r: Receiver<Str>) -> Bool { match(try_recv(&r)) { Some(t) => contains(t, "\"isError\":true"), None => false } }
+fn is_error(r: Receiver<String>) -> Bool { match(try_recv(&r)) { Some(t) => t.as_str().contains("\"isError\":true"), None => false } }
+// The first `n` bytes of a text, or all of it.
+fn leading(text: &str, n: Int) -> &str { if(text.len() <= n) { text } else { text.slice(0, n) } }
 fn args(pairs: Vec<(&str, &str)>) -> Json {
     let mut out = Vec::new();
     let mut each = pairs.into_iter();
@@ -85,7 +67,6 @@ fn args(pairs: Vec<(&str, &str)>) -> Json {
     while({ more }) { match(each.next()) { Some((k, v)) => Vec::push(&mut out, (k, jstr(v))), None => more = false } };
     object(out)
 }
-fn shown(b: Bool) -> Str { if(b) { "true" } else { "false" } }
 
 fn main() -> Int {
     let mut app = App::new().register<Hp>().register<Damage>().add_systems(Update, (ramp, apply_damage).chain()).build();
@@ -97,10 +78,14 @@ fn main() -> Int {
     let list = client.send("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
     let none = client.send("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
     session.pump(&mut app);
-    say(shown(match(try_recv(&init)) { Some(t) => contains(t, "\"serverInfo\""), None => false }));
-    let tools = match(try_recv(&list)) { Some(t) => t, None => "" };
-    say(shown(std::vec::all(Vec::from_array(["overview", "explain", "history", "step", "what_if", "why_not", "asm"]), fn(n: &str) -> Bool { contains(tools, "\"name\":\"" ++ n ++ "\"") })));
-    say(shown(match(try_recv(&none)) { Some(_) => false, None => true }));
+    say(match(try_recv(&init)) { Some(t) => t.as_str().contains("\"serverInfo\""), None => false });
+    let tools = match(try_recv(&list)) { Some(t) => t, None => String::new() };
+    let wanted = ["overview", "explain", "history", "step", "what_if", "why_not", "asm"];
+    let mut all_there = true;
+    let mut k = 0;
+    while({ k < 7 }) { let named = String::from("\"name\":\"") + wanted[k] + "\""; if(tools.as_str().contains(named.as_str())) { () } else { all_there = false }; k = k + 1 };
+    say(all_there);
+    say(match(try_recv(&none)) { Some(_) => false, None => true });
 
     let emitted = client.call("emit", object(Vec::from_array([("label", jstr("Update")), ("count", JNum(3))])));
     session.pump(&mut app);
@@ -117,14 +102,16 @@ fn main() -> Int {
     let missing = client.call("entity", args(Vec::from_array([("id", "999v0")])));
     session.pump(&mut app);
     let overview = reply_text(overview);
-    say(shown(starts_with(overview, "frame 3")));
-    say(shown(contains(overview, "labels you can emit/step: Update")));
-    say(shown(contains(reply_text(shown_entity), "Hp = Hp(44)")));
+    say(overview.as_str().starts_with("frame 3"));
+    say(overview.as_str().contains("labels you can emit/step: Update"));
+    say(reply_text(shown_entity).as_str().contains("Hp = Hp(44)"));
     let explained = reply_text(explained);
-    say(shown(if(contains(explained, "apply_damage")) { if(contains(explained, "reads:")) { contains(explained, "ramp") } else { false } } else { false }));
-    say(take(reply_text(first), 16));
-    say(take(reply_text(stepped), 16));
-    say(shown(is_error(missing)));
+    say(explained.as_str().contains("apply_damage") and { explained.as_str().contains("reads:") } and { explained.as_str().contains("ramp") });
+    let first_text = reply_text(first);
+    say(leading(first_text.as_str(), 16));
+    let stepped_text = reply_text(stepped);
+    say(leading(stepped_text.as_str(), 16));
+    say(is_error(missing));
 
     // (With Damage raised, Hp drops further in the edited copy only.)
     let what_if = client.call("what_if", object(Vec::from_array([("label", jstr("Update")), ("frames", JNum(1)),
@@ -132,9 +119,9 @@ fn main() -> Int {
     let before = match(app.world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 };
     session.pump(&mut app);
     let what_if = reply_text(what_if);
-    say(shown(if(contains(what_if, "Hp: Hp(")) { contains(what_if, "Damage: Damage(") } else { false }));
-    say(shown(match(app.world.get<Hp>(e)) { Some(h) => h.0 == before, None => false }));
-    say(shown(contains(what_if, "Hp: Hp(23)")));
+    say(what_if.as_str().contains("Hp: Hp(") and { what_if.as_str().contains("Damage: Damage(") });
+    say(match(app.world.get<Hp>(e)) { Some(h) => h.0 == before, None => false });
+    say(what_if.as_str().contains("Hp: Hp(23)"));
 
     let paused = client.call("pause", args(Vec::new()));
     let resumed = client.call("resume", args(Vec::new()));

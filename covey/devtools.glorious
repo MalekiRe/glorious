@@ -73,12 +73,12 @@ fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut h
 fn some_hp(q: &mut Query<(&Hp,), ()>) -> Bool { q.count() > 0 }
 struct Dead
 fn watcher(alive: &mut Query<(&Hp,), (ecs::Without<Dead>,)>, hurt: &mut Query<(&Damage,), (ecs::Changed<Damage>,)>) { () }
-fn say_all(why: Option<Vec<Str>>) {
-    match(why) { Some(reasons) => say(show(len_at(&reasons)) ++ ": " ++ std::text::join(reasons, "; ")), None => say("no such system") }
+fn say_all(why: Option<Vec<String>>) {
+    match(why) { Some(reasons) => say(len_at(&reasons).to_string() + ": " + std::text::join(reasons, "; ").as_str()), None => say("no such system") }
 }
 // A step as `kind flag`, or `done` where the pass is.
-fn shown(step: ecs::StepReport) -> Str {
-    if(step.finished) { "done" } else { show(step.kind) ++ " " ++ (if(step.flag) { "true" } else { "false" }) }
+fn shown(step: ecs::StepReport) -> String {
+    if(step.finished) { String::from("done") } else { step.kind.to_string() + " " + (if(step.flag) { "true" } else { "false" }) }
 }
 
 fn new_history() -> History<Hp> { History::new() }
@@ -93,12 +93,12 @@ fn console<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs:
     discard(bridge(&mut world, Later, hp_seen));
     world
 }
-fn status(s: &TaskStatus) -> Str {
+fn status(s: &TaskStatus) -> String {
     match(s) {
-        &TaskStatus::NotStarted => "not started",
-        &TaskStatus::WaitingFor(label) => "waiting for " ++ *label,
-        &TaskStatus::WaitingOnItsOwn => "waiting",
-        &TaskStatus::Finished => "finished"
+        &TaskStatus::NotStarted => String::from("not started"),
+        &TaskStatus::WaitingFor(label) => String::from("waiting for ") + *label,
+        &TaskStatus::WaitingOnItsOwn => String::from("waiting"),
+        &TaskStatus::Finished => String::from("finished")
     }
 }
 fn hp_of<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Hp> { match(world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 } }
