@@ -270,6 +270,9 @@ enum Instr {
 struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
+    /// The layouts the instructions name by place (format 9); none where
+    /// each is written where it is named (a loaded program, `image`).
+    lays: Option<Vec<Rc<Lay>>>,
 }
 
 type Decoded<T> = Result<T, String>;
@@ -491,10 +494,19 @@ impl Reader<'_> {
         }
     }
 
+    /// A layout by its place in the file's table.
+    fn lay_at(&mut self) -> Decoded<Rc<Lay>> {
+        if self.lays.is_none() {
+            return Ok(Rc::new(self.lay()?));
+        }
+        let i = self.nat()? as usize;
+        self.lays.as_ref().and_then(|ls| ls.get(i).cloned()).ok_or_else(|| format!("no layout {i} in the table"))
+    }
+
     fn laid(&mut self) -> Decoded<Laid> {
         let size = self.nat()? as usize;
         let align = self.nat()? as usize;
-        Ok(Laid { size, align, lay: self.lay()? })
+        Ok(Laid { size, align, lay: (*self.lay_at()?).clone() })
     }
 
     fn instr(&mut self) -> Decoded<Instr> {
@@ -556,11 +568,11 @@ impl Reader<'_> {
                     17 => MemOp::Deref,
                     18 => MemOp::StaticAt,
                     19 => MemOp::AddressOf,
-                    10 => MemOp::LoadL(Rc::new(self.lay()?)),
-                    11 => MemOp::StoreL(Rc::new(self.lay()?)),
-                    12 => MemOp::SwapL(Rc::new(self.lay()?)),
-                    13 => MemOp::TagL(Rc::new(self.lay()?)),
-                    14 => MemOp::FocusL(Rc::new(self.lay()?)),
+                    10 => MemOp::LoadL(self.lay_at()?),
+                    11 => MemOp::StoreL(self.lay_at()?),
+                    12 => MemOp::SwapL(self.lay_at()?),
+                    13 => MemOp::TagL(self.lay_at()?),
+                    14 => MemOp::FocusL(self.lay_at()?),
                     t => return Err(format!("unknown memory operation {t}")),
                 };
                 Ok(Instr::Mem(op, self.atoms()?))
@@ -880,12 +892,14 @@ fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
     if bytes.len() < 5 || &bytes[..4] != b"GLBC" {
         return Err("not a Glorious bytecode file".into());
     }
-    if bytes[4] != 8 {
+    if bytes[4] != 9 {
         return Err(format!("unsupported bytecode version {}", bytes[4]));
     }
-    let mut r = Reader { bytes, pos: 5 };
+    let mut r = Reader { bytes, pos: 5, lays: None };
     let names = r.list(Reader::string)?;
     let fn_names = r.list(Reader::string)?;
+    // The layouts, each once, before what names them.
+    r.lays = Some(r.list(Reader::lay)?.into_iter().map(Rc::new).collect());
     let mut codes = r.list(Reader::code)?;
     codes.push(r.code()?);
     let mut drops = HashMap::new();

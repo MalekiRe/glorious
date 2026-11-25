@@ -107,9 +107,12 @@ partial def laidFields (fs : List (Nat × Lay)) : Bytes :=
 
 end
 
-def laid (l : Laid) : Bytes := nat l.size ++ nat l.align ++ lay l.lay
+/-- A layout with its size and alignment, the layout by its place in the
+file's table (`layTable`). -/
+def laid (ix : Lay → Nat) (l : Laid) : Bytes := nat l.size ++ nat l.align ++ nat (ix l.lay)
 
-def memOp : MemOp → Bytes
+/-- An access of memory; one at a layout names it by its place in the table. -/
+def memOp (ix : Lay → Nat) : MemOp → Bytes
   | .load => [0]
   | .store => [1]
   | .swap => [2]
@@ -125,13 +128,13 @@ def memOp : MemOp → Bytes
   | .deref => [17]
   | .staticAt => [18]
   | .addressOf => [19]
-  | .loadL l => 10 :: lay l
-  | .storeL l => 11 :: lay l
-  | .swapL l => 12 :: lay l
-  | .tagL l => 13 :: lay l
-  | .focusL l => 14 :: lay l
+  | .loadL l => 10 :: nat (ix l)
+  | .storeL l => 11 :: nat (ix l)
+  | .swapL l => 12 :: nat (ix l)
+  | .tagL l => 13 :: nat (ix l)
+  | .focusL l => 14 :: nat (ix l)
 
-def instr : Instr → Bytes
+def instr (ix : Lay → Nat) : Instr → Bytes
   | .op r => 0 :: rhs r
   | .call f args => 1 :: atom f ++ list atom args
   | .tail f args => 2 :: atom f ++ list atom args
@@ -150,19 +153,40 @@ def instr : Instr → Bytes
   | .host id args => 13 :: nat id ++ list atom args
   | .testCtor pl tag arity fail => 14 :: place pl ++ nat tag ++ nat arity ++ nat fail
   | .testInt pl n fail => 15 :: place pl ++ int n ++ nat fail
-  | .mem op args => 16 :: memOp op ++ list atom args
+  | .mem op args => 16 :: memOp ix op ++ list atom args
   | .cell init thunk => 17 :: atom init ++ atom thunk
   | .cellTail init thunk => 18 :: atom init ++ atom thunk
-  | .cellL l init thunk => 20 :: laid l ++ atom init ++ atom thunk
-  | .cellTailL l init thunk => 21 :: laid l ++ atom init ++ atom thunk
+  | .cellL l init thunk => 20 :: laid ix l ++ atom init ++ atom thunk
+  | .cellTailL l init thunk => 21 :: laid ix l ++ atom init ++ atom thunk
   | .lend uniq r thunk pre post =>
     19 :: (if uniq then 1 else 0) :: atom r ++ atom thunk ++ list atom pre ++ list atom post
 
-def code (c : Code) : Bytes := list instr c
+def code (ix : Lay → Nat) (c : Code) : Bytes := list (instr ix) c
+
+/-- The layouts a program's instructions are at, each once, in the order
+they are first named: written once, before the functions, and named by
+place, as one may be large and named by many. -/
+def layTable (p : Program) : Array Lay × Std.HashMap Lay Nat := Id.run do
+  let mut out : Array Lay := #[]
+  let mut at_ : Std.HashMap Lay Nat := {}
+  for c in p.fns.toList.map (·.code) ++ [p.main] do
+    for i in c do
+      let l? := match i with
+        | .mem (.loadL l) _ | .mem (.storeL l) _ | .mem (.swapL l) _
+        | .mem (.tagL l) _ | .mem (.focusL l) _ => some l
+        | .cellL l _ _ | .cellTailL l _ _ => some l.lay
+        | _ => none
+      if let some l := l? then
+        unless at_.contains l do
+          at_ := at_.insert l out.size
+          out := out.push l
+  pure (out, at_)
 
 def program (p : Program) : Bytes :=
-  list (fun (f : Fn) => code f.code) p.fns.toList ++ code p.main ++ list pair p.drops
-    ++ list (list nat) p.statics
+  let (table, at_) := layTable p
+  let ix := fun (l : Lay) => at_.getD l 0
+  list lay table.toList ++ list (fun (f : Fn) => code ix f.code) p.fns.toList ++ code ix p.main
+    ++ list pair p.drops ++ list (list nat) p.statics
 
 def string (s : String) : Bytes := list (fun b => [b.toNat]) s.toUTF8.toList
 
@@ -170,6 +194,6 @@ def string (s : String) : Bytes := list (fun b => [b.toNat]) s.toUTF8.toList
 used to print values, the functions' names (what `host_fn_name` gives),
 and the program. -/
 def file (ctorNames : List String) (p : Program) : Bytes :=
-  [0x47, 0x4C, 0x42, 0x43, 8] ++ list string ctorNames ++ list string p.names.toList ++ program p
+  [0x47, 0x4C, 0x42, 0x43, 9] ++ list string ctorNames ++ list string p.names.toList ++ program p
 
 end Glorious.Bytecode.Encode

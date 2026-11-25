@@ -351,12 +351,17 @@ def lowered (C : Cert) (p : Program) (kept : Option TypedMemo := none) : L (Prog
     for e in es do
       let key := if kept.isNone then 0 else mixHash global (mixHash madeOf (hash (e.sig, e.hints)))
       let (cs, asks) ← match kept.bind (·[key]?) with
-        | some k => pure (k.clauses.map (fun c => { c with body := c.body.mapStatics fun h => staticAt.getD h h }),
+        | some k =>
+          -- (Kept as it was, the same object: written again, it points into
+          -- what was read.)
+          made := made.insert key k
+          pure (k.clauses.map (fun c => { c with body := c.body.mapStatics fun h => staticAt.getD h h }),
             k.asks.map (·.mapFn fun s => bySid.getD s.toUInt64 s))
-        | none =>
-          tryCatch ((lowerClauses C e F.clauses).run #[]) fun err => throw s!"{err} (in function {fn})"
-      if kept.isSome then made := made.insert key ⟨cs.map (fun c => { c with body := c.body.mapStatics bytesOf }),
-        asks.map (·.mapFn fun g => ((sids[g]?).getD (hash g)).toNat)⟩
+        | none => do
+          let (cs, asks) ← tryCatch ((lowerClauses C e F.clauses).run #[]) fun err => throw s!"{err} (in function {fn})"
+          if kept.isSome then made := made.insert key ⟨cs.map (fun c => { c with body := c.body.mapStatics bytesOf }),
+            asks.map (·.mapFn fun g => ((sids[g]?).getD (hash g)).toNat)⟩
+          pure (cs, asks)
       atSigs := atSigs.push (cs.map fun c => { c with body := c.body.mapFns fun k => (asks[k]?).map (·.target C U) |>.getD k })
     lowers := lowers.push atSigs.toList
   let all := lowers.toList

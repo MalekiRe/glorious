@@ -372,7 +372,7 @@ def saveKept {α : Type} (dir : System.FilePath) (name : String) (v : α) : IO U
 (`GLORIOUS_FRESH`) is not set; `none_` otherwise. -/
 def keptIn {α : Type} [Nonempty α] (fresh : Bool) (file : System.FilePath) (key : String) (none_ : α) :
     IO α := do
-  if fresh then pure none_ else pure ((← Store.load file key).getD none_)
+  if fresh then pure none_ else pure ((← Trace.timedIO s!"load: {key}" (Store.load file key)).getD none_)
 
 /-- Compile the program at `path`, with the modules it has in other files.
 What the last compile of it found for each place where a borrow can be a scope
@@ -398,14 +398,15 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   let libraryKept ← keptIn fresh (library / "units") "units" ([] : Check.Kept)
   let checkKept := checkKept ++ libraryKept
   -- (What certificate inference made the last time, by function and signature.)
-  let memo ← if fresh then pure {} else do
-    let mut m : Infer.Memo := {}
-    for i in [0:inferShards] do
-      if let some part ← Store.load (α := Infer.Memo) (dir / s!"infer.{i}") "infer" then
-        m := if m.isEmpty then part else
-          { inst := part.inst.fold (·.insert) m.inst, schemes := part.schemes.fold (·.insert) m.schemes
-            faces := part.faces.fold (·.insert) m.faces, mains := part.mains.fold (·.insert) m.mains }
-    pure m
+  -- (Each shard as it was read, to be written again with what was made
+  -- of it added: what was read, the same objects.)
+  let memoShards : Array Infer.Memo ← if fresh then pure #[] else Trace.timedIO "load: infer" do
+    (List.range inferShards).toArray.mapM fun i => do
+      pure ((← Store.load (α := Infer.Memo) (dir / s!"infer.{i}") "infer").getD {})
+  let memo : Infer.Memo := memoShards.foldl (init := {}) fun m part =>
+    if m.isEmpty then part else
+      { inst := part.inst.fold (·.insert) m.inst, schemes := part.schemes.fold (·.insert) m.schemes
+        faces := part.faces.fold (·.insert) m.faces, mains := part.mains.fold (·.insert) m.mains }
   -- (The prelude and library as checked, by an earlier process of this
   -- compiler, for any program.)
   let firsts ← [(true, false), (true, true), (false, false), (false, true)].filterMapM fun (std, drop) => do
@@ -421,13 +422,13 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   -- checked them: all in one kept file, read as one region, each group a
   -- place in it.)
   let groupsKeptList : List (UInt64 × Check.KeptGroup) ← if fresh then pure [] else
-    loadShards dir "groups.kept" "groups"
+    Trace.timedIO "load: groups" (loadShards dir "groups.kept" "groups")
   let groupsKept : Check.Deltas := groupsKeptList.foldl (fun m (k, d) => m.insertIfNew k (Thunk.pure (some d))) {}
   -- (And each module's items as resolution made them.)
   let unitsKept : Syntax.Modules.UnitsKept := .ofList (← keptIn fresh (dir / "resolved") "resolved" [])
   -- (And what the front end's passes made of each item.)
   let frontKept : Std.HashMap UInt64 (List Syntax.Item) ← if fresh then pure {} else
-    pure (Std.HashMap.ofList (← loadShards (α := List Syntax.Item) dir "front" "front"))
+    pure (Std.HashMap.ofList (← Trace.timedIO "load: front" (loadShards (α := List Syntax.Item) dir "front" "front")))
   -- (And each function as lowered, and as elaborated; and each group of the
   -- program's own text's items, as parsed.)
   let lowerKept : Elab.LowerMemo ← keptIn fresh (dir / "lower") "lower" {}
@@ -472,13 +473,15 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       -- what it needed from what was kept makes nothing of the rest, which
       -- the next may need.)
       if inferNew then
+        -- (What was read of the shard, with what was made added: the shard's
+        -- objects are the same, and written again point into what was read.)
         let now := Infer.toMemo made
-        let mine := fun (k : UInt64) => shardOf k == i
+        let was := memoShards.getD i {}
         let merged : Infer.Memo :=
-          { inst := memo.inst.fold (fun m k v => if mine k && !m.contains k then m.insert k v else m) now.inst
-            schemes := memo.schemes.fold (fun m k v => if mine k && !m.contains k then m.insert k v else m) now.schemes
-            faces := memo.faces.fold (fun m k v => if mine k && !m.contains k then m.insert k v else m) now.faces
-            mains := memo.mains.fold (fun m k v => if mine k && !m.contains k then m.insert k v else m) now.mains }
+          { inst := now.inst.fold (fun m k v => m.insert k v) was.inst
+            schemes := now.schemes.fold (fun m k v => m.insert k v) was.schemes
+            faces := now.faces.fold (fun m k v => m.insert k v) was.faces
+            mains := now.mains.fold (fun m k v => m.insert k v) was.mains }
         keep <| Trace.timedIO "save: infer" (Store.save (dir / s!"infer.{i}") "infer" merged (chain := 64))
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
@@ -552,7 +555,7 @@ otherwise compiled and kept (`GLORIOUS_FRESH` set: compiled whatever is kept). -
 def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check.Kept))) := none)
     (search : Bool := true) : IO (Except String Target.Built) := do
   let dir ← Target.dirOf path
-  let key ← Target.keyOf (← IO.FS.readFile path) (← moduleFiles path)
+  let key ← Trace.timedIO "key of the texts" do Target.keyOf (← IO.FS.readFile path) (← moduleFiles path)
   if (← IO.getEnv "GLORIOUS_FRESH").isNone then
     if let some b ← Trace.timedIO "read the program" (Target.read dir key) then
       -- (One built without looking for each place serves what does not
@@ -561,7 +564,7 @@ def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check
   let kept ← match checkKept with
     | some ref => pure (((← ref.get).lookup path).getD [])
     | none => pure []
-  match ← compileFile path kept search with
+  match ← Trace.timedIO "compile file" (compileFile path kept search) with
   | .error e => pure (.error e)
   | .ok c =>
     if let some ref := checkKept then
@@ -677,7 +680,7 @@ def builtBytes (b : Target.Built) : ByteArray :=
 /-- The program at `path` built: by the running server if there is one, and
 otherwise here. -/
 def buildAsked (path : String) (search : Bool := true) : IO (Except String Target.Built) := do
-  match ← buildByServer path with
+  match ← Trace.timedIO "ask the server" (buildByServer path) with
   | some result => pure result
   | none => buildFile path (search := search)
 
@@ -977,7 +980,7 @@ def runOnVm (bytes : ByteArray) (input : List Int) : IO (Option UInt32) := do
   let vm := (← vmDir) / "glorious-vm"
   if (← IO.getEnv "GLORIOUS_MACHINE") == some "lean" || !(← vm.pathExists) then return none
   let file := (← IO.getEnv "TMPDIR").getD "/tmp" ++ s!"/glorious-run-{← IO.monoNanosNow}.gbc"
-  IO.FS.writeBinFile file bytes
+  Trace.timedIO "write the bytecode" (IO.FS.writeBinFile file bytes)
   let child ← IO.Process.spawn
     { cmd := vm.toString, args := #[file] ++ (input.map toString).toArray, env := #[("GLORIOUS_RUN", some "1")] }
   let rc ← Trace.timedIO "run" child.wait
@@ -1024,7 +1027,7 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
 def main (args : List String) : IO UInt32 := do
   let code ← Trace.timedIO "glorious" (command args)
   -- (What a compile keeps is written while the program it made runs.)
-  waitKept
+  Trace.timedIO "wait for what is kept" waitKept
   Trace.report
   -- (Ended here, not by returning: the ways of finding a certificate not
   -- taken, each on a thread of its own, would be waited for to the end.)
@@ -1174,7 +1177,7 @@ where
         | .error e =>
           IO.eprintln (errorLines s!"{path}: " e)
           return 1
-      if let some rc ← runOnVm (builtBytes b) input then
+      if let some rc ← runOnVm (Trace.timed "bytes of the program" fun _ => builtBytes b) input then
         unless rc == 2 do return rc
         -- (It went wrong: where, and why, as below.)
         match ← compileFile path with

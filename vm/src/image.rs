@@ -378,7 +378,7 @@ pub(crate) fn read(bytes: &[u8]) -> Decoded<Program> {
     if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
         return Err("not a loaded program".into());
     }
-    let mut r = Reader { bytes, pos: MAGIC.len() };
+    let mut r = Reader { bytes, pos: MAGIC.len(), lays: None };
     let names = r.list(Reader::string)?;
     let fn_names = r.list(Reader::string)?;
     let codes = r.list(|r| r.list(Reader::loaded_instr))?;

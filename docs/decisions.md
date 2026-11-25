@@ -8482,3 +8482,15 @@ to the same output for every program. `GLORIOUS_MACHINE=lean` runs on the
 Lean machine; so does a build with no VM. Told `GLORIOUS_RUN`, the VM shows
 nothing of a `main` that gives `()` and says nothing where the program went
 wrong: the compiler says where, from Core, as for the Lean machine.
+
+## Bytecode format 9: layouts in a table
+
+A layout is written once, in a table before the functions, and an
+instruction at a layout (`load`/`store`/`swap`/`tag`/`focus` at one, a cell
+laid out) names it by its place (`Encode.layTable`). Before, each
+instruction wrote its layout whole, and a large one (covey's world: 3984
+bytes, nested) was written at every instruction that named it: fleet's
+bytecode was 7.5 MB, now 1.2 MB. Making its bytes took 1.1 s of an edit to
+`main`, now 0.2 s, and the Rust VM loads and runs it in 0.5 s, from 0.64 s.
+The VM keeps one `Rc` of each; a loaded program (`image`) still writes each
+where it is named. Fleet's edit to `main` goes from 4.65 s to 3.6 s.

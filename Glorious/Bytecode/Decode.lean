@@ -162,13 +162,18 @@ partial def laidFields (bs : Bytes) : Option (List (Nat × Lay) × Bytes) :=
 
 end
 
-def laid (bs : Bytes) : Option (Laid × Bytes) := do
+/-- A layout by its place in the file's table (`Encode.layTable`). -/
+def layAt (table : Array Lay) (bs : Bytes) : Option (Lay × Bytes) := do
+  let (i, bs) ← nat bs
+  pure ((← table[i]?), bs)
+
+def laid (table : Array Lay) (bs : Bytes) : Option (Laid × Bytes) := do
   let (size, bs) ← nat bs
   let (align, bs) ← nat bs
-  let (l, bs) ← lay bs
+  let (l, bs) ← layAt table bs
   pure ({ lay := l, size, align }, bs)
 
-def memOp : Bytes → Option (MemOp × Bytes)
+def memOp (table : Array Lay) : Bytes → Option (MemOp × Bytes)
   | 0 :: bs => some (.load, bs)
   | 1 :: bs => some (.store, bs)
   | 2 :: bs => some (.swap, bs)
@@ -184,14 +189,14 @@ def memOp : Bytes → Option (MemOp × Bytes)
   | 17 :: bs => some (.deref, bs)
   | 18 :: bs => some (.staticAt, bs)
   | 19 :: bs => some (.addressOf, bs)
-  | 10 :: bs => (lay bs).map fun (l, bs) => (.loadL l, bs)
-  | 11 :: bs => (lay bs).map fun (l, bs) => (.storeL l, bs)
-  | 12 :: bs => (lay bs).map fun (l, bs) => (.swapL l, bs)
-  | 13 :: bs => (lay bs).map fun (l, bs) => (.tagL l, bs)
-  | 14 :: bs => (lay bs).map fun (l, bs) => (.focusL l, bs)
+  | 10 :: bs => (layAt table bs).map fun (l, bs) => (.loadL l, bs)
+  | 11 :: bs => (layAt table bs).map fun (l, bs) => (.storeL l, bs)
+  | 12 :: bs => (layAt table bs).map fun (l, bs) => (.swapL l, bs)
+  | 13 :: bs => (layAt table bs).map fun (l, bs) => (.tagL l, bs)
+  | 14 :: bs => (layAt table bs).map fun (l, bs) => (.focusL l, bs)
   | _ => none
 
-def instr : Bytes → Option (Instr × Bytes)
+def instr (table : Array Lay) : Bytes → Option (Instr × Bytes)
   | 0 :: bs => (rhs bs).map fun (r, rest) => (.op r, rest)
   | 1 :: bs => do
     let (f, bs) ← atom bs
@@ -249,7 +254,7 @@ def instr : Bytes → Option (Instr × Bytes)
     let (fail, bs) ← nat bs
     pure (.testInt pl n fail, bs)
   | 16 :: bs => do
-    let (op, bs) ← memOp bs
+    let (op, bs) ← memOp table bs
     let (args, bs) ← list atom bs
     pure (.mem op args, bs)
   | 17 :: bs => do
@@ -261,12 +266,12 @@ def instr : Bytes → Option (Instr × Bytes)
     let (thunk, bs) ← atom bs
     pure (.cellTail init thunk, bs)
   | 20 :: bs => do
-    let (l, bs) ← laid bs
+    let (l, bs) ← laid table bs
     let (init, bs) ← atom bs
     let (thunk, bs) ← atom bs
     pure (.cellL l init thunk, bs)
   | 21 :: bs => do
-    let (l, bs) ← laid bs
+    let (l, bs) ← laid table bs
     let (init, bs) ← atom bs
     let (thunk, bs) ← atom bs
     pure (.cellTailL l init thunk, bs)
@@ -280,14 +285,17 @@ def instr : Bytes → Option (Instr × Bytes)
     else none
   | _ => none
 
-def code (bs : Bytes) : Option (Code × Bytes) := list instr bs
+def code (table : Array Lay) (bs : Bytes) : Option (Code × Bytes) := list (instr table) bs
 
-def fn (bs : Bytes) : Option (Fn × Bytes) := (code bs).map fun (c, rest) => (⟨c⟩, rest)
+def fn (table : Array Lay) (bs : Bytes) : Option (Fn × Bytes) := (code table bs).map fun (c, rest) => (⟨c⟩, rest)
 
 /-- Decode a whole program; nothing may follow it. (Its functions' names are
 not written: a program read back has none.) -/
-def program (bs : Bytes) : Option Program :=
-  match list fn bs with
+def program (bs : Bytes) : Option Program := do
+  let (table, bs) ← list lay bs
+  let table := table.toArray
+  let code := code table
+  match list (fn table) bs with
   | some (fns, rest) =>
     match code rest with
     | some (main, rest) =>
