@@ -376,6 +376,8 @@ def lowered (C : Cert) (p : Program) (kept : Option TypedMemo := none) : L (Prog
       | some (fn, i) => fn * width + 1 + (((kinds[fn]?).bind (·[i]?)).getD 0)
       | none => (u - U.total) * width
     let kinds' := (kinds.toList.zip all).toArray.map fun (ks, ls) =>
+      -- (One signature is one kind: nothing to tell apart.)
+      if ls.length ≤ 1 then ks.map fun _ => 0 else
       let keys := ks.zip (ls.map (·.map fun c => { c with body := c.body.mapFns kindOf }))
       let firsts := keys.foldl (fun (acc : List (Nat × List Clause)) k =>
         if acc.contains k then acc else acc ++ [k]) []
