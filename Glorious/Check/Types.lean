@@ -1675,6 +1675,33 @@ where
       out := out.push t
     pure (out.toList, seen)
 
+/-- Whether a lifetime holds nothing a caller could see of `root`'s: none the
+type has, none written or fixed, and all it holds, through other lifetimes,
+the same or `root` itself (what `transmute` gives, a borrow of nothing in
+particular; or a borrow of what holds it). -/
+partial def capHoldsNothing (typeCaps fixed : Std.HashSet Nat) (fuel : Nat) (c : Nat) (root : Nat) : M Bool := do
+  match fuel with
+  | 0 => pure false
+  | fuel + 1 =>
+    let r ← findCap c
+    -- (What holds what holds it holds nothing more.)
+    if r == root then return true
+    let s ← get
+    if typeCaps.contains r || fixed.contains r || s.rigidCaps.any (·.1 == r) then return false
+    for i in s.capOut.getD r #[] do
+      match s.capEdges.get? i with
+      | some (_, .ty target) =>
+        let target ← zonk target
+        unless (freeTys target).isEmpty do return false
+        for c' in freeCaps target do
+          unless ← capHoldsNothing typeCaps fixed fuel c' root do return false
+      -- (That it is a borrow, which what it is of says; a borrow made while
+      -- it runs, its own.)
+      | some (_, .loan _) | some (_, .inner _) => pure ()
+      | some _ => return false
+      | none => pure ()
+    pure true
+
 /-- Generalise every variable of a type that nothing else depends on: not a
 declaration's inferred type, and not any of the types in `keep`. The capture
 variables generalised are those of the type and those they capture in turn,
@@ -1734,6 +1761,7 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   -- (`reach` in the order found, and the same as a set to ask of: what a
   -- type holds can be a great deal, and each was looked for in a list.)
   let mut reach : List Nat := (freeCaps t).eraseDups
+  let typeCaps : Std.HashSet Nat := reach.foldl (·.insert ·) {}
   let mut reached : Std.HashSet Nat := reach.foldl (·.insert ·) {}
   let mut todo := reach
   let mut found : Array (Nat × Nat × Captured) := #[]
@@ -1752,11 +1780,23 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
             -- other holds: it is no part of what this one's type says it holds.
             if s.sharedEdges.contains i then continue
             let target ← zonk target
+            -- (A borrow of nothing in particular: of a lifetime the type does
+            -- not have, that nothing holds and nothing fixes, as `transmute`
+            -- gives one. It holds nothing a caller could see.)
+            let mut empty := true
+            for c in freeCaps target do
+              let r ← findCap c
+              if reached.contains r || fixedCaps.contains r || !(← capHoldsNothing typeCaps fixedCaps 16 r root) then
+                empty := false
+            if empty && !(freeCaps target).isEmpty && (freeTys target).isEmpty then continue
             found := found.push (i, root, .ty target)
             for c in freeCaps target do
               unless reached.contains c || nextSet.contains c do
                 next := c :: next
                 nextSet := nextSet.insert c
+          -- (A borrow made while it runs is of its own: no caller's borrow is
+          -- it, so no caller asks it.)
+          | some (_, .inner _) => pure ()
           | some (_, what) => found := found.push (i, root, what)
           | none => pure ()
       reach := reach ++ next
