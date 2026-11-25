@@ -429,7 +429,7 @@ type parameters as written, whether it is `unsafe`, its rows). -/
 def interfaceOf (c : String) : M UInt64 := do
   let s ← get
   let shown := fun (xs : List (Ty × String)) => xs.map fun (t, w) => (showTy t, w)
-  let sch := match s.fns[c]? with
+  let sch := match (s.fnCalls[c]?).orElse fun _ => s.fns[c]? with
     | some sc => s!"{schemeDetail sc} {shown sc.stays} {shown sc.statics} {sc.sites.map showTy} {sc.ranked} {shown sc.quiets} {sc.assocs.map fun ((a, t, b, u) : String × Ty × String × Ty) => (a, showTy t, b, showTy u)} {sc.incls.map fun ((t, u) : Ty × Ty) => (showTy t, showTy u)} {sc.rvars} {showTyCaps sc.ty}"
     | none => ""
   let rows := (s.rowChecks.filter (·.1 == c)).map fun (_, ps) => ps.map fun ((n, t) : String × Ty) => (n, showTy t)

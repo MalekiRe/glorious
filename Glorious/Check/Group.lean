@@ -605,10 +605,11 @@ partial def varsAs (body sig : Ty) (acc : List (Nat × Ty) × List (Nat × Nat) 
 /-- A function's type as its signature says it, with what its body found
 that is not a contract but how a call is made: the instances of effects at
 its sites, and the types left to implementations it uses, in the
-signature's variables (`varsAs`); those only the body has stay its own. -/
-def withBodyParts (sig body : Scheme) (params : List (Nat × Nat)) : Scheme := Id.run do
-  -- (Nothing more than the signature has: the signature, the same.)
-  if body.sites.isEmpty && body.incls.isEmpty && body.assocs.length == sig.assocs.length then return sig
+signature's variables (`varsAs`); those only the body has stay its own.
+None where the body found nothing more (`St.fnCalls`). -/
+def withBodyParts (sig body : Scheme) (params : List (Nat × Nat)) : Option Scheme := Id.run do
+  -- (Nothing more than the signature has: none.)
+  if body.sites.isEmpty && body.incls.isEmpty && body.assocs.length == sig.assocs.length then return none
   -- (The type parameters it writes, by their places; then the type, and
   -- what is left to implementations of what both have.)
   let mut acc := varsAs body.ty sig.ty (params.map (fun (b, s) => (b, Ty.var s)), [], [])
@@ -621,7 +622,7 @@ def withBodyParts (sig body : Scheme) (params : List (Nat × Nat)) : Scheme := I
         acc := varsAs a a' acc
   let (tm, rm, cm) := acc
   let tr := subst tm rm cm
-  return { sig with
+  return some { sig with
     sites := body.sites.map tr
     assocs := body.assocs.map fun (a, t, n, u) => (a, tr t, n, tr u)
     incls := body.incls.map fun (t, u) => (tr t, tr u)
@@ -707,9 +708,13 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
               | (some b, some a) => some (b, a)
               | _ => none
           | _, _ => []
+        let call := withBodyParts sig body written
         { s with
           bodySchemes := s.bodySchemes.insert name body
-          fns := s.fns.insert name (withBodyParts sig body written)
+          fns := s.fns.insert name sig
+          fnCalls := match call with
+            | some call => s.fnCalls.insert name call
+            | none => s.fnCalls
           typeParams := match ids with
             | some ids => (name, ids) :: s.typeParams
             | none => s.typeParams }

@@ -628,7 +628,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
     -- (One whose signature is written whole: at lifetimes of its own.)
     if s.groupSigned.contains x then return .fn (← freshSigCaps t) [] true
     return .fn t [] true
-  if let some scheme := s.fns[x]? then
+  if let some scheme := (s.fnCalls[x]?).orElse fun _ => s.fns[x]? then
     if s.unsafeFns.contains x && !(s.unsafeBlock || s.unsafeFns.contains s.owner) then
       throw s!"`{Syntax.lastSegment x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
     -- `x<A, B>(..)`: the first type parameters are the types written.

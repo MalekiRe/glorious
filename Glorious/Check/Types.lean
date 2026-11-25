@@ -762,6 +762,10 @@ structure St where
   /-- What each body checked needs of its callers, where its signature is
   what they are checked with (`fns`): to be within it (`schemeWithin`). -/
   bodySchemes : Std.HashMap String Scheme := {}
+  /-- How a call of a function is made, where its body found more of that
+  than its signature says: the signature, with the instances of effects at
+  its sites and the types it leaves to implementations (`withBodyParts`). -/
+  fnCalls : Std.HashMap String Scheme := {}
   /-- The functions being inferred together, with their types so far. -/
   group : List (String × Ty) := []
   /-- The functions of the group whose signatures are written whole: each
