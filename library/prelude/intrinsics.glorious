@@ -51,6 +51,10 @@
 // `(0, 0)` when there are no more).
 #[intrinsic] fn host_write<T>(value: T) where T: Use<[1, 1]>;
 #[intrinsic] fn host_read() -> (Int, Int);
+// A character put at the end of the line being written; the line ended,
+// written.
+#[intrinsic] fn host_put(code: Int);
+#[intrinsic] fn host_line();
 // The bits at an address, so many of them (without a sign if negative), read
 // and written.
 #[intrinsic] unsafe fn ptr_read(at: usize, bits: Int) -> Int;

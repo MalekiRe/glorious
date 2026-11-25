@@ -379,7 +379,15 @@ impl String {
 }
 
 // Write a value as `Debug` has it, as Rust's `println!("{:?}", value)`.
-fn say_debug<T>(value: T) where T: Debug { let held = value; host_write(String::to_str(&format_debug(&held))) }
+fn say_debug<T>(value: T) where T: Debug { let held = value; write_line(&format_debug(&held)) }
+// A text written as a line, character by character. (Read as the `String`'s
+// elements: so on every machine.)
+fn write_line(text: &String) {
+    let mut it = String::chars_typed(text);
+    let mut more = true;
+    while({ more }) { match(Chars::next_typed(&mut it, &text.bytes)) { Some(c) => host_put(int(c)), None => more = false } };
+    host_line()
+}
 
 // Texts in order of their bytes, as Rust's.
 impl<'a> Clone for StrRef<'a> { fn clone(s: &StrRef<'a>) -> StrRef<'a> { *s } }

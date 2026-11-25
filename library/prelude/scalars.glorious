@@ -683,7 +683,7 @@ impl<'a, T> Show for SliceRef<'a, T> where T: Show { fn fmt(s: &SliceRef<'a, T>)
 impl<T, N> Show for Fixed<T, N> where T: Show, N: Known { fn fmt(a: &Fixed<T, N>) -> Str { elements_text(a) } }
 
 // Write a value as text.
-fn say<T>(value: T) where T: Display { let held = value; host_write(String::to_str(&format(&held))) }
+fn say<T>(value: T) where T: Display { let held = value; write_line(&format(&held)) }
 
 // A value owned anew, from one read through a reference (the library
 // specification's §3.1): of what is copied as it is read, the copy; of a

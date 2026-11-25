@@ -75,9 +75,13 @@ def runConst (p : Program) (fn : Nat) (fuel : Nat) (display : Value → String) 
 
 /-- The characters of a text, the prelude's `StrChar`s ending in `StrEnd`. -/
 partial def textOf (names : Array String) : Value → Option (List Nat)
+  -- (A line written by `host_line`.)
+  | .data tag fields@(_ :: _) =>
+    if tag == textLineTag then fields.mapM (fun | .int c => some c.toNat | _ => none)
+    else match fields with
+      | [.int c, rest] => if (names[tag]?.getD "").endsWith "StrChar" then (textOf names rest).map (c.toNat :: ·) else none
+      | _ => none
   | .data tag [] => if (names[tag]?.getD "").endsWith "StrEnd" then some [] else none
-  | .data tag [.int c, rest] =>
-    if (names[tag]?.getD "").endsWith "StrChar" then (textOf names rest).map (c.toNat :: ·) else none
   | _ => none
 
 /-- A value as what a constant wrote is said: a text as its characters. -/

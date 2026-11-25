@@ -757,6 +757,8 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
       | 10, [] => pure (ITy.tuple [.int, .int])
       -- (`transmute`: the value, of another type.)
       | 14, [_] => freshTy
+      | 21, [c] => do int c; pure .unit
+      | 22, [] => pure .unit
       | _, _ => throw s!"host operation {id} does not exist with {args.length} arguments"
     -- (What one outside Core's rules gives, for the typed lowering.)
     if 2 ≤ id then hint (.ty σ)

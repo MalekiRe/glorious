@@ -83,6 +83,8 @@ structure World where
   input : List Int
   output : List Value
   heap : List (Option Value) := []
+  /-- The characters of the line being written (`call` 21), not yet ended. -/
+  line : List Int := []
   /-- The program's functions' names, by index (`call` 9). -/
   names : Array String := #[]
 
@@ -108,6 +110,9 @@ Perform host operation `id`.
   as an array of its characters' codes (none, of any other value), and the
   value itself, given back.
 * `14`, a value: the value as it is (`transmute`: of another type).
+* `21`, a character's code: put at the end of the line being written.
+* `22`, no arguments: the line being written ended, written as one value
+  (`textLineTag`).
 
 Memory by address is the machine's (`MemOp.alloc` and the rest), not the host's.
 -/
@@ -138,6 +143,14 @@ def call (w : World) (id : Nat) (args : List Value) : Option (Value × World) :=
     match args with
     | [.int n, v, _] =>
       if 0 ≤ n ∧ n.toNat < w.heap.length then some (.data 0 [], { w with heap := w.heap.set n.toNat (some v) }) else none
+    | _ => none
+  else if id = 21 then
+    match args with
+    | [.int c] => some (.data 0 [], { w with line := w.line ++ [c] })
+    | _ => none
+  else if id = 22 then
+    match args with
+    | [] => some (.data 0 [], { w with output := w.output ++ [.data textLineTag (w.line.map Value.int)], line := [] })
     | _ => none
   else if id = 14 then
     -- (`transmute`: the value as it is.)

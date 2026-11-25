@@ -374,6 +374,8 @@ def hosts : List (String × Nat × Nat) :=
    ("heap_machine_coming", 10, 0),
    -- The name of the function a callable is of, and the callable back.
    ("host_fn_name", 9, 2),
+   -- A character put at the end of the line being written; the line ended.
+   ("host_put", 21, 1), ("host_line", 22, 0),
    -- Unsafe: memory, by address. A new block of so many bytes at a multiple
    -- of an alignment; a block freed; bytes copied.
    ("mem_alloc", 11, 2), ("mem_free", 12, 1), ("mem_copy", 13, 3),

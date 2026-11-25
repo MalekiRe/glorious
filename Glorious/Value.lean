@@ -62,6 +62,9 @@ def anyName : Nat := builtinNames + 1
 for `n`. -/
 def fixedBase : Nat := 6917529027641081856
 def fixedName : Nat := builtinNames + 2
+/-- A line of text the program wrote (host operations 21 and 22): its
+fields are its characters' codes. No program builds one. -/
+def textLineTag : Nat := fixedBase - 1
 def lenBase : Nat := builtinNames + 3
 
 /-- The locals of one activation, oldest first. -/

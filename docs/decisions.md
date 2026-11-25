@@ -8166,3 +8166,11 @@ could, which left a program not lowered (laid out by its types):
   receiver whose type an implementation decides later takes it as the
   function's parameter (`count.to_string()` of `KeptRun`'s result: written
   `let n: Int = count`).
+
+## A line written by its characters
+
+- `say` and `say_debug` write their text character by character
+  (`host_put`, host operation 21) and end the line (`host_line`, 22),
+  reading the `String`'s elements: no `Str` is made to be written. The
+  machines keep the line being written; the Lean ones record it as a value
+  of `textLineTag`, shown as its characters.

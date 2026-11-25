@@ -1363,6 +1363,8 @@ pub struct Vm {
     heap: Rc<Heap>,
     /// The functions' names, shared with the other machines.
     shared_names: Rc<Vec<String>>,
+    /// The characters of the line being written (host operation 21).
+    line: String,
 }
 
 impl Vm {
@@ -2174,6 +2176,17 @@ impl Vm {
                     }
                     // `transmute`: the value as it is.
                     (14, [v]) => v.clone(),
+                    // A character put at the end of the line being written;
+                    // the line ended, written.
+                    (21, [Value::Int(code)]) => {
+                        self.line.push(u32::try_from(*code).ok().and_then(char::from_u32).unwrap_or('\u{FFFD}'));
+                        unit()
+                    }
+                    (22, []) => {
+                        let line = std::mem::take(&mut self.line);
+                        writeln!(self.out, "{line}").expect("cannot write to standard output");
+                        unit()
+                    }
                     // The name of the function a callable is of, and the
                     // callable back.
                     // (The character at a place of it, `-1` past its end.)
@@ -2539,6 +2552,7 @@ fn machine(program: Program, input: VecDeque<i64>) -> Vm {
         input,
         out: BufWriter::new(io::stdout()),
         shared_names: Rc::new(program.fn_names),
+        line: String::new(),
         names: program.names,
         stop: None,
         pool: Vec::new(),
@@ -2572,6 +2586,7 @@ fn sibling(vm: &Vm) -> Vm {
         static_at: Rc::clone(&vm.static_at),
         heap: Rc::clone(&vm.heap),
         shared_names: Rc::clone(&vm.shared_names),
+        line: String::new(),
     }
 }
 

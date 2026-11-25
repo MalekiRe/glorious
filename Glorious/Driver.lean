@@ -1292,9 +1292,13 @@ def borrowFns (src : String) : Option Nat :=
 /-- The characters of a text, if the value is one: the prelude's `Str`, whose
 constructors are shown under names no program can write. -/
 partial def textOf (names : Array String) : Value → Option (List Nat)
-  | .data tag [] => if names[tag]? == some Syntax.textEndName then some [] else none
-  | .data tag [.int c, rest] =>
-    if names[tag]? == some Syntax.textCharName then (textOf names rest).map (c.toNat :: ·) else none
+  -- (A line written by `host_line`.)
+  | .data tag fields =>
+    if tag == textLineTag then fields.mapM (fun | .int c => some c.toNat | _ => none) else
+    match fields with
+    | [] => if names[tag]? == some Syntax.textEndName then some [] else none
+    | [.int c, rest] => if names[tag]? == some Syntax.textCharName then (textOf names rest).map (c.toNat :: ·) else none
+    | _ => none
   | _ => none
 
 /-- Characters as a string; a code that is no character is U+FFFD. -/
