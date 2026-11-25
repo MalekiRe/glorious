@@ -66,7 +66,7 @@ fn values(q: &mut Query<(&Value,), (Changed<Value>,)>) -> Vec<Int> {
 }
 
 // `skipped_single_and_conditions_do_not_consume_pending_changes`
-fn gated(q: &mut Query<(&Value,), (Changed<Value>,)>, gate: &mut Single<(&Gate,), ()>) { say(values(q)) }
+fn gated(q: &mut Query<(&Value,), (Changed<Value>,)>, gate: &mut Single<(&Gate,), ()>) { say_debug(values(q)) }
 fn tagged(q: &mut Query<(&Tag,), ()>) -> Bool { q.count() > 0 }
 fn skipped() {
     let mut app = App::new().register<Value>().register<Tag>().register<Gate>()
@@ -87,7 +87,7 @@ fn skipped() {
 fn changed_or_tagged(q: &mut Query<(&Value,), (Or<(Changed<Value>, With<Tag>)>,)>) {
     let mut out = Vec::new();
     q.for_each() { (v,) => Vec::push(&mut out, v.0); };
-    say(sort(out))
+    say_debug(sort(out))
 }
 fn bump(single: &mut Single<(&mut Value,), (Changed<Value>,)>) {
     match(single.get_mut()) { Some((mut v,)) => v.0 = v.0 + 10;, None => () }
@@ -121,7 +121,7 @@ fn replaced() {
     discard(app.world.spawn_bundle((Tag,)));
     discard(app.world.spawn_bundle((Value(2),)));
     app.emit(&Update);
-    say(match(app.world.resource<Count>()) { Some(c) => Vec::from_array([c.0 / 10, c.0 % 10]), None => Vec::new() })
+    say_debug(match(app.world.resource<Count>()) { Some(c) => Vec::from_array([c.0 / 10, c.0 % 10]), None => Vec::new() })
 }
 
 // `cached_matches_follow_new_tables_growth_and_repopulated_empty_tables`
@@ -129,7 +129,7 @@ fn all_values(q: &mut Query<(&Value,), ()>) {
     let mut out = Vec::new();
     q.for_each() { (v,) => Vec::push(&mut out, v.0); };
     let n = len_at(&out);
-    if(n > 3) { say(n) } else { say(sort(out)) }
+    if(n > 3) { say(n) } else { say_debug(sort(out)) }
 }
 fn cached() {
     let mut app = App::new().register<Value>().register<Tag>().register<Gate>()

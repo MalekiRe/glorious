@@ -417,7 +417,8 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
   for m in members do
     let nb ← numbering m.sig
     let ground ← zonkSigWith nb m.sig
-    if m.fn == fn && ground != sig then
+    -- (For the typed lowering, which reads no regions, it may be.)
+    if m.fn == fn && ground != sig && !(← get).anyUnknown then
       throw s!"region: function {fn} cannot be used with the regions it is given: wanted {showSig sig}, found {showSig ground}"
     unless ((← get).emitted[m.fn]?.getD []).contains ground do
       let hints ← try m.hints.toList.mapM (zonkHints nb.body)

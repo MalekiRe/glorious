@@ -3,7 +3,7 @@
 // expect:
 // ada: 9.10
 // bo: 4.50
-// [4.50, 5.50]
+// ["4.50", "5.50"]
 // 5.55
 // closed march after 2 lines
 // 2
@@ -61,7 +61,7 @@ fn main() -> Int {
         record(&mut ledger, name ++ ": " ++ shown(Money(cents)));
         n + 1 });
     let big = collect(&mut map(filter(into_iter(Vec::from_array([120 * 3, 450, 275 * 2])), { (c) => *c >= 400 }), { (c) => shown(Money(c)) }));
-    say(big);
+    say_debug(big);
     say(shown(Money(largest(&orders, 0, 0)) + Money(5)));
     written
 }

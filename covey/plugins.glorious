@@ -122,7 +122,7 @@ fn main() -> Int {
     app.emit(&Update);
     let mut movers = Vec::new();
     app.world.query<(&Pos, &Vel)>().for_each() { p, v => Vec::push(&mut movers, (p.0, v.0)); };
-    say(sort(movers));
+    say_debug(sort(movers));
     say(match(app.world.get<Spawned>(counter)) { Some(s) => s.0, None => 0 });
     say("--");
 

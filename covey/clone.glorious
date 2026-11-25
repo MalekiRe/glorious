@@ -51,7 +51,7 @@ fn main() -> Int {
     say(match(world.get<Size>(copy)) { Some(s) => s.0, None => 0 - 1 });
     flag(match(world.get<Handle>(copy)) { Some(_) => false, None => true });
     say(len(world.targets<Likes>(copy)));
-    say(map(world.targets<Likes>(original), { e => e.index }));
+    say_debug(map(world.targets<Likes>(original), { e => e.index }));
     discard(world.despawn(original));
     flag(match(world.clone_entity(original)) { Some(_) => false, None => true });
 
@@ -74,8 +74,8 @@ fn main() -> Int {
     world.query<(&Label,)>().for_each() { (_l,) => seen = seen + 1; };
     say(seen);
     let children = world.sources<ChildOf>(copy);
-    say(map(&children, { c => match(world.get<Label>(c)) { Some(l) => l.0, None => 0 - 1 } }));
-    say(map(&children, { c => len(world.sources<ChildOf>(c)) }));
+    say_debug(map(&children, { c => match(world.get<Label>(c)) { Some(l) => l.0, None => 0 - 1 } }));
+    say_debug(map(&children, { c => len(world.sources<ChildOf>(c)) }));
     say(len(world.sources<ChildOf>(row)));
     world.despawn_linked<ChildOf>(copy);
     seen = 0;

@@ -823,10 +823,13 @@ partial def unifyList (as bs : List ITy) : M Unit := do
   for (x, y) in as.zip bs do
     unify x y
 
-/-- Make two rows the same: each gets the other's operations, and the same tail. -/
+/-- Make two rows the same: each gets the other's operations, and the same tail.
+(For the typed lowering, which reads no effects, rows that cannot be made
+the same are let be: `requireOp`.) -/
 partial def unifyRow (a b : IRow) : M Unit := do
   let a ← flattenRow a
   let b ← flattenRow b
+  let lenient := (← get).anyUnknown
   let mut onlyA : IOps := []
   for (op, targs) in a.ops do
     match b.ops.lookup op with
@@ -835,17 +838,17 @@ partial def unifyRow (a b : IRow) : M Unit := do
   let onlyB := b.ops.filter fun (op, _) => (a.ops.lookup op).isNone
   match a.tail, b.tail with
   | none, none =>
-    unless onlyA.isEmpty && onlyB.isEmpty do
+    unless onlyA.isEmpty && onlyB.isEmpty || lenient do
       throw "two closed sets of operations differ"
   | some va, none =>
-    unless onlyA.isEmpty do throw "a closed set of operations lacks an operation"
+    unless onlyA.isEmpty || lenient do throw "a closed set of operations lacks an operation"
     bindRow va ⟨onlyB, none⟩
   | none, some vb =>
-    unless onlyB.isEmpty do throw "a closed set of operations lacks an operation"
+    unless onlyB.isEmpty || lenient do throw "a closed set of operations lacks an operation"
     bindRow vb ⟨onlyA, none⟩
   | some va, some vb =>
     if va == vb then
-      unless onlyA.isEmpty && onlyB.isEmpty do
+      unless onlyA.isEmpty && onlyB.isEmpty || lenient do
         throw "a set of operations would contain itself"
     else if onlyA.isEmpty && onlyB.isEmpty then bindRow va ⟨[], some vb⟩
     else

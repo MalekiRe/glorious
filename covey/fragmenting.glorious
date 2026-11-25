@@ -39,12 +39,12 @@ fn main() -> Int {
     let alpha = world.spawn_bundle((Name(1),));
     let beta = world.spawn_bundle((Name(2),));
     let member = world.spawn_bundle((Name(3), InSquad.to(alpha)));
-    say(names(&world, world.targets<InSquad>(member)));
+    say_debug(names(&world, world.targets<InSquad>(member)));
     say(match(world.get<Relates<InSquad>>(member)) { Some(_) => "some", None => "none" });
     discard(world.insert(member, InSquad.to(beta)));
-    say(names(&world, world.targets<InSquad>(member)));
-    say(names(&world, world.sources<InSquad>(beta)));
-    say(names(&world, world.sources<InSquad>(alpha)));
+    say_debug(names(&world, world.targets<InSquad>(member)));
+    say_debug(names(&world, world.sources<InSquad>(beta)));
+    say_debug(names(&world, world.sources<InSquad>(alpha)));
 
     let mut first = 0 - 1;
     let mut grew = 0;
@@ -57,7 +57,7 @@ fn main() -> Int {
         while({ k < 3 }) { Vec::push(&mut members, world.spawn_bundle((Name(k),))); k = k + 1 };
         let mut m = 0;
         while({ m < 3 }) { discard(world.relate(members[m], InSquad, squad)); m = m + 1 };
-        if(shown) { () } else { say(names(&world, world.sources<InSquad>(squad))); shown = true };
+        if(shown) { () } else { say_debug(names(&world, world.sources<InSquad>(squad))); shown = true };
         let mut d = 0;
         while({ d < 3 }) { discard(world.despawn(members[d])); d = d + 1 };
         discard(world.despawn(squad));

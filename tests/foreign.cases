@@ -18,12 +18,12 @@ Hi
 use std::c::{c_string, text_at, free};
 use std::text::{from_utf8};
 extern "C" { fn puts(s: usize) -> i32; fn toupper(c: i32) -> i32; fn getenv(name: usize) -> usize; }
-fn main() -> i32 { say("h\u{e9}\u{20ac}".as_bytes().to_vec()); say(match(from_utf8("h\u{e9}llo \u{1F600}".as_bytes())) { Ok(text) => text == "h\u{e9}llo \u{1F600}", Err(_) => false }); unsafe { let s = c_string("hello from C"); puts(s); say(text_at(s)); free(s); let name = c_string("GLORIOUS_TEST"); say(getenv(name) == 0usize); free(name); toupper(97i32) } }
+fn main() -> i32 { say_debug("h\u{e9}\u{20ac}".as_bytes().to_vec()); say(match(from_utf8("h\u{e9}llo \u{1F600}".as_bytes())) { Ok(text) => text == "h\u{e9}llo \u{1F600}", Err(_) => false }); unsafe { let s = c_string("hello from C"); puts(s); say_debug(text_at(s)); free(s); let name = c_string("GLORIOUS_TEST"); say(getenv(name) == 0usize); free(name); toupper(97i32) } }
 #### expect
 [104, 195, 169, 226, 130, 172]
 true
 hello from C
-Ok(hello from C)
+Some("hello from C")
 true
 65
 #### case
@@ -330,7 +330,7 @@ fn main() -> Int {
         Ok(text) =>
             say(unsafe { strlen(CString::as_ptr(&text)) });
             say(match(unsafe { bytes_at(CString::as_ptr(&text), 100) }) { Ok(bytes) => len_at(&bytes), Err(_) => 0 - 1 });
-            say(CString::into_bytes(text));
+            say_debug(CString::into_bytes(text));
             // A zero inside is refused, and says where.
             say(match(CString::from_vec(std::vec::Vec::from_array([104u8, 0u8, 105u8]))) { Ok(made) => CString::release(made); 0 - 1, Err(Rejected { value, error }) => error.position * 10 + len_at(&value) });
             let raw = [111u8, 107u8, 0u8];
@@ -349,7 +349,7 @@ fn main() -> Int {
                         unsafe { ptr_write_bytes(at, 7u8, 8) };
                         unsafe { ptr_write_bytes(at, 1u8, 2) };
                         unsafe { ptr_copy(at, ptr_add(at, 1), 4) };
-                        say(unsafe { read_bytes(at, 8) });
+                        say_debug(unsafe { read_bytes(at, 8) });
                         Allocation::release(memory);
                         0
                 }

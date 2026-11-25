@@ -56,7 +56,7 @@ fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 fn changed_numbers(q: &mut Query<(&Number,), (Changed<Number>,)>) {
     let mut out = Vec::new();
     q.for_each() { (n,) => Vec::push(&mut out, n.0); };
-    say(sort(out))
+    say_debug(sort(out))
 }
 fn tagged_or_changed(q: &mut Query<(&Number,), (Or<(With<Tag>, Changed<Number>)>,)>) { say(q.count()) }
 

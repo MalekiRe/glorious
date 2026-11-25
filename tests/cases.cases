@@ -4125,19 +4125,19 @@ fn main() -> Int { match(Rgb(255, 128, 0)) { Rgb(r, g, b) => int(r) + int(g) + i
 #### case
 #### Tuples and `Result` have `Show` if their parts do.
 fn pair() -> Result<Int, Str> { Ok(3) }
-fn main() -> Int { say((1, 2.5)); say(((), 'x', "s")); say(pair()); say(1 < 2); say(()); 0 }
+fn main() -> Int { say_debug((1, 2.5)); say_debug(((), 'x', "s")); say_debug(pair()); say(1 < 2); say(()); 0 }
 #### expect
 (1, 2.5)
-((), x, s)
+((), 'x', "s")
 Ok(3)
 true
 ()
 0
 #### case
 struct P(Int)
-fn main() -> Int { say((1, P(2))); 0 }
+fn main() -> Int { say_debug((1, P(2))); 0 }
 #### expect
-error: 2:20: in `main`: `P` does not implement `Show`, which `Show` of `(Int, P)` needs
+error: 2:20: in `main`: `P` does not implement `Debug`, which `Debug` of `(Int, P)` needs
 #### case
 #### A trait can give a function a body, and can need another trait; what is
 #### written of a type parameter is then all it has.
@@ -4201,7 +4201,7 @@ fn main() -> Int { legs(Box(5)) + name(Box(1)) }
 8
 #### case
 #### `let x: Type = value`.
-fn main() -> Int { let x: u8 = 200; let y: (Int, f64) = (1, 2.5); let z: Option<Int> = None; say(x); say(y); match(z) { Some(n) => n, None => int(x) } }
+fn main() -> Int { let x: u8 = 200; let y: (Int, f64) = (1, 2.5); let z: Option<Int> = None; say(x); say_debug(y); match(z) { Some(n) => n, None => int(x) } }
 #### expect
 200
 (1, 2.5)
@@ -4381,7 +4381,7 @@ fn main() -> Int { let mut w = W(5); *get(&w) }
 #### Arrays: `[a, b]`, `[x; n]`, `a[i]`, `a[i] = v`, `[T]`. An array is a
 #### value; a place that is not there stops the program.
 use std::vec::{Vec};
-fn main() -> Int { let mut a = Vec::from_array([10, 20, 30]); say(&a); say(a.len()); say(a[1]); let mut b = clone(&a); b.push(40); say(&b); say(&a); say([1.5; 3]); say(b"hi"); a[0] + b[3] }
+fn main() -> Int { let mut a = Vec::from_array([10, 20, 30]); say_debug(&a); say(a.len()); say(a[1]); let mut b = clone(&a); b.push(40); say_debug(&b); say_debug(&a); say_debug([1.5; 3]); say_debug(b"hi"); a[0] + b[3] }
 #### expect
 [10, 20, 30]
 3
@@ -4392,7 +4392,7 @@ fn main() -> Int { let mut a = Vec::from_array([10, 20, 30]); say(&a); say(a.len
 [104, 105]
 50
 #### case
-fn main() -> Int { let mut a = [1, 2, 3]; a[1] = 20; a[2] = a[1] + a[0]; say(a); let mut grid = [[0; 2]; 2]; grid[1][0] = 7; say(grid); grid[1][0] }
+fn main() -> Int { let mut a = [1, 2, 3]; a[1] = 20; a[2] = a[1] + a[0]; say_debug(a); let mut grid = [[0; 2]; 2]; grid[1][0] = 7; say_debug(grid); grid[1][0] }
 #### expect
 [1, 20, 21]
 [[0, 0], [7, 0]]
@@ -4404,10 +4404,10 @@ went wrong
 #### case
 use std::vec::{Vec};
 fn sum(a: Vec<Int>) -> Int { fold(a, 0, fn(acc, x) { acc + x }) }
-fn main() -> Int { let mut a: Vec<Int> = Vec::new(); a.push(4); a.push(5); say(match(a.get(1)) { Some(x) => Some(*x), None => None }); say(match(a.get(2)) { Some(x) => Some(*x), None => None }); match(a.pop()) { Some(last) => sum(a) * 10 + last, None => 0 } }
+fn main() -> Int { let mut a: Vec<Int> = Vec::new(); a.push(4); a.push(5); say_debug(match(a.get(1)) { Some(x) => Some(*x), None => None }); say_debug(match(a.get(2)) { Some(x) => Some(*x), None => None }); match(a.pop()) { Some(last) => sum(a) * 10 + last, None => 0 } }
 #### expect
-Ok(5)
-Err(())
+Some(5)
+None
 45
 #### case
 use std::vec::{Vec};
@@ -4428,7 +4428,7 @@ fn main() -> Int { let s = "héllo"; s.len() + len([s, s]) }
 8
 #### case
 use std::vec::{collect};
-fn main() -> Int { let a = [1, 2, 3, 4, 5]; say(a.as_slice().sub(1, 4).unwrap()); let cs = collect(&mut "hello".chars()); say(cs[1]); let mut up = cs.clone(); up[0] = 'J'; say(text(&up)); say(text(up.as_slice().sub(1, 3).unwrap())); len_at(&cs) }
+fn main() -> Int { let a = [1, 2, 3, 4, 5]; say_debug(a.as_slice().sub(1, 4).unwrap()); let cs = collect(&mut "hello".chars()); say(cs[1]); let mut up = cs.clone(); up[0] = 'J'; say(text(&up)); say(text(up.as_slice().sub(1, 3).unwrap())); len_at(&cs) }
 #### expect
 [2, 3, 4]
 e
@@ -4631,13 +4631,13 @@ error: the operator `<>` is brought in with one fixity where it already has anot
 #### names it has it.
 use std::result::{map, map_err, and_then, ok, err, is_err};
 fn half(n: Int) -> Result<Int, &'static str> { if(n % 2 == 0) { Ok(n / 2) } else { Err("odd") } }
-fn main() -> Bool { say(map(half(4), { x => x + 1 })); say(map_err(half(3), { e => e.len() })); say(and_then(half(8), half)); say(ok(half(3))); say(err(half(3))); is_err(half(1)) }
+fn main() -> Bool { say_debug(map(half(4), { x => x + 1 })); say_debug(map_err(half(3), { e => e.len() })); say_debug(and_then(half(8), half)); say_debug(ok(half(3))); say_debug(err(half(3))); is_err(half(1)) }
 #### expect
 Ok(3)
 Err(3)
 Ok(2)
-Err(())
-Ok(odd)
+None
+Some("odd")
 Ok(())
 #### case
 fn main() -> Int { 1 }
@@ -4655,7 +4655,7 @@ fn main() -> Int { say(show_o(compare(1, 2))); say(show_o(reverse(compare('a', '
 10
 #### case
 use std::int::{abs, signum, pow, gcd, lcm, div_floor, mod_floor, digits, sqrt, is_even};
-fn main() -> Bool { say(abs(0 - 5)); say(signum(0 - 3)); say(pow(2, 10)); say(gcd(12, 18)); say(lcm(4, 6)); say(div_floor(0 - 7, 2)); say(mod_floor(0 - 7, 2)); say(digits(1203)); say(sqrt(99)); is_even(4) }
+fn main() -> Bool { say(abs(0 - 5)); say(signum(0 - 3)); say(pow(2, 10)); say(gcd(12, 18)); say(lcm(4, 6)); say(div_floor(0 - 7, 2)); say(mod_floor(0 - 7, 2)); say_debug(digits(1203)); say(sqrt(99)); is_even(4) }
 #### expect
 5
 -1
@@ -4669,19 +4669,19 @@ fn main() -> Bool { say(abs(0 - 5)); say(signum(0 - 3)); say(pow(2, 10)); say(gc
 Ok(())
 #### case
 use std::char::{is_digit, is_alpha, is_space, digit, of_digit, to_upper, to_lower, code};
-fn main() -> Int { say(is_digit('7')); say(is_alpha('_')); say(is_space(' ')); say(digit('8')); say(of_digit(3)); say(to_upper('q')); say(to_lower('Q')); code('A') }
+fn main() -> Int { say(is_digit('7')); say(is_alpha('_')); say(is_space(' ')); say_debug(digit('8')); say_debug(of_digit(3)); say(to_upper('q')); say(to_lower('Q')); code('A') }
 #### expect
 true
 false
 true
-Ok(8)
-Ok(3)
+Some(8)
+Some('3')
 Q
 q
 65
 #### case
 use std::vec::*;
-fn main() -> Int { let a = [5, 3, 9, 1, 3]; say(sort(a)); say(map(a, { x => x * 2 })); say(filter(a, { x => x > 3 })); say(reverse(a)); say(range(2, 6)); say(sum(a)); say(maximum(a)); say(zip(a, [true, false])); say(enumerate([7, 8])); say(binary_search(sort(a), 5)); say(binary_search(sort(a), 4)); say(dedup(sort(a))); say(take(a, 2)); say(drop(a, 3)); say(contains(a, 9)); say(position(a, { x => x == 9 })); say(concat([Vec::from_array([1]), Vec::from_array([2, 3]), Vec::new()])); say(swap(a, 0, 4)); say(sort_by(["pear", "fig", "apple"], fn(x, y) { length(x) < length(y) })); count(a, { x => x == 3 }) }
+fn main() -> Int { let a = [5, 3, 9, 1, 3]; say_debug(sort(a)); say_debug(map(a, { x => x * 2 })); say_debug(filter(a, { x => x > 3 })); say_debug(reverse(a)); say_debug(range(2, 6)); say(sum(a)); say_debug(maximum(a)); say_debug(zip(a, [true, false])); say_debug(enumerate([7, 8])); say_debug(binary_search(sort(a), 5)); say_debug(binary_search(sort(a), 4)); say_debug(dedup(sort(a))); say_debug(take(a, 2)); say_debug(drop(a, 3)); say(contains(a, 9)); say_debug(position(a, { x => x == 9 })); say_debug(concat([Vec::from_array([1]), Vec::from_array([2, 3]), Vec::new()])); say_debug(swap(a, 0, 4)); say_debug(sort_by(["pear", "fig", "apple"], fn(x, y) { length(x) < length(y) })); count(a, { x => x == 3 }) }
 #### expect
 [1, 3, 3, 5, 9]
 [10, 6, 18, 2, 6]
@@ -4689,7 +4689,7 @@ fn main() -> Int { let a = [5, 3, 9, 1, 3]; say(sort(a)); say(map(a, { x => x * 
 [3, 1, 9, 3, 5]
 [2, 3, 4, 5]
 21
-Ok(9)
+Some(9)
 [(5, true), (3, false)]
 [(0, 7), (1, 8)]
 Ok(3)
@@ -4698,26 +4698,26 @@ Err(3)
 [5, 3]
 [1, 3]
 true
-Ok(2)
+Some(2)
 [1, 2, 3]
 [3, 3, 9, 1, 5]
-[fig, pear, apple]
+["fig", "pear", "apple"]
 2
 #### case
 use std::text::{join, pad_start, pad_end};
-fn main() -> Bool { let h = "hello"; say(h.starts_with("he")); say(h.ends_with("lo")); say(h.find("ll")); say("Hello, World".to_uppercase()); say("  hi there \n".trim()); say("a,b,,c".split(",")); say(" the quick  fox ".split_whitespace()); say(join(["a", "b", "c"], "-")); say("ab".repeat(3)); say("-120".parse_int()); say("12x".parse_int()); say(pad_start("7", 3, '0')); say(pad_end("7", 3, '.')); say(h.slice(0, 2)); say(h.slice(2, h.len())); h.contains("xyz") }
+fn main() -> Bool { let h = "hello"; say(h.starts_with("he")); say(h.ends_with("lo")); say_debug(h.find("ll")); say("Hello, World".to_uppercase()); say("  hi there \n".trim()); say_debug("a,b,,c".split(",")); say_debug(" the quick  fox ".split_whitespace()); say(join(["a", "b", "c"], "-")); say("ab".repeat(3)); say_debug("-120".parse_int()); say_debug("12x".parse_int()); say(pad_start("7", 3, '0')); say(pad_end("7", 3, '.')); say(h.slice(0, 2)); say(h.slice(2, h.len())); h.contains("xyz") }
 #### expect
 true
 true
-Ok(2)
+Some(2)
 HELLO, WORLD
 hi there
-[a, b, , c]
-[the, quick, fox]
+["a", "b", "", "c"]
+["the", "quick", "fox"]
 a-b-c
 ababab
-Ok(-120)
-Err(())
+Some(-120)
+None
 007
 7..
 he
@@ -4725,23 +4725,23 @@ llo
 Err(())
 #### case
 use std::map;
-fn main() -> Int { let m = map::from([(3, "three"), (1, "one"), (2, "two")]); say(map::get(m, 2)); say(map::get(m, 5)); say(map::keys(m)); say(map::values(map::insert(m, 1, "uno"))); say(map::len(m)); say(map::entries(map::remove(m, 2))); say(map::contains_key(m, 3)); let big = fold(std::vec::range(0, 40), map::new(), fn(acc, i) { map::insert(acc, (i * 7) % 40, i) }); say(map::len(big)); say(map::least(big)); say(map::greatest(big)); let counts = fold(std::vec::collect(&mut "mississippi".chars()), map::new(), fn(acc, c) { map::update(acc, c, { old => (old else { 0 }) + 1 }) }); say(map::entries(counts)); map::len(map::remove(big, 7)) }
+fn main() -> Int { let m = map::from([(3, "three"), (1, "one"), (2, "two")]); say_debug(map::get(m, 2)); say_debug(map::get(m, 5)); say_debug(map::keys(m)); say_debug(map::values(map::insert(m, 1, "uno"))); say(map::len(m)); say_debug(map::entries(map::remove(m, 2))); say(map::contains_key(m, 3)); let big = fold(std::vec::range(0, 40), map::new(), fn(acc, i) { map::insert(acc, (i * 7) % 40, i) }); say(map::len(big)); say_debug(map::least(big)); say_debug(map::greatest(big)); let counts = fold(std::vec::collect(&mut "mississippi".chars()), map::new(), fn(acc, c) { map::update(acc, c, { old => (old else { 0 }) + 1 }) }); say_debug(map::entries(counts)); map::len(map::remove(big, 7)) }
 #### expect
-Ok(two)
-Err(())
+Some("two")
+None
 [1, 2, 3]
-[uno, two, three]
+["uno", "two", "three"]
 3
-[(1, one), (3, three)]
+[(1, "one"), (3, "three")]
 true
 40
-Ok((0, 0))
-Ok((39, 17))
-[(i, 4), (m, 1), (p, 2), (s, 4)]
+Some((0, 0))
+Some((39, 17))
+[('i', 4), ('m', 1), ('p', 2), ('s', 4)]
 39
 #### case
 use std::set;
-fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4]); say(set::to_vec(a)); say(set::to_vec(set::union(a, b))); say(set::to_vec(set::intersection(a, b))); say(set::to_vec(set::difference(a, b))); say(set::contains(a, 2)); say(set::is_subset(set::from([1, 2]), a)); set::len(a) }
+fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4]); say_debug(set::to_vec(a)); say_debug(set::to_vec(set::union(a, b))); say_debug(set::to_vec(set::intersection(a, b))); say_debug(set::to_vec(set::difference(a, b))); say(set::contains(a, 2)); say(set::is_subset(set::from([1, 2]), a)); set::len(a) }
 #### expect
 [1, 2, 3]
 [1, 2, 3, 4]
@@ -4752,25 +4752,25 @@ true
 3
 #### case
 use std::iter;
-fn main() -> Int { say(iter::collect(iter::take(iter::map(iter::filter(iter::iterate(1, { n => n + 1 }), { n => n % 3 == 0 }), { n => n * n }), 4))); say(iter::sum(iter::range(1, 101))); say(iter::collect(iter::zip(iter::of(['a', 'b']), iter::repeat(0)))); say(iter::collect(iter::chain(iter::range(0, 2), iter::of([9])))); say(iter::find(iter::iterate(1, { n => n * 2 }), { n => n > 1000 })); say(iter::collect(iter::enumerate(iter::of(["x", "y"])))); say(iter::collect(iter::take_while(iter::range(0, 10), { n => n < 3 }))); say(iter::collect(iter::skip(iter::range(0, 5), 3))); iter::count(iter::range(0, 7)) }
+fn main() -> Int { say_debug(iter::collect(iter::take(iter::map(iter::filter(iter::iterate(1, { n => n + 1 }), { n => n % 3 == 0 }), { n => n * n }), 4))); say(iter::sum(iter::range(1, 101))); say_debug(iter::collect(iter::zip(iter::of(['a', 'b']), iter::repeat(0)))); say_debug(iter::collect(iter::chain(iter::range(0, 2), iter::of([9])))); say_debug(iter::find(iter::iterate(1, { n => n * 2 }), { n => n > 1000 })); say_debug(iter::collect(iter::enumerate(iter::of(["x", "y"])))); say_debug(iter::collect(iter::take_while(iter::range(0, 10), { n => n < 3 }))); say_debug(iter::collect(iter::skip(iter::range(0, 5), 3))); iter::count(iter::range(0, 7)) }
 #### expect
 [9, 36, 81, 144]
 5050
-[(a, 0), (b, 0)]
+[('a', 0), ('b', 0)]
 [0, 1, 9]
-Ok(1024)
-[(0, x), (1, y)]
+Some(1024)
+[(0, "x"), (1, "y")]
 [0, 1, 2]
 [3, 4]
 7
 #### case
 use std::option;
-fn main() -> Int { say(option::map(Some(2), { x => x + 1 })); say(option::unwrap_or(None, 7)); say(option::zip(Some(1), Some('a'))); say(option::and_then(Some(3), { x => if(x > 2) { Some(x * 2) } else { None } })); say(option::is_none(option::filter(Some(4), { x => x > 5 }))); option::fold(Some(5), 1, fn(a, b) { a + b }) }
+fn main() -> Int { say_debug(option::map(Some(2), { x => x + 1 })); say(option::unwrap_or(None, 7)); say_debug(option::zip(Some(1), Some('a'))); say_debug(option::and_then(Some(3), { x => if(x > 2) { Some(x * 2) } else { None } })); say(option::is_none(option::filter(Some(4), { x => x > 5 }))); option::fold(Some(5), 1, fn(a, b) { a + b }) }
 #### expect
-Ok(3)
+Some(3)
 7
-Ok((1, a))
-Ok(6)
+Some((1, 'a'))
+Some(6)
 true
 6
 #### case
@@ -4826,10 +4826,10 @@ fn main() { ptr_read(0usize, 8) }
 error: 1:13: in `main`: `ptr_read` is unsafe: it can be named only in `unsafe { .. }` or in an `unsafe fn`
 #### case
 use std::text::{from_utf8};
-fn main() -> Bool { say("h\u{e9}\u{20ac}".as_bytes().to_vec()); say(match(from_utf8(&[104u8, 105u8])) { Ok(text) => Some(text), Err(_) => None }); match(from_utf8("h\u{e9}llo \u{1F600}".as_bytes())) { Ok(text) => text == "h\u{e9}llo \u{1F600}", Err(_) => false } }
+fn main() -> Bool { say_debug("h\u{e9}\u{20ac}".as_bytes().to_vec()); say_debug(match(from_utf8(&[104u8, 105u8])) { Ok(text) => Some(text), Err(_) => None }); match(from_utf8("h\u{e9}llo \u{1F600}".as_bytes())) { Ok(text) => text == "h\u{e9}llo \u{1F600}", Err(_) => false } }
 #### expect
 [104, 195, 169, 226, 130, 172]
-Ok(hi)
+Some("hi")
 Ok(())
 #### case
 extern "C" { fn f(x: Str) -> Int; }
@@ -4847,7 +4847,7 @@ fn main() -> Int { let mut a = Vec::new(); let mut i = 0; while({ i < 50 }) { a.
 #### case
 use std::vec::{Vec};
 fn fill(n: Int, out: &mut Vec<Int>) { if(n == 0) { () } else { out.push(n); tail fill(n - 1, out) } }
-fn main() -> Int { let mut a = Vec::new(); fill(30, &mut a); let mut b = clone(&a); b[0] = 0; say(a[0]); say(b[0]); let mut g = Vec::new(); g.push(Vec::from_array([1, 2])); g.push(Vec::from_array([3, 4])); g[1][1] = 9; g[0].push(5); say(&g); match(b.pop()) { Some(last) => b.len() * 100 + last, None => 0 } }
+fn main() -> Int { let mut a = Vec::new(); fill(30, &mut a); let mut b = clone(&a); b[0] = 0; say(a[0]); say(b[0]); let mut g = Vec::new(); g.push(Vec::from_array([1, 2])); g.push(Vec::from_array([3, 4])); g[1][1] = 9; g[0].push(5); say_debug(&g); match(b.pop()) { Some(last) => b.len() * 100 + last, None => 0 } }
 #### expect
 30
 0
@@ -5007,29 +5007,29 @@ use std::hash::{HashMap};
 fn get(m: &HashMap<&str, Int>, key: &str) -> Option<Int> { match(m.get(&key)) { Some(v) => Some(*v), None => None } }
 fn main() -> Int {
     let mut m = HashMap::from([("one", 1), ("two", 2), ("three", 3)]);
-    say(get(&m, "two"));
-    say(get(&m, "four"));
+    say_debug(get(&m, "two"));
+    say_debug(get(&m, "four"));
     let mut big = HashMap::new();
     let mut i = 0;
     while({ i < 60 }) { big.insert(i * 7, i); i = i + 1 };
     say(big.len());
-    say(match(big.get(&(21 * 7))) { Some(v) => Some(*v), None => None });
+    say_debug(match(big.get(&(21 * 7))) { Some(v) => Some(*v), None => None });
     big.remove(&7);
     big.remove(&1000);
     say(big.len());
     say(big.contains_key(&7));
     m.insert("two", 22);
-    say(std::vec::sort(m.keys()));
+    say_debug(std::vec::sort(m.keys()));
     std::vec::sum(std::vec::map(m.into_entries(), { (_, v) => v }))
 }
 #### expect
-Ok(2)
-Err(())
+Some(2)
+None
 60
-Ok(21)
+Some(21)
 59
 false
-[one, three, two]
+["one", "three", "two"]
 26
 #### case
 #### A `&mut` reference is not given to a resumption: the handler's arm could
@@ -6539,7 +6539,7 @@ Circle(5)
 #### A reference to a place of an array, from a reference to the array.
 use std::vec::{Vec};
 fn at<T>(a: &mut Vec<T>, i: Int) -> &mut T { &mut a[i] }
-fn main() -> Int { let mut a = Vec::from_array([1, 2, 3]); let r = at(&mut a, 1); *r = 20; say(&a); 0 }
+fn main() -> Int { let mut a = Vec::from_array([1, 2, 3]); let r = at(&mut a, 1); *r = 20; say_debug(&a); 0 }
 #### expect
 [1, 20, 3]
 0
@@ -6565,7 +6565,7 @@ fn main() -> Int { let mut a = [10, 20, 30]; match(element(&a, 3)) { Some(r) => 
 -1
 #### case
 use std::vec::{Vec};
-fn main() -> Int { let mut a = Vec::from_array([10, 20, 30]); match(element_mut(&mut a, 2)) { Some(r) => *r = *r + 5, None => () }; say(&a); 0 }
+fn main() -> Int { let mut a = Vec::from_array([10, 20, 30]); match(element_mut(&mut a, 2)) { Some(r) => *r = *r + 5, None => () }; say_debug(&a); 0 }
 #### expect
 [10, 20, 35]
 0
@@ -6716,27 +6716,27 @@ fn main() -> Int {
     say(VecDeque::len(&q));
     say(match(VecDeque::front(&q)) { Some(r) => *r, None => 0 });
     say(match(VecDeque::back(&q)) { Some(r) => *r, None => 0 });
-    say(VecDeque::pop_front(&mut q)); say(VecDeque::pop_back(&mut q)); say(VecDeque::pop_front(&mut q)); say(VecDeque::pop_front(&mut q));
+    say_debug(VecDeque::pop_front(&mut q)); say_debug(VecDeque::pop_back(&mut q)); say_debug(VecDeque::pop_front(&mut q)); say_debug(VecDeque::pop_front(&mut q));
     VecDeque::push_back(&mut q, 7); VecDeque::push_back(&mut q, 8);
-    say(VecDeque::into_vec(q));
+    say_debug(VecDeque::into_vec(q));
     let mut h = BinaryHeap::new();
     BinaryHeap::push(&mut h, 5); BinaryHeap::push(&mut h, 9); BinaryHeap::push(&mut h, 1); BinaryHeap::push(&mut h, 7);
     say(match(BinaryHeap::peek(&h)) { Some(r) => *r, None => 0 });
-    say(BinaryHeap::pop(&mut h)); say(BinaryHeap::len(&h));
-    say(BinaryHeap::into_sorted_vec(h));
-    say(BinaryHeap::into_sorted_vec(BinaryHeap::from_vec(std::vec::Vec::from_array([3, 8, 2, 9, 4]))));
+    say_debug(BinaryHeap::pop(&mut h)); say(BinaryHeap::len(&h));
+    say_debug(BinaryHeap::into_sorted_vec(h));
+    say_debug(BinaryHeap::into_sorted_vec(BinaryHeap::from_vec(std::vec::Vec::from_array([3, 8, 2, 9, 4]))));
     0 }
 #### expect
 3
 1
 3
-Ok(1)
-Ok(3)
-Ok(2)
-Err(())
+Some(1)
+Some(3)
+Some(2)
+None
 [7, 8]
 9
-Ok(9)
+Some(9)
 3
 [7, 5, 1]
 [9, 8, 4, 3, 2]
@@ -6747,7 +6747,7 @@ use core::option::{is_some, unwrap_or};
 use alloc::vec::{sort, reverse};
 use alloc::collections::{VecDeque};
 use alloc::collections::map;
-fn main() -> Int { let mut q = VecDeque::new(); VecDeque::push_back(&mut q, 3); say(sort([3, 1, 2])); say(unwrap_or(VecDeque::pop_front(&mut q), 0)); let m = map::insert(map::new(), 1, 2); say(map::len(m)); 0 }
+fn main() -> Int { let mut q = VecDeque::new(); VecDeque::push_back(&mut q, 3); say_debug(sort([3, 1, 2])); say(unwrap_or(VecDeque::pop_front(&mut q), 0)); let m = map::insert(map::new(), 1, 2); say(map::len(m)); 0 }
 #### expect
 [1, 2, 3]
 3
@@ -6836,25 +6836,25 @@ use alloc::vec::{Vec};
 fn main() -> Int {
     let mut v = Vec::new();
     Vec::push(&mut v, 10); Vec::push(&mut v, 30); Vec::push(&mut v, 40);
-    say(Vec::insert(&mut v, 1, 20));
+    say_debug(Vec::insert(&mut v, 1, 20));
     say(Vec::len(&v));
     say(match(Vec::get(&v, 1)) { Some(r) => *r, None => 0 });
     match(Vec::get_mut(&mut v, 0)) { Some(r) => *r = *r + 1, None => () };
-    say(Vec::remove(&mut v, 2));
-    say(Vec::pop(&mut v));
+    say_debug(Vec::remove(&mut v, 2));
+    say_debug(Vec::pop(&mut v));
     Vec::append(&mut v, Vec::from_array([7, 8, 9]));
     Vec::reverse(&mut v);
     say(match(Vec::first(&v)) { Some(r) => *r, None => 0 });
     Vec::truncate(&mut v, 4);
-    say(Vec::insert(&mut v, 99, 5));
-    say(v);
+    say_debug(Vec::insert(&mut v, 99, 5));
+    say_debug(v);
     0 }
 #### expect
 Ok(())
 4
 20
-Ok(30)
-Ok(40)
+Some(30)
+Some(40)
 9
 Err(5)
 [9, 8, 7, 20]
@@ -6935,19 +6935,19 @@ fn main() -> Int {
     say(match(m.get(&"two")) { Some(r) => *r, None => 0 });
     say(m.contains_key(&"four"));
     let _ = m.remove(&"one");
-    say(m.insert("two", 22));
+    say_debug(m.insert("two", 22));
     say(m.len());
     say(match(m.get(&"two")) { Some(r) => *r, None => 0 });
-    say(match(m.get(&"one")) { Some(r) => Some(*r), None => None });
+    say_debug(match(m.get(&"one")) { Some(r) => Some(*r), None => None });
     0 }
 #### expect
 3
 2
 false
-Ok(2)
+Some(2)
 2
 22
-Err(())
+None
 0
 #### case
 #### A value bound with `let`, or given as an argument, can be borrowed with `&`: it is kept where a reference can point.
@@ -7033,9 +7033,9 @@ fn main() -> Int {
         None => say(0 - 1)
     };
     let mut r = range(0, 5);
-    say(map_collect(&mut r, { (x) => x * x }));
+    say_debug(map_collect(&mut r, { (x) => x * x }));
     let mut texts = into_iter(Vec::from_array(["a", "bb", "ccc"]));
-    say(find_map(&mut texts, { (t) => if(length(t) == 2) { Some(t) } else { None } }));
+    say_debug(find_map(&mut texts, { (t) => if(length(t) == 2) { Some(t) } else { None } }));
     say(count(&mut texts));
     let mut total = 0;
     let mut again = range(1, 4);
@@ -7049,7 +7049,7 @@ fn main() -> Int {
 50
 90
 [0, 1, 4, 9, 16]
-Ok(bb)
+Some("bb")
 1
 6
 5
@@ -7259,11 +7259,11 @@ fn main() -> Int {
     match(as_mut(&mut a)) { Some(r) => *r = *r * 2;, None => () };
     let seen = match(as_ref(&a)) { Some(r) => *r, None => 0 };
     let had = take(&mut a);
-    say(had); say(a);
+    say_debug(had); say_debug(a);
     seen }
 #### expect
-Ok(8)
-Err(())
+Some(8)
+None
 8
 #### case
 use core::result::{as_mut};
@@ -7343,15 +7343,15 @@ fn main() -> Int { let n = 5; let written = format(&n); say(String::to_str(&writ
 use core::iter::{Iterator, range, into_iter, find, find_map};
 fn main() -> Int {
     let mut r = range(0, 50);
-    say(find(&mut r, { (n) => *n * *n > 200 }));
+    say_debug(find(&mut r, { (n) => *n * *n > 200 }));
     let mut words = into_iter(["a", "bb", "ccc"]);
-    say(find(&mut words, { (w) => length(*w) == 2 }));
-    say(find(&mut words, { (w) => length(*w) == 9 }));
+    say_debug(find(&mut words, { (w) => length(*w) == 2 }));
+    say_debug(find(&mut words, { (w) => length(*w) == 9 }));
     0 }
 #### expect
-Ok(15)
-Ok(bb)
-Err(())
+Some(15)
+Some("bb")
+None
 0
 #### case
 #### An implementation's condition says what a trait leaves to a parameter's implementation: an iterator made from an iterator.
@@ -7375,17 +7375,17 @@ fn main() -> Int {
 #### The library's adapter types, chained; nothing is done until `collect` asks.
 use core::iter::{Iterator, range, into_iter, map, filter, take, skip, enumerate, zip, chain, collect, fold};
 fn main() -> Int {
-    say(collect(&mut take(map(filter(range(0, 100), { (n) => *n % 2 == 0 }), { (n) => n * n }), 5)));
-    say(collect(&mut skip(range(0, 6), 4)));
-    say(collect(&mut enumerate(into_iter(["a", "b"]))));
-    say(collect(&mut zip(range(0, 10), into_iter(["x", "y", "z"]))));
-    say(collect(&mut chain(range(0, 2), range(7, 9))));
+    say_debug(collect(&mut take(map(filter(range(0, 100), { (n) => *n % 2 == 0 }), { (n) => n * n }), 5)));
+    say_debug(collect(&mut skip(range(0, 6), 4)));
+    say_debug(collect(&mut enumerate(into_iter(["a", "b"]))));
+    say_debug(collect(&mut zip(range(0, 10), into_iter(["x", "y", "z"]))));
+    say_debug(collect(&mut chain(range(0, 2), range(7, 9))));
     fold(&mut map(range(1, 4), { (n) => n * 10 }), 0, { (acc, x) => acc + x }) }
 #### expect
 [0, 4, 16, 36, 64]
 [4, 5]
-[(0, a), (1, b)]
-[(0, x), (1, y), (2, z)]
+[(0, "a"), (1, "b")]
+[(0, "x"), (1, "y"), (2, "z")]
 [0, 1, 7, 8]
 60
 #### case
@@ -8699,7 +8699,7 @@ fn main() -> Int {
 use std::generator::*;
 use core::iter::{collect, take};
 fn three() -> Int / {Yield<Int, ()>} { yield(1); yield(2); yield(3); 0 }
-fn main() -> Int { say(collect(&mut iterate(generator({ three() })))); 0 }
+fn main() -> Int { say_debug(collect(&mut iterate(generator({ three() })))); 0 }
 #### expect
 [1, 2, 3]
 0
@@ -8707,7 +8707,7 @@ fn main() -> Int { say(collect(&mut iterate(generator({ three() })))); 0 }
 use std::generator::*;
 use core::iter::{collect, take};
 fn count_from(n: Int) -> Int / {Yield<Int, ()>} { yield(n); tail count_from(n + 1) }
-fn main() -> Int { say(collect(&mut take(iterate(generator({ count_from(10) })), 4))); 0 }
+fn main() -> Int { say_debug(collect(&mut take(iterate(generator({ count_from(10) })), 4))); 0 }
 #### expect
 [10, 11, 12, 13]
 0
@@ -8800,9 +8800,9 @@ fn main() -> Int {
         None => say(0 - 1)
     };
     let mut r = range(0, 5);
-    say(map_collect(&mut r, { (x) => x * x }));
+    say_debug(map_collect(&mut r, { (x) => x * x }));
     let mut texts = into_iter(Vec::from_array(["a", "bb", "ccc"]));
-    say(find_map(&mut texts, { (t) => if(length(t) == 2) { Some(t) } else { None } }));
+    say_debug(find_map(&mut texts, { (t) => if(length(t) == 2) { Some(t) } else { None } }));
     say(count(&mut texts));
     let mut total = 0;
     let mut again = range(1, 4);
@@ -8816,7 +8816,7 @@ fn main() -> Int {
 50
 90
 [0, 1, 4, 9, 16]
-Ok(bb)
+Some("bb")
 1
 6
 5
@@ -9139,7 +9139,7 @@ fn main() -> Int {
     let left = ByteReader::remaining_len(&r);
     ByteReader::skip(&mut r, left);
     bad = bad + check(ByteReader::finish(r) is Ok(_), 9);
-    say(match(hex_decode("00ff7F")) { Ok(found) => found, Err(_) => std::vec::Vec::new() });
+    say_debug(match(hex_decode("00ff7F")) { Ok(found) => found, Err(_) => std::vec::Vec::new() });
     say(match(hex_decode("0g")) { Ok(_) => 0 - 1, Err(e) => e.offset });
     // The one shortest way: a redundant last byte is refused.
     let padded = Vec::from_array([128u8, 0u8]);
@@ -9180,7 +9180,7 @@ fn main() -> Int {
     let mark = Arena::mark(&arena);
     Arena::insert(&mut arena, 20);
     Arena::insert(&mut arena, 30);
-    say(match(Arena::rollback_take(&mut arena, mark)) { Ok(taken) => taken, Err(_) => std::vec::Vec::new() });
+    say_debug(match(Arena::rollback_take(&mut arena, mark)) { Ok(taken) => taken, Err(_) => std::vec::Vec::new() });
     say(Arena::len(&arena));
     // A place used again refuses its old name.
     let mut pool: GenArena<Function, Str> = GenArena::new();
@@ -9196,13 +9196,13 @@ fn main() -> Int {
             },
         Err(_) => ()
     };
-    say(GenArena::into_vec(pool));
+    say_debug(GenArena::into_vec(pool));
     // Texts kept once.
     let mut texts: StringInterner<Name> = StringInterner::new();
     let x = match(StringInterner::intern(&mut texts, "x")) { Ok(found) => found, Err(_) => id(99) };
     let y = match(StringInterner::intern(&mut texts, "y")) { Ok(found) => found, Err(_) => id(99) };
     let again = match(StringInterner::intern(&mut texts, "x")) { Ok(found) => found, Err(_) => id(99) };
-    say((Id::index(x), Id::index(y), Id::index(again)));
+    say_debug((Id::index(x), Id::index(y), Id::index(again)));
     say(StringInterner::len(&texts));
     say(match(StringInterner::get(&texts, y)) { Some(text) => text, None => "?" });
     // Sets of places.
@@ -9211,14 +9211,14 @@ fn main() -> Int {
     let mut more: BitSet<Function> = BitSet::new();
     BitSet::insert(&mut more, id(1)); BitSet::insert(&mut more, id(8));
     say(BitSet::union_with(&mut seen, &more));
-    say(ids(BitSet::to_vec(&seen), 0, Vec::new()));
+    say_debug(ids(BitSet::to_vec(&seen), 0, Vec::new()));
     say(BitSet::is_subset(&more, &seen));
     say(BitSet::subtract(&mut seen, &more));
-    say((ids(BitSet::to_vec(&seen), 0, Vec::new()), BitSet::len(&seen)));
+    say_debug((ids(BitSet::to_vec(&seen), 0, Vec::new()), BitSet::len(&seen)));
     let mut sparse: SparseSet<Function> = SparseSet::new();
     SparseSet::insert(&mut sparse, id(7)); SparseSet::insert(&mut sparse, id(2)); SparseSet::insert(&mut sparse, id(4));
     SparseSet::remove(&mut sparse, id(7));
-    say((ids(SparseSet::to_vec(&sparse), 0, Vec::new()), SparseSet::contains(&sparse, id(7)), SparseSet::contains(&sparse, id(4))));
+    say_debug((ids(SparseSet::to_vec(&sparse), 0, Vec::new()), SparseSet::contains(&sparse, id(7)), SparseSet::contains(&sparse, id(4))));
     // Each waits once, first in first out.
     let mut work: WorkQueue<Function> = WorkQueue::new();
     WorkQueue::push(&mut work, id(3)); WorkQueue::push(&mut work, id(1)); say(WorkQueue::push(&mut work, id(3)));
@@ -9226,7 +9226,7 @@ fn main() -> Int {
     say(WorkQueue::push(&mut work, id(3)));
     let q = match(WorkQueue::pop(&mut work)) { Some(found) => Id::index(found), None => 0 - 1 };
     let r = match(WorkQueue::pop(&mut work)) { Some(found) => Id::index(found), None => 0 - 1 };
-    say((p, q, r));
+    say_debug((p, q, r));
     say(WorkQueue::is_empty(&work));
     0
 }
@@ -9239,7 +9239,7 @@ main
 one
 false
 two
-[two]
+["two"]
 (0, 1, 0)
 2
 y
@@ -9962,7 +9962,7 @@ fn main() -> Int {
     let mark = UndoLog::mark(&log);
     UndoLog::push(&mut log, "b");
     UndoLog::push(&mut log, "c");
-    say(match(UndoLog::rollback_take(&mut log, mark)) { Ok(records) => records, Err(_) => std::vec::Vec::new() });
+    say_debug(match(UndoLog::rollback_take(&mut log, mark)) { Ok(records) => records, Err(_) => std::vec::Vec::new() });
     UndoLog::len(&log)
 }
 
@@ -9974,7 +9974,7 @@ true
 100
 111
 0
-[c, b]
+["c", "b"]
 1
 #### case
 use std::budget::{StepBudget, MemoryBudget, MemoryCharge, DepthBudget, DepthPermit, UndoLog};
@@ -10047,10 +10047,10 @@ fn run(text: &str, limit: Int) -> Int {
     let input = std::vec::collect(&mut text.chars());
     let mut c = Cursor::new(std::vec::Vec::as_slice(&input));
     match(many(&mut c, limit, digit)) {
-        Ok(found) => say(found); Cursor::position(&c),
-        Err((found, ParseError::User(e))) => say(found); say(e); 0 - Cursor::position(&c),
-        Err((found, ParseError::NoProgress)) => say(found); 0 - 100,
-        Err((found, ParseError::Limit(_))) => say(found); 0 - 200
+        Ok(found) => say_debug(found); Cursor::position(&c),
+        Err((found, ParseError::User(e))) => say_debug(found); say(e); 0 - Cursor::position(&c),
+        Err((found, ParseError::NoProgress)) => say_debug(found); 0 - 100,
+        Err((found, ParseError::Limit(_))) => say_debug(found); 0 - 200
     }
 }
 fn main() -> Int {
@@ -10092,13 +10092,13 @@ fn main() -> Int {
     // 0 -> 1 -> 2 -> 0 is a circle; 2 -> 3 -> 4; 5 is apart.
     let g = Edges { to: Vec::from_array([Vec::from_array([1]), Vec::from_array([2]), Vec::from_array([0, 3]), Vec::from_array([4]), Vec::new(), Vec::from_array([4])]) };
     let mut budget = StepBudget::new(1000);
-    say(match(reachable(&g, 3, &mut budget)) { Ok(found) => found, Err(_) => Vec::new() });
-    say(match(reachable(&g, 0, &mut budget)) { Ok(found) => found, Err(_) => Vec::new() });
+    say_debug(match(reachable(&g, 3, &mut budget)) { Ok(found) => found, Err(_) => Vec::new() });
+    say_debug(match(reachable(&g, 0, &mut budget)) { Ok(found) => found, Err(_) => Vec::new() });
     let tail_nodes = Vec::from_array([5, 3]);
-    say(match(topological_order(&g, tail_nodes.as_slice(), &mut budget)) { Ok(order) => order, Err(_) => Vec::new() });
+    say_debug(match(topological_order(&g, tail_nodes.as_slice(), &mut budget)) { Ok(order) => order, Err(_) => Vec::new() });
     let all = Vec::from_array([0, 5]);
-    say(match(topological_order(&g, all.as_slice(), &mut budget)) { Ok(_) => Vec::new(), Err(GraphError::Cycle(c)) => c.nodes, Err(GraphError::Limit(_)) => Vec::from_array(Vec::from_array([0 - 1])) });
-    say(match(strongly_connected_components(&g, all.as_slice(), &mut budget)) { Ok(groups) => groups, Err(_) => Vec::new() });
+    say_debug(match(topological_order(&g, all.as_slice(), &mut budget)) { Ok(_) => Vec::new(), Err(GraphError::Cycle(c)) => c.nodes, Err(GraphError::Limit(_)) => Vec::from_array(Vec::from_array([0 - 1])) });
+    say_debug(match(strongly_connected_components(&g, all.as_slice(), &mut budget)) { Ok(groups) => groups, Err(_) => Vec::new() });
     let mut small = StepBudget::new(2);
     say(match(reachable(&g, 0, &mut small)) { Ok(_) => 0 - 1, Err(e) => e.remaining });
     1000 - StepBudget::remaining(&budget)
@@ -10122,17 +10122,17 @@ fn main() -> Int {
         Err(_) => 0 - 1,
         Ok(id) =>
             say(match(SourceMap::name(&map, id)) { Some(n) => n, None => "?" });
-            say(match(SourceMap::locate(&map, id, 15)) { Ok(at) => (at.line, at.column_bytes), Err(_) => (0 - 1, 0) });
-            say(match(SourceMap::line_range(&map, id, 1)) { Ok(range) => range, Err(_) => (0 - 1, 0) });
+            say_debug(match(SourceMap::locate(&map, id, 15)) { Ok(at) => (at.line, at.column_bytes), Err(_) => (0 - 1, 0) });
+            say_debug(match(SourceMap::line_range(&map, id, 1)) { Ok(range) => range, Err(_) => (0 - 1, 0) });
             say(match(SourceMap::slice(&map, SourceSpan { source: id, start: 11, end: 14 })) { Ok(text) => text, Err(_) => "?" });
             // `é` is two bytes and one unit; the face is four bytes and two units.
-            say(match(SourceMap::to_utf16(&map, id, 24)) { Ok(at) => (at.line, at.column_units), Err(_) => (0 - 1, 0) });
+            say_debug(match(SourceMap::to_utf16(&map, id, 24)) { Ok(at) => (at.line, at.column_units), Err(_) => (0 - 1, 0) });
             say(match(SourceMap::from_utf16(&map, id, Utf16Location { line: 1, column_units: 9 })) { Ok(at) => at, Err(_) => 0 - 1 });
             // Inside the face: a place between its two units, or among its bytes.
             say(match(SourceMap::from_utf16(&map, id, Utf16Location { line: 1, column_units: 8 })) { Ok(at) => at, Err(SourceError::InvalidBoundary) => 0 - 2, Err(_) => 0 - 1 });
             say(match(SourceMap::locate(&map, id, 20)) { Ok(_) => 0, Err(SourceError::InvalidBoundary) => 0 - 2, Err(_) => 0 - 1 });
             say(match(SourceMap::locate(&map, id, 999)) { Ok(_) => 0, Err(SourceError::InvalidRange) => 0 - 3, Err(_) => 0 - 1 });
-            say(match(SourceMap::line_range(&map, id, 2)) { Ok(range) => range, Err(_) => (0 - 1, 0) });
+            say_debug(match(SourceMap::line_range(&map, id, 2)) { Ok(range) => range, Err(_) => (0 - 1, 0) });
             SourceMap::len(&map)
     }
 }
@@ -10552,7 +10552,7 @@ fn main() -> Int {
     });
     say(n);
     // Three tasks taking turns.
-    say(round_robin([worker("a", 2), worker("bb", 1), worker("ccc", 3)]));
+    say_debug(round_robin([worker("a", 2), worker("bb", 1), worker("ccc", 3)]));
     0
 }
 
@@ -10785,17 +10785,17 @@ fn main() -> Int {
     write(&mut out, std::vec::Vec::from_array([3u8, 4u8, 5u8]));
     say(BufferWriter::buffered(&out));
     write(&mut out, std::vec::Vec::from_array([6u8]));
-    say(match(BufferWriter::finish(out)) { Ok(inner) => MemoryCursor::into_inner(inner), Err(_) => std::vec::Vec::new() });
+    say_debug(match(BufferWriter::finish(out)) { Ok(inner) => MemoryCursor::into_inner(inner), Err(_) => std::vec::Vec::new() });
     // A writer that fills: what was not written comes back with it.
     let mut small = BufferWriter::new(Full { taken: std::vec::Vec::new(), room: 3 }, 100);
     write(&mut small, std::vec::Vec::from_array([1u8, 2u8, 3u8, 4u8, 5u8]));
-    say(match(BufferWriter::finish(small)) { Ok(_) => std::vec::Vec::new(), Err(failure) => failure.pending });
+    say_debug(match(BufferWriter::finish(small)) { Ok(_) => std::vec::Vec::new(), Err(failure) => failure.pending });
     // Reading a little at a time from a reader asked rarely.
     let mut source = MemoryCursor::new([]);
     write_str(&mut source, "abcdefgh");
     let mut reader = BufferReader::new(source, 5);
-    say(match(read(&mut reader, 2)) { Ok(got) => got, Err(_) => std::vec::Vec::new() });
-    say(match(read(&mut reader, 2)) { Ok(got) => got, Err(_) => std::vec::Vec::new() });
+    say_debug(match(read(&mut reader, 2)) { Ok(got) => got, Err(_) => std::vec::Vec::new() });
+    say_debug(match(read(&mut reader, 2)) { Ok(got) => got, Err(_) => std::vec::Vec::new() });
     match(BufferReader::into_parts(reader)) { (inner, kept) => MemoryCursor::position(&inner) * 10 + len_at(&kept) }
 }
 
@@ -11241,13 +11241,13 @@ fn main() -> Int {
     }() {
         log(m, k) => Vec::push(&mut lines, m); k(())
     };
-    say(r);
+    say_debug(r);
     say(lines.len());
     b.open_count()
 }
 
 #### expect
-(Ok(()), Err(already done), Err(no such task))
+(Ok(()), Err("already done"), Err("no such task"))
 4
 2
 #### case
@@ -11317,8 +11317,8 @@ fn main() -> Int {
     say(m.len());
     match(m.get(&7)) { Some(v) => say(*v), None => say(0 - 1) };
     match(m.get_mut(&3)) { Some(v) => *v = 100, None => () };
-    say(m.insert(3, 5));
-    say(m.remove(&4));
+    say_debug(m.insert(3, 5));
+    say_debug(m.remove(&4));
     say(m.contains_key(&4));
     let mut words = HashMap::new();
     words.insert("a", 1);
@@ -11334,8 +11334,8 @@ fn main() -> Int {
 #### expect
 20
 49
-Ok(100)
-Ok(16)
+Some(100)
+Some(16)
 false
 2
 110
@@ -11381,18 +11381,18 @@ fn main() -> Int {
     let mut v = Vec::new();
     v.extend(Vec::from_array([5, 1, 4, 2, 3]));
     say(v.contains(&4));
-    say(v.swap_remove(1));
-    say(&v);
+    say_debug(v.swap_remove(1));
+    say_debug(&v);
     v.retain({ x => *x > 2 });
-    say(&v);
+    say_debug(&v);
     let _ = v.rotate_left(1);
-    say(&v);
+    say_debug(&v);
     let _ = v.swap(0, 2);
-    say(&v);
+    say_debug(&v);
     v.resize(5, 0);
-    say(&v);
-    match(v.split_off(3)) { Ok(back) => say(&back), Err(_) => () };
-    say(v.replace(0, 9));
+    say_debug(&v);
+    match(v.split_off(3)) { Ok(back) => say_debug(&back), Err(_) => () };
+    say_debug(v.replace(0, 9));
     *v.index_mut(1) = 7;
     let mut it = v.into_iter();
     fold(&mut it, 0, { (a, x) => a * 10 + x })
@@ -11400,7 +11400,7 @@ fn main() -> Int {
 
 #### expect
 true
-Ok(1)
+Some(1)
 [5, 3, 4, 2]
 [5, 3, 4]
 [3, 4, 5]
@@ -11509,16 +11509,16 @@ fn main() -> Int {
 10
 #### case
 use std::iterator::{Iterator, range, sum, product, any, all, position, last, min, max};
-fn main() -> Int { let mut a = range(1, 5); say(sum(&mut a)); let mut b = range(1, 5); say(product(&mut b)); let mut c = range(0, 10); say(any(&mut c, { x => x > 8 })); let mut d = range(0, 10); say(all(&mut d, { x => x < 5 })); let mut e = range(3, 9); say(position(&mut e, { x => x == 6 })); let mut f = range(3, 9); say(last(&mut f)); let mut g = range(3, 9); say(min(&mut g)); let mut h = range(3, 9); say(max(&mut h)); 0 }
+fn main() -> Int { let mut a = range(1, 5); say(sum(&mut a)); let mut b = range(1, 5); say(product(&mut b)); let mut c = range(0, 10); say(any(&mut c, { x => x > 8 })); let mut d = range(0, 10); say(all(&mut d, { x => x < 5 })); let mut e = range(3, 9); say_debug(position(&mut e, { x => x == 6 })); let mut f = range(3, 9); say_debug(last(&mut f)); let mut g = range(3, 9); say_debug(min(&mut g)); let mut h = range(3, 9); say_debug(max(&mut h)); 0 }
 #### expect
 10
 24
 true
 false
-Ok(3)
-Ok(8)
-Ok(3)
-Ok(8)
+Some(3)
+Some(8)
+Some(3)
+Some(8)
 0
 #### case
 #### `where I::Item: Ord`.
@@ -11617,26 +11617,26 @@ fn main() -> Int { let a = Some(3); let b = a.map({ x => x + 1 }).unwrap_or(0); 
 #### expect
 14
 #### case
-fn main() -> Int { let a = Some(3); say(a.is_some()); say(a.map({ x => x * 2 })); let n: Option<Int> = None; say(n.is_none()); say(a.and_then({ x => if(x > 2) { Some(x) } else { None } })); say(n.ok_or("none")); a.unwrap() + a.expect("there") }
+fn main() -> Int { let a = Some(3); say(a.is_some()); say_debug(a.map({ x => x * 2 })); let n: Option<Int> = None; say(n.is_none()); say_debug(a.and_then({ x => if(x > 2) { Some(x) } else { None } })); say_debug(n.ok_or("none")); a.unwrap() + a.expect("there") }
 #### expect
 true
-Ok(6)
+Some(6)
 true
-Ok(3)
-Err(none)
+Some(3)
+Err("none")
 6
 #### case
 fn half(x: Int) -> Result<Int, &'static str> { if(x % 2 == 0) { Ok(x / 2) } else { Err("odd") } }
-fn main() -> Int { say(half(3).map_err({ e => String::from(e) + "!" })); say(half(4).is_ok()); half(8).unwrap_or(0) }
+fn main() -> Int { say_debug(half(3).map_err({ e => String::from(e) + "!" })); say(half(4).is_ok()); half(8).unwrap_or(0) }
 #### expect
-Err(odd!)
+Err("odd!")
 true
 4
 #### case
-fn main() -> Int { let a = Some(3); say(a.filter({ x => *x > 5 })); say(a.filter({ x => *x > 1 })); 0 }
+fn main() -> Int { let a = Some(3); say_debug(a.filter({ x => *x > 5 })); say_debug(a.filter({ x => *x > 1 })); 0 }
 #### expect
-Err(())
-Ok(3)
+None
+Some(3)
 0
 #### case
 #### A text's functions, brought in, called with a dot.
@@ -12540,28 +12540,28 @@ drop 1
 0
 #### case
 #### `Some(x)` is an `Option`: what it could have failed with is nothing, so it can be shown as it is.
-fn main() -> Int { say(Some(3)); 0 }
+fn main() -> Int { say_debug(Some(3)); 0 }
 #### expect
-Ok(3)
+Some(3)
 0
 #### case
-fn main() -> Int { say(Some(true)); 0 }
+fn main() -> Int { say_debug(Some(true)); 0 }
 #### expect
-Ok(true)
+Some(true)
 0
 #### case
 #### A name for a constructor with its type written, the type using another name for a type.
 let Just: fn(Int) -> Option<Int> = Ok;
-fn main() -> Int { say(Just(3)); match(Just(4)) { Just(x) => x, None => 0 } }
+fn main() -> Int { say_debug(Just(3)); match(Just(4)) { Just(x) => x, None => 0 } }
 #### expect
-Ok(3)
+Some(3)
 4
 #### case
 let Just: fn(_) -> Option<_> = Ok;
-fn main() -> Int { say(Just(3)); say(Just("s")); match(Just(4)) { Just(x) => x, None => 0 } }
+fn main() -> Int { say_debug(Just(3)); say_debug(Just("s")); match(Just(4)) { Just(x) => x, None => 0 } }
 #### expect
-Ok(3)
-Ok(s)
+Some(3)
+Some("s")
 4
 #### case
 use std::vec::{Vec};
@@ -12814,24 +12814,24 @@ fn main() -> Int { let mut v = Vec::new(); Vec::push(&mut v, 3); Vec::push(&mut 
 #### case
 use std::iterator::{Iterator, next, into_iter, map, filter, fold, take, range};
 use std::vec::{collect};
-fn main() -> Int { let evens = collect(&mut take(filter(range(1, 100), { (x) => *x % 2 == 0 }), 3)); say(evens); fold(&mut map(into_iter([1, 2, 3]), { (x) => x * x }), 0, { (a, x) => a + x }) }
+fn main() -> Int { let evens = collect(&mut take(filter(range(1, 100), { (x) => *x % 2 == 0 }), 3)); say_debug(evens); fold(&mut map(into_iter([1, 2, 3]), { (x) => x * x }), 0, { (a, x) => a + x }) }
 #### expect
 [2, 4, 6]
 14
 #### case
 use std::map;
-fn main() -> Int { let m = map::from([(3, "c"), (1, "a"), (2, "b")]); say(map::keys(m)); say(map::get(m, 2)); say(map::get(m, 9)); map::len(m) }
+fn main() -> Int { let m = map::from([(3, "c"), (1, "a"), (2, "b")]); say_debug(map::keys(m)); say_debug(map::get(m, 2)); say_debug(map::get(m, 9)); map::len(m) }
 #### expect
 [1, 2, 3]
-Ok(b)
-Err(())
+Some("b")
+None
 3
 #### case
 use std::generator::{Yield, yield, generator, iterate};
 use std::iterator::{take};
 use std::vec::{collect};
 fn fib(a: Int, b: Int) -> () / {Yield<Int, ()>} { yield(a); fib(b, a + b) }
-fn main() -> Int { say(collect(&mut take(iterate(generator({ fib(0, 1) })), 8))); 0 }
+fn main() -> Int { say_debug(collect(&mut take(iterate(generator({ fib(0, 1) })), 8))); 0 }
 #### expect
 [0, 1, 1, 2, 3, 5, 8, 13]
 0
@@ -12842,7 +12842,7 @@ fn main() -> Int { let mut q = VecDeque::new(); VecDeque::push_back(&mut q, 1); 
 21
 #### case
 use std::set;
-fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4]); say(set::to_vec(set::union(a, b))); say(set::to_vec(set::intersection(a, b))); set::len(a) }
+fn main() -> Int { let a = set::from([3, 1, 2, 3]); let b = set::from([2, 3, 4]); say_debug(set::to_vec(set::union(a, b))); say_debug(set::to_vec(set::intersection(a, b))); set::len(a) }
 #### expect
 [1, 2, 3, 4]
 [2, 3]
@@ -15312,7 +15312,7 @@ fn main() -> Int { total((1, 2, 3, 4)) }
 #### case
 trait Shout { fn shout(Self) }
 impl Shout for () { fn shout(t: ()) { () } }
-impl<H, ..R> Shout for (H, ..R) where H: Show, (..R): Shout { fn shout(t: (H, ..R)) { let (h, ..rest) = t; say(h); shout((..rest)) } }
+impl<H, ..R> Shout for (H, ..R) where H: Display, (..R): Shout { fn shout(t: (H, ..R)) { let (h, ..rest) = t; say(h); shout((..rest)) } }
 fn main() -> Int { shout((1, "two", 3)); 0 }
 #### expect
 1

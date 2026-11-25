@@ -39,6 +39,6 @@ fn main() -> Int {
     say(match(app.world.query<(To<InSquad, (&Hp,)>,)>().get_mut(a)) { Some((Some((h,)),)) => h.0, _ => 0 - 1 });
     say(match(app.world.query<(To<InSquad, (&Hp, Has<Disabled>)>,)>().get_mut(a)) { Some((Some((h, _)),)) => h.0, _ => 0 - 1 });
     let children = match(app.world.query<(From<ChildOf, &Hp>,)>().get_mut(shown)) { Some((hs,)) => fold(hs, Vec::new(), fn(out: Vec<Int>, h: &Hp) -> Vec<Int> { pushed(out, h.0) }), None => Vec::new() };
-    say(children);
+    say_debug(children);
     0
 }

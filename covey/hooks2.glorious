@@ -51,7 +51,7 @@ fn main() -> Int {
     app.emit(&Update);
     let mut seen = Vec::new();
     app.world.query<(&Health, &Marker)>().for_each() { h, _ => Vec::push(&mut seen, h.0); };
-    say(sort(seen));
+    say_debug(sort(seen));
 
     let mut world = App::new().register<Health>().register<Marker>().build().into_world();
     let entity = world.spawn_bundle((Health(1),));

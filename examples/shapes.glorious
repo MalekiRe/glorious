@@ -57,6 +57,6 @@ fn main() -> Int {
     say(total);
     let none = handle Stack::pop(&mut stack) { empty() => 0 - 1 };
     say(none);
-    say(collect(&mut take(iterate(generator({ primes_from(2) })), 6)));
+    say_debug(collect(&mut take(iterate(generator({ primes_from(2) })), 6)));
     lines
 }

@@ -83,11 +83,11 @@ fn main() -> Int {
     let osprey = world.spawn_bundle((Name(2),));
     let ship = world.spawn_bundle((Name(3), DockedAt { berth: 3 }.to(kestrel)));
     say(docked(&world, ship));
-    say(names(&world, world.sources<DockedAt>(kestrel)));
+    say_debug(names(&world, world.sources<DockedAt>(kestrel)));
     discard(world.insert(ship, DockedAt { berth: 5 }.to(osprey)));
     say(docked(&world, ship));
     flag(is_none(world.get<Sources<DockedAt>>(kestrel)) == false);
-    say(names(&world, world.sources<DockedAt>(osprey)));
+    say_debug(names(&world, world.sources<DockedAt>(osprey)));
     discard(world.remove<Relates<DockedAt>>(ship));
     flag(is_none(world.get<Sources<DockedAt>>(osprey)) == false);
     discard(world.despawn(kestrel));
@@ -126,9 +126,9 @@ fn main() -> Int {
     discard(app.world.relate(fan, Likes, b));
     say(len_at(&app.world.targets<Likes>(fan)));
     discard(app.world.insert(fan, Likes.to(station)));
-    say(names(&app.world, app.world.targets<Likes>(fan)));
+    say_debug(names(&app.world, app.world.targets<Likes>(fan)));
     flag(is_none(app.world.get<Sources<Likes>>(a)) == false);
     discard(app.world.relate(fan, Likes, a));
-    say(names(&app.world, app.world.targets<Likes>(fan)));
+    say_debug(names(&app.world, app.world.targets<Likes>(fan)));
     0
 }

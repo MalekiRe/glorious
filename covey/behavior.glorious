@@ -160,7 +160,7 @@ fn main() -> Int {
     let a = world.spawn_bundle(());
     let b = world.spawn_bundle(());
     flag(world.despawn(a));
-    say(map_entities(&world));
+    say_debug(map_entities(&world));
     flag(world.despawn(b));
     say(len_at(&ecs::entities(&world)));
     0

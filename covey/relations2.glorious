@@ -96,13 +96,13 @@ fn main() -> Int {
     discard(world.relate(a, Likes, b));
     discard(world.relate(a, Likes, c));
     discard(world.relate(c, Likes, a));
-    say(names(&world, world.targets<Likes>(a)));
-    say(names(&world, world.sources<Likes>(b)));
+    say_debug(names(&world, world.targets<Likes>(a)));
+    say_debug(names(&world, world.sources<Likes>(b)));
     discard(world.unlink<Likes>(a, b));
     discard(world.relate(b, Likes, b));
     discard(world.despawn(b));
-    say(names(&world, world.sources<Likes>(a)));
-    say(names(&world, world.sources<Likes>(b)));
+    say_debug(names(&world, world.sources<Likes>(a)));
+    say_debug(names(&world, world.sources<Likes>(b)));
     say("--");
 
     let mut world = App::new().register<Name>().relation<ChildOf>().build().into_world();
@@ -158,11 +158,11 @@ fn main() -> Int {
     let mut members = Vec::new();
     let mut i = 0;
     while({ i < 6 }) { let m = world.spawn_bundle((Name(i),)); discard(world.relate(m, InSquad, if(i % 2 == 0) { alpha } else { beta })); Vec::push(&mut members, m); i = i + 1 };
-    say(names(&world, world.sources<InSquad>(alpha)));
-    say(names(&world, world.sources<InSquad>(beta)));
+    say_debug(names(&world, world.sources<InSquad>(alpha)));
+    say_debug(names(&world, world.sources<InSquad>(beta)));
     discard(world.relate(members[0], InSquad, beta));
-    say(names(&world, world.sources<InSquad>(alpha)));
-    say(names(&world, world.sources<InSquad>(beta)));
+    say_debug(names(&world, world.sources<InSquad>(alpha)));
+    say_debug(names(&world, world.sources<InSquad>(beta)));
     say("--");
 
     let mut world = App::new().register<Name>().relation<Tagged>().build().into_world();
@@ -175,12 +175,12 @@ fn main() -> Int {
     discard(world.relate(things[1], Tagged, red));
     discard(world.relate(things[1], Tagged, blue));
     discard(world.relate(things[2], Tagged, blue));
-    say(names(&world, world.sources<Tagged>(red)));
-    say(names(&world, world.sources<Tagged>(blue)));
+    say_debug(names(&world, world.sources<Tagged>(red)));
+    say_debug(names(&world, world.sources<Tagged>(blue)));
     discard(world.unlink<Tagged>(things[1], red));
-    say(names(&world, world.sources<Tagged>(red)));
+    say_debug(names(&world, world.sources<Tagged>(red)));
     discard(world.despawn(blue));
-    say(names(&world, world.targets<Tagged>(things[2])));
+    say_debug(names(&world, world.targets<Tagged>(things[2])));
     say("--");
 
     let mut world = App::new().register<Name>().relation<ChildOf>().build().into_world();

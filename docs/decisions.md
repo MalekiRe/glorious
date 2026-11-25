@@ -8093,3 +8093,22 @@ could, which left a program not lowered (laid out by its types):
   that a typed Core program goes wrong only by a named fault (see above). The
   parser, checker, elaborator, binary decoder in the Rust VM and the VM itself
   are not proved; they are compared by running every test program three ways.
+
+## `say` of any `Display`; `say_debug` of any `Debug`
+
+- `say(x)` writes `x` as `Display` does, through a `Formatter` into a
+  `String`; `say_debug(x)` as `Debug` does: a `Vec`, a tuple, a `Result`
+  are `Debug` only, texts in them quoted, an `Option` (`Result<T, ()>`)
+  written `Some(..)` and `None` (the more particular implementation). Every
+  test that said such a value says it with `say_debug`, its expected output
+  Rust's.
+- A program that says something now reads and writes memory (a `String`'s
+  bytes), which a certificate does not cover: 947 programs are certified,
+  from 1067. (Check 94's cleanup writes with `host_write(show(9))`, as it is
+  about the cleanup's regions, not printing.)
+- The `Formatter` puts text in as the `String`'s elements, not read again
+  through a `&str`: a program that is not lowered prints right.
+- The types for the lowering let rows and regions be where they cannot be
+  made the same: the lowering reads neither (`remote`, `plugins` lowered).
+- `std::iter::of` says its element is the array's (`T: Index<Elem = U>`):
+  it was decided only by its body.

@@ -86,7 +86,7 @@ fn locals<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::
     let mut local = Vec::new();
     bridge_world(&mut world, Update, two_healths);
     match(bridge(&mut world, Update, healths)) { Ok(hs) => local = hs, Err(_) => () };
-    say(sort(&local));
+    say_debug(sort(&local));
     say(fold(local, 0, fn(sum: Int, h: Int) -> Int { sum + h }));
     world
 }

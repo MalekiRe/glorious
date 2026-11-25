@@ -319,16 +319,22 @@ impl Formatter {
         } else { () };
         String::push_string(&mut value.text, text)
     }
-    // A `Str`, written as `write_str` writes.
+    // A `Str`, written as `write_str` writes. (Its characters put in as the
+    // `String`'s elements, not read again through a `&str`: so on every
+    // machine, a program's bytes laid out or not.)
     pub fn write_text(value: &mut Self, text: Str) {
-        let s = String::from_text(text);
-        Formatter::write_str(value, String::as_str(&s))
+        match(text) {
+            StrEnd => (),
+            _ =>
+                if(value.fresh) {
+                    let mut i = 0;
+                    while({ i < value.depth * value.width }) { String::push(&mut value.text, ' '); i = i + 1 };
+                    value.fresh = false
+                } else { () };
+                String::push_text(&mut value.text, text)
+        }
     }
-    pub fn write_char(value: &mut Self, character: char) {
-        let mut s = String::new();
-        String::push(&mut s, character);
-        Formatter::write_str(value, String::as_str(&s))
-    }
+    pub fn write_char(value: &mut Self, character: char) { Formatter::write_text(value, StrChar(character, StrEnd)) }
     pub fn newline(value: &mut Self) {
         String::push_str(&mut value.text, "\n");
         value.fresh = true
@@ -470,6 +476,16 @@ impl Display for Result<(), ()> {
 }
 impl Debug for Result<(), ()> {
     fn fmt(b: &Result<(), ()>, out: &mut Formatter) { match(b) { Ok(_) => Formatter::write_str(out, "true"), Err(_) => Formatter::write_str(out, "false") } }
+}
+// An `Option`, `Result<T, ()>`, as `Some(..)` and `None` (preferred, as the
+// more particular implementation, over the one of every `Result`).
+impl<T> Debug for Result<T, ()> where T: Debug {
+    fn fmt(r: &Result<T, ()>, out: &mut Formatter) {
+        match(r) {
+            Ok(value) => Formatter::write_str(out, "Some("); Debug::fmt(value, out); Formatter::write_str(out, ")"),
+            Err(_) => Formatter::write_str(out, "None")
+        }
+    }
 }
 impl<T, E> Debug for Result<T, E> where T: Debug, E: Debug {
     fn fmt(r: &Result<T, E>, out: &mut Formatter) {
