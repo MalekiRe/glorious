@@ -517,7 +517,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       match c.types.get with
       | none => IO.eprintln "not lowered: no types"
       | some C =>
-        match Lower.lowered C c.checked with
+        match (Lower.lowered C c.checked).run' {} with
         | .ok _ => IO.eprintln "lowered"
         | .error e =>
           -- (The function named, where it is said.)
@@ -529,7 +529,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
         -- one of whose signatures has what nothing decided.)
         let C := C.withIndex
         let undecidedIn := (List.range c.checked.fns.size).filter fun f =>
-          (C.sigsOf f).any fun e => (e.sig.params ++ [e.sig.ret]).any (Lower.undecided C [])
+          (C.sigsOf f).any fun e => (((e.sig.params ++ [e.sig.ret]).anyM (Lower.undecided C)).run' {}).toOption == some true
         unless undecidedIn.isEmpty do
           IO.eprintln s!"with what nothing decided: {undecidedIn.map fun f => c.fnNames[f]?.getD (toString f)}"
         let unsigned := (List.range c.checked.fns.size).filter fun f => (C.sigsOf f).isEmpty

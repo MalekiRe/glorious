@@ -765,7 +765,7 @@ initialize unlowered : Bool ← do pure (← IO.getEnv "GLORIOUS_UNLOWERED").isS
 def Compiled.lower (c : Compiled) : Compiled :=
   -- (The static blocks gathered first: the same for the program lowered.)
   let c := { c with core := c.core.internStatics }
-  match if unlowered then none else c.types.get.bind (Lower.program · c.core) with
+  match Trace.timed "lower by types" fun _ => if unlowered then none else c.types.get.bind (Lower.program · c.core) with
   | some (core, copies) =>
     { c with core, checked := c.core, lowered := true
              fnNames := c.fnNames ++ (copies.map fun fn => (c.fnNames[fn]?).getD "").toArray }

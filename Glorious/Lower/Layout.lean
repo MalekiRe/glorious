@@ -46,39 +46,63 @@ def holdsItself (C : Cert) (name : Nat) (args : List Ty) : Bool :=
   | some ctors => (ctors.foldl (fun s (_, fs) => fs.foldl (heldWithin C) s) []).contains (name, args)
   | none => false
 
-/-- The layout of a type, `seen` the declared types it is inside of. -/
-partial def layOf (C : Cert) (seen : List (Nat × List Ty)) : Ty → Laid
-  | .int => ⟨.int 8 true, 8, 8⟩
-  | .scalar b =>
-    let n := b.natAbs / 8
-    ⟨.int n (0 < b), n, n⟩
-  | .tuple fs =>
-    let (at_, size, align) := placeFields 0 (fs.map (layOf C seen))
-    ⟨.fields 0 at_, alignUp size align, align⟩
-  | .data name args =>
-    -- (A `[T; N]`: its elements one after another, inline.)
-    if name == fixedName then
-      match args with
-      | [t, .data len []] =>
-        let n := len - lenBase
-        let (at_, size, align) := placeFields 0 (List.replicate n (layOf C seen t))
-        ⟨.fields (fixedBase + n) at_, alignUp size align, align⟩
-      | _ => ⟨.held, 8, 8⟩
-    else if name == anyName then ⟨.held, 8, 8⟩
-    else if seen.contains (name, args) || holdsItself C name args then ⟨.held, 8, 8⟩
-    else
-      match findData C.datas name args with
-      | some [(tag, fs)] =>
-        let (at_, size, align) := placeFields 0 (fs.map (layOf C ((name, args) :: seen)))
-        ⟨.fields tag at_, alignUp size align, align⟩
-      | some ctors =>
-        let each := ctors.map fun (tag, fs) => (tag, placeFields 1 (fs.map (layOf C ((name, args) :: seen))))
-        let size := each.foldl (fun s (_, (_, sz, _)) => max s sz) 1
-        let align := each.foldl (fun a (_, (_, _, al)) => max a al) 1
-        ⟨.tagged (each.map fun (tag, (at_, _, _)) => (tag, at_)), alignUp size align, align⟩
-      | none => ⟨.held, 8, 8⟩
-  | .fn .. => ⟨.held, 16, 8⟩
-  | .ref _ _ => ⟨.addr, 8, 8⟩
-  | .never => ⟨.nothing, 0, 1⟩
+deriving instance Hashable for Rgn
+deriving instance Hashable for Ty
+
+/-- What the lowering has worked out of types, each once: a type's layout,
+and whether a declared type at its arguments holds itself. -/
+structure LayCache where
+  lays : Std.HashMap Ty Laid := {}
+  holds : Std.HashMap (Nat × List Ty) Bool := {}
+
+/-- Why a program is not lowered, or what it is lowered to; with what was
+worked out of types on the way. -/
+abbrev L := StateT LayCache (Except String)
+
+/-- `holdsItself`, worked out once for each declared type at its arguments. -/
+def holdsM (C : Cert) (name : Nat) (args : List Ty) : L Bool := do
+  if let some h := (← get).holds[(name, args)]? then return h
+  let h := holdsItself C name args
+  modify fun c => { c with holds := c.holds.insert (name, args) h }
+  pure h
+
+/-- The layout of a type, each worked out once. (A declared type that holds
+itself is held by the machine; one that does not reaches no cycle, so each
+is a matter of its name and arguments alone.) -/
+partial def layOf (C : Cert) (t : Ty) : L Laid := do
+  if let some l := (← get).lays[t]? then return l
+  let l ← match t with
+    | .int => pure ⟨.int 8 true, 8, 8⟩
+    | .scalar b => let n := b.natAbs / 8; pure ⟨.int n (0 < b), n, n⟩
+    | .tuple fs =>
+      let (at_, size, align) := placeFields 0 (← fs.mapM (layOf C))
+      pure ⟨.fields 0 at_, alignUp size align, align⟩
+    | .data name args =>
+      -- (A `[T; N]`: its elements one after another, inline.)
+      if name == fixedName then
+        match args with
+        | [t, .data len []] =>
+          let n := len - lenBase
+          let e ← layOf C t
+          let (at_, size, align) := placeFields 0 (List.replicate n e)
+          pure ⟨.fields (fixedBase + n) at_, alignUp size align, align⟩
+        | _ => pure ⟨.held, 8, 8⟩
+      else if name == anyName || (← holdsM C name args) then pure ⟨.held, 8, 8⟩
+      else
+        match findData C.datas name args with
+        | some [(tag, fs)] =>
+          let (at_, size, align) := placeFields 0 (← fs.mapM (layOf C))
+          pure ⟨.fields tag at_, alignUp size align, align⟩
+        | some ctors =>
+          let each ← ctors.mapM fun (tag, fs) => do pure (tag, placeFields 1 (← fs.mapM (layOf C)))
+          let size := each.foldl (fun s (_, (_, sz, _)) => max s sz) 1
+          let align := each.foldl (fun a (_, (_, _, al)) => max a al) 1
+          pure ⟨.tagged (each.map fun (tag, (at_, _, _)) => (tag, at_)), alignUp size align, align⟩
+        | none => pure ⟨.held, 8, 8⟩
+    | .fn .. => pure ⟨.held, 16, 8⟩
+    | .ref _ _ => pure ⟨.addr, 8, 8⟩
+    | .never => pure ⟨.nothing, 0, 1⟩
+  modify fun c => { c with lays := c.lays.insert t l }
+  pure l
 
 end Glorious.Lower
