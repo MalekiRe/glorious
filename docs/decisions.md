@@ -8174,10 +8174,21 @@ could, which left a program not lowered (laid out by its types):
 - Not yet: `bundles` and `behavior` are not lowered (`ecs::column_remove`
   is used at what inference does not decide); not lowered, a view of a
   `String`'s bytes reads the machine's slots, so `bundles` builds its lines
-  with `push_string`, which puts the bytes in as elements. A dot call on a
-  receiver whose type an implementation decides later takes it as the
-  function's parameter (`count.to_string()` of `KeptRun`'s result: written
-  `let n: Int = count`).
+  with `push_string`, which puts the bytes in as elements.
+  Tried: what nothing decided taken as unit once no function, at a use's
+  signature, decided what the use left undecided (as the checker's types
+  have it), with operations resumed with a value of their arguments' types
+  refused where they are let be. Unsound: inference for the lowering lets
+  regions and effects be, and `tasks` then lowered its counts as unit
+  (lines of garbage). What an `ecs` world's columns hold where nothing is
+  put in them stays undecided; the lowering refuses it.
+- A dot call on a name whose type is not known where the call is, where
+  the function takes a reference, gives the name as it is and waits
+  (`St.lateReceivers`): once the bounds of types whose heads are known have
+  decided it (`checkLateReceivers`, between those and the others in
+  `settleBounds`), a value is read again borrowed (`Decision.receiver`), a
+  reference is given. `count.to_string()` of `KeptRun`'s result, whose type
+  `F: KeptRun<S, O, Lc>` decides.
 
 ## A line written by its characters
 

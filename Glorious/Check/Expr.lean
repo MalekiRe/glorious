@@ -976,6 +976,21 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       -- known, `checkCompares`.)
       if i == 0 && call != 0 && compareOps.any (what == s!"`{·.1}`") then
         modify fun s => { s with compares := s.compares.push (call, p) }
+      -- (A dot call's receiver, a name of a type not known yet, where the
+      -- function takes a reference: given as what it is, and whether it is
+      -- a reference told where its type is known, `checkLateReceivers`.)
+      let late ← if i == 0 && call != 0 && (dotAltsOf (← get).modules call).isSome then do
+          let some x := (← get).body.bare? a | pure false
+          let some (.val t _) := scope.lookup x | pure false
+          match ← find p, ← find t with
+          | .ref .., .var _ => pure true
+          | _, _ => pure false
+        else pure false
+      let p ← if late then do
+          let given ← freshTy
+          modify fun s => { s with lateReceivers := s.lateReceivers.push (call, given, p) }
+          pure given
+        else pure p
       -- (A dot call whose receiver is of a type with a function of its own of
       -- the name: that one, if the function in scope does not fit.)
       let before ← get

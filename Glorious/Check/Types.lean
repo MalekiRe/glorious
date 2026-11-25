@@ -535,6 +535,10 @@ structure St where
   /-- Each comparison, `a == b`, with what it compares: of a type that is
   not copied, read again comparing by reference (`Decision.compareByRef`). -/
   compares : Array (Nat × Ty) := #[]
+  /-- Each dot call whose receiver, a name, was of a type not known where
+  the function takes a reference: the type it is given as, and the type the
+  function takes (`checkLateReceivers`). -/
+  lateReceivers : Array (Nat × Ty × Ty) := #[]
   /-- Types whose values must be free to go unused, with the reason; checked
   once the types are known. -/
   drops : Array (Ty × String) := #[]

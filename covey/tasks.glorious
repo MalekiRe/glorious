@@ -104,7 +104,7 @@ fn kept<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Ge
     let mut going = true;
     while({ going }) {
         match(system.bridge(&mut world, Update)) {
-            Ok((count, ids)) => let n: Int = count; say(n.to_string() + " " + format_debug(&ids).as_str()),
+            Ok((count, ids)) => say(count.to_string() + " " + format_debug(&ids).as_str()),
             Err(_) => going = false
         }
     };

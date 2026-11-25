@@ -491,6 +491,24 @@ def dotOwnInstead (call : Nat) (trait : String) (ty : Ty) (said : String) : M Un
         if (← get).kimpls.has (Syntax.traitBase trait) h then
           throwThe Elab.Said { msg := said, decision := some (.derefReceiver call) }
 
+/-- A dot call's receiver, a name whose type was not known where the call
+is (`lateReceivers`), once the bounds of types whose heads are known have
+decided what they do, `F: Runs<O>` of `O`: where it is a value, and the
+function takes a reference, read again with it borrowed, as Rust borrows it
+(`Elab.Decision.receiver`); else given as it is. -/
+def checkLateReceivers : M Unit := do
+  let rs := (← get).lateReceivers
+  modify fun s => { s with lateReceivers := #[] }
+  for (call, given, wanted) in rs do
+    match ← find given, ← find wanted with
+    | .var _, _ | .ref .., _ => unify given wanted
+    | _, .ref how _ _ =>
+      let uniq := match ← find how with
+        | .con "&mut" [] => true
+        | _ => false
+      throwThe Elab.Said { msg := "the receiver is borrowed", decision := some (.receiver call none (some uniq)) }
+    | _, _ => unify given wanted
+
 /-- A bound as its trait's implementations for the type it now has are told
 apart: one whose type was not known when the bounds were keyed, or that
 waited, keyed as it would have been then, where its trait has several
@@ -1122,13 +1140,15 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- (Those of a type whose head is known first: what their implementations
   -- say may decide what the others are of, `F: Into<S>` the `S` of a block
   -- named in place of a function that needs `S: Col`.)
-  let mut known : Array Bound := #[]
-  let mut unknown : Array Bound := #[]
+  let mut known : Array (Option Bound) := #[]
+  let mut unknown : Array (Option Bound) := #[]
   for b in pending do
     match ← find b.ty with
     | .var _ => unknown := unknown.push b
     | _ => known := known.push b
-  for b in known ++ unknown do
+  for b in known ++ #[none] ++ unknown do
+    -- (Between: what those of known types decided of receivers.)
+    let some b := b | checkLateReceivers; continue
     let b ← rekey b
     -- (How to destroy a type that nothing decides is not asked for.)
     let ls ← try (timedM "bounds: leaves" (if (← get).patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait b.ty b.args b.owner

@@ -109,6 +109,24 @@ true
 false
 0
 #### case
+#### A dot call on a name whose type a bound decides later: borrowed once
+#### it is known, as Rust borrows it.
+trait Runs<O> { fn run(&Self) -> O }
+struct A
+impl Runs<(Int, Vec<Int>)> for A { fn run(a: &A) -> (Int, Vec<Int>) { (41, Vec::from_array([1, 2])) } }
+fn go<F, O>(f: &F) -> Result<O, Int> where F: Runs<O> { Ok(<F as Runs<O>>::run(f)) }
+fn main() -> Int {
+    let a = A;
+    match(go(&a)) {
+        Ok((count, ids)) => say(count.to_string() + " " + ids.len().to_string().as_str()),
+        Err(_) => ()
+    };
+    0
+}
+#### expect
+41 2
+0
+#### case
 #### A field by number of an element that is a reference: read through it.
 struct P(Int)
 fn total(ps: &[&P]) -> Int { let mut s = 0; let mut i = 0; while({ i < ps.len() }) { s = s + ps[i].0; i = i + 1 }; s }
