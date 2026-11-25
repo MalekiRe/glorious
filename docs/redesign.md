@@ -236,6 +236,17 @@ sites, `Scheme.sites`, are its body's), `tys` 234, `caps` 77 and `capOut`
 function's own type is its signature's alone, with what its body found of
 effect sites kept beside it.
 
+Tried: `fns` kept the signature's after a body is checked (the body's beside
+it, for `schemeWithin`), with the signature's type parameter numbers. 374
+programs then fail, all but a few on one rule: a callable parameter written
+`fn(..)` may, as its signature says, be called any number of times, and
+`std::thread::run_thread` gives `push_waiting` a block that holds a
+resumption, which runs once. Rust says so with `FnOnce`, and a callable kept
+in a `Vec` is `Box<dyn FnOnce()>`; Glorious has no way to write it of a
+callable that is not a type parameter, so a caller now reads what the
+callee's body needs (fewer uses), as before. Writing that a callable is run
+once (`fn once() -> ()`, or `Use` of a value parameter) comes first.
+
 ## Expected size
 
 Estimates, to be replaced by measurements as each step lands.
