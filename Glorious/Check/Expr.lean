@@ -728,8 +728,21 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Flat.ExprId)
         match ← headName 8 ty with
         | some h => pure (some h)
         | none =>
-          if (← get).assocUses.isEmpty then pure none
-          else do settleAssocsAll; headName 8 ty
+          -- (Of a trait's argument a single implementation decides, as
+          -- Rust's does: `convert(..).0.len()`.)
+          let decided ← match ← find ty with
+            | .var v => argDecidedAt v
+            | .ref _ t _ => match ← find t with
+              | .var v => argDecidedAt v
+              | _ => pure false
+            | _ => pure false
+          if decided then headName 8 ty
+          else do
+            -- (What a trait leaves to an implementation, and the fields read
+            -- of what that is: `pair.0` of `let pair = &fs[0]`.)
+            unless (← get).assocUses.isEmpty do settleAssocsAll
+            runProjections false
+            headName 8 ty
       | none => pure none
     set saved
     let some h := h | return none
@@ -1519,6 +1532,37 @@ partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
       | some e => throw e
   pure none
 
+/-- A dot call of a reference to a value of the function's type, where the
+function takes the value whole: of the value it points to, as Rust's
+receiver is dereferenced (`part.len()` of a `part: &&str`). Its type; none
+where the receiver is no such reference. -/
+partial def derefReceiver (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (alt : String)
+    (call : Nat) : M (Option Ty) := do
+  let some a := args[0]? | return none
+  let b := (← get).body
+  -- (A name, as written or as borrowed for another function: its type as
+  -- the scope has it, nothing read again.)
+  let some v := (match b.expr a with
+    | .ref _ v => some v
+    | .name none v => some v
+    | _ => none) | return none
+  let found := match scope.lookup v with
+    | some (.val t _) => some t
+    | some (.cell t _) => some t
+    | _ => none
+  let through ← match found with
+    | some t => do
+      match ← find t with
+      | .ref _ inner _ => do pure ((← headName 8 inner).any fun h => alt.startsWith (h ++ "::"))
+      | _ => pure false
+    | none => pure false
+  unless through do return none
+  let given := Expr.deref (.name none v)
+  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
+                           argsChosen := ((call, 0), given) :: s.argsChosen }
+  let given ← flatIn given
+  return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+
 /-- A dot call taken as the function of the value's type: its type; none
 where it is not taken so (`inferCall`). -/
 partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Array Flat.ExprId)
@@ -1530,10 +1574,30 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
   -- again only where it does not.
   if let some x := b.bare? f then
     if let some alts := dotAltsOf (← get).modules call then
+      -- (The only one of the name: as it is, or through the reference; or,
+      -- where it borrows and the resolver could not tell to, of a field of
+      -- what a name points to, `fuel.0.to_string()`, borrowed where it is,
+      -- as Rust's receiver is.)
+      if alts.isEmpty then
+        match (← receiverKinds x x).2 with
+        | some 0 =>
+          if let some t ← derefReceiver scope amb args x call then return some t
+        | some k =>
+          if let some a := args[0]? then
+            if let some (v, path, fid) ← fieldThroughRef scope a then
+              let bt := Expr.refField fid (k == 2) v path true
+              modify fun s => { s with dotChosen := (call, x, 0) :: s.dotChosen,
+                                       argsChosen := ((call, 0), bt) :: s.argsChosen }
+              let given ← flatIn bt
+              return some (← inferCall scope amb (← pushE (.name none x)) (#[given] ++ args.extract 1 args.size) call)
+        | none => pure ()
+        return none
       if let some a := args[0]? then
         if let some alt ← dotAltFor scope amb call a then
           if alt != x && alts.contains alt then
             let (mine, theirs) ← receiverKinds x alt
+            if theirs == some 0 then
+              if let some t ← derefReceiver scope amb args alt call then return some t
             if mine.isSome && mine == theirs then
               modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
               return some (← inferCall scope amb (← pushE (.name none alt)) args call)

@@ -44,7 +44,7 @@ pub fn pad_end(text: &str, width: Int, with: char) -> String {
     out
 }
 fn char_count(text: &str) -> Int {
-    let mut it = StrRef::chars(&text);
+    let mut it = StrRef::chars(text);
     let mut n = 0;
     while({ it.next().is_some() }) { n = n + 1 };
     n

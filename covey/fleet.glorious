@@ -90,7 +90,7 @@ struct Carrier
 struct Update
 
 fn say_all(lines: Vec<Str>) { let mut i = 0; while({ i < len_at(&lines) }) { say(lines[i]); i = i + 1 } }
-fn list(items: Vec<Str>) -> Str { if(len_at(&items) == 0) { "none" } else { join(items, ", ") } }
+fn list(items: Vec<Str>) -> String { if(len_at(&items) == 0) { String::from("none") } else { join(items, ", ") } }
 
 // ---- Systems
 // Docked ships unload into their station: one row at a time.
@@ -164,7 +164,7 @@ fn status(ships: &mut Query<(&Name, (&Fuel, &Hull, &Pos), To<InFleet, (&Name,)>)
     let mut lines = Vec::new();
     ships.for_each() { ship, (fuel, hull, pos), flagship =>
         let fleet = match(flagship) { Some((f,)) => f.0, None => "-" };
-        Vec::push(&mut lines, "  " ++ pad_end(ship.0, 9, ' ') ++ " fuel " ++ pad_start(show(fuel.0), 3, ' ') ++ "  hull " ++ pad_start(show(hull.0), 3, ' ') ++ "  pos " ++ pad_start(show(pos.0), 4, ' ') ++ "  fleet " ++ fleet);
+        Vec::push(&mut lines, "  " ++ pad_end(String::from_text(ship.0).as_str(), 9, ' ') ++ " fuel " ++ pad_start(fuel.0.to_string().as_str(), 3, ' ') ++ "  hull " ++ pad_start(hull.0.to_string().as_str(), 3, ' ') ++ "  pos " ++ pad_start(pos.0.to_string().as_str(), 4, ' ') ++ "  fleet " ++ fleet);
     };
     say_all((std::vec::sort(lines)))
 }

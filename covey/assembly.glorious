@@ -15,12 +15,12 @@ use asm::{Target, Code, scan, stats};
 
 fn main() -> Int {
     let objdump = std::vec::Vec::from_array(["<frame>:", "game::apply_damage:", "/src/game.rs:10", "inlined by /src/game.rs:30 (run)", "\tmov    %rax,%rbx", "\tcall   1234 <helper+0x10>", "other::finish:", "/src/other.rs:5", "\tret"]);
-    let (found, saw): (Code, Bool) = scan(clone(&objdump), Target::Function("apply_damage"));
+    let (found, saw): (Code, Bool) = scan(clone(&objdump), Target::Function(String::from("apply_damage")));
     say(if(saw) { "true" } else { "false" });
     let instructions = found.instructions;
     let mut i = 0;
-    while({ i < len_at(&instructions) }) { say(instructions[i]); i = i + 1 };
-    let (lines, _): (Code, Bool) = scan(objdump, Target::Lines("game.rs", 28, 31));
+    while({ i < instructions.len() }) { say(instructions[i].as_str()); i = i + 1 };
+    let (lines, _): (Code, Bool) = scan(objdump, Target::Lines(String::from("game.rs"), 28, 31));
     say(len_at(&lines.instructions));
     say(stats(&lines));
     0

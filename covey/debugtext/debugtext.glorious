@@ -5,47 +5,25 @@
 use std::vec::{Vec};
 use std::text::{join};
 
-// ---- Texts as `Str`, while that is the type of this module's texts. ----
-fn reverse(text: Str) -> Str { reverse_onto(text, "") }
-fn reverse_onto(text: Str, out: Str) -> Str {
-    match(text) { StrEnd => out, StrChar(c, rest) => tail reverse_onto(rest, StrChar(c, out)) }
-}
-fn split(text: Str, at: char) -> Vec<Str> { let mut out = Vec::new(); split_onto(text, at, "", &mut out); out }
-fn split_onto(text: Str, at: char, part: Str, out: &mut Vec<Str>) {
-    match(text) {
-        StrEnd => Vec::push(out, reverse(part)),
-        StrChar(c, rest) =>
-            if(c == at) { Vec::push(out, reverse(part)); tail split_onto(rest, at, "", out) }
-            else { tail split_onto(rest, at, StrChar(c, part), out) }
-    }
-}
-fn lines(text: Str) -> Vec<Str> { split(text, '\n') }
-fn parse_int(text: Str) -> Option<Int> {
-    match(text) {
-        StrChar('-', rest) => match(digits_value(rest, 0, 0)) { Some(n) => Some(0 - n), None => None },
-        _ => digits_value(text, 0, 0)
-    }
-}
-fn digits_value(text: Str, seen: Int, value: Int) -> Option<Int> {
-    match(text) {
-        StrEnd => if(seen > 0) { Some(value) } else { None },
-        StrChar(c, rest) => match(std::char::digit(c)) {
-            Some(d) => tail digits_value(rest, seen + 1, value * 10 + d),
-            None => None
-        }
-    }
-}
-
 
 pub enum Value {
-    VUnit, VBool(Bool), VInt(Int), VFloat(f64), VChar(char), VStr(Str),
+    VUnit, VBool(Bool), VInt(Int), VFloat(f64), VChar(char), VStr(String),
     // Named fields: `Pos { x: 1.0 }`; positional, `Hp(3)`, a tuple where
     // the name is empty.
-    VStruct(Str, Vec<(Str, Value)>), VTuple(Str, Vec<Value>),
+    VStruct(String, Vec<(String, Value)>), VTuple(String, Vec<Value>),
     VList(Vec<Value>), VMap(Vec<(Value, Value)>),
     // A bare name: `None`, `Idle`.
-    VName(Str),
-    VRaw(Str)
+    VName(String),
+    VRaw(String)
+}
+
+// Its characters, one after another.
+fn chars_of(text: &str) -> Vec<char> {
+    let mut out = Vec::new();
+    let mut it = text.chars();
+    let mut more = true;
+    while({ more }) { match(it.next()) { Some(c) => Vec::push(&mut out, c), None => more = false } };
+    out
 }
 
 fn at(cs: &Vec<char>, i: Int) -> char { if(i < len_at(cs)) { cs[i] } else { '\u{0}' } }
@@ -80,15 +58,15 @@ fn number(cs: &Vec<char>, i: Int) -> (Value, Int) {
 }
 
 // Text between quotes, its escapes read; and where it ends.
-fn quoted(cs: &Vec<char>, i: Int, close: char) -> (Str, Int) {
-    let mut out = "";
+fn quoted(cs: &Vec<char>, i: Int, close: char) -> (String, Int) {
+    let mut out = String::new();
     let mut j = i + 1;
     while({ if(j < len_at(cs)) { at(cs, j) != close } else { false } }) {
         if(at(cs, j) == '\\') {
             let e = at(cs, j + 1);
-            out = out ++ show(if(e == 'n') { '\n' } else if(e == 't') { '\t' } else { e });
+            out.push(if(e == 'n') { '\n' } else if(e == 't') { '\t' } else { e });
             j = j + 2
-        } else { out = out ++ show(at(cs, j)); j = j + 1 }
+        } else { out.push(at(cs, j)); j = j + 1 }
     };
     (out, j + 1)
 }
@@ -96,10 +74,10 @@ fn quoted(cs: &Vec<char>, i: Int, close: char) -> (Str, Int) {
 // The value written from `i`, and where it ends. (One function: what a
 // list holds is read by it again.)
 // One character, or the text as it is.
-fn char_or_raw(t: Str) -> Value { let one = chars(t); if(len_at(&one) == 1) { VChar(one[0]) } else { VRaw(t) } }
+fn char_or_raw(t: String) -> Value { let one = chars_of(t.as_str()); if(one.len() == 1) { VChar(one[0]) } else { VRaw(t) } }
 // What a list closed by `c` is, of its values or its pairs.
 fn made_of(c: char, vs: Vec<Value>, pairs: Vec<(Value, Value)>) -> Value {
-    if(c == '(') { if(len_at(&vs) == 0) { VUnit } else { VTuple("", vs) } }
+    if(c == '(') { if(len_at(&vs) == 0) { VUnit } else { VTuple(String::new(), vs) } }
     else if(c == '[') { VList(vs) }
     else if(len_at(&vs) > 0) { VList(vs) } else { VMap(pairs) }
 }
@@ -128,9 +106,9 @@ fn value_at(cs: &Vec<char>, i: Int) -> (Value, Int) {
     else if(c == '\'') { let (t, j) = quoted(cs, i, '\''); (char_or_raw(t), j) }
     else if(if(std::char::is_digit(c)) { true } else { c == '-' }) { number(cs, i) }
     else if(name_char(c)) {
-        let mut name = "";
+        let mut name = String::new();
         let mut j = i;
-        while({ name_char(at(cs, j)) }) { name = name ++ show(at(cs, j)); j = j + 1 };
+        while({ name_char(at(cs, j)) }) { name.push(at(cs, j)); j = j + 1 };
         let k = skip_space(cs, j);
         if(at(cs, j) == '(') {
             match(value_at(cs, j)) {
@@ -143,8 +121,8 @@ fn value_at(cs: &Vec<char>, i: Int) -> (Value, Int) {
             let mut fs = Vec::new();
             let mut e = skip_space(cs, k + 1);
             while({ if(e < len_at(cs)) { at(cs, e) != '}' } else { false } }) {
-                let mut field = "";
-                while({ if(std::char::is_alphanumeric(at(cs, e))) { true } else { at(cs, e) == '_' } }) { field = field ++ show(at(cs, e)); e = e + 1 };
+                let mut field = String::new();
+                while({ if(std::char::is_alphanumeric(at(cs, e))) { true } else { at(cs, e) == '_' } }) { field.push(at(cs, e)); e = e + 1 };
                 e = skip_space(cs, e);
                 if(at(cs, e) == ':') { e = e + 1 } else { () };
                 let (v, e2) = value_at(cs, e);
@@ -154,26 +132,26 @@ fn value_at(cs: &Vec<char>, i: Int) -> (Value, Int) {
             };
             (VStruct(name, fs), e + 1)
         }
-        else if(name == "true") { (VBool(true), j) } else if(name == "false") { (VBool(false), j) }
+        else if(name.as_str() == "true") { (VBool(true), j) } else if(name.as_str() == "false") { (VBool(false), j) }
         else { (VName(name), j) }
-    } else { (VRaw(show(c)), i + 1) }
+    } else { let mut raw = String::new(); raw.push(c); (VRaw(raw), i + 1) }
 }
 
 // What `{:?}` wrote, read back.
-pub fn parse_debug(text: Str) -> Value {
-    let cs = chars(text);
+pub fn parse_debug(text: &str) -> Value {
+    let cs = chars_of(text);
     let (v, end) = value_at(&cs, 0);
-    if(skip_space(&cs, end) >= len_at(&cs)) { v } else { VRaw(text) }
+    if(skip_space(&cs, end) >= len_at(&cs)) { v } else { VRaw(String::from(text)) }
 }
 
 // The value at a path of field names and places, `pos.x`, `items.2`.
-pub fn get<'a>(value: &'a Value, path: Str) -> Option<&'a Value> {
-    let steps = split(path, '.');
+pub fn get<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    let steps = path.split(".");
     let mut at_: Option<&'a Value> = Some(value);
     let mut k = 0;
     while({ k < len_at(&steps) }) {
         let step = steps[k];
-        let place = parse_int(step);
+        let place = step.parse_int();
         if(step == "") { () } else {
             at_ = match(at_) {
                 Some(v) => match(v) {
@@ -192,44 +170,53 @@ pub fn get<'a>(value: &'a Value, path: Str) -> Option<&'a Value> {
 fn item_of<'a>(vs: &'a Vec<Value>, place: Option<Int>) -> Option<&'a Value> {
     match(place) { Some(p) => if(p < len_at(vs)) { let v = &vs[p]; Some(v) } else { None }, None => None }
 }
-fn field_of<'a>(fs: &'a Vec<(Str, Value)>, name: Str) -> Option<&'a Value> {
+fn field_of<'a>(fs: &'a Vec<(String, Value)>, name: &str) -> Option<&'a Value> {
     let mut found: Option<&'a Value> = None;
     let mut i = 0;
-    while({ i < len_at(fs) }) { let pair = &fs[i]; if(pair.0 == name) { found = Some(&pair.1) } else { () }; i = i + 1 };
+    while({ i < len_at(fs) }) { let pair = &fs[i]; if(pair.0.as_str() == name) { found = Some(&pair.1) } else { () }; i = i + 1 };
     found
 }
 
-fn shown_all(vs: &Vec<Value>) -> Str {
+fn shown_all(vs: &Vec<Value>) -> String {
     let mut out = Vec::new();
     let mut i = 0;
     while({ i < len_at(vs) }) { Vec::push(&mut out, shown(&vs[i])); i = i + 1 };
     join(out, ", ")
 }
 // A value written as `{:?}` writes it.
-pub fn shown(value: &Value) -> Str {
+pub fn shown(value: &Value) -> String {
     match(value) {
-        VUnit => "()",
-        VBool(b) => if(*b) { "true" } else { "false" },
-        VInt(n) => show(*n),
-        VFloat(f) => show(*f),
-        VChar(c) => "'" ++ show(*c) ++ "'",
-        VStr(t) => "\"" ++ escaped(*t) ++ "\"",
+        VUnit => String::from("()"),
+        VBool(b) => String::from(if(*b) { "true" } else { "false" }),
+        VInt(n) => n.to_string(),
+        VFloat(f) => f.to_string(),
+        VChar(c) => let mut out = String::from("'"); out.push(*c); out + "'",
+        VStr(t) => String::from("\"") + escaped(t.as_str()).as_str() + "\"",
         VStruct(n, fs) =>
             let mut out = Vec::new();
             let mut i = 0;
-            while({ i < len_at(fs) }) { let pair = &fs[i]; Vec::push(&mut out, pair.0 ++ ": " ++ shown(&pair.1)); i = i + 1 };
-            *n ++ " { " ++ join(out, ", ") ++ " }",
-        VTuple(n, vs) => *n ++ "(" ++ shown_all(vs) ++ ")",
-        VList(vs) => "[" ++ shown_all(vs) ++ "]",
+            while({ i < len_at(fs) }) { let pair = &fs[i]; Vec::push(&mut out, pair.0.clone() + ": " + shown(&pair.1).as_str()); i = i + 1 };
+            n.clone() + " { " + join(out, ", ").as_str() + " }",
+        VTuple(n, vs) => n.clone() + "(" + shown_all(vs).as_str() + ")",
+        VList(vs) => String::from("[") + shown_all(vs).as_str() + "]",
         VMap(ps) =>
             let mut out = Vec::new();
             let mut i = 0;
-            while({ i < len_at(ps) }) { let pair = &ps[i]; Vec::push(&mut out, shown(&pair.0) ++ ": " ++ shown(&pair.1)); i = i + 1 };
-            "{" ++ join(out, ", ") ++ "}",
-        VName(n) => *n,
-        VRaw(t) => *t
+            while({ i < len_at(ps) }) { let pair = &ps[i]; Vec::push(&mut out, shown(&pair.0) + ": " + shown(&pair.1).as_str()); i = i + 1 };
+            String::from("{") + join(out, ", ").as_str() + "}",
+        VName(n) => n.clone(),
+        VRaw(t) => t.clone()
     }
 }
-fn escaped(t: Str) -> Str {
-    fold(chars(t), "", fn(out: Str, c: char) -> Str { out ++ (if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else { show(c) }) })
+fn escaped(t: &str) -> String {
+    let mut out = String::new();
+    let cs = chars_of(t);
+    let mut i = 0;
+    while({ i < cs.len() }) {
+        let c = cs[i];
+        if(c == '"' or { c == '\\' }) { out.push('\\') } else { () };
+        out.push(c);
+        i = i + 1
+    };
+    out
 }

@@ -386,19 +386,25 @@ def fitHead (im : ImplDecl) (hargs args : List Ty) (said : Option String := none
     unless ← fit want got do return none
   pure (some at_)
 
+/-- Whether a type has the variable in it. -/
+partial def mentionsVar (v : Nat) : Ty → Bool
+  | .var w => w == v
+  | .con _ args | .tuple args => args.any (mentionsVar v)
+  | .ref _ t _ => mentionsVar v t
+  | .fn ps r _ _ _ => ps.any (mentionsVar v) || mentionsVar v r
+
 /-- A type not yet known that is an argument of a trait asked of a known
 type, which has one implementation of the trait: that implementation's
 argument there, as Rust's single implementation decides it (`owned + &more`
 of `impl Add<&str> for String`: `&more` is then fitted to `&str`). Whether
 one was. -/
 def argDecidedAt (v : Nat) : M Bool := do
+  -- (Of the argument or a part of it: `(s, n)` of `Convert<(B, A)>`.)
+  let has := fun (t : Ty) => mentionsVar v t
   for bd in (← get).bounds do
     let base := Syntax.traitBase bd.trait
     let (self, args) ← if bd.args.isEmpty then subjectOf base bd.ty else pure (bd.ty, bd.args)
-    let mine ← args.anyM fun a => do
-      match ← find a with
-      | .var w => pure (w == v)
-      | _ => pure false
+    let mine ← args.anyM fun a => do pure (has (← zonk a))
     unless mine do continue
     let some (head, hargs) ← headFor base (← find self) | continue
     match (← implsOfHead base head).filter (·.targs.length == args.length) with

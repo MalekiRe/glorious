@@ -7,170 +7,107 @@
 use std::vec::{Vec};
 use std::text::{join};
 
-// ---- Texts as `Str`, while that is the type of this module's texts. ----
-fn is_empty(text: Str) -> Bool { match(text) { StrEnd => true, _ => false } }
-fn reverse(text: Str) -> Str { reverse_onto(text, "") }
-fn reverse_onto(text: Str, out: Str) -> Str {
-    match(text) { StrEnd => out, StrChar(c, rest) => tail reverse_onto(rest, StrChar(c, out)) }
-}
-fn starts_with(text: Str, start: Str) -> Bool {
-    match((text, start)) {
-        (_, StrEnd) => true,
-        (StrChar(c, rest), StrChar(d, more)) => if(c == d) { starts_with(rest, more) } else { false },
-        _ => false
-    }
-}
-fn ends_with(text: Str, end: Str) -> Bool { starts_with(reverse(text), reverse(end)) }
-fn contains(text: Str, part: Str) -> Bool { match(find(text, part)) { Some(_) => true, None => false } }
-fn find(text: Str, part: Str) -> Option<Int> { find_from(text, part, 0) }
-fn find_from(text: Str, part: Str, at: Int) -> Option<Int> {
-    if(starts_with(text, part)) { Some(at) } else {
-        match(text) { StrEnd => None, StrChar(_, rest) => tail find_from(rest, part, at + 1) }
-    }
-}
-fn take(text: Str, n: Int) -> Str {
-    if(n <= 0) { "" } else { match(text) { StrEnd => "", StrChar(c, rest) => StrChar(c, take(rest, n - 1)) } }
-}
-fn drop(text: Str, n: Int) -> Str {
-    if(n <= 0) { text } else { match(text) { StrEnd => "", StrChar(_, rest) => tail drop(rest, n - 1) } }
-}
-fn char_at(text: Str, i: Int) -> Option<char> {
-    match(text) { StrEnd => None, StrChar(c, rest) => if(i == 0) { Some(c) } else { tail char_at(rest, i - 1) } }
-}
-fn map<e: EffectRow>(text: Str, f: fn(char) -> char / {| e}) -> Str / {| e} {
-    match(text) { StrEnd => "", StrChar(c, rest) => StrChar(f(c), map(rest, f)) }
-}
-fn to_upper(text: Str) -> Str { map(text, std::char::to_upper) }
-fn to_lower(text: Str) -> Str { map(text, std::char::to_lower) }
-fn trim(text: Str) -> Str { reverse(trim_start(reverse(trim_start(text)))) }
-fn trim_start(text: Str) -> Str {
-    match(text) {
-        StrEnd => "",
-        StrChar(c, rest) => if(std::char::is_space(c)) { tail trim_start(rest) } else { text }
-    }
-}
-fn split(text: Str, at: char) -> Vec<Str> { let mut out = Vec::new(); split_onto(text, at, "", &mut out); out }
-fn split_onto(text: Str, at: char, part: Str, out: &mut Vec<Str>) {
-    match(text) {
-        StrEnd => Vec::push(out, reverse(part)),
-        StrChar(c, rest) =>
-            if(c == at) { Vec::push(out, reverse(part)); tail split_onto(rest, at, "", out) }
-            else { tail split_onto(rest, at, StrChar(c, part), out) }
-    }
-}
-fn lines(text: Str) -> Vec<Str> { split(text, '\n') }
-fn chars(text: Str) -> Vec<char> { let mut out = Vec::new(); chars_onto(text, &mut out); out }
-fn chars_onto(text: Str, out: &mut Vec<char>) {
-    match(text) {
-        StrEnd => (),
-        StrChar(c, rest) => Vec::push(out, c); tail chars_onto(rest, out)
-    }
-}
-fn words(text: Str) -> Vec<Str> { std::vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
-fn parse_int(text: Str) -> Option<Int> {
-    match(text) {
-        StrChar('-', rest) => match(digits_value(rest, 0, 0)) { Some(n) => Some(0 - n), None => None },
-        _ => digits_value(text, 0, 0)
-    }
-}
-fn digits_value(text: Str, seen: Int, value: Int) -> Option<Int> {
-    match(text) {
-        StrEnd => if(seen > 0) { Some(value) } else { None },
-        StrChar(c, rest) => match(std::char::digit(c)) {
-            Some(d) => tail digits_value(rest, seen + 1, value * 10 + d),
-            None => None
-        }
-    }
-}
-
-
 // What to collect: a function by path, matched by its last segment; or the
 // lines `first` to `last` of a file (a closure's body).
-pub enum Target { Function(Str), Lines(Str, Int, Int) }
+pub enum Target { Function(String), Lines(String, Int, Int) }
 
-pub struct Code { pub instructions: Vec<Str>, pub symbols: Vec<Str> }
+pub struct Code { pub instructions: Vec<String>, pub symbols: Vec<String> }
 
 // One source location of an instruction's inline chain.
-struct Frame { file: Str, line: Int, function: Option<Str> }
+struct Frame { file: String, line: Int, function: Option<String> }
 
 // The last segment of a path, `game::apply_damage` to `apply_damage`, its
 // type arguments left out.
-fn last_segment(path: Str) -> Str {
-    let bare = match(find(path, "<")) { Some(at) => take(path, at), None => path };
-    let parts = split(bare, ':');
+fn last_segment(path: &str) -> &str {
+    let bare = match(path.find("<")) { Some(at) => path.slice(0, at), None => path };
+    let parts = bare.split(":");
     let mut out = bare;
     let mut i = 0;
-    while({ i < len_at(&parts) }) { if(parts[i] == "") { () } else { out = parts[i] }; i = i + 1 };
+    while({ i < parts.len() }) { if(parts[i].is_empty()) { () } else { out = parts[i] }; i = i + 1 };
     out
 }
 // Each path in a type's name shortened to its last segment.
-pub fn short_type(name: Str) -> Str {
-    let mut out = "";
-    let mut word = "";
-    let mut i = 0;
-    let n = length(name);
-    while({ i < n }) {
-        match(char_at(name, i)) {
-            Some(c) => if(if(std::char::is_alphanumeric(c)) { true } else { if(c == '_') { true } else { c == ':' } }) { word = word ++ show(c) }
-                else { out = out ++ last_segment(word) ++ show(c); word = "" },
-            None => ()
-        };
-        i = i + 1
+pub fn short_type(name: &str) -> String {
+    let mut out = String::new();
+    let mut word = String::new();
+    let mut it = name.chars();
+    let mut more = true;
+    while({ more }) {
+        match(it.next()) {
+            Some(c) =>
+                if(std::char::is_alphanumeric(c) or { c == '_' } or { c == ':' }) { word.push(c) }
+                else { out.push_str(last_segment(word.as_str())); out.push(c); word.clear() },
+            None => more = false
+        }
     };
-    out ++ last_segment(word)
+    out.push_str(last_segment(word.as_str()));
+    out
 }
 
 // `file:line`, with ` (function)` after it or not.
-fn parse_frame(text: Str) -> Option<Frame> {
-    let (location, rest) = match(find(text, " (")) { Some(at) => (take(text, at), Some(drop(text, at + 2))), None => (text, None) };
-    let parts = split(location, ':');
-    let count = len_at(&parts);
+fn parse_frame(text: &str) -> Option<Frame> {
+    let (location, rest) = match(text.find(" (")) { Some(at) => (text.slice(0, at), Some(text.slice(at + 2, text.len()))), None => (text, None) };
+    let parts = location.split(":");
+    let count = parts.len();
     if(count < 2) { None } else {
         let file = join(parts.as_slice().split_at(count - 1).0, ":");
         let function = match(rest) {
-            Some(r) => let f = if(ends_with(r, ")")) { take(r, length((r)) - 1) } else { r }; if(starts_with(f, "discriminator")) { None } else { Some(f) },
+            Some(r) =>
+                let f = if(r.ends_with(")")) { r.slice(0, r.len() - 1) } else { r };
+                if(f.starts_with("discriminator")) { None } else { Some(String::from(f)) },
             None => None
         };
-        match(parse_int(parts[count - 1])) { Some(line) => Some(Frame { file: file, line: line, function: function }), None => None }
+        match(parts[count - 1].parse_int()) { Some(line) => Some(Frame { file: file, line: line, function: function }), None => None }
     }
 }
 
-fn matches(target: &Target, frame: &Frame) -> Bool {
+// Whether a location is of the target, its function as said.
+fn matches(target: &Target, frame: &Frame, function: &Option<String>) -> Bool {
+    let file = frame.file.as_str();
+    let line = frame.line;
     match(target) {
-        Target::Function(name) => match(&frame.function) { Some(f) => last_segment(*f) == *name, None => false },
-        Target::Lines(file, first, last) =>
-            let same = if(ends_with(frame.file, *file)) { true } else { ends_with(*file, frame.file) };
+        Target::Function(name) => match(function) { Some(f) => last_segment(f.as_str()) == name.as_str(), None => false },
+        Target::Lines(of, first, last) =>
+            let same = file.ends_with(of.as_str()) or { of.as_str().ends_with(file) };
             let end = if(*last < 0) { *first } else { *last };
-            if(same) { if(frame.line >= *first) { frame.line <= end } else { false } } else { false }
+            same and { line >= *first } and { line <= end }
     }
 }
 
-fn is_hex(word: Str) -> Bool {
-    let cs = chars(word);
-    std::vec::all(cs, fn(c: char) -> Bool { if(std::char::is_digit(c)) { true } else { contains("abcdefABCDEF", show(c)) } })
+fn is_hex(word: &str) -> Bool {
+    let mut it = word.chars();
+    let mut hex = true;
+    let mut more = true;
+    while({ more }) {
+        match(it.next()) {
+            Some(c) => if(std::char::is_digit(c) or { c >= 'a' and { c <= 'f' } } or { c >= 'A' and { c <= 'F' } }) { () } else { hex = false },
+            None => more = false
+        }
+    };
+    hex
 }
 // An instruction with its addresses and offsets left out.
-fn normalize(instruction: Str) -> Str {
-    let ws = words(instruction);
+fn normalize(instruction: &str) -> String {
+    let ws = instruction.split_whitespace();
     let mut out = Vec::new();
     let mut i = 0;
     let mut going = true;
-    while({ if(going) { i < len_at(&ws) } else { false } }) {
+    while({ going and { i < ws.len() } }) {
         let word = ws[i];
-        let hex = if(ends_with(word, ",")) { take(word, length((word)) - 1) } else { word };
-        let next_symbol = if(i + 1 < len_at(&ws)) { starts_with(ws[i + 1], "<") } else { false };
-        if(if(length((hex)) >= 4) { if(is_hex(hex)) { next_symbol } else { false } } else { false }) {
-            Vec::push(&mut out, "<addr>");
-            let symbol = ws[i + 1];
-            let bare = split(symbol, '+')[0];
-            let bare = if(ends_with(bare, ">")) { take(bare, length((bare)) - 1) } else { bare };
-            Vec::push(&mut out, bare ++ ">");
+        let hex = if(word.ends_with(",")) { word.slice(0, word.len() - 1) } else { word };
+        let next_symbol = i + 1 < ws.len() and { ws[i + 1].starts_with("<") };
+        if(hex.len() >= 4 and { is_hex(hex) } and { next_symbol }) {
+            Vec::push(&mut out, String::from("<addr>"));
+            let pieces = ws[i + 1].split("+");
+            let bare = pieces[0];
+            let bare = if(bare.ends_with(">")) { bare.slice(0, bare.len() - 1) } else { bare };
+            Vec::push(&mut out, String::from(bare) + ">");
             i = i + 2
-        } else if(starts_with(word, "#")) { going = false }
+        } else if(word.starts_with("#")) { going = false }
         else {
-            match(find(word, "(%rip)")) {
-                Some(at) => Vec::push(&mut out, "<rip>" ++ drop(word, at + 6)),
-                None => Vec::push(&mut out, word)
+            match(word.find("(%rip)")) {
+                Some(at) => Vec::push(&mut out, String::from("<rip>") + word.slice(at + 6, word.len())),
+                None => Vec::push(&mut out, String::from(word))
             };
             i = i + 1
         }
@@ -182,48 +119,68 @@ fn normalize(instruction: Str) -> Str {
 // whether it had line tables at all. Each location block (the innermost
 // line, then the `inlined by` callers) is of the instructions after it; an
 // instruction is the target's where any frame of its chain is.
-pub fn scan(lines: Vec<Str>, target: Target) -> (Code, Bool) {
+pub fn scan(lines: Vec<&str>, target: Target) -> (Code, Bool) {
     let mut instructions = Vec::new();
-    let mut symbols = Vec::new();
-    let mut symbol = "";
-    let mut function: Option<Str> = None;
+    let mut symbols: Vec<String> = Vec::new();
+    let mut symbol = String::new();
+    let mut function: Option<String> = None;
     let mut matched = false;
     let mut saw_lines = false;
     let mut i = 0;
     while({ i < len_at(&lines) }) {
         let line = lines[i];
-        let white = match(char_at(line, 0)) { Some(c) => if(c == ' ') { true } else { c == '\t' }, None => false };
-        if(if(starts_with(line, "<")) { ends_with(line, ">:") } else { false }) {
-            symbol = take(drop(line, 1), length((line)) - 3);
+        let white = line.starts_with(" ") or { line.starts_with("\t") };
+        if(line.starts_with("<") and { line.ends_with(">:") }) {
+            symbol = String::from(line.slice(1, line.len() - 2));
             matched = false
-        } else if(starts_with(line, "inlined by ")) {
-            match(parse_frame(drop(line, 11))) { Some(frame) => if(matches(&target, &frame)) { matched = true } else { () }, None => () }
-        } else if(if(starts_with(line, "/")) { true } else { starts_with(line, "./") }) {
+        } else if(line.starts_with("inlined by ")) {
+            match(parse_frame(line.slice(11, line.len()))) { Some(frame) => if(matches(&target, &frame, &frame.function)) { matched = true } else { () }, None => () }
+        } else if(line.starts_with("/") or { line.starts_with("./") }) {
             match(parse_frame(line)) {
-                Some(frame) => saw_lines = true; let Frame { file, line: at, function: _ } = frame; matched = matches(&target, &Frame { file: file, line: at, function: function }),
+                Some(frame) => saw_lines = true; matched = matches(&target, &frame, &function),
                 None => ()
             }
-        } else if(if(ends_with(line, ":")) { if(white) { false } else { line != ":" } } else { false }) {
-            let name = take(line, length((line)) - 1);
-            function = Some(if(ends_with(name, "()")) { take(name, length(name) - 2) } else { name })
-        } else if(if(white) { matched } else { false }) {
-            let instruction = trim(line);
-            if(instruction == "") { () } else {
+        } else if(line.ends_with(":") and { not(white) } and { line != ":" }) {
+            let name = line.slice(0, line.len() - 1);
+            function = Some(String::from(if(name.ends_with("()")) { name.slice(0, name.len() - 2) } else { name }))
+        } else if(white and { matched }) {
+            let instruction = line.trim();
+            if(instruction.is_empty()) { () } else {
                 Vec::push(&mut instructions, normalize(instruction));
-                if(std::vec::contains(clone(&symbols), symbol)) { () } else { Vec::push(&mut symbols, symbol) }
+                let mut known = false;
+                let mut k = 0;
+                while({ k < len_at(&symbols) }) { if(symbols[k].as_str() == symbol.as_str()) { known = true } else { () }; k = k + 1 };
+                if(known) { () } else { Vec::push(&mut symbols, symbol.clone()) }
             }
         } else { () };
         i = i + 1
     };
-    (Code { instructions: instructions, symbols: std::vec::sort(symbols) }, saw_lines)
+    // (In order of their texts.)
+    let mut order: Vec<&str> = Vec::new();
+    let mut k = 0;
+    while({ k < len_at(&symbols) }) { Vec::push(&mut order, symbols[k].as_str()); k = k + 1 };
+    order.sort();
+    let mut sorted = Vec::new();
+    let mut k = 0;
+    while({ k < len_at(&order) }) { Vec::push(&mut sorted, String::from(order[k])); k = k + 1 };
+    (Code { instructions: instructions, symbols: sorted }, saw_lines)
 }
 
+// How many of the instructions pass a test.
+fn count_of(code: &Code, test: fn(&str) -> Bool) -> Int {
+    let mut n = 0;
+    let mut k = 0;
+    while({ k < code.instructions.len() }) { if(test(code.instructions[k].as_str())) { n = n + 1 } else { () }; k = k + 1 };
+    n
+}
 // Counts that say most about the code.
-pub fn stats(code: &Code) -> Str {
-    let count = fn(test: fn(Str) -> Bool) -> Int { size_at(&std::vec::filter(clone(&code.instructions), test)) };
-    let vector = count(fn(i: Str) -> Bool { if(contains(i, "%ymm")) { true } else if(contains(i, "%zmm")) { true } else if(contains(i, "%xmm")) { contains(i, "p") } else { false } });
-    show(len_at(&code.instructions)) ++ " instructions (" ++ show(vector) ++ " vector, "
-        ++ show(count(fn(i: Str) -> Bool { starts_with(i, "call") })) ++ " calls, "
-        ++ show(count(fn(i: Str) -> Bool { starts_with(i, "j") })) ++ " branches) in "
-        ++ join(std::vec::map(clone(&code.symbols), short_type), ", ")
+pub fn stats(code: &Code) -> String {
+    let vector = count_of(code, fn(i: &str) -> Bool { i.contains("%ymm") or { i.contains("%zmm") } or { i.contains("%xmm") and { i.contains("p") } } });
+    let mut shortened = Vec::new();
+    let mut k = 0;
+    while({ k < code.symbols.len() }) { Vec::push(&mut shortened, short_type(code.symbols[k].as_str())); k = k + 1 };
+    code.instructions.len().to_string() + " instructions (" + vector.to_string().as_str() + " vector, "
+        + count_of(code, fn(i: &str) -> Bool { i.starts_with("call") }).to_string().as_str() + " calls, "
+        + count_of(code, fn(i: &str) -> Bool { i.starts_with("j") }).to_string().as_str() + " branches) in "
+        + join(shortened, ", ").as_str()
 }

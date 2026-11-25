@@ -18,11 +18,11 @@ fn main() -> Int {
     let parsed = parse_debug("(Some([1.5, -2.0]), \"a\\\"b\", 'x', [(\"k\", 3)], {1: \"one\"})");
     match(&parsed) {
         VTuple(_, items) => say(shown(&items[0])); say(shown(&items[1])); say(shown(&items[2])); say(shown(&items[4]));
-            match(&items[1]) { VStr(t) => say(*t), _ => say("not text") },
+            match(&items[1]) { VStr(t) => say(t.as_str()), _ => say("not text") },
         _ => say("not a tuple")
     };
     let pos = parse_debug("Pos { x: 1e-9, tag: None }");
     say(match(get(&pos, "x")) { Some(v) => match(v) { VFloat(f) => if(*f > 0.0) { if(*f < 0.000000002) { "true" } else { "false" } } else { "false" }, _ => "false" }, None => "false" });
-    say(match(get(&pos, "tag")) { Some(v) => shown(v), None => "none" });
+    say(match(get(&pos, "tag")) { Some(v) => shown(v), None => String::from("none") });
     0
 }

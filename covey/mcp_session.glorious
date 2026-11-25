@@ -30,7 +30,7 @@ pub mod reflected;
 mod mcp;
 
 use ecs::{App, Query, chain};
-use mcp::{Json, JStr, JNum, JArr, JObj, session_channel, parse_json, field, object, written};
+use mcp::{Json, JStr, JNum, JArr, JObj, session_channel, parse_json, field, object, written, jstr};
 use std::reflect::{Described};
 use std::thread::{Receiver, try_recv};
 
@@ -52,9 +52,6 @@ fn find_from(text: Str, part: Str, at: Int) -> Option<Int> {
 fn take(text: Str, n: Int) -> Str {
     if(n <= 0) { "" } else { match(text) { StrEnd => "", StrChar(c, rest) => StrChar(c, take(rest, n - 1)) } }
 }
-fn drop(text: Str, n: Int) -> Str {
-    if(n <= 0) { text } else { match(text) { StrEnd => "", StrChar(_, rest) => tail drop(rest, n - 1) } }
-}
 
 
 pub struct Update
@@ -72,7 +69,7 @@ fn reply_text(r: Receiver<Str>) -> Str {
     match(try_recv(&r)) {
         Some(t) => let reply = parse_json(t); match(field(&reply, "result")) {
             Some(result) => match(field(result, "content")) {
-                Some(content) => match(content) { JArr(items) => match(field(&items[0], "text")) { Some(x) => match(x) { JStr(s) => *s, _ => "" }, None => "" }, _ => "" },
+                Some(content) => match(content) { JArr(items) => match(field(&items[0], "text")) { Some(x) => match(x) { JStr(s) => s.to_str(), _ => "" }, None => "" }, _ => "" },
                 None => ""
             },
             None => ""
@@ -81,7 +78,13 @@ fn reply_text(r: Receiver<Str>) -> Str {
     }
 }
 fn is_error(r: Receiver<Str>) -> Bool { match(try_recv(&r)) { Some(t) => contains(t, "\"isError\":true"), None => false } }
-fn args(pairs: Vec<(Str, Str)>) -> Json { object((std::vec::map(pairs, fn(p: (Str, Str)) -> (Str, Json) { let (k, v) = p; (k, JStr(v)) }))) }
+fn args(pairs: Vec<(&str, &str)>) -> Json {
+    let mut out = Vec::new();
+    let mut each = pairs.into_iter();
+    let mut more = true;
+    while({ more }) { match(each.next()) { Some((k, v)) => Vec::push(&mut out, (k, jstr(v))), None => more = false } };
+    object(out)
+}
 fn shown(b: Bool) -> Str { if(b) { "true" } else { "false" } }
 
 fn main() -> Int {
@@ -96,15 +99,16 @@ fn main() -> Int {
     session.pump(&mut app);
     say(shown(match(try_recv(&init)) { Some(t) => contains(t, "\"serverInfo\""), None => false }));
     let tools = match(try_recv(&list)) { Some(t) => t, None => "" };
-    say(shown(std::vec::all(Vec::from_array(["overview", "explain", "history", "step", "what_if", "why_not", "asm"]), fn(n: Str) -> Bool { contains(tools, "\"name\":\"" ++ n ++ "\"") })));
+    say(shown(std::vec::all(Vec::from_array(["overview", "explain", "history", "step", "what_if", "why_not", "asm"]), fn(n: &str) -> Bool { contains(tools, "\"name\":\"" ++ n ++ "\"") })));
     say(shown(match(try_recv(&none)) { Some(_) => false, None => true }));
 
-    let emitted = client.call("emit", object(Vec::from_array([("label", JStr("Update")), ("count", JNum(3))])));
+    let emitted = client.call("emit", object(Vec::from_array([("label", jstr("Update")), ("count", JNum(3))])));
     session.pump(&mut app);
     say(reply_text(emitted));
     say(match(app.world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 });
 
-    let entity = show(e.index) ++ "v" ++ show(e.generation);
+    let entity_text = e.index.to_string() + "v" + e.generation.to_string().as_str();
+    let entity = entity_text.as_str();
     let overview = client.call("overview", args(Vec::new()));
     let shown_entity = client.call("entity", args(Vec::from_array([("id", entity)])));
     let explained = client.call("explain", args(Vec::from_array([("entity", entity), ("component", "Hp")])));
@@ -123,7 +127,7 @@ fn main() -> Int {
     say(shown(is_error(missing)));
 
     // (With Damage raised, Hp drops further in the edited copy only.)
-    let what_if = client.call("what_if", object(Vec::from_array([("label", JStr("Update")), ("frames", JNum(1)),
+    let what_if = client.call("what_if", object(Vec::from_array([("label", jstr("Update")), ("frames", JNum(1)),
         ("edits", JArr(Vec::from_array([args(Vec::from_array([("entity", entity), ("component", "Damage"), ("field", "0"), ("value", "20")]))])))])));
     let before = match(app.world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 };
     session.pump(&mut app);

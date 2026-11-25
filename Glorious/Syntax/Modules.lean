@@ -1056,7 +1056,8 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
         if let some en := lookupIn (ctx.of name) .value name then
           if en.kind == .fn || en.kind == .method then
             let alts := (← own true).map (·.entry.global)
-            unless alts.isEmpty || id == 0 do
+            -- (None: still a dot call, which the checker is told.)
+            unless id == 0 do
               modifyThe St fun s => { s with dotAlts := (id, alts) :: s.dotAlts }
             -- (Marked: whether it is borrowed for the call is decided once
             -- every function's declaration has been seen.)
@@ -1069,8 +1070,9 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
         let fieldNamed := ((← getThe St).fieldsNamed.getD name #[]).any fun (path, p) => p || path == ctx.here
         unless fieldNamed do
           let found ← own true
-          if found.length > 1 && id != 0 then
-            modifyThe St fun s => { s with dotAlts := (id, found.map (·.entry.global)) :: s.dotAlts }
+          -- (One: no other, but a dot call, which the checker is told.)
+          if id != 0 then
+            modifyThe St fun s => { s with dotAlts := (id, if found.length > 1 then found.map (·.entry.global) else []) :: s.dotAlts }
           if let bd :: _ := found then
             liftM (noteUse ctx.here bd.entry)
             let receiver ← resolveExprF ctx bound receiver

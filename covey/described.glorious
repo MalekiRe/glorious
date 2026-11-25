@@ -24,33 +24,36 @@ use std::reflect::{Described, NoValue, FlagValue, WholeValue, FloatValue, CharVa
 pub struct Armor { pub value: u8, tough: Bool }
 pub struct Hp(pub Int)
 
-fn shown(d: Described) -> Str {
+fn shown(d: Described) -> String {
     match(d) {
-        NoValue => "()",
-        FlagValue(b) => if(b) { "true" } else { "false" },
-        WholeValue(n) => show(n),
-        FloatValue(_) => "float",
-        CharValue(_) => "char",
+        NoValue => String::from("()"),
+        FlagValue(b) => String::from(if(b) { "true" } else { "false" }),
+        WholeValue(n) => n.to_string(),
+        FloatValue(_) => String::from("float"),
+        CharValue(_) => String::from("char"),
         TextValue(t) => t,
-        StructValue(name, fields) => let mut each = fields.into_iter(); name ++ "{" ++ std::iterator::fold(&mut each, "", fn(out: Str, f: (Str, Described)) -> Str { let (n, v) = f; out ++ " " ++ n ++ ": " ++ shown(v) }) ++ " }",
-        ListValue(_) => "list",
-        OpaqueValue(n) => "opaque " ++ n
+        StructValue(name, fields) =>
+            let mut out = String::from(name) + "{";
+            let mut each = fields.into_iter();
+            let mut more = true;
+            while({ more }) { match(each.next()) { Some((n, v)) => out.push_str(" "); out.push_str(n); out.push_str(": "); out.push_str(shown(v).as_str()), None => more = false } };
+            out + " }",
+        ListValue(_) => String::from("list"),
+        OpaqueValue(n) => String::from("opaque ") + n
     }
 }
-fn said(r: Result<Described, Str>) -> Str { match(r) { Ok(d) => shown(d), Err(e) => e } }
+fn said(r: Result<Described, String>) -> String { match(r) { Ok(d) => shown(d), Err(e) => e } }
 
 fn main() -> Int {
     let mut app = App::new().register<Armor>().register<Hp>().build();
     let e = app.world.spawn_bundle((Armor { value: 3, tough: false }, Hp(1)));
-    say(match(app.world.describe_component(e, "Armor")) { Some(d) => shown(d), None => "none" });
-    say(match(app.world.editable_fields("Armor")) {
-        Some(fs) => let mut out = ""; let mut i = 0; while({ i < fs.len() }) { out = if(out == "") { fs[i] } else { out ++ " " ++ fs[i] }; i = i + 1 }; out,
-        None => "none" });
+    say(match(app.world.describe_component(e, "Armor")) { Some(d) => shown(d), None => String::from("none") });
+    say(match(app.world.editable_fields("Armor")) { Some(fs) => std::text::join(fs, " "), None => String::from("none") });
     let before = app.world.tick();
     say(said(app.world.set_field(e, "Armor", "value", "200")));
     say(said(app.world.set_field(e, "Armor", "value", "300")));
     say(said(app.world.set_field(e, "Armor", "tough", "true")));
-    match(app.world.get<Armor>(e)) { Some(a) => say(show(int(a.value)) ++ " " ++ (if(a.tough) { "true" } else { "false" })), None => () };
+    match(app.world.get<Armor>(e)) { Some(a) => say(int(a.value).to_string() + " " + (if(a.tough) { "true" } else { "false" })), None => () };
     say(if(len_at(&app.world.changes_since<Armor>(before)) == 1) { "true" } else { "false" });
     say(said(app.world.set_field(e, "Hp", "0", "7")));
     say(said(app.world.set_field(e, "Nothing", "0", "7")));

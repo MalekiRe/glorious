@@ -8047,6 +8047,27 @@ could, which left a program not lowered (laid out by its types):
 - An inclusion of effects says the function it was found in, for the
   message.
 
+## Dot calls by the receiver's type, as Rust's
+
+- `&str` and `&[T]` are values (`StrRef`, `SliceRef`): their own functions
+  take the view whole (`fn len(s: Self)`), as Rust's `&self` of a `str` is
+  the reference. A dot call of a reference to one is of what it points to
+  (`part.len()` of a `part: &&str`, a name), and of a field through a
+  reference the function borrows, `fuel.0.to_string()`, the field is
+  borrowed where it is. A dot call the resolver found one function for is
+  told to the checker as a dot call, for both.
+- A receiver whose type is not known yet is of what a trait's single
+  implementation decides (`convert(Both(1, "xy"))`'s `(s, n)`, `s.len()`),
+  and of the field reads that waited for a type (`pair.0` of `let pair =
+  &fs[0]`) once they are settled.
+- Not yet: a call's result is not dereferenced for a dot call on it
+  (`(*v.index(i)).is_empty()` is written so); reading it again for that
+  made chains of calls exponential.
+- The machine's cells are declared beside `[T; N]`: a program that is not
+  checked has no `Fixed`.
+- `debugtext`, `reflected`, `described`, `asm`, the `mcp` JSON and tools
+  are written over `String` and `&str`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
