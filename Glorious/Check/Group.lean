@@ -655,6 +655,13 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   -- `f<T>(..)`; what the body needs is kept beside it, `schemeWithin`.)
   let fns := (← get).fns
   let params := (← get).typeParams
+  -- (What `'static` holds, a group's own: what a function's borrows are
+  -- held by is nothing to any other's, and is let go after it.)
+  let staticOut ← match (← get).staticCap with
+    | some c => do
+      let root ← findCap c
+      pure (some (root, (← get).capOut.getD root #[]))
+    | none => pure none
   -- (A constant's type is its value's.)
   let sigs := if signature then [] else decls.filterMap fun d =>
     if Syntax.isConstFn d.name then none
@@ -700,6 +707,8 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   (fun s => Glorious.Trace.said "loans" fun _ => (timedM "group: loans" (checkLoans loansAt cellsAt) : M Unit).run s : M Unit)
   (fun s => Glorious.Trace.said "bounds" fun _ => (timedM "group: bounds" (settleBounds decls defs) : M Unit).run s : M Unit)
   modify fun s => { s with assocUses := #[] }
+  if let some (root, out) := staticOut then
+    modify fun s => { s with capOut := s.capOut.set! root out }
   for (name, sig, ids) in sigs do
     modify fun s => match s.fns[name]? with
       | some body =>
