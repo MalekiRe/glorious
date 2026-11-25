@@ -241,11 +241,13 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   let extra := fun (f : Nat) =>
     hash (st.armFns.contains f, st.ncaps[f]?, givenUpBy[f]?, anySet.contains f,
       dropsBy[f]?, (capBy.getD f []).mergeSort (fun (a : Nat × Nat) b => a.1 ≤ b.1))
+  -- (What closures capture and which destroy which are each function's,
+  -- in `extra`: a change to one function's is not every function's.)
   let globals := hash (items.filter (fun
       | .fn .. => false
       | .pub _ (.fn ..) => false
       | _ => true),
-    envSizes, st.strict, st.regions, st.loans, st.ranked, st.widen, st.anyUnknown, p.drops)
+    st.strict, st.regions, st.loans, st.ranked, st.widen, st.anyUnknown)
   let n := st.fns.size
   let members := (List.range n).foldl (fun (m : Std.HashMap Nat (List Nat)) f =>
     let r := (st.scc[f]?).getD f
