@@ -742,6 +742,9 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           refreshCopies
           made := (k, st) :: made
     let rest := (groups.zipIdx.drop start).toArray
+    -- (What the unit's declarations say of types left to implementations,
+    -- `type Kind = OneToMany`, answered where they ask it, before any body.)
+    settleAssocsAll
     -- Each function's type as its signature says, first.
     let pre ← get
     -- (Where each group numbers from is part of what it is checked from.)
