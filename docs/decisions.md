@@ -8136,8 +8136,8 @@ could, which left a program not lowered (laid out by its types):
   not on another, is kept in a variable where the clause starts
   (`Decision.letMut` at the statement the clause is in), and so destroyed
   where it was not used, as Rust's drop flags do: `examples/json` gives
-  its `name` away on one path. Not yet: reading `Token<'s>` through `&'a
-  Spot<'s>` was said to depend on `'a` (the calculator takes one lifetime).
+  its `name` away on one path. `Token<'s>` read through `&'a Spot<'s>` is
+  of `'s` alone.
 
 ## The ECS and its devtools over `String` and `&str`
 
@@ -8153,10 +8153,15 @@ could, which left a program not lowered (laid out by its types):
 - A text literal is of any lifetime it is asked (Rust's `'static` where a
   shorter is wanted); a value read of a type with `'static` in it, through
   what is read only, is too (`shortenStatic`): `l.names[0] == name` of a
-  `'static` name and a borrowed one. Not yet: where the type is known only
-  once an implementation is found (`labels[i] == name` of an `Index`) the
-  value is first given a name; `[what, temp.as_str()]` of a parameter's
-  text and a temporary, an array of one lifetime, is written with `+`.
+  `'static` name and a borrowed one, also where the type is known only once
+  an implementation is found (`labels[i] == name` of an `Index`).
+- A type not known yet that a value is given as, an argument's or a
+  clause's result, is the value's at lifetimes of its own, which the
+  value's outlive (`freshLifetimes`, in `fitAtCore`); what else is given
+  there need only outlive them too, as Rust's subtyping has it:
+  `[what, temp.as_str()]` of a parameter's text and a temporary, `if(c) {
+  what } else { s.as_str() }`. A lifetime the function declares stays
+  itself (so that what does not fit is said of it).
 - A field through a reference waits for the implementation that decides
   what the reference is to (`settleAssocsAll` in `fieldAtThrough`).
 

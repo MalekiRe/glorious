@@ -550,6 +550,26 @@ partial def freshSigCaps (t : Ty) : M Ty := do
     pure (.fn ps r effs tail cap)
   | other => pure other
 
+/-- A type with each reference's lifetime anew (one for each it had), as
+far as the type is known: what values of it at lifetimes of their own can
+each be given as (`fitLifetimes`). -/
+partial def freshLifetimes (t : Ty) : M Ty := do
+  let rec go (t : Ty) : StateT (List (Nat × Nat)) M Ty := do
+    match ← (find t : M Ty) with
+    | .con n args => pure (.con n (← args.mapM go))
+    | .tuple args => pure (.tuple (← args.mapM go))
+    | .ref how inner cap => do
+      let root ← (findCap cap : M Nat)
+      let c ← match (← get).lookup root with
+        | some c => pure c
+        | none => do
+          let c ← (freshCap : M Nat)
+          modify ((root, c) :: ·)
+          pure c
+      pure (.ref how (← go inner) c)
+    | other => pure other
+  (go t).run' []
+
 /-- What a name in an expression refers to. -/
 inductive Head where
   | local (b : Binding)
@@ -1118,6 +1138,22 @@ def fitAtCore (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Si
   -- not made one: a reference given where a shorter one will do is not
   -- thereby taken to borrow what the other one borrows.
   if (← mentionsRef expected) || (← mentionsRef actual) then
+    -- (What is not known yet is made of what is given at lifetimes of its
+    -- own, which what is given outlives, so that what else is given there,
+    -- an array's next element, a branch's other result, need only outlive
+    -- them too, as Rust's subtyping has it. Not of a lifetime the function
+    -- declares, which stays itself.)
+    let declared ← (refCaps (← zonk actual)).anyM fun c => do
+      pure ((← get).rigidCaps.lookup (← findCap c)).isSome
+    if let .var _ ← find expected then
+      unless declared do
+        let fresh ← freshLifetimes actual
+        let saved ← get
+        try
+          unify expected fresh
+          fitLifetimes .co expected actual true
+          return none
+        catch _ => set saved
     if (← tryLifetimes expected actual true).isNone then return none
   try
     unifyAt what expected actual

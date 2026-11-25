@@ -75,6 +75,17 @@ x
 0
 0
 #### case
+#### Shared references of several lifetimes where one type is wanted, an
+#### array's elements, a branch's results: of a lifetime each outlives.
+fn pair(what: &str, n: Int) -> Int { let parts = [what, n.to_string().as_str()]; parts[0].len() + parts[1].len() }
+fn pick(what: &str, n: Int) -> Int { let s = n.to_string(); let p = if(n > 2) { what } else { s.as_str() }; p.len() }
+fn main() -> Int { say(pair("x", 345)); say(pick("xy", 3)); say(pick("xy", 1)); 0 }
+#### expect
+4
+2
+1
+0
+#### case
 #### A field by number of an element that is a reference: read through it.
 struct P(Int)
 fn total(ps: &[&P]) -> Int { let mut s = 0; let mut i = 0; while({ i < ps.len() }) { s = s + ps[i].0; i = i + 1 }; s }
