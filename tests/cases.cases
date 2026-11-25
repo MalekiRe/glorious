@@ -3315,7 +3315,7 @@ went wrong
 fn f(a: i8, b: u8) -> i8 { a + b }
 fn main() -> Int { 0 }
 #### expect
-error: 1:28: in `f`: `i8` does not implement `Add<u8>`
+error: 1:28: in `f`: argument 2 of `+`: expected `i8`, found `u8`
 #### case
 fn twice<T>(x: T) -> T where T: Add, T: Use<[0, *]> { x + x }
 fn main() -> Int { say(twice(3)); say(twice(3u8)); say(twice(1.5)); 0 }

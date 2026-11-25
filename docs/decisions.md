@@ -7983,9 +7983,12 @@ the bytes), `String + &str` (`impl<'a> Add<&'a str> for String`), a
 
 What it took of the compiler:
 
-- A text written where a trait's argument is wanted, every implementation
-  of which for the type it is asked of takes `&str` there, is a `&str`
-  (`textWantedAt`): `owned + " more"`.
+- An argument wanted where a trait's argument is, of a known type that has
+  one implementation of the trait, is wanted as that implementation's
+  (`argDecidedAt`), as Rust's single implementation decides it:
+  `owned + " more"` and `owned + &other` (a `&String` then fitted to `&str`
+  by `string_as_str`). `i8 + u8` is again "argument 2 of `+`: expected
+  `i8`, found `u8`".
 - An implementation whose trait arguments name its own lifetimes is
   generic, the only one for its type (`impl<'a> Add<&'a str> for String`).
 - The prelude and library are compacted before they are checked once for
