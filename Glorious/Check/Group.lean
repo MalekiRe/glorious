@@ -662,10 +662,8 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   let outerBase := (← get).capsBase
   let outerUndo := (← get).capUndo
   modify fun s => { s with capsBase := s.caps.size, capUndo := #[] }
-  -- (A constant's type is its value's.)
   let sigs := if signature then [] else decls.filterMap fun d =>
-    if Syntax.isConstFn d.name then none
-    else (fns[d.name]?).map fun sig => (d.name, sig, params.lookup d.name)
+    (fns[d.name]?).map fun sig => (d.name, sig, params.lookup d.name)
   let mut defs : List (String × Ty) := []
   let mut reused : List (String × Ty) := []
   if !signature then
@@ -734,7 +732,8 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
               | (some b, some a) => some (b, a)
               | _ => none
           | _, _ => []
-        let call := withBodyParts sig body written
+        -- (A constant's type is its value's: a call of it, that.)
+        let call := if Syntax.isConstFn name then some body else withBodyParts sig body written
         { s with
           bodySchemes := s.bodySchemes.insert name body
           fns := s.fns.insert name sig
@@ -742,7 +741,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
             | some call => s.fnCalls.insert name call
             | none => s.fnCalls
           typeParams := match ids with
-            | some ids => (name, ids) :: s.typeParams
+            | some ids => if Syntax.isConstFn name then s.typeParams else (name, ids) :: s.typeParams
             | none => s.typeParams }
       | none => s
   -- Later functions follow calls into these as they will be elaborated.

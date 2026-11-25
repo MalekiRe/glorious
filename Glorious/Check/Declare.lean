@@ -1010,8 +1010,11 @@ def declare (items : List Item) : M Unit := do
   -- most once (exactly once, of one used exactly once), as Rust's
   -- `Box<dyn FnOnce()>`: so said of its capture, for every use of the type.
   -- (Any other is called any number of times, `Box<dyn Fn()>`: `checkGroup`.)
+  let saidHere := items.filterMap fun
+    | .use head _ _ => some head
+    | _ => none
   for (head, (must, once)) in (← get).useDecls.toList do
-    if once then
+    if once && saidHere.contains head then
       let ctors := (((← get).types[head]?).map (·.ctors)).getD []
       for c in ctors do
         if let some sig := (← get).ctors[c]? then
