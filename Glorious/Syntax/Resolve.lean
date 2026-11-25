@@ -1073,8 +1073,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
           | .call _ f #[] =>
             -- (Written as the resolver has written texts by now: the
             -- prelude's constructors by their own names.)
-            if b.bare? f == some selfNameFn then some (flatExpr ((last h).toList.foldr (fun c rest =>
-              .call 0 (.name none "StrChar") [scalarValue "char_of" (c.toNat : Int), rest]) (.name none "StrEnd")))
+            if b.bare? f == some selfNameFn then some (flatExpr (textValue ((last h).toList.map Char.toNat)))
             else none
           | _ => none }
         let ms' := ms.map fun

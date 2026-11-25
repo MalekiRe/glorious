@@ -149,10 +149,10 @@ partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := d
 
 partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := do
   -- A text written is a `&'static str`: its UTF-8 bytes, where the program
-  -- has them from its start (but where a `Str` is wanted, `textOwned`).
+  -- has them from its start.
   -- (Of any lifetime it is asked, as Rust's `'static` one is wherever a
   -- shorter is wanted: `["<", n.to_string().as_str()]`.)
-  if !(← get).textOwned && ((← get).body.textCodes e0).isSome then
+  if ((← get).body.textCodes e0).isSome then
     let t ← match ← resolveType [] false (.name "StrRef" [.name "'static" []]) with
       | .con n [_] => pure (Ty.con n [← freshTy])
       | t => pure t
@@ -579,9 +579,6 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
     let _ ← argDecidedAt v
   -- A text written where `&str` is wanted is one.
   if ← textAt p a then return none
-  if ← ownedTextAt p a then
-    let t ← withTextOwned (inferExpr scope amb a)
-    return ← fitAt scope amb what site p t
   -- A block where what is wanted is known and is no callable: it is run
   -- there, and is its value (5.4).
   if let some (id, _) := b.plainBlock a then
@@ -1536,11 +1533,6 @@ partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
     if mark == Syntax.ascribeMark then
       let expected ← resolveType (← get).rigidParams false (TypeExpr.ofExpr (Flat.treeExpr b ty))
       if ← textAt expected value then return some expected
-      if ← ownedTextAt expected value then
-        let found ← withTextOwned (inferExpr scope amb value)
-        match ← fitAt scope amb "the value of a `let` with a type" none expected found with
-        | none => return some expected
-        | some e => throw e
       if let .int n := b.expr value then
         match ← literalAt expected n value with
         | some none => return some expected
@@ -2115,18 +2107,9 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
         if let .con n [] ← find expected then
           if Syntax.isScalar n then
             modify fun s => { s with wantResult := some (id, expected) }
-      -- A text a body ends with, where `&str` is wanted of the body; or a
-      -- `Str`. Where what is wanted is not known yet, which it is is settled
-      -- with the function (`settleTexts`).
+      -- A text a body ends with, where `&str` is wanted of the body.
       if let some (expected, _) := want then
-        if (b.textCodes e).isSome && !(← get).textOwned then
-          if let .var _ ← find expected then
-            let v ← freshTy
-            modify fun s => { s with pendingTexts := s.pendingTexts.push (s.owner, e, v) }
-            return ← finish v false
         if ← textAt expected e then return expected
-        if ← ownedTextAt expected e then
-          return ← finish (← withTextOwned (inferExpr scope amb e)) false
       -- A whole number a body ends with is of the type wanted of the body.
       if let (.int n, some (expected, _)) := (b.expr e, want) then
         match ← literalAt expected n e with

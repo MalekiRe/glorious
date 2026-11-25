@@ -182,7 +182,6 @@ impl<T> IndexedMut for Vec<T> where T: Use<[1, 1]> {
     fn place_at(i: Int, v: &mut Vec<T>) -> &mut <Vec<T> as Indexed>::Element { vec_must_be_at(&*v, i); vec_at_mut(v, i) }
 }
 // Written as an array is: `[a, b]`.
-impl<T> Show for Vec<T> where T: Show { fn fmt(v: &Vec<T>) -> Str { elements_text(v) } }
 // Equal where each element is.
 impl<T> Eq for Vec<T> where T: Eq, T: Use<[0, *]> {
     fn ==(a: Vec<T>, b: Vec<T>) -> Bool {

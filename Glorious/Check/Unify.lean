@@ -20,7 +20,7 @@ def bindRow (id : Nat) (r : Row) : M Unit :=
 
 /-- Can two types never be the same, whatever what is still unknown in them
 turns out to be? Two instances of an effect whose arguments are apart are two
-effects (`Store<Int>`, `Store<Str>`); a function's own type parameters are
+effects (`Store<Int>`, `Store<String>`); a function's own type parameters are
 each apart from the other and from every type that is not a parameter. -/
 partial def apart (a b : Ty) : M Bool := do
   match ← find a, ← find b with

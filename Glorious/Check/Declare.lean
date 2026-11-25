@@ -798,7 +798,7 @@ def declareImpl (params : List String) (tr head : String) (args : List String) (
   if !extra.isEmpty || shared || head.startsWith "(fn" || head.startsWith "(&" then
     modify fun s => { s with patterned := true }
   -- Two implementations of a trait for one type: no type is both's
-  -- (`From<Int>`, `From<Str>`), or one asks more of the type than the
+  -- (`From<Int>`, `From<String>`), or one asks more of the type than the
   -- other (`Wrap<Int>`, `Wrap<T>`), and is then the one for the types it
   -- fits. Not the same twice, and not two that some type fits with
   -- neither asking more.

@@ -30,54 +30,22 @@ fn to<T, U>(x: T) -> U where T: Whole, U: Whole, T: Use<[1, 1]>, U: Use<[1, 1]> 
 // One type made from another: `impl From<Meters> for Feet`.
 trait From<T> { fn from(T) -> Self }
 
-// Text: the characters, one after another.
-enum Str { StrEnd, StrChar(char, Str) }
-
-infixr 5 ++
-fn ++(a: Str, b: Str) -> Str {
-    match(a) {
-        StrEnd => b,
-        StrChar(c, rest) => StrChar(c, rest ++ b)
-    }
-}
-
-fn length(text: Str) -> Int {
-    match(text) {
-        StrEnd => 0,
-        StrChar(_, rest) => int_add(1, length(rest))
-    }
-}
-
-impl Eq for Str {
-    fn ==(a: Str, b: Str) -> Bool {
-        match((a, b)) {
-            (StrEnd, StrEnd) => true,
-            (StrChar(c, x), StrChar(d, y)) =>
-                match(int_eq(char_bits(c), char_bits(d))) { 0 => false, _ => x == y },
-            _ => false
-        }
-    }
-}
-
-// A value as text.
-// What can be written as text, looked at where it is: nothing of it is
-// copied or taken. `show(x)` writes what it is given; `show(&x)` what `x` is.
-trait Show { fn fmt(&Self) -> Str }
-fn show<T>(value: T) -> Str where T: Show { let held = value; Show::fmt(&held) }
-impl<'a, T> Show for &'a T where T: Show { fn fmt(r: &&'a T) -> Str { Show::fmt(*r) } }
-impl<'a, T> Show for &'a mut T where T: Show { fn fmt(r: &&'a mut T) -> Str { Show::fmt(&**r) } }
-impl Show for Str { fn fmt(text: &Str) -> Str { *text } }
-impl Show for char { fn fmt(c: &char) -> Str { StrChar(*c, StrEnd) } }
-
-// How numbers are written as text. Only what is `pub` is the prelude's.
+// How numbers are written as text: their characters put after a `String`'s.
 mod number_text {
-    // The digits of a number that is not positive, the first first, before `rest`.
-    pub fn digits_before(n: Int, rest: Str) -> Str {
-        let digit = char_of(int_sub(48, int_rem(n, 10)));
-        match(int_div(n, 10)) {
-            0 => StrChar(digit, rest),
-            more => tail digits_before(more, StrChar(digit, rest))
-        }
+    // The digits of a number that is not positive, the first first.
+    pub fn push_nonpositive(out: &mut String, n: Int) {
+        match(int_div(n, 10)) { 0 => (), more => push_nonpositive(out, more) };
+        String::push(out, char_of(int_sub(48, int_rem(n, 10))))
+    }
+    // The digits of a number that is not positive, as characters.
+    fn digit_chars(out: &mut Vec<char>, n: Int) {
+        match(int_div(n, 10)) { 0 => (), more => digit_chars(out, more) };
+        Vec::push(out, char_of(int_sub(48, int_rem(n, 10))))
+    }
+    // The digits of 128 bits read without a sign.
+    pub fn push_unsigned(out: &mut String, n: Int) {
+        match(uw_div(n, 10)) { 0 => (), more => push_unsigned(out, more) };
+        String::push(out, char_of(int_add(48, uw_rem(n, 10))))
     }
 
     // A floating point number as text: the fewest digits that give it back.
@@ -94,107 +62,74 @@ mod number_text {
             _ => (digits, exp10)
         }
     }
-
-    fn zeros(count: Int, rest: Str) -> Str {
-        match(count) {
-            0 => rest,
-            _ => StrChar('0', zeros(int_sub(count, 1), rest))
-        }
+    fn push_zeros(out: &mut String, count: Int) {
+        let mut i = 0;
+        while({ int_lt(i, count) == 1 }) { String::push(out, '0'); i = int_add(i, 1) }
     }
-
-    // The digits with a point after the first `before` of them.
-    fn point_after(digits: Str, before: Int) -> Str {
-        match(before) {
-            0 => StrChar('.', digits),
-            _ => match(digits) {
-                StrChar(c, rest) => StrChar(c, point_after(rest, int_sub(before, 1))),
-                StrEnd => StrEnd
-            }
-        }
-    }
-
-    fn float_scientific<T>(digits: Str, exponent: T) -> Str where T: Show {
-        match(digits) {
-            StrChar(c, StrEnd) => StrChar(c, StrChar('e', show(exponent))),
-            StrChar(c, rest) => StrChar(c, StrChar('.', rest ++ StrChar('e', show(exponent)))),
-            StrEnd => StrEnd
-        }
-    }
-
-    // `exp10` is the power of ten of the last digit, `first` that of the first.
-    fn float_placed(digits: Str, exp10: Int, first: Int) -> Str {
+    // The digits, `exp10` the power of ten of the last and `first` that of the
+    // first: placed with a point, or `d.ddde..` where they are far from it.
+    fn push_placed(out: &mut String, digits: &Vec<char>, exp10: Int, first: Int) {
+        let n = Vec::len(digits);
         match(int_add(int_lt(first, -5), int_lt(16, first))) {
             0 => match(int_lt(exp10, 0)) {
-                0 => digits ++ zeros(exp10, ".0"),
+                0 =>
+                    let mut i = 0;
+                    while({ int_lt(i, n) == 1 }) { String::push(out, *Vec::index(digits, i)); i = int_add(i, 1) };
+                    push_zeros(out, exp10);
+                    String::push_str(out, ".0"),
                 _ => match(int_lt(first, 0)) {
-                    0 => point_after(digits, int_add(first, 1)),
-                    _ => StrChar('0', StrChar('.', zeros(int_sub(-1, first), digits)))
+                    0 =>
+                        let mut i = 0;
+                        while({ int_lt(i, n) == 1 }) {
+                            if(int_eq(i, int_add(first, 1)) == 1) { String::push(out, '.') } else { () };
+                            String::push(out, *Vec::index(digits, i));
+                            i = int_add(i, 1)
+                        },
+                    _ =>
+                        String::push_str(out, "0.");
+                        push_zeros(out, int_sub(-1, first));
+                        let mut i = 0;
+                        while({ int_lt(i, n) == 1 }) { String::push(out, *Vec::index(digits, i)); i = int_add(i, 1) }
                 }
             },
-            _ => float_scientific(digits, first)
+            _ =>
+                String::push(out, *Vec::index(digits, 0));
+                if(int_lt(1, n) == 1) {
+                    String::push(out, '.');
+                    let mut i = 1;
+                    while({ int_lt(i, n) == 1 }) { String::push(out, *Vec::index(digits, i)); i = int_add(i, 1) }
+                } else { () };
+                String::push(out, 'e');
+                push_whole(out, first)
         }
     }
-
-    // The digits of 128 bits read without a sign.
-    pub fn unsigned_digits(n: Int, rest: Str) -> Str {
-        let digit = char_of(int_add(48, uw_rem(n, 10)));
-        match(uw_div(n, 10)) {
-            0 => StrChar(digit, rest),
-            more => tail unsigned_digits(more, StrChar(digit, rest))
+    pub fn push_whole(out: &mut String, n: Int) {
+        match(int_lt(n, 0)) {
+            0 => push_nonpositive(out, wide_sub(0, n)),
+            _ => String::push(out, '-'); push_nonpositive(out, n)
         }
     }
-
-    pub fn float_text(negative: Int, wide: Int, held: Int, single: Int, infinite: Int) -> Str {
-        let none: Str = "";
-        let sign = match(negative) { 0 => none, _ => StrChar('-', StrEnd) };
+    pub fn push_float(out: &mut String, negative: Int, wide: Int, held: Int, single: Int, infinite: Int) {
         match(f64_eq(wide, wide)) {
-            0 => let nan: Str = "NaN"; nan,
-            _ => match(int_eq(held, infinite)) {
-                0 => match(held) {
-                    0 => sign ++ "0.0",
-                    _ =>
-                        let (digits, exp10) = float_shortest(wide, held, single, 1);
-                        let text = digits_before(int_sub(0, digits), StrEnd);
-                        sign ++ float_placed(text, exp10, int_add(exp10, int_sub(length(text), 1)))
-                },
-                _ => sign ++ "inf"
-            }
+            0 => String::push_str(out, "NaN"),
+            _ =>
+                match(negative) { 0 => (), _ => String::push(out, '-') };
+                match(int_eq(held, infinite)) {
+                    0 => match(held) {
+                        0 => String::push_str(out, "0.0"),
+                        _ =>
+                            let (digits, exp10) = float_shortest(wide, held, single, 1);
+                            let mut each = Vec::new();
+                            digit_chars(&mut each, int_sub(0, digits));
+                            let n = Vec::len(&each);
+                            push_placed(out, &each, exp10, int_add(exp10, int_sub(n, 1)))
+                    },
+                    _ => String::push_str(out, "inf")
+                }
         }
     }
 }
-use number_text::{digits_before, float_text, unsigned_digits};
-
-// A whole number of any width as text.
-fn show_whole(n: Int) -> Str {
-    match(int_lt(n, 0)) {
-        0 => digits_before(wide_sub(0, n), StrEnd),
-        _ => StrChar('-', digits_before(n, StrEnd))
-    }
-}
-
-impl Show for Int { fn fmt(n: &Int) -> Str { show_whole(*n) } }
-
-// A tuple and a `Result` as text, if their parts are. Truth is `Ok(())`.
-impl Show for () { fn fmt(u: &()) -> Str { "()" } }
-impl<A, B> Show for (A, B) where A: Show, B: Show {
-    fn fmt(p: &(A, B)) -> Str { "(" ++ Show::fmt(&(*p).0) ++ ", " ++ Show::fmt(&(*p).1) ++ ")" }
-}
-impl<A, B, C> Show for (A, B, C) where A: Show, B: Show, C: Show {
-    fn fmt(p: &(A, B, C)) -> Str { "(" ++ Show::fmt(&(*p).0) ++ ", " ++ Show::fmt(&(*p).1) ++ ", " ++ Show::fmt(&(*p).2) ++ ")" }
-}
-impl<T, E> Show for Result<T, E> where T: Show, E: Show {
-    fn fmt(r: &Result<T, E>) -> Str {
-        match(r) {
-            Ok(value) => "Ok(" ++ Show::fmt(value) ++ ")",
-            Err(error) => "Err(" ++ Show::fmt(error) ++ ")"
-        }
-    }
-}
-// Truth, `Result<(), ()>`, as `true` and `false` (preferred, as the more
-// particular implementation, over the one of every `Result`).
-impl Show for Result<(), ()> {
-    fn fmt(b: &Result<(), ()>) -> Str { let yes: Str = "true"; let no: Str = "false"; match(b) { Ok(_) => yes, Err(_) => no } }
-}
+use number_text::{push_whole, push_unsigned, push_float};
 
 // The character at a place of the name of the function a callable is of,
 // as its code (`-1` past its end), and the callable back.
@@ -374,42 +309,7 @@ impl<'a> StrRef<'a> {
     // Where its bytes are.
     fn address(s: Self) -> usize { s.at }
 }
-// The characters UTF-8 bytes from a place on are, as a `Str`; `rest` after.
-fn str_chars(s: &StrRef, i: Int, out: Str) -> Str {
-    match(int_lt(i, 0)) {
-        0 => out,
-        _ => tail str_chars(s, int_sub(i, 1), StrChar(str_char_at(s, i), out))
-    }
-}
 fn str_char_at(s: &StrRef, i: Int) -> char { char_of(u8_bits(StrRef::byte(*s, i))) }
-impl<'a> Show for StrRef<'a> {
-    fn fmt(s: &StrRef<'a>) -> Str { str_decode(s, 0, StrEnd) }
-}
-// The text's characters, decoded from UTF-8 from a place on, before `rest`
-// reversed and then put back in order.
-fn str_decode(s: &StrRef, i: Int, back: Str) -> Str {
-    match(int_lt(i, s.len)) {
-        0 => str_reversed(back, StrEnd),
-        _ =>
-            let b0 = u8_bits(StrRef::byte(*s, i));
-            let (code, n) = match(int_lt(b0, 128)) {
-                1 => (b0, 1),
-                _ => match(int_lt(b0, 224)) {
-                    1 => (int_add(int_mul(int_sub(b0, 192), 64), int_sub(u8_bits(StrRef::byte(*s, int_add(i, 1))), 128)), 2),
-                    _ => match(int_lt(b0, 240)) {
-                        1 => (int_add(int_mul(int_add(int_mul(int_sub(b0, 224), 64), int_sub(u8_bits(StrRef::byte(*s, int_add(i, 1))), 128)), 64),
-                              int_sub(u8_bits(StrRef::byte(*s, int_add(i, 2))), 128)), 3),
-                        _ => (int_add(int_mul(int_add(int_mul(int_add(int_mul(int_sub(b0, 240), 64), int_sub(u8_bits(StrRef::byte(*s, int_add(i, 1))), 128)), 64),
-                              int_sub(u8_bits(StrRef::byte(*s, int_add(i, 2))), 128)), 64), int_sub(u8_bits(StrRef::byte(*s, int_add(i, 3))), 128)), 4)
-                    }
-                }
-            };
-            tail str_decode(s, int_add(i, n), StrChar(char_of(code), back))
-    }
-}
-fn str_reversed(a: Str, out: Str) -> Str {
-    match(a) { StrEnd => out, StrChar(c, rest) => tail str_reversed(rest, StrChar(c, out)) }
-}
 // Two texts are equal where their bytes are.
 impl<'a> Eq for StrRef<'a> {
     fn ==(a: StrRef<'a>, b: StrRef<'a>) -> Bool {
@@ -464,7 +364,6 @@ trait Index {
     fn index_set(Self, Int, Elem) -> Self
 }
 trait Len { fn len(Self) -> Int }
-impl Len for Str { fn len(text: Str) -> Int { length(text) } }
 
 // Whole numbers as types, for how long a `[T; N]` is: the bits from the
 // lowest, `B1<B0<B1<Z>>>` for five. What number a type stands for is its
@@ -642,15 +541,6 @@ fn element_mut<A, T>(a: &mut A, i: Int) -> Option<&mut T> where A: IndexedMut, A
     }
 }
 
-// Characters as a text (`std::text::chars` is a text's characters).
-fn text<A>(a: A) -> Str where A: Indexed<Element = char> { let held = a; text_before(&held, size_at(&held), StrEnd) }
-fn text_before<A>(a: &A, i: Int, rest: Str) -> Str where A: Indexed<Element = char> {
-    match(i) {
-        0 => rest,
-        _ => tail text_before(a, int_sub(i, 1), StrChar(*element_at(a, int_sub(i, 1)), rest))
-    }
-}
-
 // `f(f(f(init, a[0]), a[1]), ..)`, of the elements of anything that has
 // them one after another: an array, a `[T; N]`, a `Vec`, a slice.
 fn fold<A, T, U, e: EffectRow>(a: A, init: U, f: fn(U, T) -> U / {| e}) -> U / {| e}
@@ -667,21 +557,6 @@ where A: Indexed<Element = T>, T: Use<[0, *]>, U: Use<[1, 1]> {
 }
 fn each<A, T, e: EffectRow>(a: A, f: fn(T) -> () / {| e}) -> () / {| e} where A: Indexed<Element = T>, T: Use<[0, *]> { fold(a, (), fn(done, x) { f(x) }) }
 
-// Elements one after another, each written where it is: `[a, b]`.
-fn elements_text<A, T>(a: &A) -> Str where A: Indexed<Element = T>, T: Show { "[" ++ elements_from(a, size_at(a), 0, StrEnd) ++ "]" }
-fn elements_from<A, T>(a: &A, n: Int, i: Int, text: Str) -> Str where A: Indexed<Element = T>, T: Show {
-    match(int_lt(i, n)) {
-        0 => text,
-        _ => tail elements_from(a, n, int_add(i, 1), match(i) { 0 => Show::fmt(element_at(a, i)), _ => text ++ ", " ++ Show::fmt(element_at(a, i)) })
-    }
-}
-
-// A slice written as an array is.
-impl<'a, T> Show for SliceRef<'a, T> where T: Show { fn fmt(s: &SliceRef<'a, T>) -> Str { elements_text(s) } }
-
-// A `[T; N]` written as an array is.
-impl<T, N> Show for Fixed<T, N> where T: Show, N: Known { fn fmt(a: &Fixed<T, N>) -> Str { elements_text(a) } }
-
 // Write a value as text.
 fn say<T>(value: T) where T: Display { let held = value; write_line(&format(&held)) }
 
@@ -696,7 +571,6 @@ trait Clone { fn clone(value: &Self) -> Self }
 trait Deref { type Target; fn deref(value: &Self) -> &Target }
 trait DerefMut { type Target; fn deref_mut(value: &mut Self) -> &mut Target }
 impl Clone for Int { fn clone(v: &Int) -> Int { *v } }
-impl Clone for Str { fn clone(v: &Str) -> Str { *v } }
 impl Clone for char { fn clone(v: &char) -> char { *v } }
 impl Clone for f64 { fn clone(v: &f64) -> f64 { *v } }
 impl Clone for f32 { fn clone(v: &f32) -> f32 { *v } }
@@ -729,8 +603,16 @@ fn some_or_leave<T, R, L, e: EffectRow>(value: Result<T, ()>, target: L, fallbac
 
 // Stopping: what is said is written, and the program stops there, with no
 // cleanup run (the library specification's §6.1).
-fn abort<T>(message: Str) -> T { host_write(message); fixed_get(no_elements(), 0) }
-fn unreachable<T>(message: Str) -> T where T: Use<[1, 1]> { abort(message) }
+// (Written character by character as it is: nothing that can stop the
+// program is called on the way.)
+fn abort<T>(message: &str) -> T {
+    let mut it = Chars { text: message, at: 0 };
+    let mut more = true;
+    while({ more }) { match(it.next()) { Some(c) => host_put(int(c)), None => more = false } };
+    host_line();
+    fixed_get(no_elements(), 0)
+}
+fn unreachable<T>(message: &str) -> T where T: Use<[1, 1]> { abort(message) }
 // What an `Option` or a `Result` has, asked of it as a value's own: `o.map(f)`.
 // (An `Option<T>` is a `Result<T, ()>`, so each is both's.)
 impl<T, E> Result<T, E> {
@@ -739,7 +621,7 @@ impl<T, E> Result<T, E> {
     fn is_ok(value: &Self) -> Bool { match(value) { &Ok(_) => true, &Err(_) => false } }
     fn is_err(value: &Self) -> Bool { match(value) { &Ok(_) => false, &Err(_) => true } }
     fn unwrap(value: Self) -> T where T: Use<[1, 1]> { match(value) { Ok(x) => x, Err(_) => abort("unwrap of nothing") } }
-    fn expect(value: Self, message: Str) -> T where T: Use<[1, 1]> { match(value) { Ok(x) => x, Err(_) => abort(message) } }
+    fn expect(value: Self, message: &str) -> T where T: Use<[1, 1]> { match(value) { Ok(x) => x, Err(_) => abort(message) } }
     fn unwrap_or(value: Self, other: T) -> T { match(value) { Ok(x) => x, Err(_) => other } }
     fn unwrap_or_else<e: EffectRow>(value: Self, other: fn(E) -> T / {| e}) -> T / {| e} where T: Use<[1, 1]>, E: Use<[1, 1]> { match(value) { Ok(x) => x, Err(e) => other(e) } }
     fn map<V, e: EffectRow>(value: Self, f: fn(T) -> V / {| e}) -> Result<V, E> / {| e} where V: Use<[1, 1]>, T: Use<[1, 1]> { match(value) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
@@ -753,12 +635,12 @@ impl<T, E> Result<T, E> {
     }
 }
 fn assert(condition: Result<(), ()>) { match(condition) { Ok(_) => (), Err(_) => abort("assertion failed") } }
-fn assert_message(condition: Result<(), ()>, message: Str) { match(condition) { Ok(_) => (), Err(_) => abort(message) } }
-fn assert_eq<T>(left: &T, right: &T) where T: Eq, T: Show, T: Use<[0, *]> {
-    match(*left == *right) { Ok(_) => (), Err(_) => abort(show(*left) ++ " is not " ++ show(*right)) }
+fn assert_message(condition: Result<(), ()>, message: &str) { match(condition) { Ok(_) => (), Err(_) => abort(message) } }
+fn assert_eq<T>(left: &T, right: &T) where T: Eq, T: Debug, T: Use<[0, *]> {
+    match(*left == *right) { Ok(_) => (), Err(_) => abort((format_debug(left) + " is not " + format_debug(right).as_str()).as_str()) }
 }
-fn assert_ne<T>(left: &T, right: &T) where T: Eq, T: Show, T: Use<[0, *]> {
-    match(*left == *right) { Ok(_) => abort(show(*left) ++ " is what it should not be"), Err(_) => () }
+fn assert_ne<T>(left: &T, right: &T) where T: Eq, T: Debug, T: Use<[0, *]> {
+    match(*left == *right) { Ok(_) => abort((format_debug(left) + " is what it should not be").as_str()), Err(_) => () }
 }
 
 
@@ -794,19 +676,7 @@ fn fixed_same<T, N>(a: &Fixed<T, N>, b: &Fixed<T, N>, i: Int) -> Bool where T: E
 impl<A, B> Ord for (A, B) where A: Ord, B: Ord, A: Use<[0, *]> {
     fn <(x: (A, B), y: (A, B)) -> Bool { match((x, y)) { ((a, b), (c, d)) => a < c or { a == c and { b < d } } } }
 }
-impl Ord for Str {
-    fn <(a: Str, b: Str) -> Bool {
-        match((a, b)) {
-            (_, StrEnd) => false,
-            (StrEnd, _) => true,
-            (StrChar(c, x), StrChar(d, y)) =>
-                match(int_lt(char_bits(c), char_bits(d))) {
-                    0 => match(int_eq(char_bits(c), char_bits(d))) { 0 => false, _ => x < y },
-                    _ => true
-                }
-        }
-    }
-}
+
 
 // A character is its code: any but the codes kept for pairs, up to 10FFFF.
 impl Eq for char { fn ==(a: char, b: char) -> Bool { bool(int_eq(char_bits(a), char_bits(b))) } }
@@ -892,26 +762,3 @@ impl Real for f32 {
 }
 fn f32(n: Int) -> f32 { narrow(f64(n)) }
 
-impl Show for f64 {
-    fn fmt(x: &f64) -> Str {
-        let bits = f64_bits(*x);
-        match(int_lt(bits, 0)) {
-            0 => float_text(0, bits, bits, 0, 9218868437227405312),
-            _ =>
-                let rest = int_sub(bits, -9223372036854775808);
-                float_text(1, rest, rest, 0, 9218868437227405312)
-        }
-    }
-}
-
-impl Show for f32 {
-    fn fmt(x: &f32) -> Str {
-        let bits = f32_bits(*x);
-        match(int_lt(bits, 2147483648)) {
-            0 =>
-                let rest = int_sub(bits, 2147483648);
-                float_text(1, f64_widen(rest, 0), rest, 1, 2139095040),
-            _ => float_text(0, f64_widen(bits, 0), bits, 1, 2139095040)
-        }
-    }
-}

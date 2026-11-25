@@ -5,11 +5,11 @@ public import Glorious.Elab.Base
 /-!
 # Instances of an effect as effects of their own
 
-`effect Store<C> { take() -> [C] }` is a family: `Store<Int>` and `Store<Str>`
+`effect Store<C> { take() -> [C] }` is a family: `Store<Int>` and `Store<String>`
 are two effects, each handled by the nearest handler of exactly that one. Core
 knows an operation by a number, so before a program is elaborated each
 instance it uses is made an effect of its own, with operations of its own:
-`take@<Int>`, `take@<Str>`.
+`take@<Int>`, `take@<String>`.
 
 A function that performs `Store<C>` for a `C` of its caller's choosing is
 written out once for each choice: the checker says, for every call in a

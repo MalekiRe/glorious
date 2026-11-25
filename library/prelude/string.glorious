@@ -9,23 +9,12 @@ impl String {
     // Of borrowed text, its bytes copied: `String::from("abc")`.
     pub fn from(text: &str) -> Self { let mut s = String::new(); String::push_str(&mut s, text); s }
     pub fn from_str(text: &str) -> Self { String::from(text) }
-    // Of a `Str`, its characters as UTF-8.
-    pub fn from_text(text: Str) -> Self { let mut s = String::new(); String::push_text(&mut s, text); s }
     // Of bytes that are UTF-8; the bytes given back if they are not.
     pub fn from_utf8(bytes: Vec<u8>) -> Result<Self, Vec<u8>> {
         match(string_utf8_from(&Vec::as_slice(&bytes), 0)) { Ok(_) => Ok(Self { bytes: bytes }), Err(_) => Err(bytes) }
     }
     pub fn into_bytes(value: Self) -> Vec<u8> { match(value) { String { bytes } => bytes } }
     pub fn as_bytes<'a>(value: &'a Self) -> &'a [u8] { Vec::as_slice(&value.bytes) }
-    // The text as a `Str`. (Its bytes read as the `Vec`'s elements, as they
-    // were put there: so on every machine, a program's bytes laid out or not.)
-    pub fn to_str(value: &Self) -> Str {
-        let mut back: Str = StrEnd;
-        let mut it = String::chars_typed(value);
-        let mut going = true;
-        while({ going }) { match(Chars::next_typed(&mut it, &value.bytes)) { Some(c) => back = StrChar(c, back), None => going = false } };
-        str_reversed(back, StrEnd)
-    }
     // Its characters, read from its bytes as the `Vec`'s elements.
     fn chars_typed(value: &Self) -> Chars<'static> { Chars { text: unsafe { str_at(0usize, Vec::len(&value.bytes)) }, at: 0 } }
     // Another's text put after this one's, byte by byte as the `Vec`'s
@@ -43,10 +32,6 @@ impl String {
         let mut i = 0;
         while({ i < text.len() }) { Vec::push(&mut value.bytes, text.byte(i)); i = i + 1 }
     }
-    // A `Str`'s characters, as UTF-8, put after these.
-    pub fn push_text(value: &mut Self, text: Str) {
-        match(text) { StrEnd => (), StrChar(c, rest) => String::push(value, c); tail String::push_text(value, rest) }
-    }
     // A character, as UTF-8, put after these.
     pub fn push(value: &mut Self, c: char) { string_encode(char_bits(c), &mut value.bytes) }
     pub fn clear(value: &mut Self) { Vec::clear(&mut value.bytes) }
@@ -56,13 +41,6 @@ impl String {
         unsafe { str_at(ptr_mut_address(Vec::as_mut_ptr(&value.bytes)), Vec::len(&value.bytes)) }
     }
 }
-
-// (While `Str` is: borrowed text and a `String` are one wherever one is
-// wanted.)
-coerce str_text
-fn str_text<'a>(s: &'a str) -> Str { let held = s; str_decode(&held, 0, StrEnd) }
-coerce string_text
-fn string_text(s: String) -> Str { let held = s; String::to_str(&held) }
 
 // A `&String` is a `&str` wherever one is wanted, as Rust's is.
 coerce string_as_str
@@ -76,7 +54,6 @@ impl<'a> Add<&'a str> for String {
 }
 impl Clone for String { fn clone(s: &String) -> String { String { bytes: clone(&s.bytes) } } }
 impl Eq for String { fn ==(a: String, b: String) -> Bool { a.bytes == b.bytes } }
-impl Show for String { fn fmt(s: &String) -> Str { String::to_str(s) } }
 
 // A character's code as UTF-8, put after `out`.
 fn string_encode(code: Int, out: &mut Vec<u8>) {
@@ -238,7 +215,7 @@ fn str_mapped(s: &StrRef, low: Int, high: Int, by: Int) -> String {
 // A text's characters, decoded from UTF-8 one at a time.
 struct Chars<'a> { text: &'a str, at: Int }
 impl<'a> Chars<'a> {
-    // The next character of bytes held in a `Vec` (`String::to_str`).
+    // The next character of bytes held in a `Vec`, read as its elements.
     fn next_typed(it: &mut Chars<'a>, bytes: &Vec<u8>) -> Option<char> {
         let n = Vec::len(bytes);
         if(it.at >= n) { None } else {
@@ -319,22 +296,15 @@ impl Formatter {
         } else { () };
         String::push_string(&mut value.text, text)
     }
-    // A `Str`, written as `write_str` writes. (Its characters put in as the
-    // `String`'s elements, not read again through a `&str`: so on every
-    // machine, a program's bytes laid out or not.)
-    pub fn write_text(value: &mut Self, text: Str) {
-        match(text) {
-            StrEnd => (),
-            _ =>
-                if(value.fresh) {
-                    let mut i = 0;
-                    while({ i < value.depth * value.width }) { String::push(&mut value.text, ' '); i = i + 1 };
-                    value.fresh = false
-                } else { () };
-                String::push_text(&mut value.text, text)
-        }
+    // A character, written as `write_str` writes.
+    pub fn write_char(value: &mut Self, character: char) {
+        if(value.fresh) {
+            let mut i = 0;
+            while({ i < value.depth * value.width }) { String::push(&mut value.text, ' '); i = i + 1 };
+            value.fresh = false
+        } else { () };
+        String::push(&mut value.text, character)
     }
-    pub fn write_char(value: &mut Self, character: char) { Formatter::write_text(value, StrChar(character, StrEnd)) }
     pub fn newline(value: &mut Self) {
         String::push_str(&mut value.text, "\n");
         value.fresh = true
@@ -420,8 +390,12 @@ impl<'a, T> Display for &'a mut T where T: Display { fn fmt(r: &&'a mut T, out: 
 impl<'a, T> Debug for &'a T where T: Debug { fn fmt(r: &&'a T, out: &mut Formatter) { Debug::fmt(*r, out) } }
 impl<'a, T> Debug for &'a mut T where T: Debug { fn fmt(r: &&'a mut T, out: &mut Formatter) { Debug::fmt(&**r, out) } }
 
-impl Display for Int { fn fmt(n: &Int, out: &mut Formatter) { Formatter::write_text(out, show(*n)) } }
-impl Debug for Int { fn fmt(n: &Int, out: &mut Formatter) { Formatter::write_text(out, show(*n)) } }
+// A whole number of any width, and one of 128 bits read without a sign, as
+// its digits.
+fn write_whole(out: &mut Formatter, n: Int) { let mut s = String::new(); push_whole(&mut s, n); Formatter::write_string(out, &s) }
+fn write_unsigned(out: &mut Formatter, n: Int) { let mut s = String::new(); push_unsigned(&mut s, n); Formatter::write_string(out, &s) }
+impl Display for Int { fn fmt(n: &Int, out: &mut Formatter) { write_whole(out, *n) } }
+impl Debug for Int { fn fmt(n: &Int, out: &mut Formatter) { write_whole(out, *n) } }
 impl Display for char { fn fmt(c: &char, out: &mut Formatter) { Formatter::write_char(out, *c) } }
 impl Debug for char {
     fn fmt(c: &char, out: &mut Formatter) {
@@ -441,8 +415,6 @@ impl<'a> Display for StrRef<'a> { fn fmt(s: &StrRef<'a>, out: &mut Formatter) { 
 impl<'a> Debug for StrRef<'a> { fn fmt(s: &StrRef<'a>, out: &mut Formatter) { Formatter::quoted(out, *s) } }
 impl Display for String { fn fmt(s: &String, out: &mut Formatter) { Formatter::write_string(out, s) } }
 impl Debug for String { fn fmt(s: &String, out: &mut Formatter) { Formatter::quoted(out, String::as_str(s)) } }
-impl Display for Str { fn fmt(text: &Str, out: &mut Formatter) { Formatter::write_text(out, *text) } }
-impl Debug for Str { fn fmt(text: &Str, out: &mut Formatter) { let s = String::from_text(*text); Formatter::quoted(out, String::as_str(&s)) } }
 impl Display for () { fn fmt(u: &(), out: &mut Formatter) { Formatter::write_str(out, "()") } }
 impl Debug for () { fn fmt(u: &(), out: &mut Formatter) { Formatter::write_str(out, "()") } }
 
@@ -472,10 +444,29 @@ impl<'a, T> Debug for SliceRef<'a, T> where T: Debug {
     }
 }
 
-impl Display for f64 { fn fmt(x: &f64, out: &mut Formatter) { Formatter::write_text(out, Show::fmt(x)) } }
-impl Debug for f64 { fn fmt(x: &f64, out: &mut Formatter) { Formatter::write_text(out, Show::fmt(x)) } }
-impl Display for f32 { fn fmt(x: &f32, out: &mut Formatter) { Formatter::write_text(out, Show::fmt(x)) } }
-impl Debug for f32 { fn fmt(x: &f32, out: &mut Formatter) { Formatter::write_text(out, Show::fmt(x)) } }
+// The fewest digits that give the number back.
+fn write_f64(out: &mut Formatter, x: f64) {
+    let bits = f64_bits(x);
+    let mut s = String::new();
+    match(int_lt(bits, 0)) {
+        0 => push_float(&mut s, 0, bits, bits, 0, 9218868437227405312),
+        _ => let rest = int_sub(bits, -9223372036854775808); push_float(&mut s, 1, rest, rest, 0, 9218868437227405312)
+    };
+    Formatter::write_string(out, &s)
+}
+fn write_f32(out: &mut Formatter, x: f32) {
+    let bits = f32_bits(x);
+    let mut s = String::new();
+    match(int_lt(bits, 2147483648)) {
+        0 => let rest = int_sub(bits, 2147483648); push_float(&mut s, 1, f64_widen(rest, 0), rest, 1, 2139095040),
+        _ => push_float(&mut s, 0, f64_widen(bits, 0), bits, 1, 2139095040)
+    };
+    Formatter::write_string(out, &s)
+}
+impl Display for f64 { fn fmt(x: &f64, out: &mut Formatter) { write_f64(out, *x) } }
+impl Debug for f64 { fn fmt(x: &f64, out: &mut Formatter) { write_f64(out, *x) } }
+impl Display for f32 { fn fmt(x: &f32, out: &mut Formatter) { write_f32(out, *x) } }
+impl Debug for f32 { fn fmt(x: &f32, out: &mut Formatter) { write_f32(out, *x) } }
 
 // Truth, `Result<(), ()>`, as `true` and `false` (preferred, as the more
 // particular implementation, over the one of every `Result`).

@@ -79,9 +79,9 @@ partial def textOf (names : Array String) : Value → Option (List Nat)
   | .data tag fields@(_ :: _) =>
     if tag == textLineTag then fields.mapM (fun | .int c => some c.toNat | _ => none)
     else match fields with
-      | [.int c, rest] => if (names[tag]?.getD "").endsWith "StrChar" then (textOf names rest).map (c.toNat :: ·) else none
+      | [.int c, rest] => if (names[tag]?.getD "").endsWith Syntax.textCharName then (textOf names rest).map (c.toNat :: ·) else none
       | _ => none
-  | .data tag [] => if (names[tag]?.getD "").endsWith "StrEnd" then some [] else none
+  | .data tag [] => if (names[tag]?.getD "").endsWith Syntax.textEndName then some [] else none
   | _ => none
 
 /-- A value as what a constant wrote is said: a text as its characters. -/
@@ -116,7 +116,8 @@ def evaluate (out : Elab.Output) (display : Value → String := shown out.ctorNa
       | .wild | .bind => true
       | _ => false
     unless arity == 0 || ((name.splitOn "⟨").length > 1 && plain) do continue
-    let v ← match runConst { out.program with fns := fns } i fuel display arity with
+    -- (Its texts' bytes in the program's blocks, as where it runs.)
+    let v ← match runConst ({ out.program with fns := fns }).internStatics i fuel display arity with
       | .ok v => pure v
       | .error e => throw s!"{constName name} could not be worked out at compile time: {e}"
     match literal v arity with

@@ -8174,3 +8174,23 @@ could, which left a program not lowered (laid out by its types):
   reading the `String`'s elements: no `Str` is made to be written. The
   machines keep the line being written; the Lean ones record it as a value
   of `textLineTag`, shown as its characters.
+
+## `Str` gone
+
+- The prelude has no `Str`, `Show`, `show`, `++`, `length`, `text`, nor the
+  `str_text` and `string_text` coercions (`&String` as `&str` stays, as
+  Rust's deref). Text is `&str` and `String`; written as `Display` and
+  `Debug` say.
+- A text written out is, as the parser writes it, the constructors of a
+  type no program can name (`Syntax.textItem`, `%Text`: `%char`, `%end`);
+  checked, it is a `&'static str` of any lifetime it is asked; not checked,
+  it is written as its characters.
+- Numbers are written by putting their digits after a `String`'s
+  (`number_text`): whole numbers of any width, 128 bits without a sign, and
+  floats with the fewest digits that give them back, as before.
+- `abort` takes a `&str` and writes it character by character with nothing
+  on the way that can stop the program (it had made `Vec::index` and
+  `Chars::next_typed` one group, of one type at a time).
+- A constant is worked out with its program's texts in their blocks
+  (`internStatics` before `runConst`): `"ab".len()` at compile time.
+- `assert_eq` and `assert_ne` say their values as `Debug` does.

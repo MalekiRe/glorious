@@ -534,11 +534,15 @@ def destroyTrait : String := "%Destroy"
 /-- The value a scalar's name makes of an integer. -/
 def scalarValue (name : String) (n : Int) : Expr := .call 0 (.name (some "%prelude") name) [.int n]
 
-/-- A text as a value: its characters, one after another. -/
+/-- A text written out, `"abc"`, as the parser writes it before it is
+anything: its characters, one after another, as the constructors of a type
+no program can name (`textItem`). Where it is checked it is a `&'static
+str`, its bytes where the program has them from its start; a program that
+is not checked writes it as its characters. -/
 def textValue (codes : List Nat) : Expr :=
   codes.foldr (fun (c : Nat) rest =>
-      .call 0 (.name (some "%prelude::Str") "StrChar") [scalarValue "char_of" (c : Int), rest])
-    (.name (some "%prelude::Str") "StrEnd")
+      .call 0 (.name (some "%prelude::%Text") textCharName) [scalarValue "char_of" (c : Int), rest])
+    (.name (some "%prelude::%Text") textEndName)
 
 /-- `self_name()` in an implementation for every type: in its copy for each
 type, the type's name, as a text (what Rust's `type_name::<Self>()` names
@@ -1034,5 +1038,10 @@ partial def unmutPat : Pattern → Pattern × List String
     let parts := args.map unmutPat
     (.tuple (parts.map (·.1)), parts.flatMap (·.2))
   | p => (p, [])
+
+/-- The type of a text written out as the parser writes it (`textValue`):
+the prelude's, of names no program can write. -/
+def textItem : Item :=
+  .enum "%Text" [] [(textEndName, []), (textCharName, [.name "char" [], .name "%Text" []])]
 
 end Glorious.Syntax

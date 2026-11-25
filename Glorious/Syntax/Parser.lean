@@ -1616,7 +1616,6 @@ partial def describable (t : TypeExpr) : Bool :=
 /-- The text of `impl Reflect for` a declared type, or nothing. -/
 def reflectText (name : String) (params : List String) (isPub : Bool)
     (ctors : List (String × List TypeExpr × List String × List Bool)) (enum : Bool) : Option String := Id.run do
-  if name == "Str" then return none
   let tys := params.filter (!·.startsWith "'")
   let head := if params.isEmpty then name else s!"{name}<{", ".intercalate params}>"
   let generics := if params.isEmpty then "" else s!"<{", ".intercalate params}>"

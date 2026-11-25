@@ -448,7 +448,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
             throw s!"`{b.subject}: {Syntax.lastSegment b.trait}<{name} = ..>`: `{Syntax.lastSegment b.trait}` leaves no type `{name}` to its implementations"
           let a ← resolveType rigid false said
           -- (Of the trait at the arguments written: `F: Family<Int, Of
-          -- = A>` and `F: Family<Str, Of = B>` are two questions.)
+          -- = A>` and `F: Family<String, Of = B>` are two questions.)
           let targs ← b.args.mapM (resolveType rigid false)
           let subject := if targs.isEmpty then self else Ty.tuple (self :: targs)
           modify fun s => { s with assocUses := s.assocUses.push (b.trait, subject, name, a, d.name, "") }
@@ -543,7 +543,6 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
   -- A use of the function inside its group has the function's type, but
   -- what it is given there need not be what the function itself was given:
   -- the captures of the two are kept apart, and related below.
-  settleTexts
   let used := (group.lookup d.name).getD t
   if let .var _ ← find used then unify used t
   else

@@ -335,11 +335,11 @@ end
 ending in `StrEnd`, as the parser writes it), if it is one. -/
 partial def textCodes (b : Body) (e : ExprId) : Option (List Nat) :=
   match b.expr e with
-  | .name _ x => if lastSegment x == "StrEnd" then some [] else none
+  | .name _ x => if lastSegment x == textEndName then some [] else none
   | .call _ f #[c, rest] =>
     match b.expr f, b.expr c with
     | .name _ x, .call _ g #[n] =>
-      if lastSegment x != "StrChar" then none else
+      if lastSegment x != textCharName then none else
       match b.expr g, b.expr n with
       | .name _ y, .int code => if lastSegment y == "char_of" then (textCodes b rest).map (code.toNat :: ·) else none
       | _, _ => none

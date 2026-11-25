@@ -615,14 +615,6 @@ structure St where
   the type it is of where a use does not write them: `R` of
   `trait Add<R = Self>`. -/
   selfDefaults : Std.HashMap String (List Nat) := {}
-  /-- A text written is read as a `Str` here, where one is wanted, and not
-  as the `&'static str` it is elsewhere (`inferExpr`). -/
-  textOwned : Bool := false
-  /-- Texts written at the end of a body whose type was not known there
-  (`if(c) { "x" } else { s }`): the function, the text, and the variable its
-  type is, settled when the function is (`settleTexts`): a `Str` where that
-  is what came of it, a `&'static str` otherwise. -/
-  pendingTexts : Array (String × Nat × Ty) := #[]
   /-- A type a trait leaves to its implementations, at a use: the trait, what
   it is asked of (the type, and after it the trait's arguments if it has
   some), which type, the variable that stands for it, the function this is in,

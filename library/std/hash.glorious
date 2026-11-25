@@ -19,13 +19,7 @@ pub fn combine(a: Int, b: Int) -> Int { mix(int_xor(mix(a), int_add(int_and(b, 4
 impl Hash for Int { fn hash(n: Int) -> Int { mix(int_and(n, 9223372036854775807)) } }
 impl Hash for char { fn hash(c: char) -> Int { mix(int(c)) } }
 impl Hash for () { fn hash(u: ()) -> Int { 7 } }
-impl Hash for Str {
-    fn hash(text: Str) -> Int { hash_text(text, 5381) }
-}
-fn hash_text(text: Str, h: Int) -> Int {
-    match(text) { StrEnd => h, StrChar(c, rest) => tail hash_text(rest, combine(h, int(c))) }
-}
-// Text by its characters, as `Str`'s is.
+// Text by its characters.
 impl<'a> Hash for StrRef<'a> {
     fn hash(text: StrRef<'a>) -> Int {
         let mut it = text.chars();

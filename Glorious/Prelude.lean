@@ -73,9 +73,8 @@ impl Whole for {t} \{
     fn whole(x: {t}) -> i128 {test s!"i128_of({t}_bits(x))"}
     fn of_whole(n: i128) -> {t} {test s!"{t}_of(int_fit(i128_bits(n), {width}))"}
 }
-impl Show for {t} \{ fn fmt(x: &{t}) -> Str {test s!"show_whole({t}_bits(*x))"} }
-impl Display for {t} \{ fn fmt(x: &{t}, out: &mut Formatter) \{ Formatter::write_text(out, Show::fmt(x)) } }
-impl Debug for {t} \{ fn fmt(x: &{t}, out: &mut Formatter) \{ Formatter::write_text(out, Show::fmt(x)) } }
+impl Display for {t} \{ fn fmt(x: &{t}, out: &mut Formatter) \{ write_whole(out, {t}_bits(*x)) } }
+impl Debug for {t} \{ fn fmt(x: &{t}, out: &mut Formatter) \{ write_whole(out, {t}_bits(*x)) } }
 impl Clone for {t} \{ fn clone(v: &{t}) -> {t} \{ *v } }
 fn {t}(n: Int) -> {t} {test s!"{t}_of(int_fit(n, {width}))"}
 "
@@ -106,9 +105,8 @@ impl Whole for {t} \{
     fn whole(x: {t}) -> i128 {test s!"i128_of(int_fit({t}_bits(x), -127))"}
     fn of_whole(n: i128) -> {t} {test s!"{t}_of(int_fit(i128_bits(n), -127))"}
 }
-impl Show for {t} \{ fn fmt(x: &{t}) -> Str {test s!"unsigned_digits({t}_bits(*x), StrEnd)"} }
-impl Display for {t} \{ fn fmt(x: &{t}, out: &mut Formatter) \{ Formatter::write_text(out, Show::fmt(x)) } }
-impl Debug for {t} \{ fn fmt(x: &{t}, out: &mut Formatter) \{ Formatter::write_text(out, Show::fmt(x)) } }
+impl Display for {t} \{ fn fmt(x: &{t}, out: &mut Formatter) \{ write_unsigned(out, {t}_bits(*x)) } }
+impl Debug for {t} \{ fn fmt(x: &{t}, out: &mut Formatter) \{ write_unsigned(out, {t}_bits(*x)) } }
 impl Clone for {t} \{ fn clone(v: &{t}) -> {t} \{ *v } }
 fn {t}(n: Int) -> {t} {test s!"{t}_of(int_fit(n, -63))"}
 "

@@ -776,7 +776,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
             let k := (← keyOf t).getD 0
             -- The trait at the arguments written, if it takes some: this
             -- bound's, where the trait is asked of the type more than
-            -- once (`F: Family<Int>, F: Family<Str>`).
+            -- once (`F: Family<Int>, F: Family<String>`).
             let nth := ((ordinary.take at_).filter fun o => o.subject == b.subject && o.trait == b.trait).length
             let theirs := (← get).writtenArgs.filterMap fun (f, subject, tr, args) =>
               if f == d.name && subject == b.subject && tr == b.trait then some args else none

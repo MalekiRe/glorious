@@ -1576,7 +1576,7 @@ def resolve (prelude root : List Syntax.Item) (kept : Option UnitsKept := none) 
   let preludeOwn := ((units.find? (·.path == preludePath)).map (·.own)).getD []
   let ctor := fun (name : String) =>
     (preludeOwn.find? fun b => b.name == name && b.entry.kind == Kind.ctor).map (·.entry.global)
-  let text := match ctor "StrEnd", ctor "StrChar" with
+  let text := match ctor Syntax.textEndName, ctor Syntax.textCharName with
     | some e, some c => some (e, c)
     | _, _ => none
   let preludeNames := (declared preludePath (prelude.map Syntax.Item.declared)).1.map (·.name)

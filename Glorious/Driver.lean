@@ -387,7 +387,7 @@ partial def checkUnsafeImpls (items : List Syntax.Item) : Except String Unit := 
 /-- The prelude read, once. -/
 def readPrelude : Thunk (Except String (List Syntax.Item × Syntax.Fixities)) := Thunk.mk fun _ =>
   match Syntax.parse {} Prelude.source (reflect := false) with
-  | .ok r => .ok r
+  | .ok (items, fix) => .ok (Syntax.textItem :: items, fix)
   | .error e => .error s!"prelude: {e}"
 
 /-- The library's texts read, once: what each says before it is parsed, the
@@ -571,7 +571,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- one did: `preludeKept`.)
   let (prelude, fix) ← Trace.timed "parse: the prelude" fun _ => if check then (match preludeKept with | some p => pure p | none => readPrelude.get) else
     match Syntax.parse {} Prelude.unchecked (reflect := false) with
-    | .ok r => pure r
+    | .ok (items, fix) => pure (Syntax.textItem :: items, fix)
     | .error e => throw s!"prelude: {e}"
   -- The library's texts as they were read once, where the program names it.
   let read ← if std && check && needed.isNone then
@@ -1289,7 +1289,8 @@ def borrowFns (src : String) : Option Nat :=
   | .ok c => some (c.fnNames.toList.filter fun n => (n.splitOn "borrow").length > 1).length
   | .error _ => none
 
-/-- The characters of a text, if the value is one: the prelude's `Str`, whose
+/-- The characters of a text, if the value is one: a text written out in a
+program that is not checked (`Syntax.textItem`), or a line written; whose
 constructors are shown under names no program can write. -/
 partial def textOf (names : Array String) : Value → Option (List Nat)
   -- (A line written by `host_line`.)
