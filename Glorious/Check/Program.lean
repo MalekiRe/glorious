@@ -437,7 +437,9 @@ def interfaceOf (c : String) : M UInt64 := do
     s.unsafeFns.contains c, rows))
 
 /-- What a function's body is, as the count of uses follows it. -/
-def bodyKey (f : String) : M UInt64 := do pure (hash ((← get).runFns[f]?))
+def bodyKey (f : String) : M UInt64 := do
+  let s ← get
+  pure (hash ((s.runFns[f]?).orElse fun _ => s.declFns[f]?))
 
 /-- Is what a group read still what it was? `fn ` a name it calls, `body ` a
 body it followed; `*` a count that did not finish, never. -/
@@ -648,13 +650,14 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           if let some d := diffStates here (← get) then groupDeltas := groupDeltas.push (declFrom, (d, #[]))
     made := (key, noBodies (← get)) :: made
     modify fun s =>
-      { s with runFns := decls.foldl (fun m d => m.insertIfNew d.name d.body) s.runFns }
+      { s with declFns := decls.foldl (fun m d => m.insertIfNew d.name d.body) s.declFns }
     -- (A state kept from before has the bodies that program's later
     -- functions had: this one's are put in their place.)
     let restore := fun (st : St) (later : List FnDecl) => (do
       adopt st
       modify fun s =>
-        { s with runFns := later.foldl (fun m d => m.insert d.name d.body) s.runFns } : M Unit)
+        { s with runFns := later.foldl (fun m d => m.erase d.name) s.runFns
+                 declFns := later.foldl (fun m d => m.insert d.name d.body) s.declFns } : M Unit)
     let declBy : Std.HashMap String FnDecl := decls.foldl (fun m d => if m.contains d.name then m else m.insert d.name d) {}
     let groups := Trace.timed "unit: order" fun _ => (components names deps).map fun comp => comp.filterMap fun n => declBy[n]?
     -- Each group's level: groups of one level use none of each other, so

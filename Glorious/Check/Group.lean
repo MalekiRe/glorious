@@ -750,7 +750,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   unless cs.isEmpty do
     modify fun s =>
       { s with runFns := decls.foldl (fun m d =>
-                 match m[d.name]? with
+                 match (m[d.name]?).orElse fun _ => s.declFns[d.name]? with
                  | some fb => m.insert d.name (Elab.coerceFn cs d.name fb)
                  | none => m) s.runFns }
   -- A later function can still decide a requirement made here: of a type an

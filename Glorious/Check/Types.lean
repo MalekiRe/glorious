@@ -745,6 +745,9 @@ structure St where
   are written. Each is what its list says, the first of a name where the
   list has two. -/
   runFns : Std.HashMap String Flat.Body := {}
+  /-- The bodies of a unit's functions as written, which the count of uses
+  follows until one is checked and its body is in `runFns`. -/
+  declFns : Std.HashMap String Flat.Body := {}
   runCtors : Std.HashSet String := {}
   runAliases : Std.HashMap String Expr := {}
   runOps : Std.HashMap String Bool := {}

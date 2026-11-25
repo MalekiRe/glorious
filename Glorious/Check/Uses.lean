@@ -234,6 +234,8 @@ inductive AVal where
 
 structure ACtx where
   fns : Std.HashMap String Flat.Body
+  /-- The bodies as written, of those not checked yet (`St.declFns`). -/
+  declFns : Std.HashMap String Flat.Body := {}
   ctors : Std.HashSet String
   aliases : Std.HashMap String Expr
   ops : Std.HashMap String Bool
@@ -442,6 +444,10 @@ def ACtx.inside (ctx : ACtx) (env : List (String × AVal)) : ACtx :=
         | _ => none }
   | _ => ctx
 
+/-- A function's body as the count follows it: as checked, or as written. -/
+def ACtx.bodyOf (ctx : ACtx) (f : String) : Option Flat.Body :=
+  (ctx.fns[f]?).orElse fun _ => ctx.declFns[f]?
+
 /-- May a call of a `probe` come of this value? -/
 def holdsProbe : AVal → Bool := holdsVal fun | .probe => true | _ => false
 
@@ -561,7 +567,7 @@ partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) :
     pure [(.gone probeTarget, n), (if args.any holdsProbe then .probe else .unknown, n)]
   | .clo b clauses env => applyClauses (ctx.inside env) depth b clauses env args
   | .fn name =>
-    match depth, ctx.fns[name]? with
+    match depth, ctx.bodyOf name with
     | d + 1, some fb =>
       modify fun s => { s with followed := s.followed.push name }
       -- (A call of a function being followed, again: it comes back, or never
@@ -630,7 +636,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String ×
     | none =>
       if let some c := ctx.ctorOf x then pure [(.data c [], 0)]
       else if (ctx.ops[x]?).isSome then pure [(.unknown, 0)]
-      else if (ctx.fns[x]?).isSome then pure [(.fn x, 0)]
+      else if (ctx.bodyOf x).isSome then pure [(.fn x, 0)]
       else
         match ctx.aliases[x]? with
         | some value =>
@@ -834,7 +840,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String 
         match goneOf vs with
         | some t => (.gone t, n)
         | none => (.data c vs, n))
-    else if x == "fixed_len" && (ctx.fns[x]?).isNone then
+    else if x == "fixed_len" && (ctx.bodyOf x).isNone then
       -- Asking how long a `[T; N]` is only looks at it: it is still
       -- whoever's it was.
       let found ← runList ctx depth b env args
@@ -857,7 +863,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String 
           for (_, k) in found do
             worst := max worst (n + k)
         pure [(.unknown, worst)]
-    else if ctx.lower && ctx.quiet.contains x && (ctx.fns[x]?).isNone then
+    else if ctx.lower && ctx.quiet.contains x && (ctx.bodyOf x).isNone then
       handedOn fun n => [(.unknown, n)]
     else general
   | _ => general
@@ -1284,7 +1290,7 @@ def checkUses (code : Flat.Body) (pos : String) (outer : Scope) (binds : Scope) 
     | _ => bb) code
   -- What only computes: the machine's own operations and what builds a value.
   let ctx : ACtx :=
-    { fns := s.runFns, ctors := s.runCtors, aliases := s.runAliases, ops := s.runOps,
+    { fns := s.runFns, declFns := s.declFns, ctors := s.runCtors, aliases := s.runAliases, ops := s.runOps,
       quiet := intrinsics, exact := s.runExact, now := s.runNow }
   let names := (binds ++ outer).map (·.1)
   for (x, b) in binds do
@@ -1402,10 +1408,10 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     | some sig => sig.result.isSome
     | none => false
   let ctx : ACtx :=
-    { fns := s.runFns, ctors := s.runCtors, aliases := s.runAliases, ops := s.runOps,
+    { fns := s.runFns, declFns := s.declFns, ctors := s.runCtors, aliases := s.runAliases, ops := s.runOps,
       quiet := intrinsics, exact := s.runExact, lower := true, sure := sure }
   let quiet := fun (f : String) =>
-    (ctx.ctorOf f).isSome || (intrinsics.contains f && (ctx.fns[f]?).isNone)
+    (ctx.ctorOf f).isSome || (intrinsics.contains f && (ctx.bodyOf f).isNone)
   let roots ← mustInfo
   -- What is found here is said first: it names the binding.
   let earlier := (← get).drops
