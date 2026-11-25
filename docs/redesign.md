@@ -1,0 +1,227 @@
+# The redesign: one checking pass, a job queue, ids for everything
+
+This is the plan for the compiler's next shape: why, what it becomes, what
+goes, and in what order it is done. `decisions.md` records each rule as it
+lands; this file is the map.
+
+## Why
+
+The compiler part (everything but `Typing`, `Proof`, `Core`, `Bytecode` and
+the runtime) is 27.6k lines of code. Zig's front end and semantic analysis
+are about 81k (with comments) for a language without traits, ownership or
+effects, so the size is not out of proportion to what Glorious does. Its
+shape is the problem: the same work is done two or three times.
+
+| Done more than once | Where | Lines |
+|---|---|---|
+| Type inference: over the source, and again over Core for the certificate | `Check`, `Infer` | 10.2k, 2.9k |
+| Receivers, borrows, comparisons: decided by rewriting syntax and checking the function again (`Decision`: eta, letMut, refPats, receiver, derefField, derefReceiver, compareByRef, rest), and by front passes before checking (`receiverExpr`, `promote`, `nameBorrows`, `hoist`) | `Check`, `Elab/Specialize`, `Syntax/Resolve`, `Syntax/FlatOps` | ~1.5k |
+| Generics: trait dictionaries passed as values, then copies per implementation, then copies per layout in the typed lowering; `Layout` a trait only because types reach callees as values | `Elab`, `Elab/Specialize`, `Lower` | ~1.5k |
+| Identity: types compared and hashed by walking them whole; owners and traits as strings; stable names, keyed bodies and literals-by-bytes bolted on so caches survive an edit | everywhere | — |
+| Keeping work between compiles: about ten caches, each keyed its own way (front passes, resolved units, checked groups, inference's instances, schemes, faces and mains, elaboration, lowering, typed lowering, parsed items, lexed texts) | `Main`, `Driver`, `Infer`, `Check/Merge` | ~1.5k |
+| Checking side by side: whole checker states diffed and merged | `Check/Merge`, `Check/Program` | ~0.8k |
+
+What other compilers do instead:
+
+- **Zig**: one semantic pass (`Sema`, ZIR → AIR) whose output is typed;
+  every coercion and address-of it decides is an instruction it emits, not a
+  rewrite of the source. All types and values interned (`InternPool`), each
+  an integer. Incremental compilation is dependency tracking between
+  analysis units over stable ids, not per-stage caches. Generics copied per
+  use in `Sema`; layouts follow from types. Analysis is lazy.
+- **Jai**: declarations checked out of order by jobs that wait on what they
+  name and run again when it is known; polymorphic procedures copied per
+  use; one bytecode for compile-time execution and the back ends.
+- **rustc** (for traits and borrowing): type checking records each
+  expression's adjustments (autoref, autoderef, reborrow) in a table; the
+  borrow checker runs once, on MIR, where every borrow and move is explicit.
+
+## What it becomes
+
+```mermaid
+flowchart LR
+  subgraph Now
+    P[parse + desugar] --> F[front passes] --> C[Check]
+    C -- Decision: rewrite, check again --> C
+    C --> E[Elab: dictionaries, copies] --> I[Infer again over Core] --> T[Typing: proved checker] --> L[typed lowering: copies per layout]
+  end
+  subgraph After
+    P2[parse] --> Q[job queue: reachable band, then the rest]
+    Q --> S[Sema: one pass per job, writes typed Core]
+    S --> O[ownership and borrows, on typed Core]
+    O --> M[copies per use of each generic]
+    M --> T2[Typing: proved checker, unchanged] --> L2[layout from types]
+  end
+```
+
+The proved checker (`Typing`) does not change. Everything certified is still
+checked by it, so no part of the redesign can make a certified program
+unsound: a wrong signature or hint is refused there, as now.
+
+### 1. Ids for everything
+
+One table interns every type, name, function, trait and implementation; each
+is an integer. Equality and hashing are integer operations, and what is kept
+between compiles is integers into a table that is itself kept.
+
+- A type is a node of the table: its head and its arguments' ids. A type
+  built twice is the same id. Unknowns during checking stay variables
+  outside the table until they are decided.
+- A function's id is stable across compiles: its path, and for one with no
+  name (a closure, a block) its maker and its place among what that names,
+  as `Program.sids` is now.
+- Strings in control flow go: owners, trait keys, rigid type names, and the
+  message parsing (`"(in function "`) become ids and structured fields.
+
+### 2. Jobs and the queue
+
+A job checks one thing:
+
+- a type declaration's fields, from its own text;
+- a function's signature, from its own text;
+- a function's body, given the signatures of what it names;
+- a trait implementation's head and conditions;
+- a top-level `let` item or constant, from its value.
+
+A job that needs what is not finished waits on it and runs again when it is
+(Jai's way). Waiting cycles that are mutual recursion become one job for the
+group (as groups are now); any other cycle is an error naming it.
+
+Two bands, one queue:
+
+1. **Reachable**: what `main` (or another root: a test, an export) reaches,
+   first. Everything a reachable job depends on is itself reachable, so the
+   first band never waits on the second.
+2. **The rest**: every other function and item. Most of what they need is
+   finished in the first band.
+
+Everything is checked. `run`, `build` and the suite finish both bands before
+anything runs. `watch` and `serve` start running the program once the first
+band is done and report what the second finds when it does.
+
+Jobs whose dependencies are finished run in parallel (Lean `Task`s). A job's
+result is its own (a signature, a typed body, its errors) and goes into the
+table; nothing merges checker states, so `Check/Merge` and the levels of
+`Check/Program` go.
+
+### 3. Results that do not depend on order
+
+What a job finds depends only on its own text and the finished results of
+what it names. So:
+
+- A declaration is decided from its own text, in its own job: a `let` item's
+  type from its value; a `fn` field written without effects performs none,
+  as a struct's `fn` field already does; what a `fn` field captures is a type
+  parameter of the declaration where it is not written. Nothing a use does
+  decides a declaration. What cannot be decided so is an error that says
+  what to write. (Rust is stricter: an item's type is always written,
+  `const` included. Inferring a `let` item from its own value is still order
+  independent, so it stays.)
+- Unknowns made in one job are that job's. A job's result names only
+  finished ids and its own generalized parameters, never another job's
+  unknowns (what `freeze` refuses now, made impossible).
+- Errors are collected from every job and reported sorted by source position.
+  A job that depends on a failed one is skipped, not reported again.
+
+### 4. Sema: one pass that writes typed Core
+
+For each body job, one pass over the flat body (`Flat.Body`) that:
+
+- infers types (unification, as `Check` does now), resolves traits and
+  their implementations, effects, lifetimes and regions;
+- writes **typed Core** as it goes: each expression's adjustments explicit
+  (borrow, `&mut` borrow, dereference, reborrow, move, copy, coercion),
+  each call to the chosen function, each operation and handler with its
+  types. A dot call's receiver is adjusted here, by its type, as rustc's is;
+- writes for each function the signature entries and hints the certificate
+  needs (`Typing.SigEntry`, `Hint`), so nothing infers Core again;
+- keeps for every Core node where it is in the source, for messages.
+
+What goes: `Infer` (2.9k), `Decision` and its rewrites (`decideBody`,
+`receiverBody`, `compareBody`, `refPatsBody`, `letMutRewriteF`, the eta and
+rest rewrites), the front passes that borrow by syntax (`receiverExpr`,
+`elementRead`, `promote`, `nameBorrows`, `hoist`), the side tables
+(`argsChosen`, `dotChosen`), and checking a function again.
+
+### 5. Ownership and borrows, once, on typed Core
+
+The move, use-once, drop and borrow analyses (`Uses`, `Scopes`, `Borrows`:
+2.9k) run once per body, on Sema's typed Core, where every borrow and move is
+explicit (rustc's MIR borrow check). Their rules and messages stay; they
+read explicit operations in place of reconstructing them from syntax. Where
+a rule wants something written differently (`let mut x` to destroy what one
+path does not use), the message says so; nothing is rewritten and checked
+again.
+
+### 6. Generics: one copy per use
+
+After Sema, each generic function is copied once for each set of types it is
+used at (monomorphized), as Zig and Jai do. The certificate already lists
+every function at every signature it is used at; the program now is those
+copies. Layouts follow from types.
+
+What goes: trait dictionaries passed as values (`Elab`'s `untrait`), copies
+per implementation (`Elab/Specialize`, `Elab/Lower`'s copies), `Layout` as a
+trait, and the typed lowering's grouping of signatures into kinds
+(`Lower/Typed` settle). A generic function no use reaches is still checked
+(in its job, against its bounds) and never copied.
+
+### 7. Keeping work between compiles: one design
+
+Each job's result is kept, by the job's id and the ids of what it read, with
+the list of what it depends on (Zig's dependency tracking). An edit queues
+again the jobs whose own text changed and those that depend on a changed
+result, reachable band first. A compile whose inputs all hash the same takes
+the program built, as now. The ten caches and their keys go.
+
+## What is kept
+
+- The language, its error messages, and every program in the suite (with
+  the annotations rule 3 asks for written in, each recorded in
+  `decisions.md`).
+- `Typing`, its proofs, `Core`, the machines, the bytecode and the VM.
+- The parser and module resolution (only the desugaring that borrows by
+  syntax moves into Sema).
+- Flat bodies of indices (`Flat.Body`): already the right representation.
+
+## Order of the work
+
+Hardest first, except where that would make the same work be done twice:
+
+1. **Sema writing typed Core, with the job queue and ids.** Ids and the
+   queue go in first because Sema is built on them; declarations decided
+   from their own text with them. Built beside the old path, behind
+   `GLORIOUS_SEMA=1`, until the suite passes on it, then the old path is
+   deleted.
+2. **Ownership and borrows on typed Core.**
+3. **One copy per use of each generic.**
+4. **One design for keeping work between compiles.**
+5. **Every error, sorted.**
+6. **`watch` and `serve` running after the reachable band.**
+
+Each step lands with the suite green and is committed and pushed.
+
+## Expected size
+
+Estimates, to be replaced by measurements as each step lands.
+
+| Step | Removed | Added |
+|---|---|---|
+| Sema, queue, ids | `Infer` 2.9k, decisions and front passes ~1.5k, `Merge` and levels ~0.8k, `Check` simplified | Sema's Core writing ~1k, queue ~0.4k, ids ~0.4k |
+| Ownership on typed Core | ~1k of reconstruction in `Uses`/`Scopes`/`Borrows` | — |
+| One copy per use | ~1.5k | ~0.3k |
+| One design for keeping work | ~1.2k | ~0.4k |
+
+Together about 7–8k fewer lines: under 20k.
+
+## Risks
+
+- **The size of step 1.** It replaces the heart of the compiler. Building it
+  beside the old path, with the suite as the judge, keeps the old one
+  working until the new one passes everything.
+- **Messages.** Many rules have careful messages written against syntax;
+  each keeps its text, now said at the source position Core keeps.
+- **Programs the order rules refuse.** Each is edited and the rule recorded.
+- **Copies per use can grow the program** where one generic function is used
+  at many types; the certificate already lists each of those, so the checker
+  sees no more than now.
