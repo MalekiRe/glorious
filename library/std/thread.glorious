@@ -43,7 +43,7 @@ fn waiting_count(queue: Held<Waiting>) -> Int {
     put_cell(queue, w);
     n
 }
-fn push_waiting(queue: Held<Waiting>, ready: fn() -> Bool, rest: fn() -> ()) {
+fn push_waiting<R>(queue: Held<Waiting>, ready: fn() -> Bool, rest: R) where R: Fn<(), Output = ()>, R: Use<[0, 1]> {
     let mut w = take_cell(queue);
     Vec::push(&mut w.ready, ready);
     Vec::push(&mut w.rest, rest);

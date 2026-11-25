@@ -34,7 +34,7 @@ fn run_all(tasks: List) {
 // A waiting task holds a resumption, which has to be used, and once. So the
 // queue is never copied or overwritten: what it holds is taken out with
 // `replace`, and whatever `replace` gives back is run.
-fn push(queue: &mut List, task: fn() -> ()) {
+fn push<T>(queue: &mut List, task: T) where T: Fn<(), Output = ()>, T: Use<[1, 1]> {
     let waiting = replace(queue, Nil);
     run_all(replace(queue, append(waiting, Cons(task, Nil))))
 }

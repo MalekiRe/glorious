@@ -10,6 +10,7 @@ open Syntax
 
 delta_part StDelta6 diffPart6 applyPart6 fitsPart6 clearPart6 restorePart6 [
   fns : MapD String Scheme,
+  bodySchemes : MapD String Scheme,
   pending : ArrD Pending,
   projections : ArrD (Ty × Nat × Ty × String × Nat),
   namedReads : ArrD (Ty × String × Ty × Nat × String),

@@ -577,6 +577,58 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
   afterGroupFn t
   pure (defs, reused)
 
+/-- The variables of `body` as `sig` has them, where the two are one type
+written with variables of their own (`schemeWithin`): types, rows and
+captures by their places. -/
+partial def varsAs (body sig : Ty) (acc : List (Nat × Ty) × List (Nat × Nat) × List (Nat × Nat)) :
+    List (Nat × Ty) × List (Nat × Nat) × List (Nat × Nat) :=
+  let all := fun (xs ys : List Ty) acc => (xs.zip ys).foldl (fun acc (x, y) => varsAs x y acc) acc
+  match body, sig with
+  | .var a, t => if acc.1.any (·.1 == a) then acc else ((a, t) :: acc.1, acc.2)
+  | .con _ xs, .con _ ys | .tuple xs, .tuple ys => all xs ys acc
+  | .fn ps r effs tail c, .fn ps' r' effs' tail' c' =>
+    let acc := varsAs r r' (all ps ps' acc)
+    -- (Effects of a name in the order each row has them.)
+    let acc := (effs.map (·.1)).eraseDups.foldl (fun acc e =>
+      let mine := (effs.filter (·.1 == e)).map (·.2)
+      let theirs := (effs'.filter (·.1 == e)).map (·.2)
+      (mine.zip theirs).foldl (fun acc (xs, ys) => all xs ys acc) acc) acc
+    let acc := match tail, tail' with
+      | some a, some b => (acc.1, (a, b) :: acc.2.1, acc.2.2)
+      | _, _ => acc
+    (acc.1, acc.2.1, (c, c') :: acc.2.2)
+  | .ref h t c, .ref h' t' c' =>
+    let acc := varsAs t t' (varsAs h h' acc)
+    (acc.1, acc.2.1, (c, c') :: acc.2.2)
+  | _, _ => acc
+
+/-- A function's type as its signature says it, with what its body found
+that is not a contract but how a call is made: the instances of effects at
+its sites, and the types left to implementations it uses, in the
+signature's variables (`varsAs`); those only the body has stay its own. -/
+def withBodyParts (sig body : Scheme) (params : List (Nat × Nat)) : Scheme := Id.run do
+  -- (Nothing more than the signature has: the signature, the same.)
+  if body.sites.isEmpty && body.incls.isEmpty && body.assocs.length == sig.assocs.length then return sig
+  -- (The type parameters it writes, by their places; then the type, and
+  -- what is left to implementations of what both have.)
+  let mut acc := varsAs body.ty sig.ty (params.map (fun (b, s) => (b, Ty.var s)), [], [])
+  for _ in [0:3] do
+    for (tr, subject, name, a) in body.assocs do
+      let (tm, rm, cm) := acc
+      let subject := subst tm rm cm subject
+      if let some (_, _, _, a') := sig.assocs.find? fun (tr', subject', name', _) =>
+          tr' == tr && name' == name && showTy subject' == showTy subject && freeTys subject' == freeTys subject then
+        acc := varsAs a a' acc
+  let (tm, rm, cm) := acc
+  let tr := subst tm rm cm
+  return { sig with
+    sites := body.sites.map tr
+    assocs := body.assocs.map fun (a, t, n, u) => (a, tr t, n, tr u)
+    incls := body.incls.map fun (t, u) => (tr t, tr u)
+    tvars := sig.tvars ++ body.tvars.filter fun v => !tm.any (·.1 == v)
+    rvars := sig.rvars ++ body.rvars.filter fun v => !rm.any (·.1 == v)
+    cvars := sig.cvars ++ body.cvars.filter fun v => !cm.any (·.1 == v) }
+
 /-- Infer one group of mutually recursive functions and generalise their types.
 With `signature`, each function's type is what its signature says, its
 clauses not looked at: what a caller is checked with (`declareSignatures`). -/
@@ -597,6 +649,17 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
     | .ref false _ _ => (d.name, 1)
     | _ => (d.name, 0)
   modify fun s => { s with group := group, groupSigned := signed, groupFirst := first }
+  -- (Of a body checked against its signature: the signature stays what
+  -- callers are checked with, with the numbers of its type parameters,
+  -- `f<T>(..)`; what the body needs is kept beside it, `schemeWithin`.)
+  let fns := (← get).fns
+  let params := (← get).typeParams
+  -- (A constant's type is its value's, and one whose callables run in an
+  -- environment or that is given a label has its body for its signature,
+  -- `checkItems`: theirs are their bodies'.)
+  let sigs := if signature then [] else decls.filterMap fun d =>
+    if Syntax.isConstFn d.name || d.bounds.any (fun b => b.trait == "Environment" || b.trait == "Label") then none
+    else (fns[d.name]?).map fun sig => (d.name, sig, params.lookup d.name)
   let mut defs : List (String × Ty) := []
   let mut reused : List (String × Ty) := []
   if !signature then
@@ -638,6 +701,21 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   (fun s => Glorious.Trace.said "loans" fun _ => (timedM "group: loans" (checkLoans loansAt cellsAt) : M Unit).run s : M Unit)
   (fun s => Glorious.Trace.said "bounds" fun _ => (timedM "group: bounds" (settleBounds decls defs) : M Unit).run s : M Unit)
   modify fun s => { s with assocUses := #[] }
+  for (name, sig, ids) in sigs do
+    modify fun s => match s.fns[name]? with
+      | some body =>
+        let written := match ids, s.typeParams.lookup name with
+          | some ids, some own => (own.zip ids).filterMap fun
+              | (some b, some a) => some (b, a)
+              | _ => none
+          | _, _ => []
+        { s with
+          bodySchemes := s.bodySchemes.insert name body
+          fns := s.fns.insert name (withBodyParts sig body written)
+          typeParams := match ids with
+            | some ids => (name, ids) :: s.typeParams
+            | none => s.typeParams }
+      | none => s
   -- Later functions follow calls into these as they will be elaborated.
   let cs := Elab.firstOf (← get).coercions.toList
   unless cs.isEmpty do

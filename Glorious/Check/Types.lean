@@ -759,6 +759,9 @@ structure St where
   effects : List (String × EffectDecl) := []
   aliases : Std.HashMap String Expr := {}
   fns : Std.HashMap String Scheme := {}
+  /-- What each body checked needs of its callers, where its signature is
+  what they are checked with (`fns`): to be within it (`schemeWithin`). -/
+  bodySchemes : Std.HashMap String Scheme := {}
   /-- The functions being inferred together, with their types so far. -/
   group : List (String × Ty) := []
   /-- The functions of the group whose signatures are written whole: each

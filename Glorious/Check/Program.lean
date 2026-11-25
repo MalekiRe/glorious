@@ -160,10 +160,11 @@ def stayedBelow (s from_ : St) (j : Nat) (gap : Nat := unitGap) : Bool :=
 /-- How many threads the groups of one level are checked on, at most. -/
 def sideThreads : Nat := 16
 
-/-- The captures of a type, in the order it has them. -/
+/-- The captures of a type, in the order it has them, with those of what a
+callable performs. -/
 partial def capsOf : Ty → List Nat
   | .ref how t c => capsOf how ++ capsOf t ++ [c]
-  | .fn ps r _ _ c => ps.flatMap capsOf ++ capsOf r ++ [c]
+  | .fn ps r effs _ c => ps.flatMap capsOf ++ capsOf r ++ effs.flatMap (·.2.flatMap capsOf) ++ [c]
   | .con _ args | .tuple args => args.flatMap capsOf
   | .var _ => []
 
@@ -797,7 +798,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           else s) {}
       -- (A constant's type is its value's, which no signature says.)
       let isSettled := fun (g : List FnDecl) => g.all fun d =>
-        Syntax.isConstFn d.name || ofEnvironment d || match fromSt.fns[d.name]?, now.fns[d.name]? with
+        Syntax.isConstFn d.name || ofEnvironment d || match fromSt.fns[d.name]?, now.bodySchemes[d.name]? with
         | some a, some b => schemeWithin b a
         | _, _ => false
       let firstRefused := rest.toList.find? fun (_, k) => refused.contains k
@@ -808,7 +809,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
       for (g, _) in before do
         unless isSettled g do
           for d in g do
-            match fromSt.fns[d.name]?, now.fns[d.name]? with
+            match fromSt.fns[d.name]?, now.bodySchemes[d.name]? with
             | some a, some b => unless schemeWithin b a do beyond := beyond.push (beyondSignature d.name a b)
             | _, _ => beyond := beyond.push s!"in `{d.name}`: its signature says too little to check its callers with: write it whole"
       unless beyond.isEmpty do throw (sortedErrors beyond.toList)

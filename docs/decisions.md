@@ -8372,3 +8372,63 @@ could, which left a program not lowered (laid out by its types):
 - Programs that relied on traits and lifetimes found from bodies write
   them: covey's despawn, commands, resources, one_of, one_of2, asm; the
   tasks example's `run` takes `F: Fn<..>, F: Returns`; six cases.
+
+## A callable's signature says how it is used, as Rust's `Fn` traits do
+
+**Decision (user).** What a function asks of a callable it is given is in its
+signature, as Rust's is; it is not inferred from the body. This replaces
+"Whether a function may be given such a value is inferred from how it uses
+its parameters and checked at each call. Nothing is annotated" (in "Values
+that hold a resumption are used at most once"). How often a value can be used
+is still found of the value, from what it holds: a block that captured a
+resumption is used at most once, and so is a `Vec` it is kept in, as Rust
+finds a closure's kind from its body.
+
+There is one way to say how often: `Use<[fewest, most]>`, of a type parameter
+the callable is, `F: Fn<(A,), Output = R>` (which makes `F` the type
+`fn(A) -> R`, so it can be kept where a `fn(A) -> R` is). Rust's three traits:
+
+| Rust | Glorious |
+|---|---|
+| `Fn` | `Use<[0, *]>`; `Sync` where it only reads what it touches |
+| `FnMut` | `Use<[0, *]>`; not `Sync`, as it writes what it touches |
+| `FnOnce` | `Use<[0, 1]>` |
+| (none) | `Use<[1, 1]>`, called exactly once; `Returns`; `/ {}`; `'static` |
+
+- A parameter written `fn(..)` is Rust's `Fn`: it may be called any number of
+  times and let go. One called once is written as a type parameter,
+  `R: Fn<..>, R: Use<[0, 1]>`, as Rust writes `F: FnOnce`
+  (`std::thread::push_waiting`).
+- Every one of these is checked when the program is compiled; nothing is
+  checked while it runs. A callable that writes a mutable variable holds a
+  pointer to it, as a Rust closure that captures `&mut x` does. It borrows
+  the variable where it can run, not for as long as it lives ("References are
+  exclusive"): each call of it, and each call it is given to, is checked
+  against the borrows alive there.
+- **Threads that run at once** (the API in "Threads: the API covey is written
+  against"): a callable given where it may run beside its caller until it is
+  joined, `F: Send`, holds what it touches as borrows for that long, a write
+  as `&mut`, a read as `&`: Rust's rule for a closure, where the count of
+  calls cannot follow it. `Sync` and `Send` are found of a callable from what
+  it holds and touches, as `Use` is. A thread that borrows from outside its
+  scope needs `F: 'a` for a general `'a` in signatures. To be built after the
+  compiler is made smaller, with real threads.
+
+What is built. A function's type, once its body is checked, stays its
+signature's (`St.fns`); what the body needs is kept beside it
+(`St.bodySchemes`) and is to be within it. A caller anywhere, in the
+function's module or another, is checked with the signature alone. Of the
+body, the signature takes what says how a call is made, not what it asks:
+the instances of effects at its sites, and the types it leaves to
+implementations, in the signature's variables (`withBodyParts`). A
+constant's type, and a function whose callables run in an environment or
+that is given a label, stay their bodies'.
+
+- A lifetime of what a function performs is one of its signature's
+  (`schemeShape`): `fn leak() -> &Int / {Reader}`, which gives back what
+  `Reader`'s `ask` lends, says so, `fn leak<'a>() -> &'a Int /
+  {Reader<'a>}`. It was accepted before, and its caller saw what it held only
+  where it read the body.
+- `std::thread::push_waiting` takes `R: Fn<..>, R: Use<[0, 1]>`; the tasks
+  example's `push`, `T: Use<[1, 1]>`, as what it is given holds a
+  resumption of an operation declared `[1, 1]`.

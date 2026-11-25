@@ -3974,7 +3974,7 @@ fn main() -> Int { let mut x = 20; handle both() { ask(k) => k(&x) } }
 40
 #### case
 effect Reader<'a> { ask() -> &'a Int }
-fn leak() -> &Int / {Reader} { ask() }
+fn leak<'a>() -> &'a Int / {Reader<'a>} { ask() }
 fn main() -> Int { let mut x = 20; let r = handle leak() { ask(k) => k(&x) }; x = 5; *r }
 #### expect
 error: 3:79: in `main`: `x` is assigned while `r` holds a reference to it
