@@ -8438,3 +8438,17 @@ constant's type stays its value's.
 - `std::thread::push_waiting` takes `R: Fn<..>, R: Use<[0, 1]>`; the tasks
   example's `push`, `T: Use<[1, 1]>`, as what it is given holds a
   resumption of an operation declared `[1, 1]`.
+
+## An implementation's callables perform what is written of them
+
+A callable in what an implementation is for, or asked by its conditions
+(`impl<.., TF> Apply<TF, TO> for (A, B) where TF: Fn<(A, B), Output = TO>`),
+performs what its `Effects` says, nothing where nothing is written, as in a
+function's signature. Before, its effects were left open, one row of the
+implementation that the first use bound for every later one (and that a
+merge then changed in place). covey's `RemoteWithin` for `Waits<F>` says
+`F: Fn<(..Q), Effects = {std::thread::Threads}>`.
+
+What a unit's declarations say of types left to implementations
+(`type Kind = OneToMany`) is answered before any of its functions is read,
+not by the first body that asks.

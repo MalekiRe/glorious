@@ -5354,7 +5354,7 @@ pub struct Request<S> { point: &'static str, touches: Vec<Touch>, run: for<'a, '
 // (What it touches within the envelope of the point `P` it is run at.)
 pub trait RemoteWithin<P> {}
 impl<P, Env, ..Q, L, Ts, F> RemoteWithin<P> for F where F: Fn<(..Q)>, (..Q): Parameters<Nested = L>, L: AllTouches<List = Ts>, P: PointGroups<List = Env>, Ts: WithinEnvelope<Env> {}
-impl<P, Env, ..Q, L, Ts, F> RemoteWithin<P> for Waits<F> where F: Fn<(..Q)>, (..Q): Parameters<Nested = L>, L: AllTouches<List = Ts>, P: PointGroups<List = Env>, Ts: WithinEnvelope<Env> {}
+impl<P, Env, ..Q, L, Ts, F> RemoteWithin<P> for Waits<F> where F: Fn<(..Q), Effects = {std::thread::Threads}>, (..Q): Parameters<Nested = L>, L: AllTouches<List = Ts>, P: PointGroups<List = Env>, Ts: WithinEnvelope<Env> {}
 pub trait RunsRemote<S, O> { type Touched; fn run_remote(&Self, &mut World<S>, &mut Commands<S>) -> Option<O> / {Threads} fn remote_touches() -> Vec<Touch> }
 impl<S, O, ..P, L, Ts, Lc, F> RunsRemote<S, O> for F
     where F: Fn<(..P), Output = O>, (..P): Parameters<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,

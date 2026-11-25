@@ -566,7 +566,7 @@ def declareTrait (items : List Item) (name : String) (methods : List (String × 
 
 /-- An implementation read: what it is for, on what conditions, and what it
 leaves to its trait said (`declareTraits`). -/
-def declareImpl (params : List String) (tr head : String) (args : List String) (context : List (String × String))
+def declareImplIn (params : List String) (tr head : String) (args : List String) (context : List (String × String))
     (methods : List Item) : M Unit := do
   let what := s!"`impl {tr} for {head}`"
   -- `tr` is the trait at the arguments the implementation gives it.
@@ -824,6 +824,16 @@ def declareImpl (params : List String) (tr head : String) (args : List String) (
           dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra,
           gatParams, extraEqual }
       kimpls := s.kimpls.push ⟨tr, head, arity, ctx⟩ }
+
+
+/-- An implementation declared (`declareImplIn`): a callable in what it is
+for performs what is written of it, nothing where nothing is, as in a
+function's signature. -/
+def declareImpl (params : List String) (tr head : String) (args : List String) (context : List (String × String))
+    (methods : List Item) : M Unit := do
+  modify fun s => { s with closedRows := true }
+  try declareImplIn params tr head args context methods
+  finally modify fun s => { s with closedRows := false }
 
 /-- Read the traits and their implementations. Types are declared by now. -/
 def declareTraits (items : List Item) : M Unit := do
