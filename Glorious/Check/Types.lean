@@ -502,6 +502,9 @@ structure St where
   /-- Reading a program for what can be found of it (`glorious signatures`):
   a group that is refused is let be, and the rest are checked. -/
   lenient : Bool := false
+  /-- Only the bodies `main` reaches of the unit it is in are checked
+  (`watch`, to run before the rest is): `checkItems`. -/
+  reachOnly : Bool := false
   /-- For each value bound by a pattern, how many borrows had been made
   when it was: one made later it does not hold (`holderOf`). -/
   bindLoans : Std.HashMap Nat Nat := {}

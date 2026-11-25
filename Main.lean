@@ -380,8 +380,8 @@ of its own is where this one starts; and what this one finds is kept for the
 next, with the certificate it found: one that the proved checker accepts for
 the program now is used, and no other looked for (`GLORIOUS_FRESH` set:
 neither is read). -/
-def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool := true) :
-    IO (Except String Compiled) := do
+def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool := true)
+    (reachOnly : Bool := false) : IO (Except String Compiled) := do
   let file ← placesFile path
   let fresh := (← IO.getEnv "GLORIOUS_FRESH").isSome
   let dir ← Target.dirOf path
@@ -441,8 +441,10 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept texts
       (groupsKept := some groupsKept) (unitsKept := some unitsKept) (frontKept := some frontKept)
       (itemsKept := some itemsKept) (elabKept := some elabKept) (lowerKept := some lowerKept)
-      (typedKept := some typedKept))
-  if let .ok c := result then keep <| Trace.timedIO "save what is kept" do
+      (typedKept := some typedKept) (reachOnly := reachOnly))
+  -- (Of a compile of what `main` reaches alone, nothing is kept: the one
+  -- after it, of everything, keeps what it makes.)
+  if let .ok c := result then unless reachOnly do keep <| Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
     if search then
@@ -1004,10 +1006,11 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
       if now != last then
         last := now
         let start ← IO.monoMsNow
-        match ← compileFile path kept (search := false) with
+        -- (What `main` reaches checked first, and run; then the rest, and
+        -- what it refuses said after.)
+        match ← compileFile path kept (search := false) (reachOnly := true) with
         | .error e => IO.eprintln (errorLines s!"{path}: " e)
         | .ok c =>
-          kept := c.checkKept
           let compiled ← IO.monoMsNow
           IO.println s!"-- compiled in {compiled - start} ms"
           let wrong := fun (_ : Unit) =>
@@ -1020,6 +1023,10 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
             match ← runStreaming c.ctorNames bytecode (Bytecode.initIO bytecode input) 0 with
             | .halt r => IO.println (showValue c.ctorNames r.value)
             | _ => wrong ()
+          (← IO.getStdout).flush
+          match ← compileFile path kept (search := false) with
+          | .error e => IO.eprintln (errorLines s!"{path}: " e)
+          | .ok c => kept := c.checkKept
         (← IO.getStdout).flush
     IO.sleep 100
   pure 0

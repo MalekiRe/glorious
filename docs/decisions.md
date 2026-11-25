@@ -8494,3 +8494,14 @@ bytecode was 7.5 MB, now 1.2 MB. Making its bytes took 1.1 s of an edit to
 `main`, now 0.2 s, and the Rust VM loads and runs it in 0.5 s, from 0.64 s.
 The VM keeps one `Rc` of each; a loaded program (`image`) still writes each
 where it is named. Fleet's edit to `main` goes from 4.65 s to 3.6 s.
+
+## `watch` runs once what `main` reaches is checked
+
+`watch` checks the bodies `main` reaches first (`St.reachOnly`: of the unit
+`main` is in, the groups `main` reaches through calls; every signature, and
+every other unit, as always), runs the program, and then compiles again,
+everything, and says what that refuses. Nothing of the first compile is
+kept (a unit checked in part is no unit's state, and was taken for a whole
+one by a later compile); the second keeps what it makes. `run`, `build` and
+the suite check everything before anything runs, as decided with the
+redesign.

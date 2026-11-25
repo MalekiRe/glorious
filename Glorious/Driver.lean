@@ -785,7 +785,7 @@ def compileSource (src : String) (check : Bool := true)
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
     (parsedKept : Parsed := {})
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
-    (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
+    (lenient : Bool := false) (groupsKept : Option Check.Deltas := none) (reachOnly : Bool := false)
     (unitsKept : Option Syntax.Modules.UnitsKept := none)
     (frontKept : Option (Std.HashMap UInt64 (List Syntax.Item)) := none)
     (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
@@ -895,7 +895,7 @@ def compileSource (src : String) (check : Bool := true)
   let checkOnce := fun (all : List Syntax.Item) =>
     match check, resolved.info.shadowed, first with
     | true, false, .ok (count, first) =>
-      Check.checkUnitsKept { first with lenient } (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
+      Check.checkUnitsKept { first with lenient, reachOnly } (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
         (library := if (units.map List.length).sum == (all.drop count).length then library else 0)
         (deps := if (units.map List.length).sum == (all.drop count).length then unitDeps else [])
         (groupsKept := groupsKept)
@@ -956,7 +956,9 @@ def compileSource (src : String) (check : Bool := true)
   -- (Only they and what they reach: what `main` reaches is elaborated below.
   -- Taken from the first of them, as a program is from `main`; beside what
   -- follows, on a thread of its own, and what it refuses said first.)
-  let missing := match check, lowering with
+  -- (Where only what `main` reaches was checked, that is all that is
+  -- elaborated: the rest waits for the compile after.)
+  let missing := match check && !reachOnly, lowering with
     | true, some L =>
       let named := fun (items : List Syntax.Item) => items.filterMap fun
         | Syntax.Item.fn name _ _ _ _ => some name

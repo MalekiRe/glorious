@@ -777,12 +777,31 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
     -- (Each group kept as the signatures are, `checkGroupKept`: what it
     -- read of the others, held or not, says whether it is checked again.)
     let failMark := "%refused "
+    -- (Where only what `main` reaches is asked, `St.reachOnly` (`watch`, to
+    -- run before the rest is checked): of the unit `main` is in, the bodies
+    -- of the groups it reaches. The others' are checked by the compile
+    -- after, and nothing of this one is kept as the unit's.)
+    let reachOnly := (← get).reachOnly && names.contains "main"
+    let reached : Std.HashSet String := if !reachOnly then {} else Id.run do
+      let mut seen : Std.HashSet String := {}
+      let mut todo := ["main"]
+      while !todo.isEmpty do
+        match todo with
+        | n :: more =>
+          todo := more
+          unless seen.contains n do
+            seen := seen.insert n
+            todo := deps n ++ todo
+        | [] => pure ()
+      pure seen
+    let skipped := fun (g : List FnDecl) => reachOnly && !g.any (reached.contains ·.name)
     let fromSt ← get
     let sigFrom := mixHash 1 (hash [fromSt.tys.size, fromSt.rows.size, fromSt.caps.size, fromSt.capEdges.size,
       fromSt.loans.size, fromSt.rigidKeys.size, fromSt.brands, fromSt.dropAsked])
     -- (A group refused leaves what it did, the state not put back, which
     -- would hold it twice: what comes after it is checked again.)
     let one := fun ((g, k) : List FnDecl × Nat) => do
+      if skipped g then return #[]
       let got : Except Elab.Said (Array (UInt64 × KeptGroup)) ← attempt (match deltas with
           | some kept => checkGroupKept kept fromSt (mixHash ((ownKeyAt[k]?).getD 0) (mixHash sigFrom (hash k)))
               k g ((calleesAt[k]?).getD []) localFns
@@ -816,7 +835,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
       -- as Rust's is, with what to write.
       let mut beyond : Array String := #[]
       for (g, _) in before do
-        unless isSettled g do
+        unless skipped g || isSettled g do
           for d in g do
             match fromSt.fns[d.name]?, now.bodySchemes[d.name]? with
             | some a, some b =>
@@ -865,7 +884,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
       set now
       groupDeltas := groupDeltas ++ checked
       if let some (_, last) := rest.back? then
-        made := (keys[last]!, forKeeping (← get)) :: made
+        unless reachOnly do made := (keys[last]!, forKeeping (← get)) :: made
     if let some k := keys.getLast? then key := k
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.
@@ -943,7 +962,8 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
       checkDrops (← get).lateDrops
       checkStays (← get).lateStays
     modify fun s => { s with lateDups := #[], lateDrops := #[], lateStays := #[] }
-    pure ((whole, noBodies (← get)) :: made, groupDeltas)
+    let wholeSt := noBodies (← get)
+    pure (if reachOnly then [] else (whole, wholeSt) :: made, groupDeltas)
 
 /-- The declared types a type is made of. -/
 partial def namedIn : Ty → List String
