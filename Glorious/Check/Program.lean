@@ -287,6 +287,20 @@ def schemeWithin (body sig : Scheme) : Bool :=
         h.all (close (lifeAt i :: same ++ h')).contains
   | _, _ => false
 
+/-- A function's type with what calls of a label it is given give left out:
+a jump gives nothing back, and whatever is wanted where it is made. -/
+def withoutLabelResults (d : FnDecl) (s : Scheme) : Scheme :=
+  let labels := d.annots.zipIdx.filterMap fun
+    | (some (.name f []), i) => if d.bounds.any (fun b => b.trait == "Label" && b.subject == f) then some i else none
+    | _ => none
+  if labels.isEmpty then s else
+  match s.ty with
+  | .fn ps r effs tail cap =>
+    { s with ty := .fn (ps.zipIdx.map fun (p, i) => match p with
+        | .fn qs _ es t c => if labels.contains i then .fn qs .unit es t c else p
+        | p => p) r effs tail cap }
+  | _ => s
+
 /-- What a body needs that its signature does not say, as an error: what to
 write (`schemeWithin`). -/
 def beyondSignature (name : String) (sig body : Scheme) : String :=
@@ -747,20 +761,9 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           if let some st' := applyDelta none cur d then
             set st'
             sigsKept := some d
-    -- (A function a callable of which runs in an environment it is given,
-    -- `else`: what the environment is asked, which of the callables runs
-    -- and how, is its body's, as a constant's type is its value's; and one
-    -- given a label to jump to, `ensure`, whose call gives whatever is
-    -- wanted where it is made. So its body is its signature, read after the
-    -- others' signatures.)
-    let ofEnvironment := fun (d : FnDecl) => d.bounds.any fun b => b.trait == "Environment" || b.trait == "Label"
     if sigsKept.isNone then
       for (g, _) in rest do
-        for d in g do
-          unless ofEnvironment d do tryCatchThe Elab.Said (checkGroup [d] (signature := true)) fun _ => pure ()
-      for (g, _) in rest do
-        for d in g do
-          if ofEnvironment d then tryCatchThe Elab.Said (checkGroup [d]) fun _ => pure ()
+        for d in g do tryCatchThe Elab.Said (checkGroup [d] (signature := true)) fun _ => pure ()
     -- Then every body checked from those, side by side, none waiting for
     -- another's: each is to need no more of its callers than its signature
     -- says, as Rust's (`schemeWithin`). A group refused where all before it
@@ -798,8 +801,8 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           else s) {}
       -- (A constant's type is its value's, which no signature says.)
       let isSettled := fun (g : List FnDecl) => g.all fun d =>
-        Syntax.isConstFn d.name || ofEnvironment d || match fromSt.fns[d.name]?, now.bodySchemes[d.name]? with
-        | some a, some b => schemeWithin b a
+        Syntax.isConstFn d.name || match fromSt.fns[d.name]?, now.bodySchemes[d.name]? with
+        | some a, some b => schemeWithin (withoutLabelResults d b) (withoutLabelResults d a)
         | _, _ => false
       let firstRefused := rest.toList.find? fun (_, k) => refused.contains k
       let before := rest.toList.takeWhile fun (_, k) => !refused.contains k
@@ -810,7 +813,9 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
         unless isSettled g do
           for d in g do
             match fromSt.fns[d.name]?, now.bodySchemes[d.name]? with
-            | some a, some b => unless schemeWithin b a do beyond := beyond.push (beyondSignature d.name a b)
+            | some a, some b =>
+              unless schemeWithin (withoutLabelResults d b) (withoutLabelResults d a) do
+                beyond := beyond.push (beyondSignature d.name a b)
             | _, _ => beyond := beyond.push s!"in `{d.name}`: its signature says too little to check its callers with: write it whole"
       unless beyond.isEmpty do throw (sortedErrors beyond.toList)
       settled := true

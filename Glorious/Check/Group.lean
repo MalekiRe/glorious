@@ -654,11 +654,9 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   -- `f<T>(..)`; what the body needs is kept beside it, `schemeWithin`.)
   let fns := (← get).fns
   let params := (← get).typeParams
-  -- (A constant's type is its value's, and one whose callables run in an
-  -- environment or that is given a label has its body for its signature,
-  -- `checkItems`: theirs are their bodies'.)
+  -- (A constant's type is its value's.)
   let sigs := if signature then [] else decls.filterMap fun d =>
-    if Syntax.isConstFn d.name || d.bounds.any (fun b => b.trait == "Environment" || b.trait == "Label") then none
+    if Syntax.isConstFn d.name then none
     else (fns[d.name]?).map fun sig => (d.name, sig, params.lookup d.name)
   let mut defs : List (String × Ty) := []
   let mut reused : List (String × Ty) := []

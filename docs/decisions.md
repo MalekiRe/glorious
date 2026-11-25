@@ -8365,10 +8365,17 @@ could, which left a program not lowered (laid out by its types):
   - a group's functions written whole are known to each other's bodies by
     their signatures before any body is read.
 - A function a callable of which runs in an environment it is given
-  (`else`, `and`, `or`), or that is given a label to jump to (`ensure`),
-  has its body for its signature, as a constant has its value's type: which
-  of the callables runs, and how often, is what its callers are held to,
-  and no signature says it. These are read after the other signatures.
+  (`else`, `and`, `or`) is read from its bounds, as "A callable can be asked
+  for by a bound" meant it to be: a callable given the environment whole is
+  called at most once, and may go unused unless the environment is
+  `Use<[1, 1]>` and it alone runs in it; one lent it, `&E`, any number of
+  times; and one whose own `Use` is written, as that says (`if`'s body,
+  called or given back on every path, is `F: Use<[1, 1]>`). Held across
+  while a value that has to be used waits, it says `F: Returns`, as any
+  callable does. The body is held to that.
+- A call of a label a function is given (`ensure`) gives whatever is wanted
+  where it is made, as a jump comes back with nothing: what it gives is
+  left out when the body is held to the signature (`withoutLabelResults`).
 - Programs that relied on traits and lifetimes found from bodies write
   them: covey's despawn, commands, resources, one_of, one_of2, asm; the
   tasks example's `run` takes `F: Fn<..>, F: Returns`; six cases.
@@ -8421,8 +8428,7 @@ function's module or another, is checked with the signature alone. Of the
 body, the signature takes what says how a call is made, not what it asks:
 the instances of effects at its sites, and the types it leaves to
 implementations, in the signature's variables (`withBodyParts`). A
-constant's type, and a function whose callables run in an environment or
-that is given a label, stay their bodies'.
+constant's type stays its value's.
 
 - A lifetime of what a function performs is one of its signature's
   (`schemeShape`): `fn leak() -> &Int / {Reader}`, which gives back what

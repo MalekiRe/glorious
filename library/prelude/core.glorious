@@ -21,7 +21,7 @@ where F: Fn<(S,), Output = R, Effects = {| e}>, F: Use<[1, 1]>, S: Use<[1, 1]>, 
 // still there to be used. The body runs in an environment of its own (`E`),
 // and performs what `if` does.
 fn if<'e, E, A, X, B, F, e: EffectRow>(condition: Result<A, X>, body: F) -> Result<B, F> / {| e}
-where E: Environment<'e>, F: RunsIn<E, (A,), Output = B, Effects = {| e}>, A: Use<[1, 1]>, B: Use<[1, 1]>
+where E: Environment<'e>, F: RunsIn<E, (A,), Output = B, Effects = {| e}>, F: Use<[1, 1]>, A: Use<[1, 1]>, B: Use<[1, 1]>
 {
     match(condition) {
         Ok(found) => Ok(body(found)),

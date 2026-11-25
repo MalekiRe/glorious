@@ -3763,7 +3763,7 @@ fn main() -> Int { pick(1 < 2, one, { two() }) + pick(2 < 1, { 10 }, { two() }) 
 struct File(Int)
 impl Use<[1, 1]> for File {}
 fn close(File(fd): File) -> Int { host_write(fd); fd }
-fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }
+fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int>, A: Use<[1, 1]> { match(c) { Ok(_) => a(), Err(_) => b(a) } }
 fn main() -> Int { let f = File(3); pick(2 < 1, { close(f) }, { close(f) + 1 }) }
 #### expect
 3
@@ -3778,7 +3778,7 @@ fn main() -> Int { handle ask() + 1 { ask(k) => let m = 5; three(1, { k(m) }, { 
 struct File(Int)
 impl Use<[1, 1]> for File {}
 fn close(File(fd): File) -> Int { host_write(fd); fd }
-fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }
+fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int>, A: Use<[1, 1]> { match(c) { Ok(_) => a(), Err(_) => b(a) } }
 fn main() -> Int { let f = File(3); let g = File(4); let r = pick(2 < 1, { close(f) }, { close(f) + close(g) }); r }
 #### expect
 error: 5:54: in `main`: `g` has to be used, and one of the blocks given to `pick` holds it but not every one: only one of them runs
@@ -3786,7 +3786,7 @@ error: 5:54: in `main`: `g` has to be used, and one of the blocks given to `pick
 struct File(Int)
 impl Use<[1, 1]> for File {}
 fn close(File(fd): File) -> Int { host_write(fd); fd }
-fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }
+fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int>, A: Use<[1, 1]> { match(c) { Ok(_) => a(), Err(_) => b(a) } }
 fn main() -> Int { let f = File(3); pick(2 < 1, { close(f) }, { close(f) + 1 }) }
 #### expect
 3
@@ -3795,7 +3795,7 @@ fn main() -> Int { let f = File(3); pick(2 < 1, { close(f) }, { close(f) + 1 }) 
 struct File(Int)
 impl Use<[1, 1]> for File {}
 fn close(File(fd): File) -> Int { host_write(fd); fd }
-fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }
+fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int>, A: Use<[1, 1]> { match(c) { Ok(_) => a(), Err(_) => b(a) } }
 fn main() -> Int { let f = File(3); let h = { close(f) }; pick(2 < 1, { 1 }, { h() }) }
 #### expect
 error: 5:59: in `main`: `h` has to be used, and one of the blocks given to `pick` holds it but not every one: only one of them runs
@@ -4582,7 +4582,7 @@ fn main() -> (Int, Int) { let mut x = (1, 2); let a = &mut x.0; print(7); let b 
 #### case
 #### `After = E2`: an environment a callable leaves, in which another runs
 #### only once it has. `Label<T>`: a label that takes a `T`.
-fn seq<'e, E, E2, A, B>(a: A, b: B) -> Int where E: Environment<'e>, E2: Environment<'e>, A: RunsIn<E, (), Output = Int, After = E2>, B: RunsIn<E2, (), Output = Int> { let x = a(); x + b() }
+fn seq<'e, E, E2, A, B>(a: A, b: B) -> Int where E: Environment<'e>, E2: Environment<'e>, A: RunsIn<E, (), Output = Int, After = E2>, B: RunsIn<E2, (), Output = Int>, A: Returns, B: Returns { let x = a(); x + b() }
 fn main() -> Int { let mut n = 1; seq({ n = n + 1; n }, { n * 10 }) }
 #### expect
 22
@@ -5241,7 +5241,7 @@ fn main() -> Int { run(V({ r => r })) }
 4
 #### case
 #### An environment lent to some callables and given to another: none it is lent to is called once it is given.
-fn ok1<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { let x = a(); x + b() }
+fn ok1<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int>, A: Returns, B: Returns { let x = a(); x + b() }
 fn main() -> Int { let mut n = 1; ok1({ n = n + 1; n }, { n * 10 }) }
 #### expect
 22
@@ -5262,7 +5262,7 @@ fn main() { let mut n = 1; bad2({ n = n + 1; n }, { n * 10 }) }
 #### expect
 error: in `bad2`: `a` runs in the environment `E` lent to it, and `b` is given `E` and uses it up: on some path `a` is called after `b`
 #### case
-fn ok3<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { if(a() < 3) { a() + b() } else { b() } }
+fn ok3<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int>, A: Returns, B: Returns { if(a() < 3) { a() + b() } else { b() } }
 fn main() -> Int { let mut n = 1; ok3({ n = n + 1; n }, { n * 10 }) }
 #### expect
 33

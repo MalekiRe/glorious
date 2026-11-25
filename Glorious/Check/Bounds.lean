@@ -636,13 +636,31 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
             | .fn _ _ _ _ c => pure ((← findCap c) == root)
             | _ => pure false
           let f := named.getD "the callable"
-          -- (One that runs in an environment the function is given: which
-          -- of those runs, and how, the environment's rules say, from what
-          -- the body does.)
-          if named.any fun f => d.bounds.any fun b => b.trait == "RunsIn" && b.subject == f then
-            envNeeds := envNeeds ++ ((← (opened.getD 0 #[]).filterM fun (need, _) => isIt need).toList.map (·, true))
-              ++ ((← (opened.getD 1 #[]).filterM fun (need, _) => isIt need).toList.map (·, false))
-            envStays := envStays ++ (← (opened.getD 2 #[]).filterM fun (need, _) => isIt need).toList
+          -- (One that runs in an environment the function is given: as the
+          -- environment's rules say. Given it whole, it is called at most
+          -- once, and goes unused unless the environment is to be used and
+          -- it alone runs in it; lent it, `&E`, any number of times.)
+          if let some b := named.bind fun f => d.bounds.find? fun b => b.trait == "RunsIn" && b.subject == f then
+            let (env, lent) := match b.args.head? with
+              | some (.name e []) => (some e, false)
+              | some (.ref _ (.name e []) _) => (some e, true)
+              | _ => (none, true)
+            let members := (d.bounds.filter fun o => o.trait == "RunsIn" && match o.args.head? with
+              | some (.name e []) => some e == env
+              | _ => false).length
+            let must := env.any fun e => d.bounds.any fun o =>
+              o.trait == "Use" && o.subject == e && (o.quantity.any fun (lower, _) => lower ≥ 1)
+            -- (Or as its own `Use` says, `F: Use<[1, 1]>` of one always called
+            -- or given on.)
+            let (drops, dups) := match written with
+              | some (lower, upper) => (lower == 0, upper.isNone)
+              | none => (lent || !(must && members == 1), lent)
+            if dups then envNeeds := envNeeds ++ [((q, s!"`{f}` may be called any number of times"), true)]
+            if drops then envNeeds := envNeeds ++ [((q, s!"`{f}` runs in an environment, and may not be the one that runs"), false)]
+            if named.any fun f => d.bounds.any fun b => b.trait == "Returns" && b.subject == f then
+              envStays := envStays ++ [(q, "it is said to come back when called")]
+            else if let some (_, why) ← (opened.getD 2 #[]).findM? fun (need, _) => isIt need then
+              throw (inFunction d.name s!"{why}, and what it is given may jump to a label and not come back: write `{f}: Returns`")
             continue
           if lower ≥ 1 then
             if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => isIt need then
