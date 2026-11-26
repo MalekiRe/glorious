@@ -902,10 +902,10 @@ structure St where
   alone, while one group's bounds are settled: by the function, the trait,
   the type and arguments spelled, and what the function is given
   (`solveFitting`, `leavesFitting`). -/
-  solvedFit : PMap (String × Syntax.TraitKey × List Nat × Traits.Givens) (Option Traits.Dict) := {}
+  solvedFit : PMap (String × Syntax.TraitKey × List Nat × Traits.Givens Syntax.TraitKey) (Option Traits.Dict) := {}
   /-- How each type's values are destroyed, as found in a group: by the type
   as the solver has it and what the function is given. -/
-  destroyFit : Std.HashMap (Traits.STy × Traits.Givens) (Option Traits.Dict) := {}
+  destroyFit : Std.HashMap (Traits.STy × Traits.Givens Syntax.TraitKey) (Option Traits.Dict) := {}
   leavesFit : PMap (String × Syntax.TraitKey × List Nat) (List (Syntax.TraitKey × Nat × Ty × List Ty)) := {}
   /-- Types all known, each a number: its head and its parts' numbers (see
   `internTy`). Made anew for each group's bounds, as the caches keyed by
@@ -938,7 +938,7 @@ structure St where
   that no other object comes to be there. -/
   leavesAt : PMap (String × Syntax.TraitKey × USize × List USize) (Ty × List Ty × List (Syntax.TraitKey × Nat × Ty × List Ty)) := {}
   /-- The implementations as `Traits.solve` sees them, in the same order. -/
-  kimpls : Traits.ImplIndex := {}
+  kimpls : Traits.ImplIndex Syntax.TraitKey := {}
   /-- The bounds of the scheme last instantiated, at that use. -/
   lastBounds : List (String × Ty) := []
   /-- Has some implementation a condition that is more than a trait of one

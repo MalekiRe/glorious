@@ -28,6 +28,10 @@ rest of its Core.
 
 namespace Glorious.Traits
 
+-- (The solver is of traits by whatever tells them apart, `κ`: the checker's
+-- `Syntax.TraitKey`.)
+variable {κ : Type} [BEq κ] [Hashable κ]
+
 /-- A type as far as finding an implementation is concerned: one made with a
 name, or one the function being checked is generic in. -/
 inductive STy where
@@ -37,11 +41,11 @@ inductive STy where
 
 /-- `impl Trait for Head<T0, ..., Tn>`, on condition that each `(trait, i)` in
 `context` holds: that `Ti` has that trait. -/
-structure Impl where
-  trait : String
+structure Impl (κ : Type) where
+  trait : κ
   head : String
   arity : Nat
-  context : List (String × Nat)
+  context : List (κ × Nat)
 
 /-- The head a tuple of one or more has as its first and the tuple of the
 rest: what an implementation for `(H, ..R)` is for, one for every length. -/
@@ -80,31 +84,31 @@ inductive Dict where
 
 /-- What a function assumes of its own type parameters: each a trait and a type
 variable. -/
-abbrev Givens := List (String × Nat)
+abbrev Givens (κ : Type) := List (κ × Nat)
 
 mutual
 
 /-- `tr` holds of a type, and this is how. -/
-inductive Entails (impls : List Impl) (givens : Givens) : String → STy → Dict → Prop where
-  | given {k : Nat} {tr : String} {v : Nat} :
+inductive Entails (impls : List (Impl κ)) (givens : Givens κ) : κ → STy → Dict → Prop where
+  | given {k : Nat} {tr : κ} {v : Nat} :
       givens[k]? = some (tr, v) → Entails impls givens tr (.var v) (.given k)
-  | impl {i : Nat} {I : Impl} {tr head : String} {args : List STy} {subs : List Dict} :
+  | impl {i : Nat} {I : Impl κ} {tr : κ} {head : String} {args : List STy} {subs : List Dict} :
       impls[i]? = some I → I.trait = tr → I.head = head → I.arity = args.length →
       EntailsAll impls givens I.context args subs →
       Entails impls givens tr (.con head args) (.impl i subs)
   /-- A tuple of one or more by an implementation for its first and the
   rest, a function by one for every number of arguments (`consView`). -/
-  | cons {i : Nat} {I : Impl} {tr head : String} {args args' : List STy} {subs : List Dict} :
+  | cons {i : Nat} {I : Impl κ} {tr : κ} {head : String} {args args' : List STy} {subs : List Dict} :
       impls[i]? = some I → I.trait = tr → I.arity = 2 →
       consView head args = some (I.head, args') →
       EntailsAll impls givens I.context args' subs →
       Entails impls givens tr (.con head args) (.impl i subs)
 
 /-- Each condition of an implementation holds of the argument it is about. -/
-inductive EntailsAll (impls : List Impl) (givens : Givens) :
-    List (String × Nat) → List STy → List Dict → Prop where
+inductive EntailsAll (impls : List (Impl κ)) (givens : Givens κ) :
+    List (κ × Nat) → List STy → List Dict → Prop where
   | nil {args : List STy} : EntailsAll impls givens [] args []
-  | cons {tr : String} {j : Nat} {ctx : List (String × Nat)} {args : List STy} {τ : STy}
+  | cons {tr : κ} {j : Nat} {ctx : List (κ × Nat)} {args : List STy} {τ : STy}
       {d : Dict} {ds : List Dict} :
       args[j]? = some τ → Entails impls givens tr τ d → EntailsAll impls givens ctx args ds →
       EntailsAll impls givens ((tr, j) :: ctx) args (d :: ds)
@@ -114,10 +118,10 @@ end
 /-! ## Finding it -/
 
 /-- The first implementation of `tr` for `head` at this arity, with its place. -/
-def findImpl (tr head : String) (n : Nat) : List Impl → Option (Nat × Impl)
+def findImpl (tr : κ) (head : String) (n : Nat) : List (Impl κ) → Option (Nat × Impl κ)
   | [] => none
   | I :: rest =>
-    if I.trait = tr ∧ I.head = head ∧ I.arity = n then some (0, I)
+    if I.trait == tr && I.head == head && I.arity == n then some (0, I)
     else (findImpl tr head n rest).map fun x => (x.1 + 1, x.2)
 
 /-%proof (commented out while the machines become bytes)
@@ -142,9 +146,9 @@ theorem findImpl_sound {tr head : String} {n : Nat} : ∀ {impls : List Impl} {i
 %proof-/
 
 /-- Where an assumption is among those a function makes. -/
-def findGiven (tr : String) (v : Nat) : Givens → Option Nat
+def findGiven (tr : κ) (v : Nat) : Givens κ → Option Nat
   | [] => none
-  | g :: rest => if g = (tr, v) then some 0 else (findGiven tr v rest).map (· + 1)
+  | g :: rest => if g == (tr, v) then some 0 else (findGiven tr v rest).map (· + 1)
 
 /-%proof (commented out while the machines become bytes)
 theorem findGiven_sound {tr : String} {v : Nat} : ∀ {givens : Givens} {k : Nat},
@@ -165,8 +169,8 @@ theorem findGiven_sound {tr : String} {v : Nat} : ∀ {givens : Givens} {k : Nat
 %proof-/
 
 /-- Meet each condition of an implementation, given how to meet a bound. -/
-def collect (f : String → STy → Option Dict) (args : List STy) :
-    List (String × Nat) → Option (List Dict)
+def collect (f : κ → STy → Option Dict) (args : List STy) :
+    List (κ × Nat) → Option (List Dict)
   | [] => some []
   | (tr, j) :: ctx =>
     match args[j]? with
@@ -180,8 +184,8 @@ def collect (f : String → STy → Option Dict) (args : List STy) :
 one inside another, the implementation for a trait, a head and an arity found
 by `find`; for a tuple of one or more none is, one for its first and the
 rest. A type variable has a trait only if that is assumed. -/
-def solveBy (find : String → String → Nat → Option (Nat × Impl)) (givens : Givens) :
-    Nat → String → STy → Option Dict
+def solveBy (find : κ → String → Nat → Option (Nat × Impl κ)) (givens : Givens κ) :
+    Nat → κ → STy → Option Dict
   | 0, _, _ => none
   | _ + 1, tr, .var v => (findGiven tr v givens).map .given
   | fuel + 1, tr, .con head args =>
@@ -196,7 +200,7 @@ def solveBy (find : String → String → Nat → Option (Nat × Impl)) (givens 
         | some (i, I) => (collect (solveBy find givens fuel) args' I.context).map (.impl i)
 
 /-- `solveBy`, the implementations looked for in order. -/
-def solve (impls : List Impl) (givens : Givens) : Nat → String → STy → Option Dict :=
+def solve (impls : List (Impl κ)) (givens : Givens κ) : Nat → κ → STy → Option Dict :=
   solveBy (fun tr head n => findImpl tr head n impls) givens
 
 /-%proof (commented out while the machines become bytes)
@@ -281,58 +285,58 @@ first for each trait, head and arity, and whether a head has any of a trait.
 What is found by key is checked to be what is at that place, so it is evidence
 as `findImpl`'s is. -/
 
-structure ImplIndex where
-  impls : Array Impl := #[]
-  first : Std.HashMap (String × String × Nat) Nat := {}
-  heads : Std.HashMap (String × String) Nat := {}
+structure ImplIndex (κ : Type) [BEq κ] [Hashable κ] where
+  impls : Array (Impl κ) := #[]
+  first : Std.HashMap (κ × String × Nat) Nat := {}
+  heads : Std.HashMap (κ × String) Nat := {}
 
 /-- One more implementation, after the others. -/
-def ImplIndex.push (ix : ImplIndex) (I : Impl) : ImplIndex :=
+def ImplIndex.push (ix : ImplIndex κ) (I : Impl κ) : ImplIndex κ :=
   let i := ix.impls.size
   { impls := ix.impls.push I
     first := if ix.first.contains (I.trait, I.head, I.arity) then ix.first else ix.first.insert (I.trait, I.head, I.arity) i
     heads := if ix.heads.contains (I.trait, I.head) then ix.heads else ix.heads.insert (I.trait, I.head) i }
 
 /-- The implementations, indexed. -/
-def ImplIndex.ofArray (impls : Array Impl) : ImplIndex := impls.foldl ImplIndex.push {}
+def ImplIndex.ofArray (impls : Array (Impl κ)) : ImplIndex κ := impls.foldl ImplIndex.push {}
 
 /-- The first implementation of `tr` for `head` at this arity, with its place. -/
-def ImplIndex.find (ix : ImplIndex) (tr head : String) (n : Nat) : Option (Nat × Impl) :=
+def ImplIndex.find (ix : ImplIndex κ) (tr : κ) (head : String) (n : Nat) : Option (Nat × Impl κ) :=
   match ix.first[(tr, head, n)]? with
   | some i =>
     match ix.impls[i]? with
-    | some I => if I.trait = tr ∧ I.head = head ∧ I.arity = n then some (i, I) else none
+    | some I => if I.trait == tr && I.head == head && I.arity == n then some (i, I) else none
     | none => none
   | none => none
 
 /-- The first implementation of `tr` for `head`, at any arity. -/
-def ImplIndex.firstFor (ix : ImplIndex) (tr head : String) : Option Impl :=
+def ImplIndex.firstFor (ix : ImplIndex κ) (tr : κ) (head : String) : Option (Impl κ) :=
   ix.heads[(tr, head)]?.bind (ix.impls[·]?)
 
 /-- Is there an implementation of `tr` for `head`? -/
-def ImplIndex.has (ix : ImplIndex) (tr head : String) : Bool := ix.heads.contains (tr, head)
+def ImplIndex.has (ix : ImplIndex κ) (tr : κ) (head : String) : Bool := ix.heads.contains (tr, head)
 
 /-- `solve`, the implementations found by key. -/
-def solveIx (ix : ImplIndex) (givens : Givens) : Nat → String → STy → Option Dict :=
+def solveIx (ix : ImplIndex κ) (givens : Givens κ) : Nat → κ → STy → Option Dict :=
   solveBy ix.find givens
 
 /-! ## At most one way -/
 
 /-- No two implementations are for the same trait and the same head. -/
-def NoOverlap (impls : List Impl) : Prop :=
-  ∀ (i j : Nat) (I J : Impl), impls[i]? = some I → impls[j]? = some J → I.trait = J.trait →
+def NoOverlap (impls : List (Impl κ)) : Prop :=
+  ∀ (i j : Nat) (I J : Impl κ), impls[i]? = some I → impls[j]? = some J → I.trait = J.trait →
     I.head = J.head → I.arity = J.arity → i = j
 
 /-- No trait has an implementation for a tuple of one or more beside one
 for its first and the rest: a tuple is met by one or the other. -/
-def NoConsOverlap (impls : List Impl) : Prop :=
-  ∀ (i j : Nat) (I J : Impl), impls[i]? = some I → impls[j]? = some J → I.trait = J.trait →
+def NoConsOverlap (impls : List (Impl κ)) : Prop :=
+  ∀ (i j : Nat) (I J : Impl κ), impls[i]? = some I → impls[j]? = some J → I.trait = J.trait →
     0 < I.arity →
     (J.head = consHead ∧ I.head = tupleHead I.arity ∨ J.head = fnHead ∧ I.head = fnArityHead (I.arity - 1)) → False
 
 /-- Nothing is assumed twice. -/
-def Distinct (givens : Givens) : Prop :=
-  ∀ (k l : Nat) (x : String × Nat), givens[k]? = some x → givens[l]? = some x → k = l
+def Distinct (givens : Givens κ) : Prop :=
+  ∀ (k l : Nat) (x : κ × Nat), givens[k]? = some x → givens[l]? = some x → k = l
 
 /-%proof (commented out while the machines become bytes)
 /-- A type seen as an implementation for every length sees it has a head of
@@ -410,7 +414,7 @@ end
 /-! ## Checking the conditions -/
 
 /-- Is no implementation for the same trait and head as a later one? -/
-def noOverlap : List Impl → Bool
+def noOverlap : List (Impl κ) → Bool
   | [] => true
   | I :: rest =>
     rest.all (fun J => !(I.trait == J.trait && I.head == J.head && I.arity == J.arity))
@@ -453,23 +457,23 @@ theorem noOverlap_sound : ∀ {impls : List Impl}, noOverlap impls = true → No
 
 /-- An implementation for a tuple of one or more, or a function, that one
 for every length (`J`) would be for too? -/
-def overlapsView (I J : Impl) : Bool :=
-  decide (I.trait = J.trait) && decide (0 < I.arity) &&
+def overlapsView (I J : Impl κ) : Bool :=
+  (I.trait == J.trait) && decide (0 < I.arity) &&
     (decide (J.head = consHead) && decide (I.head = tupleHead I.arity)
       || decide (J.head = fnHead) && decide (I.head = fnArityHead (I.arity - 1)))
 
 /-- Has no trait an implementation for a tuple of one or more beside one for
 its first and the rest, nor for a function of some number of arguments
 beside one for every number? -/
-def noConsOverlap (impls : List Impl) : Bool :=
+def noConsOverlap (impls : List (Impl κ)) : Bool :=
   impls.all fun J => impls.all fun I => !overlapsView I J
 
 /-- `noOverlap`, as a set of what each implementation is for: the same
 answer, in a step for each implementation rather than for each pair of
 them, which over the library's and a program's thousands made checking a
 module's declarations quadratic. -/
-def noOverlapFast (impls : List Impl) : Bool := Id.run do
-  let mut seen : Std.HashSet (String × String × Nat) := {}
+def noOverlapFast (impls : List (Impl κ)) : Bool := Id.run do
+  let mut seen : Std.HashSet (κ × String × Nat) := {}
   for I in impls do
     if seen.contains (I.trait, I.head, I.arity) then return false
     seen := seen.insert (I.trait, I.head, I.arity)
@@ -477,9 +481,9 @@ def noOverlapFast (impls : List Impl) : Bool := Id.run do
 
 /-- `noConsOverlap`, likewise: the traits with an implementation for every
 length of tuple, and for every length of function, found first. -/
-def noConsOverlapFast (impls : List Impl) : Bool :=
-  let cons : Std.HashSet String := impls.foldl (fun s J => if J.head == consHead then s.insert J.trait else s) {}
-  let fns : Std.HashSet String := impls.foldl (fun s J => if J.head == fnHead then s.insert J.trait else s) {}
+def noConsOverlapFast (impls : List (Impl κ)) : Bool :=
+  let cons : Std.HashSet κ := impls.foldl (fun s J => if J.head == consHead then s.insert J.trait else s) {}
+  let fns : Std.HashSet κ := impls.foldl (fun s J => if J.head == fnHead then s.insert J.trait else s) {}
   impls.all fun I =>
     !(0 < I.arity && (cons.contains I.trait && I.head == tupleHead I.arity
       || fns.contains I.trait && I.head == fnArityHead (I.arity - 1)))
@@ -500,7 +504,7 @@ theorem noConsOverlap_sound {impls : List Impl} (h : noConsOverlap impls = true)
 %proof-/
 
 /-- Is nothing assumed twice? -/
-def distinct : Givens → Bool
+def distinct : Givens κ → Bool
   | [] => true
   | g :: rest => !rest.contains g && distinct rest
 

@@ -893,7 +893,7 @@ def usedAnyNumber (name : String) : M Bool := do
 
 /-- A declared type with a `drop` of its own. -/
 def dropDecl (name : String) : M (Option String) := do
-  pure (if (← get).kimpls.has "Drop" name then some (bareName name) else none)
+  pure (if (← get).kimpls.has (.of "Drop") name then some (bareName name) else none)
 
 mutual
 
@@ -983,7 +983,7 @@ def checkDups (dups : Array (Ty × String)) : M Unit := do
         -- (Of a `drop`: the function being checked, or the one a requirement
         -- checked again at the end was made in, which its message names.)
         let inDrop := (s.owner.splitOn "@").head? == some "Drop::drop" || (why.splitOn "in `Drop::drop@").length > 1
-        let home := inDrop && s.kimpls.impls.any fun I => I.trait == "Drop" && bareName I.head == name
+        let home := inDrop && s.kimpls.impls.any fun I => I.trait == .of "Drop" && bareName I.head == name
         let observed := (why.splitOn "to choose a clause").length > 1
         if through && (home || observed) then continue
         throw s!"{why}, but a `{name}` has a `drop`, which would then run once for each"

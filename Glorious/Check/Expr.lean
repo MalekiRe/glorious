@@ -1133,7 +1133,7 @@ partial def dotAltReading (scope : Scope) (amb : Row) (alts : List String) (a : 
     -- (Or a function of another trait, where the type has that trait.)
     let s ← get
     pure (alts.find? fun alt => match s.methods[alt]? with
-      | some sig => s.kimpls.has (sig.trait) h
+      | some sig => s.kimpls.has (.of sig.trait) h
       | none => false)
 
 /-- How two functions take their first argument: `0` whole, `1` by a shared
@@ -2660,7 +2660,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
       -- it: anywhere else its function would not have run.
       if let .con n _ := result then
         let s ← get
-        if !ps.isEmpty && s.kimpls.has "Drop" n then
+        if !ps.isEmpty && s.kimpls.has (.of "Drop") n then
           if let some here := s.modules.homes.lookup s.owner then
             let home := "::".intercalate ((n.splitOn "::").dropLast)
             unless here == home do

@@ -16,7 +16,7 @@ delta_part StDelta7 diffPart7 applyPart7 fitsPart7 clearPart7 restorePart7 [
   heldMoves : ArrD Use,
   traits : ListD (String × List String),
   methods : MapD String MethodSig,
-  kimpls : Array Traits.Impl,
+  kimpls : Array (Traits.Impl Syntax.TraitKey),
   blanketTraits : ListD (String × List String),
   instSites : ArrD (String × Nat × String × String × List Ty),
   siteTable : ListD (String × List (Nat × String × String × Nat × Nat)),

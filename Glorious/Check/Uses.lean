@@ -132,7 +132,7 @@ def checkAparts : M Unit := do
   modify fun st => { st with aparts := #[] }
   for (t, pos, _) in s.aparts do
     if let .con n _ ← find t then
-      if s.kimpls.has "Drop" n then
+      if s.kimpls.has (.of "Drop") n then
         if let some here := s.modules.homes.lookup s.owner then
           let home := "::".intercalate ((n.splitOn "::").dropLast)
           unless here == home do
@@ -1162,7 +1162,7 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
   if apart then
     if let (some t, .val _ bid) := (t, b) then
       if let .con n _ ← find t then
-        if s.kimpls.has "Drop" n
+        if s.kimpls.has (.of "Drop") n
             && s.owner != Syntax.implFnName "Drop" n "drop" then
           let mut plain := true
           for (subject, idx, _, _) in mine do

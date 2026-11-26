@@ -43,7 +43,7 @@ that has, as far as its type's arguments say? -/
 partial def hasDropOwn (t : Ty) : M Bool := do
   match ← find t with
   | .con n args =>
-    if (← get).kimpls.has "Drop" n then return true
+    if (← get).kimpls.has (.of "Drop") n then return true
     args.anyM hasDropOwn
   | .tuple parts => parts.anyM hasDropOwn
   | _ => pure false
@@ -1064,7 +1064,7 @@ own `drop` the value is being let go, and its fields are what is left.) -/
 def ownDropRead (subject : Ty) : M Unit := do
   if let .con n _ ← find subject then
     let s ← get
-    if s.dropMode && s.kimpls.has "Drop" n
+    if s.dropMode && s.kimpls.has (.of "Drop") n
         && s.owner != Syntax.implFnName "Drop" n "drop" then
       throw s!"{s.pos}a field is read of a `{bareName n}` that is in no variable, and a `{bareName n}` has a `drop` to run, which nothing then would: give the value a name first, `let value = ..; value.field`"
 

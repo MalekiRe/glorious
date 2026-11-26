@@ -346,7 +346,7 @@ instance {κ : Type} [BEq κ] [Hashable κ] : Delta (Std.HashSet κ) (Array κ) 
   apply _ a d := some (d.foldl (·.insert ·) a)
   fits _ _ _ := true
 
-instance : Delta Traits.ImplIndex (Array Traits.Impl) where
+instance : Delta (Traits.ImplIndex Syntax.TraitKey) (Array (Traits.Impl Syntax.TraitKey)) where
   diff p b :=
     if samePtr p b then some #[]
     else if extendsArr p.impls b.impls then some (b.impls.extract p.impls.size b.impls.size)

@@ -1045,11 +1045,11 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     let mut destroys : Array Elab.Destroy := #[]
     for im in s.impls do
       if im.trait == Syntax.destroyKey then
-        let givens : Traits.Givens := im.context
+        let givens : Traits.Givens Syntax.TraitKey := im.context.map fun (c, j) => (.of c, j)
         let place := fun (j : Nat) => (im.context.idxOf? (Syntax.destroyTrait, j)).map Elab.DictE.param
         let arity := im.params.length
-        let hook := if s.kimpls.has "Drop" im.head then
-            (Traits.solveIx s.kimpls givens 1000 "Drop"
+        let hook := if s.kimpls.has (.of "Drop") im.head then
+            (Traits.solveIx s.kimpls givens 1000 (.of "Drop")
               (.con im.head ((List.range arity).map Traits.STy.var))).map (toDictE s.impls)
           else none
         let mut ctors : List (String × List (Option Elab.DictE)) := []
@@ -1068,7 +1068,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
               for f in sig.fields do
                 let plain := (freeTys f).isEmpty && !(← needsDestroying [] f)
                 parts := parts ++ [if plain then none
-                  else (Traits.solveIx s.kimpls givens 1000 Syntax.destroyTrait (sty f)).map (toDictE s.impls)]
+                  else (Traits.solveIx s.kimpls givens 1000 Syntax.destroyKey (sty f)).map (toDictE s.impls)]
               ctors := ctors ++ [(c, parts)]
         destroys := destroys.push ⟨im.head, im.context.length, hook, im.head == "Fixed", ctors⟩
     let traitInfo : Elab.TraitInfo :=
