@@ -231,6 +231,11 @@ inductive Decision where
   written where it is (`derefNode`): the name borrowed (`some false`) or
   given as it is, a reference. -/
   | derefHere (id : Nat) (borrow : Option Bool)
+  /-- The assignment through the field borrow `id`, `x.f = v` of what
+  `DerefMut::deref_mut` gives of `x`, written where it is
+  (`derefAssignNode`): `x` borrowed `&mut` (`some true`) or given as it is,
+  a reference. -/
+  | derefAssignHere (id : Nat) (borrow : Option Bool)
   /-- The field read `id` (or borrowed, `&mut` where `uniq`) is not one the
   value shows, and the value's type implements `Deref`: it is of what
   `Deref::deref` (`DerefMut::deref_mut`) gives (`Mut<T>` as its `T`). -/
@@ -291,6 +296,46 @@ def derefNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Bo
   let (ge, b) := (b.exprs.size, { b with exprs := b.exprs.push given })
   let (ce, b) := (b.exprs.size, { b with exprs := b.exprs.push (.call (900000000000 + id) fe #[ge]) })
   pure { b with exprs := b.exprs.set! e (.fieldOf id ce f) }
+
+/-- The assignment `*(&mut x.path) = v` through the field borrow `id`, of
+what `deref_mut` gives of `x`, written where it is as a block: `{ let v' =
+v; let r = deref_mut(&mut x); *(&mut r.path) = v' }` (`x` given as it is
+where `borrow` is none, a reference): the value computed first, so that
+reading it does not meet the borrow. As the checker reads it on and the
+elaborator writes it (`Decision.derefAssignHere`). -/
+def derefAssignNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
+  let s ← (List.range b.stmts.size).find? fun i => match b.stmts[i]! with
+    | .assign t _ => match b.expr t with
+      | .deref r => match b.expr r with
+        | .refField i true _ _ false => i == id
+        | _ => false
+      | _ => false
+    | _ => false
+  let (path, x, value) ← match b.stmts[s]! with
+    | .assign t v => match b.expr t with
+      | .deref r => match b.expr r with
+        | .refField _ _ x path _ => some (path, x, v)
+        | _ => none
+      | _ => none
+    | _ => none
+  let held := s!"%deref{id}"
+  let named := held ++ "v"
+  let given : Flat.FExpr := match borrow with
+    | some u => .ref u x
+    | none => .name none x
+  let push := fun (b : Flat.Body) (n : Flat.FExpr) => (b.exprs.size, { b with exprs := b.exprs.push n })
+  let pushS := fun (b : Flat.Body) (n : Flat.FStmt) => (b.stmts.size, { b with stmts := b.stmts.push n })
+  let (s1, b) := pushS b (.let_ (.var named) value)
+  let (fe, b) := push b (.name none "deref_mut")
+  let (ge, b) := push b given
+  let (ce, b) := push b (.call (900000000000 + id) fe #[ge])
+  let (s2, b) := pushS b (.let_ (.var held) ce)
+  let (rf, b) := push b (.refField id true held path false)
+  let (dr, b) := push b (.deref rf)
+  let (ve, b) := push b (.name none named)
+  let (s3, b) := pushS b (.assign dr ve)
+  let (blk, b) := push b (.labelScope "%block" #[s1, s2, s3])
+  pure { b with stmts := b.stmts.set! s (.expr blk) }
 
 /-- What the checker says where it stops: why, and what it found to decide,
 where it stops for that; `result`

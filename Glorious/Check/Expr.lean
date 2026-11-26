@@ -138,6 +138,32 @@ def derefHere (scope : Scope) (id : Nat) (x step : String) : M Bool := do
   modify fun s => { s with body := b', decided := s.decided ++ [.derefHere id borrow] }
   pure true
 
+/-- The assignment `s`, `x.f = v` where `f` is a field `x` does not show and
+`x`'s type implements `Deref`: written where it is of what `deref_mut`
+gives (`Elab.derefAssignNode`), `x` a variable borrowed or a name holding
+a reference given as it is. Said for the elaborator
+(`Elab.Decision.derefAssignHere`). -/
+def derefAssignHere (scope : Scope) (s : Flat.StmtId) : M Bool := do
+  let b := (← get).body
+  let some (id, x, step) := (match b.stmt s with
+    | .assign t _ => match b.expr t with
+      | .deref r => match b.expr r with
+        | .refField id true x path false => some (id, x, path.headD "")
+        | _ => none
+      | _ => none
+    | _ => none) | return false
+  let (t, cell) ← match scope.lookup x with
+    | some (.val t _) => pure (t, false)
+    | some (.cell t _) => pure (t, true)
+    | _ => return false
+  unless ← derefsFor t step do return false
+  let borrow ← match ← find t with
+    | .ref .. => pure none
+    | _ => if cell then pure (some true) else return false
+  let some b' := Elab.derefAssignNode id borrow b | return false
+  modify fun s => { s with body := b', decided := s.decided ++ [.derefAssignHere id borrow] }
+  pure true
+
 /-- The dot call `call` at `e0`, its receiver a name, written where it is
 (`Elab.receiverNode`): the name borrowed as `fn` takes it, given as it is
 where it holds a reference. Said for the elaborator
@@ -2185,6 +2211,8 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
   match stmts with
   | [] => finish .unit false
   | s0 :: rest => do
+  -- (An assignment through `DerefMut`, written where it is, and read on.)
+  if ← derefAssignHere scope s0 then return ← inferStmts scope amb (s0 :: rest) want
   let b := (← get).body
   match b.stmt s0 with
   | .located line col s => do
