@@ -109,7 +109,15 @@ def save {α : Type} (file : System.FilePath) (key : String) (value : α) (chain
     -- of another compiler or not read at all, is not pointed into, and
     -- all is written again.)
     let read := (← loaded.get).map (·.1)
-    let deps := if before.length ≤ chain && before.all (read.contains ·.toString) then before else []
+    -- (Nor where what is pointed into has grown to three times the file
+    -- the chain starts from, which holds all: a region holds what was made
+    -- anew, which an edit makes much of, and the chain grew to 64 of them,
+    -- the size of the whole each, a fleet's build some gigabytes.)
+    let sizes ← before.mapM fun f => do pure ((← f.metadata).byteSize.toNat)
+    let grown := match sizes with
+      | first :: _ => sizes.foldl (· + ·) 0 > 3 * first + (1 <<< 20)
+      | [] => false
+    let deps := if !grown && before.length ≤ chain && before.all (read.contains ·.toString) then before else []
     let name := s!"{file.fileName.getD "kept"}.{now}.region"
     saveRaw (dir / name) { compiler := ← identity, key, value } deps
     let files := deps ++ [dir / name]
@@ -122,6 +130,34 @@ def save {α : Type} (file : System.FilePath) (key : String) (value : α) (chain
       if entry.fileName.startsWith s!"{file.fileName.getD "kept"}." && entry.fileName.endsWith ".region"
           && !own.contains entry.fileName then
         discard <| (IO.FS.removeFile entry.path).toBaseIO
+  catch _ => pure ()
+
+/-- The directories under `root`, the oldest written first taken away, till
+all of them hold no more than `cap` bytes; `keep` is not taken. Done at
+most once an hour (the time of `root/.collected`): it reads every file's
+size. -/
+def collect (root : System.FilePath) (cap : Nat) (keep : System.FilePath) : IO Unit := do
+  try
+    let mark := root / ".collected"
+    -- (The time now, as the file system has it: of a file written now.)
+    let probe := root / ".now"
+    IO.FS.writeFile probe ""
+    let now := (← probe.metadata).modified.sec
+    if ← mark.pathExists then
+      if now < (← mark.metadata).modified.sec + 3600 then return
+    IO.FS.writeFile mark ""
+    let mut dirs : Array (Int × Nat × System.FilePath) := #[]
+    for entry in ← root.readDir do
+      if !(← entry.path.isDir) || entry.path == keep then continue
+      let mut size := 0
+      for f in ← entry.path.readDir do
+        size := size + (← f.path.metadata).byteSize.toNat
+      dirs := dirs.push ((← entry.path.metadata).modified.sec, size, entry.path)
+    let mut total := dirs.foldl (fun t (_, s, _) => t + s) 0
+    for (_, size, dir) in dirs.qsort (fun a b => a.1 < b.1) do
+      if total ≤ cap then break
+      discard <| (IO.FS.removeDirAll dir).toBaseIO
+      total := total - size
   catch _ => pure ()
 
 /-- What was kept in `file`, if this compiler wrote it from `key`. -/

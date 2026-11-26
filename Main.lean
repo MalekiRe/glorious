@@ -522,6 +522,10 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     let older := groupsKeptList.filter fun (k, _) => !made.contains k
     saveShards dir "groups.kept" "groups" (c.groupsMade.toList ++ older) (groupsKept.contains ·)
       (most := 4096 / inferShards)
+    -- (The builds of other programs, the oldest written first, taken away
+    -- past `GLORIOUS_CACHE_MB`, 4096 where it is not said.)
+    let cap := (((← IO.getEnv "GLORIOUS_CACHE_MB").bind String.toNat?).getD 4096) * (1 <<< 20)
+    keep <| Store.collect ((← Target.cacheDir) / "build") cap dir
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)
