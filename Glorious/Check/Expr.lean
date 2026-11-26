@@ -119,6 +119,25 @@ def derefAt (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M Unit 
       throwThe Elab.Said { msg := s!"`{x}.{step}` is a field of what `{x}` stands for (`Deref`)", decision := some (.derefField id uniq) }
 
 
+/-- The field `step` read of the name `x` (the read `id`), where it is one
+`x` does not show and `x`'s type implements `Deref`: written where it is of
+what `deref` gives (`Elab.derefNode`), the name borrowed, given as it is
+where it holds a reference. Said for the elaborator
+(`Elab.Decision.derefHere`). -/
+def derefHere (scope : Scope) (id : Nat) (x step : String) : M Bool := do
+  let t := match scope.lookup x with
+    | some (.val t _) => some t
+    | some (.cell t _) => some t
+    | _ => none
+  let some t := t | return false
+  unless ← derefsFor t step do return false
+  let borrow := match ← find t with
+    | .ref .. => none
+    | _ => some false
+  let some b' := Elab.derefNode id borrow (← get).body | return false
+  modify fun s => { s with body := b', decided := s.decided ++ [.derefHere id borrow] }
+  pure true
+
 /-- The dot call `call` at `e0`, its receiver a name, written where it is
 (`Elab.receiverNode`): the name borrowed as `fn` takes it, given as it is
 where it holds a reference. Said for the elaborator
@@ -352,7 +371,9 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
       throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
     | none => throw s!"unknown name `{x}`"
   | .fieldOf id e name => do
-    if let some x := (← get).body.bare? e then derefAt scope id false x name
+    if let some x := (← get).body.bare? e then
+      if ← derefHere scope id x name then return ← inferExprAt scope amb e0
+      derefAt scope id false x name
     if let some field ← inferFieldOfPlace scope e0 then return field
     let subject ← peelTwice id (← inferExpr scope amb e)
     -- A field of what a reference is to, the reference given by what is

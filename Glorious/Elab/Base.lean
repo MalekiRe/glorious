@@ -227,6 +227,10 @@ inductive Decision where
   checker read it on, not read again (`receiverNode`): of `fn` where given,
   the name borrowed (`some uniq`) or given as it is. -/
   | receiverHere (call : Nat) (fn : Option String) (borrow : Option Bool)
+  /-- The field read `id` of a name, of what `Deref::deref` gives of it,
+  written where it is (`derefNode`): the name borrowed (`some false`) or
+  given as it is, a reference. -/
+  | derefHere (id : Nat) (borrow : Option Bool)
   /-- The field read `id` (or borrowed, `&mut` where `uniq`) is not one the
   value shows, and the value's type implements `Deref`: it is of what
   `Deref::deref` (`DerefMut::deref_mut`) gives (`Mut<T>` as its `T`). -/
@@ -268,6 +272,25 @@ def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : F
   let (ge, b) := (b.exprs.size, { b with exprs := b.exprs.push given })
   let node : Flat.FExpr := if tail then .tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)
   pure { b with exprs := b.exprs.set! e node }
+
+/-- The field read `id`, `x.f` of a name, written of what `deref` gives of
+it where it is: `deref(&x).f` (`borrow` is `some false`) or `deref(x).f`
+(`x` a reference), as the checker reads it on and the elaborator writes it
+(`Decision.derefHere`). -/
+def derefNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
+  let e ← (List.range b.exprs.size).find? fun i => match b.exprs[i]! with
+    | .fieldOf i _ _ => i == id
+    | _ => false
+  let (x, f) ← match b.exprs[e]! with
+    | .fieldOf _ s f => (b.bare? s).map (·, f)
+    | _ => none
+  let given : Flat.FExpr := match borrow with
+    | some u => .ref u x
+    | none => .name none x
+  let (fe, b) := (b.exprs.size, { b with exprs := b.exprs.push (.name none "deref") })
+  let (ge, b) := (b.exprs.size, { b with exprs := b.exprs.push given })
+  let (ce, b) := (b.exprs.size, { b with exprs := b.exprs.push (.call (900000000000 + id) fe #[ge]) })
+  pure { b with exprs := b.exprs.set! e (.fieldOf id ce f) }
 
 /-- What the checker says where it stops: why, and what it found to decide,
 where it stops for that; `result`
