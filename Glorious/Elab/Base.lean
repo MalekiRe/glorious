@@ -243,6 +243,10 @@ inductive Decision where
   (`compareNode`): `eq(&a, &b)`, an operand that is a name holding a
   reference given as it is (`refs`). -/
   | compareHere (call : Nat) (refs : List Bool)
+  /-- In `owner`, the function `x` named as a value at the node `node` (its
+  identity, `Flat.Body.idOf`), written where it is as a block that calls
+  it, the block numbered `id` (`etaNode`). -/
+  | etaHere (owner : String) (node : Nat) (x : String) (arity : Nat) (id : Nat)
   /-- The callable `id`'s clauses the checker's, `&Pattern` (`refPats`),
   written where it is (`refPatsNode`), not read again. -/
   | refPatsHere (id : Nat) (clauses : List Clause)
@@ -292,6 +296,28 @@ def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : F
   let (ge, b) := b.add given
   let node : Flat.FExpr := if tail then .tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)
   pure { b with exprs := b.exprs.set! e node }
+
+/-- The function `x` named as a value at the node whose identity is `node`,
+written where it is as a block that calls it, `{ (a, b) => x(a, b) }`, the
+block numbered `id` and its call `id + 1`: as the checker reads it on and
+the elaborator writes it (`Decision.etaHere`). -/
+def etaNode (node : Nat) (x : String) (arity : Nat) (id : Nat) (b : Flat.Body) : Option Flat.Body := do
+  let e ← (List.range b.exprs.size).reverse.find? fun i => b.idOf i == node && match b.exprs[i]! with
+    | .name _ y => y == x
+    | _ => false
+  let q ← match b.exprs[e]! with
+    | .name q _ => some q
+    | _ => none
+  let ps := (List.range arity).map fun k => s!"%eta{k}"
+  let (fe, b) := b.add (.name q x)
+  let (args, b) := ps.foldl (fun (acc : Array Flat.ExprId × Flat.Body) p =>
+    let (a, b) := acc.2.add (.name none p); (acc.1.push a, b)) (#[], b)
+  let (ce, b) := b.add (.call (id + 1) fe args)
+  let s := b.stmts.size
+  let b := { b with stmts := b.stmts.push (.expr ce) }
+  let c := b.clauses.size
+  let b := { b with clauses := b.clauses.push ⟨ps.map Pattern.var, #[s]⟩ }
+  pure { b with exprs := b.exprs.set! e (.closure id #[c]) }
 
 /-- The field read `id`, `x.f` of a name, written of what `deref` gives of
 it where it is: `deref(&x).f` (`borrow` is `some false`) or `deref(x).f`

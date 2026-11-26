@@ -330,7 +330,23 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
   let n ← node e0
   match n with
   | .int _ => pure .int
-  | .name .. | .label _ | .tuple _ => inferExprNamed scope amb n
+  | .name _ x =>
+    -- (A function that needs a trait of a type it is used at, named as a
+    -- value: written where it is as a block that calls it, and read on,
+    -- `etaHere`. Nothing was read of it before.)
+    fun s => match inferExprNamed scope amb n s with
+    | .ok t s => .ok t s
+    | .error e s =>
+      match e.decision with
+      | some (.eta owner y arity) =>
+        if owner != s.owner || y != x then .error e s else
+        let node := s.body.idOf e0
+        let id := 700000000000000 + (hash (owner, node)).toNat % 100000000000000 * 2
+        match Elab.etaNode node x arity id s.body with
+        | some b' => inferExprAt scope amb e0 { s with body := b', decided := s.decided ++ [.etaHere owner node x arity id] }
+        | none => .error e s
+      | _ => .error e s
+  | .label _ | .tuple _ => inferExprNamed scope amb n
   | .refField .. | .fieldOf .. | .proj .. => inferExprField scope amb e0 n
   | .call id f args =>
     -- (A comparison of two names of a type that is not copied: read again
