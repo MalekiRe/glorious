@@ -194,23 +194,11 @@ def signatureTy (rigid : List (String × Ty)) (annots : List (Option Ty)) (ret :
     for p in ps do captures c (.ty p)
   pure (Ty.fn ps r [] (some (← freshRowVar)) (← freshCap))
 
-/-- A comparison of what is not copied, `a == b` of two `String`s: read again
-comparing what they are by reference, `eq(&a, &b)`, as Rust's operators do
-(`Elab.Decision.compareByRef`). -/
-def checkCompares : M Unit := do
-  let cs := (← get).compares
-  modify fun s => { s with compares := #[] }
-  for (call, t) in cs do
-    modify fun s => { s with seen := {} }
-    if (← tyHasDrop [] t).isSome || (← tyOwnsOnce [] t) then
-      throwThe Elab.Said { msg := "a comparison of what is not copied compares references", decision := some (.compareByRef call) }
-
 /-- What is checked of a function once its type `t` is found
 (`checkGroupFn`). -/
 def afterGroupFn (t : Ty) : M Unit := do
   (fun s => Glorious.Trace.said "pending" fun _ => (runPending : M Unit).run s : M Unit)
   (fun s => Glorious.Trace.said "lower" fun _ => (timedM "group: lower checks" (runLowerChecks t) : M Unit).run s : M Unit)
-  checkCompares
   (fun s => Glorious.Trace.said "dups" fun _ => (do checkDups (← get).dups : M Unit).run s : M Unit)
   (fun s => Glorious.Trace.said "reads" fun _ => (checkGivenReads : M Unit).run s : M Unit)
   (fun s => Glorious.Trace.said "drops" fun _ => (do checkDrops (← get).drops : M Unit).run s : M Unit)

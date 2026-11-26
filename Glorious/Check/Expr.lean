@@ -106,17 +106,18 @@ def derefsFor (t : Ty) (step : String) : M Bool := do
   set saved
   pure !shown
 
-/-- The field `step` of `x`, read (borrowed `&mut` where `uniq`) at `id`:
-where it is one `x` does not show and `x`'s type implements `Deref`, the
-program is read again with it of what `deref` (`deref_mut`) gives. -/
-def derefAt (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M Unit := do
+/-- The field `step` of `x`, read (borrowed `&mut` where `uniq`): where it
+is one `x` does not show and `x`'s type implements `Deref`, and it was not
+written where it is (`derefHere`, `derefRefHere`: a value borrowed for
+writing), refused. -/
+def derefAt (scope : Scope) (x step : String) : M Unit := do
   let t := match scope.lookup x with
     | some (.val t _) => some t
     | some (.cell t _) => some t
     | _ => none
   if let some t := t then
     if ← derefsFor t step then
-      throwThe Elab.Said { msg := s!"`{x}.{step}` is a field of what `{x}` stands for (`Deref`)", decision := some (.derefField id uniq) }
+      throw s!"`{x}.{step}` is a field of what `{x}` stands for (`Deref`), which can be reached here only through a variable (`let mut {x}`) or a reference"
 
 
 /-- The field `step` read of the name `x` (the read `id`), where it is one
@@ -504,7 +505,7 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
   | .refField id uniq x path star => do
     if !star then
       if ← derefRefHere scope id uniq x (path.headD "") then return ← inferExprAt scope amb e0
-    derefAt scope id uniq x (path.headD "")
+    derefAt scope x (path.headD "")
     match scope.lookup x with
     | some (.cell t brand) => do
       -- A variable that holds a reference: the field is of what that points
@@ -555,7 +556,7 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
   | .fieldOf id e name => do
     if let some x := (← get).body.bare? e then
       if ← derefHere scope id x name then return ← inferExprAt scope amb e0
-      derefAt scope id false x name
+      derefAt scope x name
     if let some field ← inferFieldOfPlace scope e0 then return field
     let subject ← peelTwice id (← inferExpr scope amb e)
     -- A field of what a reference is to, the reference given by what is
@@ -2608,8 +2609,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
         | some b' =>
           modify fun s => { s with body := b', decided := s.decided ++ [.restHere id count] }
           return ← inferPat (Elab.restPat id count (.tuple ps)) t
-        | none =>
-          throwThe Elab.Said { msg := "`..` in a tuple pattern", decision := some (.rest id count) }
+        | none => throw "`..` in a tuple pattern that is not where the program has it; this is a compiler defect"
       | _ => throw "`..` in a tuple pattern stands for the parts not written, and how many the tuple has is not known here: say its type"
     -- (`()` of a reference to `()`: there is nothing in it to borrow.)
     if ps.isEmpty then

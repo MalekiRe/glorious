@@ -204,26 +204,30 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
 /-- The function that makes an implementation a value. -/
 def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
 
-/-- Something the checker decides of how a program is to be read, which it
-finds only once it knows types, decided where it is found: the function it
-is in is checked again with it, not the program. -/
+/-- Something the checker finds of how a program is to be read only once it
+knows types, written where it is found and read on: kept (`St.decided`)
+for the elaborator to write alike (`decideBody`), by the node it is of.
+No body is read again for one. (`eta`, `refPats` and `receiver` are what
+the checker says to itself where it finds one, for whoever reads the
+call or the name to write it there: never kept.) -/
 inductive Decision where
-  /-- `..` in the tuple pattern `id` stands for `count` parts. -/
-  | rest (id count : Nat)
-  /-- The same, written where it is (`restNode`), not read again. -/
+  /-- `..` in the tuple pattern `id` stands for `count` parts, written where
+  it is (`restNode`). -/
   | restHere (id count : Nat)
-  /-- In `owner`, the function `x` named as a value is a block that calls it. -/
+  /-- In `owner`, the function `x` named as a value is a block that calls it
+  (said to itself: `etaHere` is kept). -/
   | eta (owner x : String) (arity : Nat)
   /-- In `owner`, what the `let` of `x` at `line:col` binds is kept in a
   variable. -/
   | letMut (owner : String) (line col : Nat) (x : String)
   /-- The clauses of the callable `id` match what the reference they are
   given points to (`&Pattern`): as they are written out so
-  (`Syntax.Flat.byReference`). -/
+  (`Syntax.Flat.byReference`; said to itself: `refPatsHere` is kept). -/
   | refPats (id : Nat) (clauses : List Clause)
   /-- The dot call `call` is of `fn` (the type's own function of the name),
-  or of the function it is of, its receiver, a name, borrowed: given as the
-  function takes it, borrowed (`&mut` where `some true`) or whole. -/
+  or of the function it is of, its receiver given as the function takes it,
+  borrowed (`&mut` where `some true`) or whole (said to itself: the
+  `receiver…` that says how it is written is kept). -/
   | receiver (call : Nat) (fn : Option String) (borrow : Option Bool)
   /-- The dot call `call`, its receiver a name, written where it is as the
   checker read it on, not read again (`receiverNode`): of `fn` where given,
@@ -264,15 +268,6 @@ inductive Decision where
   /-- The callable `id`'s clauses the checker's, `&Pattern` (`refPats`),
   written where it is (`refPatsNode`), not read again. -/
   | refPatsHere (id : Nat) (clauses : List Clause)
-  /-- The field read `id` (or borrowed, `&mut` where `uniq`) is not one the
-  value shows, and the value's type implements `Deref`: it is of what
-  `Deref::deref` (`DerefMut::deref_mut`) gives (`Mut<T>` as its `T`). -/
-  | derefField (id : Nat) (uniq : Bool)
-  /-- The dot call `call`'s receiver, a reference, is of what it points to. -/
-  | derefReceiver (call : Nat)
-  /-- The comparison `call`, `a == b`, is of what `a` and `b` are, borrowed:
-  `eq(&a, &b)` (`Syntax.compareOps`). -/
-  | compareByRef (call : Nat)
 
 /-- Is `g` the function that reads an element where it is, `element_at`
 or `place_at` (`Syntax.elementRead`), which gives a reference to it? -/
@@ -294,10 +289,9 @@ and the node read is the one made last.)
 
 The dot call `call`'s node written where it is, as the checker reads it
 on (`Check.receiverHere`) and the elaborator writes it: of `fn` where
-given, its receiver a name borrowed (`some uniq`) or given as it is. None
-where the receiver is no name: decided as before (`receiverBody`), where
-written so, a chain of calls read again at each link cost more than reading
-the function again (covey/fleet's `main`: 1.7 s from 1.1). -/
+given, its receiver a name borrowed (`some uniq`) or given as it is (what
+is no name given whole, as it is written). None where what is borrowed is
+no name (`receiverFieldNode`, `receiverTempNode`). -/
 def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : Flat.Body)
     (at_ : Option Flat.ExprId := none) : Option Flat.Body := do
   -- (The checker says which node: its body has copies of nodes it made to
@@ -661,7 +655,7 @@ otherwise: a match found to be of a reference, or a dot call's function or
 receiver found? -/
 def Said.passOn (s : Said) : Bool :=
   match s.decision with
-  | some (.refPats ..) | some (.receiver ..) | some (.derefField ..) | some (.derefReceiver _) => true
+  | some (.refPats ..) | some (.receiver ..) => true
   | _ => false
 
 /-- What the checker tells the elaborator about the blocks of a program, each

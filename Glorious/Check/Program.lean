@@ -87,12 +87,12 @@ def placeLets (decls : List FnDecl) (from_ : Nat) : M Unit := do
   -- (What was written where it was found, `Elab.Decision.receiverHere`, in
   -- the bodies later checks follow.)
   let here := (s.decided.drop from_).filter fun
-    | .receiverHere .. | .derefHere .. | .derefAssignHere .. | .derefRefHere .. | .compareHere .. | .refPatsHere .. | .etaHere .. | .restHere .. | .receiverTemp .. | .receiverField .. | .derefReceiver .. | .receiverCopy .. => true
+    | .receiverHere .. | .derefHere .. | .derefAssignHere .. | .derefRefHere .. | .compareHere .. | .refPatsHere .. | .etaHere .. | .restHere .. | .receiverTemp .. | .receiverField .. | .receiverCopy .. => true
     | _ => false
   unless here.isEmpty do
     modify fun s =>
       { s with runFns := decls.foldl (fun m d =>
-          m.insert d.name (here.foldl (fun b dec => Elab.decideBody dec d.name d.annots b) ((m[d.name]?).getD d.body))) s.runFns }
+          m.insert d.name (here.foldl (fun b dec => Elab.decideBody dec d.name b) ((m[d.name]?).getD d.body))) s.runFns }
   let s ← get
   let lets := s.placedLets.toList.filter fun p => decls.any (·.name == p.1)
   -- (A name a clause binds: kept in a variable where the clause starts,
@@ -105,42 +105,17 @@ def placeLets (decls : List FnDecl) (from_ : Nat) : M Unit := do
   modify fun s =>
     { s with decided := s.decided ++ ds
              runFns := decls.foldl (fun m d =>
-               let b := ds.foldl (fun b dec => Elab.decideBody dec d.name d.annots b) ((m[d.name]?).getD d.body)
+               let b := ds.foldl (fun b dec => Elab.decideBody dec d.name b) ((m[d.name]?).getD d.body)
                m.insert d.name b) s.runFns }
 
-/-- Check a group, deciding where it is found what can be known only once
-types are (`Elab.Decision`): the group is checked again with it, from where
-it began, and it is kept for the program to be written with. What is said if
-a value kept in a variable is then refused is why it could not be left
-unused (`first`). -/
-partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Option String := none) :
-    M Unit := do
-  let before ← get
-  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls (before.decided.length)) fun e => do
-    let isLetMut := match e.decision with
-      | some (.letMut ..) => true
-      | _ => false
-    let said : Elab.Said := match first with
-      | some f => if isLetMut then { e with decision := none } else f
-      | none => { e with decision := none }
-    match fuel, e.decision with
-    | fuel + 1, some d =>
-      if Glorious.Trace.groupsTraced then
-        (dbgTrace s!"decision {fuel}: {e.msg.take 200}" fun _ => (pure () : M Unit))
-      let decls' := decls.map fun dl => { dl with body := Elab.decideBody d dl.name dl.annots dl.body }
-      -- (Nothing changed: what was said stands.)
-      -- (As written out: a rewrite may make new nodes of what it leaves the same.)
-      if (decls'.map fun d => d.body.hashClosure 0 d.body.roots) == (decls.map fun d => d.body.hashClosure 0 d.body.roots) then
-        throwThe Elab.Said said
-      set before
-      modify fun s =>
-        { s with decided := s.decided ++ [d]
-                 runFns := decls'.foldl (fun m d => m.insert d.name d.body) s.runFns }
-      let first := match d with
-        | .letMut .. => some (first.getD e.msg)
-        | _ => first
-      checkDeciding decls' fuel first
-    | _, _ => throwThe Elab.Said said
+/-- Check a group: what can be known only once types are is written where
+it is found (`Elab.Decision`), and written in the bodies later checks
+follow (`placeLets`). Nothing is checked again. -/
+def checkWritten (decls : List FnDecl) : M Unit := do
+  let from_ := (← get).decided.length
+  -- (Refused, said from the state the group began from: what it had
+  -- recorded is not another's to meet.)
+  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls from_) fun e => throwThe Elab.Said e
 
 /-- `x`, or its refusal: what it did kept, the state not put
 back (which would hold it twice, and copy what it changes). -/
@@ -153,9 +128,9 @@ def attempt {α : Type} (x : M α) : M (Except Elab.Said α) := fun s =>
 (`St.lenient`), one that is refused is let be. -/
 def checkMaybe (decls : List FnDecl) : M Unit := do
   if (← get).lenient then
-    tryCatchThe Elab.Said (checkDeciding decls) fun e => do
+    tryCatchThe Elab.Said (checkWritten decls) fun e => do
       modify fun s => { s with refusals := s.refusals.push e.msg }
-  else checkDeciding decls
+  else checkWritten decls
 
 /-- How far apart the ids of units checked side by side start: room for the
 runs of groups each checks side by side, a level after another

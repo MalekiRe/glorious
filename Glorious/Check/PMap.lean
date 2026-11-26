@@ -7,7 +7,7 @@ public import Glorious.Addr
 # Maps the checker's state shares with its earlier selves
 
 The checker keeps its state as one value and goes back to an earlier one
-when a guess fails (`checkDeciding`, speculative inference). A `Std.HashMap`
+when a guess fails (speculative inference). A `Std.HashMap`
 that is still held by such an earlier state is copied whole the first time
 it is changed after that: for a map that grows with the program, a cost of
 its size each time. A persistent map changes the path to one entry, and

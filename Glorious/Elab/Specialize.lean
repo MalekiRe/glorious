@@ -541,57 +541,6 @@ def splitFieldItems (all items : List Syntax.Item) : List Syntax.Item :=
 
 /-! ## What the checker decided, written into a flat body -/
 
-/-- `..` of one tuple pattern written as so many `_`. -/
-def restBody (id count : Nat) (b : Flat.Body) : Flat.Body :=
-  ({ onPat := restPat id count } : Flat.FRewrite).body b
-
-open Flat in
-mutual
-
-/-- Each naming of `x` that is not a call of it a block that calls it, its
-calls numbered from `base`. -/
-partial def etaExprF (x : String) (arity : Nat) (base : Nat) (e : ExprId) : Build ExprId := do
-  let b ← get
-  match b.expr e with
-  | .name q y =>
-    if y == x then
-      let ps := (List.range arity).map fun i => s!"%eta{i}"
-      flatExpr (.closure base [.mk (ps.map Pattern.var) [.expr (.call (base + 1) (.name q y) (ps.map (Expr.name none ·)))]])
-    else pure e
-  | .call i f args =>
-    let f' ← match b.expr f with
-      | .name _ _ => pure f
-      | _ => etaExprF x arity base f
-    pushExpr (.call i f' (← args.mapM (etaExprF x arity (base + 2 * (i % 1000000)))))
-  | .tailCall i f args =>
-    let f' ← match b.expr f with
-      | .name _ _ => pure f
-      | _ => etaExprF x arity base f
-    pushExpr (.tailCall i f' (← args.mapM (etaExprF x arity (base + 2 * (i % 1000000)))))
-  | .tuple args => do
-    pushExpr (.tuple (← (args.toList.zipIdx.mapM fun (a, k) => etaExprF x arity (base + 2 * k + 1000000000) a)).toArray)
-  | n => do
-    let n' ← n.mapIds (etaExprF x arity base) (etaClauseF x arity base) (·.mapM (etaStmtF x arity base))
-    if n' == n then pure e else pushExpr n'
-
-partial def etaClauseF (x : String) (arity : Nat) (base : Nat) (c : ClauseId) : Build ClauseId := do
-  let ⟨pats, body⟩ := (← get).clause c
-  pushClause ⟨pats, ← body.mapM (etaStmtF x arity base)⟩
-
-partial def etaStmtF (x : String) (arity : Nat) (base : Nat) (s : StmtId) : Build StmtId := do
-  match (← get).stmt s with
-  | .located l c inner => do pushStmt (.located l c (← etaStmtF x arity (base + 4000000 * l + 2000 * c) inner))
-  | n => do pushStmt (← n.mapIds (etaExprF x arity base) pure)
-
-end
-
-/-- A function's every naming of `x` that is not a call of it a block that
-calls it, `{ (a, b) => x(a, b) }`: what the checker decides where `x` needs a
-trait of a type it is used at. -/
-def etaBody (owner x : String) (arity : Nat) (b : Flat.Body) : Flat.Body :=
-  let base := 700000000000000 + 10000000000000 * (hash owner % 16).toNat
-  let (roots, b) := (b.roots.mapM (etaClauseF x arity base)).run b
-  { b with roots }
 
 /-- A clause whose patterns bind `x` that starts by keeping it in a variable,
 written at the place of its first statement (`letMutRewriteF`). -/
@@ -646,191 +595,14 @@ def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
   onClause go b c :=
     if line != 0 || col != 0 then none else (heldFirst x).onClause go b c
 
-/-- The callable `id`'s clauses the checker's (`refPats`). -/
-def refPatsBody (id : Nat) (clauses : List Clause) (b : Flat.Body) : Flat.Body :=
-  ({ onExpr := fun _ b e => match b.expr e with
-      | .closure i _ => if i == id then some (do
-          Flat.pushExpr (.closure i (← clauses.toArray.mapM Flat.flatClause))) else none
-      | _ => none } : Flat.FRewrite).body b
-
-/-- A clause borrowed again as `receiverClause` borrows, named and kept as
-anything borrowed is. -/
-def reborrowed (taken : Std.HashMap String Bool) (values refs : List String) (c : Flat.ClauseId) :
-    Flat.Build Flat.ClauseId := do
-  Flat.promoteClause values (← Flat.nameBorrowsClause (← Flat.receiverClause taken (refs.map (·, 3)) values c))
-
-/-- Each clause of a body with a node `asks` of, rewritten by `marked` and
-its borrows made again (`reborrowed`); the others as they are. -/
-def reborrowWhere (b : Flat.Body) (asks : Flat.FExpr → Bool) (taken : Std.HashMap String Bool)
-    (annots : List (Option TypeExpr)) (marked : Flat.FRewrite) : Flat.Body :=
-  let (roots, b) := (b.roots.mapM fun c => (do
-    let b ← get
-    let ⟨pats, body⟩ := b.clause c
-    if !body.any (b.anyStmt asks) then return c
-    let (values, refs) := Flat.paramsOf pats annots
-    reborrowed taken values refs (← marked.clause c) : Flat.Build Flat.ClauseId)).run b
-  { b with roots }
-
-/-- The dot call `call` of `fn` (or of the function it is of), its receiver
-given as that takes it: borrowed as the resolver borrows a receiver
-(`receiverClause`), a name given whole borrowed where `fn` is none; and then
-named and kept where a reference can point, as anything borrowed is. Only the
-clauses the call is in are written again. -/
-def receiverBody (call : Nat) (fn : Option String) (borrow : Option Bool) (annots : List (Option TypeExpr))
-    (b : Flat.Body) : Flat.Body :=
-  let marked : Flat.FRewrite := { onExpr := fun go b e => match b.expr e with
-    | .call i f args =>
-      if i != call then none else
-      match b.expr f, fn with
-      | .fieldOf _ recv _, some g => some (do
-        let r ← go.ex recv
-        let mark ← Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none Syntax.receiverMark)) #[r])
-        let rest ← args.mapM go.ex
-        Flat.pushExpr (.call i (← Flat.pushExpr (.name none g)) (#[mark] ++ rest)))
-      | _, _ =>
-        match args.toList with
-        | a :: rest => some (do
-          let callee ← match fn with
-            | some g => Flat.pushExpr (.name none g)
-            | none => pure f
-          -- (The receiver as written: what the function first chosen made of
-          -- it undone.)
-          let b ← get
-          let written ← match b.expr a with
-            | .ref _ x => Flat.pushExpr (.name none x)
-            | .refField fid _ x path _ => do
-              let mut e ← Flat.pushExpr (.name none x)
-              for step in path do
-                e ← Flat.pushExpr (.fieldOf fid e step)
-              pure e
-            | _ => pure a
-          let given ← match fn, borrow, (← get).bare? written with
-            | none, some u, some x => Flat.pushExpr (.ref u x)
-            | none, _, _ => pure a
-            | some _, _, _ => Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none Syntax.receiverMark)) #[written])
-          let rest ← rest.toArray.mapM go.ex
-          Flat.pushExpr (.call i callee (#[given] ++ rest)))
-        | [] => none
-    | _ => none }
-  let taken : Std.HashMap String Bool := match borrow with
-    | some u => ({} : Std.HashMap String Bool).insert (fn.getD "") u
-    | none => {}
-  let calls := fun (n : Flat.FExpr) => match n with
-    | .call i _ _ | .tailCall i _ _ => i == call
-    | _ => false
-  reborrowWhere b calls taken annots marked
-
-/-- The comparison `call` of the function of `Eq` or `Ord` that compares by
-reference, each side borrowed as a receiver is (`receiverClause`), named and
-kept where a reference can point. Only the clauses it is in are written
-again. -/
-def compareBody (call : Nat) (annots : List (Option TypeExpr)) (b : Flat.Body) : Flat.Body :=
-  let fnOf := fun (b : Flat.Body) (f : Flat.ExprId) =>
-    (b.name? f).bind fun (_, op) => Syntax.compareOps.lookup op
-  let marked : Flat.FRewrite := { onExpr := fun go b e => match b.expr e with
-    | .call i f #[l, r] =>
-      if i != call then none else
-      (fnOf b f).map fun fn => do
-        -- (A name borrowed as it is, a reference too: `&T` compares as `T`.)
-        let mark := fun (a : Flat.ExprId) => (do
-          match (← get).bare? a with
-          | some x =>
-            if (Syntax.lastSegment x).front.isUpper then
-              Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none Syntax.receiverMark)) #[a])
-            else Flat.pushExpr (.ref false x)
-          | none => Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none Syntax.receiverMark)) #[← go.ex a]) : Flat.Build Flat.ExprId)
-        Flat.pushExpr (.call i (← Flat.pushExpr (.name none fn)) #[← mark l, ← mark r])
-    | _ => none }
-  let taken : Std.HashMap String Bool := Syntax.compareOps.foldl (fun m (_, fn) => m.insert fn false) {}
-  let calls := fun (n : Flat.FExpr) => match n with
-    | .call i _ _ => i == call
-    | _ => false
-  reborrowWhere b calls taken annots marked
-
-/-- The name the field borrow `id` is of, in an expression outside any
-block in it. -/
-partial def refFieldOfF (b : Flat.Body) (id : Nat) (e : Flat.ExprId) : Option String :=
-  match b.expr e with
-  | .refField i _ x _ _ => if i == id then some x else none
-  | _ => (b.direct e).toList.findSome? (refFieldOfF b id)
-
-/-- The field `id` read (or borrowed) of what `Deref::deref` gives of the
-name it was of: `m.0` as `Deref::deref(&m).0`. A field borrowed is of a
-reference named before the statement; one assigned, after its value is
-computed, so that reading the value does not meet the borrow. Only the
-clauses it is in are written again. -/
-def derefBody (id : Nat) (uniq : Bool) (annots : List (Option TypeExpr)) (b : Flat.Body) : Flat.Body :=
-  let fn := if uniq then "deref_mut" else "deref"
-  -- (Its own identity, clear of every token's: the checker may decide
-  -- how the name is given to it.)
-  let given := fun (x : String) => Flat.flatExpr
-    (.call (900000000000 + id) (.name none fn) [.call 0 (.name none Syntax.receiverMark) [.name none x]])
-  let held := s!"%deref{id}"
-  let toHeld : Flat.FRewrite := { onExpr := fun _ b e => match b.expr e with
-    | .refField i u _ path _ => if i == id then some (Flat.pushExpr (.refField i u held path false)) else none
-    | _ => none }
-  let other := fun (go : Flat.FGo) (s : Flat.StmtId) => (do
-    let b ← get
-    match (b.stmtExprs s).toList.findSome? (refFieldOfF b id) with
-    | some x =>
-      let first ← Flat.pushStmt (.let_ (.var held) (← given x))
-      let moved ← toHeld.stmtList [s]
-      pure (some (first :: (← moved.mapM go.st)))
-    | none => pure none : Flat.Build (Option (List Flat.StmtId)))
-  let rec here (go : Flat.FGo) (s : Flat.StmtId) (fuel : Nat) : Flat.Build (Option (List Flat.StmtId)) := do
-    let b ← get
-    match fuel, b.stmt s with
-    | 0, _ => pure none
-    | fuel + 1, .located l c inner =>
-      match ← here go inner fuel with
-      | some made => some <$> made.mapM fun s => Flat.pushStmt (.located l c s)
-      | none => pure none
-    | _, .assign t v =>
-      let assigned : Option (Bool × List String) := match b.expr t with
-        | .deref r => match b.expr r with
-          | .refField i u x path _ => if i == id then some (u, x :: path) else none
-          | _ => none
-        | _ => none
-      match assigned with
-      | some (u, x :: path) =>
-        let value := held ++ "v"
-        let first ← Flat.pushStmt (.let_ (.var value) (← go.ex v))
-        let second ← Flat.pushStmt (.let_ (.var held) (← given x))
-        let place ← Flat.pushExpr (.deref (← Flat.pushExpr (.refField id u held path false)))
-        let third ← Flat.pushStmt (.assign place (← Flat.pushExpr (.name none value)))
-        pure (some [first, second, third])
-      | _ => other go s
-    | _, _ => other go s
-  let marked : Flat.FRewrite :=
-    { onExpr := fun _ b e => match b.expr e with
-        | .fieldOf i x f =>
-          match b.bare? x with
-          | some name => if i == id then some (do Flat.pushExpr (.fieldOf i (← given name) f)) else none
-          | none => none
-        | _ => none
-      onStmts := fun go _ ss => match ss with
-        | s :: rest => some (do
-          match ← here go s 64 with
-          | some made => pure (made ++ (← go.stmts rest))
-          | none => pure ((← go.st s) :: (← go.stmts rest)))
-        | [] => none }
-  let found := fun (n : Flat.FExpr) => match n with
-    | .fieldOf i _ _ | .refField i _ _ _ _ => i == id
-    | _ => false
-  let taken : Std.HashMap String Bool := ({} : Std.HashMap String Bool).insert fn uniq
-  reborrowWhere b found taken annots marked
-
-/-- A function's body with one thing the checker decided written in: `name`
-is the name the function is checked by, `annots` what its parameters are
-written with. -/
-def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) (b : Flat.Body) : Flat.Body :=
+/-- A function's body with one thing the checker wrote where it found it
+written in alike: `name` is the name the function is checked by. (What
+the checker only says to itself, to be written where it is, `receiver`,
+`refPats` and `eta`, is never kept.) -/
+def decideBody (d : Decision) (name : String) (b : Flat.Body) : Flat.Body :=
   match d with
-  | .rest id count => restBody id count b
   | .restHere id count => (restNode id count b).getD b
-  | .eta owner x arity => if name == owner then etaBody owner x arity b else b
   | .letMut owner line col x => if name == owner then (letMutRewriteF line col x).body b else b
-  | .refPats id clauses => refPatsBody id clauses b
-  | .receiver call fn borrow => receiverBody call fn borrow annots b
   | .receiverHere call fn borrow => (receiverNode call fn borrow b).getD b
   | .receiverTemp call fn uniq root => (receiverTempNode call fn uniq root b).getD b
   | .receiverField call fn uniq star => (receiverFieldNode call fn uniq star b).getD b
@@ -841,23 +613,7 @@ def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) 
   | .compareHere call refs => (compareNode call refs b).getD b
   | .etaHere owner node x arity id => if name == owner then (etaNode node x arity id b).getD b else b
   | .refPatsHere id clauses => (refPatsNode id clauses b).getD b
-  | .derefField id uniq => derefBody id uniq annots b
-  | .compareByRef call => compareBody call annots b
-  | .derefReceiver call =>
-    ({ onExpr := fun go b e => match b.expr e with
-        | .call i f args =>
-          if i != call then none else
-          -- (Its receiver where it is: the callee's, `recv.name(..)`, or
-          -- the first argument.)
-          match b.expr f with
-          | .fieldOf fid recv name => some (do
-            let callee ← Flat.pushExpr (.fieldOf fid (← Flat.pushExpr (.deref (← go.ex recv))) name)
-            Flat.pushExpr (.call i callee (← args.mapM go.ex)))
-          | _ =>
-            if args.isEmpty then none else some (do
-              let args ← args.mapM go.ex
-              Flat.pushExpr (.call i (← go.ex f) (args.set! 0 (← Flat.pushExpr (.deref args[0]!)))))
-        | _ => none } : Flat.FRewrite).body b
+  | .eta .. | .refPats .. | .receiver .. => b
 
 /-- Every function of an item with what the checker decided written in, each
 under the name it is checked by. -/
@@ -887,15 +643,13 @@ def Decided.of (b : Blocks) : Decided := Id.run do
   let mut d : Decided := {}
   for decision in b.decided do
     d := match decision with
-      | .rest id _ | .restHere id _ => { d with rests := d.rests.insert id }
-      | .eta owner _ _ | .letMut owner _ _ _ => { d with owners := d.owners.insert owner }
-      | .etaHere owner _ _ _ _ => { d with owners := d.owners.insert owner }
-      | .refPats id _ | .refPatsHere id _ => { d with closures := d.closures.insert id }
-      | .receiver call _ _ | .receiverHere call _ _ | .receiverTemp call _ _ _ | .receiverField call _ _ _
-      | .receiverCopy call =>
-        { d with calls := d.calls.insert call }
-      | .derefField id _ | .derefHere id _ | .derefAssignHere id _ | .derefRefHere id _ _ => { d with fields := d.fields.insert id }
-      | .derefReceiver call | .compareByRef call | .compareHere call _ => { d with calls := d.calls.insert call }
+      | .restHere id _ => { d with rests := d.rests.insert id }
+      | .letMut owner _ _ _ | .etaHere owner _ _ _ _ => { d with owners := d.owners.insert owner }
+      | .refPatsHere id _ => { d with closures := d.closures.insert id }
+      | .receiverHere call _ _ | .receiverTemp call _ _ _ | .receiverField call _ _ _ | .receiverCopy call
+      | .compareHere call _ => { d with calls := d.calls.insert call }
+      | .derefHere id _ | .derefAssignHere id _ | .derefRefHere id _ _ => { d with fields := d.fields.insert id }
+      | .eta .. | .refPats .. | .receiver .. => d
   for (call, _) in b.dotChosen do d := { d with calls := d.calls.insert call }
   for ((call, _), _) in b.argsChosen do d := { d with calls := d.calls.insert call }
   pure d
@@ -998,7 +752,7 @@ def decidedProgram (b : Blocks) (items : List Syntax.Item) : List Syntax.Item :=
   -- of more than was written.)
   let items := items.map fun item =>
     if !d.item item || !decisions.item item then item else
-    b.decided.foldl (fun item dec => Item.decide (decideBody dec) item) item
+    b.decided.foldl (fun item dec => Item.decide (fun name _ b => decideBody dec name b) item) item
   let items := scalarLiterals b items
   items.map fun item =>
     if !d.item item then item else

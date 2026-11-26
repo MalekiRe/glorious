@@ -905,9 +905,9 @@ def compileSource (src : String) (check : Bool := true)
       Check.checkUnitsKept { dropMode := drops } ((all.take count, hash resolved.info.text) :: cut (all.drop count))
         resolved.info (mixHash seed 77) checkKept (own := false)
     | _, _, _ => ((Check.checkProgram all resolved.info drops).map (·, [], [], #[])).mapError (fun e => ({ msg := e } : Elab.Said))
-  -- (What the checker decides of how the program is read once it knows
-  -- types, `..` in a tuple pattern, a function named as a value, a value
-  -- kept in a variable, it decides where it finds it: `Check.checkDeciding`.)
+  -- (What the checker finds of how the program is read once it knows
+  -- types it writes where it finds it, and the elaborator alike
+  -- (`Elab.decidedProgram`).)
   let checkWith := fun (all : List Syntax.Item) => (all, checkOnce all)
   let (all, checked) := Trace.timed "check" fun _ => checkWith all
   -- (Dot calls the checker chose a type's own function for, by the value's
