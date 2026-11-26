@@ -8479,7 +8479,7 @@ fn eat(n: Noisy) -> Int { 5 }
 fn peek(n: &Noisy) -> Int { n.0 }
 fn main() -> Int { let n = Noisy(1); let a = peek(&n); let b = eat(n); a + b + peek(&n) }
 #### expect
-error: 5:56: in `main`: reading the variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each
+error: 5:72: in `main`: `n` is borrowed after its value is given away, but a `Noisy` has a `drop`, which would then run once for each
 #### case
 struct Noisy(Int);
 impl Drop for Noisy { fn drop(n: &mut Noisy) { say(n.0) } }
@@ -8504,7 +8504,7 @@ fn eat(n: Noisy) -> Int { 5 }
 fn peek(n: &Noisy) -> Int { n.0 }
 fn main() -> Int { let n = Noisy(1); eat(n) + peek(&n) }
 #### expect
-error: 5:38: in `main`: reading the variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each
+error: 5:38: in `main`: `n` is borrowed after its value is given away, but a `Noisy` has a `drop`, which would then run once for each
 #### case
 struct Noisy(Int);
 impl Drop for Noisy { fn drop(n: &mut Noisy) { say(n.0) } }
@@ -8512,7 +8512,7 @@ fn eat(n: Noisy) -> Int { 5 }
 fn peek(n: &Noisy) -> Int { n.0 }
 fn main() -> Int { let n = Noisy(1); defer { say(peek(&n)); } eat(n) }
 #### expect
-error: 5:63: in `main`: reading the variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each
+error: 5:63: in `main`: `n` is borrowed after its value is given away, but a `Noisy` has a `drop`, which would then run once for each
 #### case
 fn main() -> Int { let mut a = 3; let b = a; let r = &a; b + *r + a }
 #### expect
@@ -8606,7 +8606,7 @@ fn eat(n: Noisy) -> Int { 5 }
 fn peek(n: &Noisy) -> Int { n.0 }
 fn main() -> Int { let n = Noisy(1); let f = { eat(n) }; let a = peek(&n); f() + a }
 #### expect
-error: 5:48: in `main`: reading the variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each
+error: 5:58: in `main`: `n` is borrowed after its value is given away, but a `Noisy` has a `drop`, which would then run once for each
 #### case
 struct Noisy(Int);
 impl Drop for Noisy { fn drop(n: &mut Noisy) { say(n.0) } }
@@ -8623,7 +8623,7 @@ fn eat(n: Noisy) -> Int { 5 }
 fn peek(n: &Noisy) -> Int { n.0 }
 fn main() -> Int { let n = Noisy(1); let a = peek(&n); repeat_n(3, { eat(n); }); a }
 #### expect
-error: 5:56: in `main`: `repeat_n` may use what it is given more than once, but a `Noisy` has a `drop`, which would then run once for each
+error: 5:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut n`), which is destroyed where it was not used
 #### case
 struct Noisy(Int);
 impl Drop for Noisy { fn drop(n: &mut Noisy) { say(n.0) } }
@@ -8632,7 +8632,7 @@ fn peek(n: &Noisy) -> Int { n.0 }
 effect Tick { tick() }
 fn main() -> Int { let n = Noisy(1); let a = peek(&n); handle { tick(); tick(); a }() { tick(k) => eat(n) + k(()) } }
 #### expect
-error: 6:20: in `main`: `n` is used more than once, but a `Noisy` has a `drop`, which would then run once for each
+error: 6:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut n`), which is destroyed where it was not used
 #### case
 struct Noisy(Int);
 impl Drop for Noisy { fn drop(n: &mut Noisy) { say(n.0) } }
@@ -8640,7 +8640,7 @@ fn eat(n: Noisy) -> Int { 5 }
 fn peek(n: &Noisy) -> Int { n.0 }
 fn main() -> Int { let n = Noisy(1); let a = peek(&n); let mut i = 0; while({ i < 2 }) { eat(n); i = i + 1; }; a }
 #### expect
-error: 5:71: in `main`: `while` may use what it is given more than once, but a `Noisy` has a `drop`, which would then run once for each
+error: 5:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut n`), which is destroyed where it was not used
 #### case
 struct Noisy(Int);
 impl Drop for Noisy { fn drop(n: &mut Noisy) { say(n.0) } }
@@ -8649,7 +8649,7 @@ fn peek(n: &Noisy) -> Int { n.0 }
 struct Job { run: fn() -> Int }
 fn main() -> Int { let n = Noisy(1); let a = peek(&n); let j = Job { run: { eat(n) } }; a }
 #### expect
-error: 6:20: in `main`: `n` could be used after its block has ended: it is stored in a declaration's `fn` field; give that declaration a type parameter for the field
+error: 6:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut n`), which is destroyed where it was not used
 #### case
 #### A variable may give its value away on some paths: its cleanup asks whether it did, and destroys the value where it did not.
 struct Noisy(Int);

@@ -2188,12 +2188,23 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
   | .defer e => do
     -- A cleanup performs no effects: it may run while its surroundings are
     -- being left, when no handler should be asked to do anything.
+    -- (What it reads of a name's value is read when the rest is left, after
+    -- what the rest reads: not before, `St.valReads`.)
+    let readsBefore := (← get).valReads
     onError (do
       let t ← withLater (b.fvStmts [] rest) (inferExpr scope ⟨[], none⟩ e)
       mustDrop t "what a `defer` gives is let go") fun err => s!"a `defer` cannot perform effects: {err}"
+    modify fun s => { s with valReads := readsBefore }
     -- It runs when the rest is left, so what it mentions is still to be used
     -- throughout the rest.
-    withLater (b.fvExpr [] e) (inferStmts scope amb rest want)
+    let result ← withLater (b.fvExpr [] e) (inferStmts scope amb rest want)
+    -- (A name it borrows whose value the rest gives away: borrowed after.)
+    for x in (b.fvExpr [] e).eraseDups do
+      if let some (.val t id) := scope.lookup x then
+        let u := b.nameUseExpr false x e
+        if !u.valued && !u.valuedInside && (← get).valReads.contains id then
+          mustDup t s!"`{x}` is borrowed after its value is given away"
+    pure result
 
 /-- Check a pattern against a type; the names it binds. -/
 partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
