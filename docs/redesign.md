@@ -368,6 +368,15 @@ moves. So the node functions here move nodes and never copy one that
 holds a literal; copying clauses waits on identities for nodes that stay
 (step 4, ids), and patterns by reference are decided as before.
 
+Node identities landed (`Flat.Body.ids`, `St.scalarLits` by identity; the
+clauses a decision writes from trees known in a space of the callable's
+own). Patterns by reference in place tried again on them stopped before
+anything ran: covey/debugtext said `element_at` unknown in the clauses
+written from trees, covey/mcp_session refused a borrow the first reading
+of the `match` had recorded. (The commit that landed identities says the
+literals were then right; that was not seen: the program did not get to
+run.) Both are what is still in the way.
+
 
 ## Expected size
 
