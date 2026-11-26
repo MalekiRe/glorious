@@ -236,6 +236,9 @@ inductive Decision where
   (`derefAssignNode`): `x` borrowed `&mut` (`some true`) or given as it is,
   a reference. -/
   | derefAssignHere (id : Nat) (borrow : Option Bool)
+  /-- The field borrow `id`, `&x.f` (`&mut` where `uniq`) of what `deref`
+  (`deref_mut`) gives of `x`, written where it is (`derefRefNode`). -/
+  | derefRefHere (id : Nat) (uniq : Bool) (borrow : Option Bool)
   /-- The comparison `call`, written where it is by reference
   (`compareNode`): `eq(&a, &b)`, an operand that is a name holding a
   reference given as it is (`refs`). -/
@@ -308,6 +311,31 @@ def derefNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Bo
   let (ge, b) := b.add given
   let (ce, b) := b.add (.call (900000000000 + id) fe #[ge])
   pure { b with exprs := b.exprs.set! e (.fieldOf id ce f) }
+
+/-- The field borrow `id`, `&x.f` of what `deref` gives of `x` (`deref_mut`
+where `uniq`), written where it is as a block: `{ let r = deref(&x); &(*r).f }`
+(`x` given as it is where `borrow` is none, a reference). As the checker
+reads it on and the elaborator writes it (`Decision.derefRefHere`). -/
+def derefRefNode (id : Nat) (uniq : Bool) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
+  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
+    | .refField i _ _ _ false => i == id
+    | _ => false
+  let (x, path) ← match b.exprs[e]! with
+    | .refField _ _ x path _ => some (x, path)
+    | _ => none
+  let held := s!"%derefb{id}"
+  let given : Flat.FExpr := match borrow with
+    | some u => .ref u x
+    | none => .name none x
+  let (fe, b) := b.add (.name none (if uniq then "deref_mut" else "deref"))
+  let (ge, b) := b.add given
+  let (ce, b) := b.add (.call (900000000000 + id) fe #[ge])
+  let first := b.stmts.size
+  let b := { b with stmts := b.stmts.push (.let_ (.var held) ce) }
+  let (re, b) := b.add (.refField id uniq held path true)
+  let last := b.stmts.size
+  let b := { b with stmts := b.stmts.push (.expr re) }
+  pure { b with exprs := b.exprs.set! e (.labelScope "%block" #[first, last]) }
 
 /-- The assignment `*(&mut x.path) = v` through the field borrow `id`, of
 what `deref_mut` gives of `x`, written where it is as a block: `{ let v' =

@@ -138,6 +138,24 @@ def derefHere (scope : Scope) (id : Nat) (x step : String) : M Bool := do
   modify fun s => { s with body := b', decided := s.decided ++ [.derefHere id borrow] }
   pure true
 
+/-- The field borrow `id`, `&x.f` (`&mut` where `uniq`), where `f` is a
+field `x` does not show and `x`'s type implements `Deref`: written where it
+is of what `deref` (`deref_mut`) gives (`Elab.derefRefNode`), `x` a place
+borrowed, or a name holding a reference given as it is. Said for the
+elaborator (`Elab.Decision.derefRefHere`). -/
+def derefRefHere (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M Bool := do
+  let (t, cell) ← match scope.lookup x with
+    | some (.val t _) => pure (t, false)
+    | some (.cell t _) => pure (t, true)
+    | _ => return false
+  unless ← derefsFor t step do return false
+  let borrow ← match ← find t with
+    | .ref .. => pure none
+    | _ => if uniq && !cell then return false else pure (some uniq)
+  let some b' := Elab.derefRefNode id uniq borrow (← get).body | return false
+  modify fun s => { s with body := b', decided := s.decided ++ [.derefRefHere id uniq borrow] }
+  pure true
+
 /-- The assignment `s`, `x.f = v` where `f` is a field `x` does not show and
 `x`'s type implements `Deref`: written where it is of what `deref_mut`
 gives (`Elab.derefAssignNode`), `x` a variable borrowed or a name holding
@@ -432,6 +450,8 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
 partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Flat.FExpr) : M Ty := do
   match n with
   | .refField id uniq x path star => do
+    if !star then
+      if ← derefRefHere scope id uniq x (path.headD "") then return ← inferExprAt scope amb e0
     derefAt scope id uniq x (path.headD "")
     match scope.lookup x with
     | some (.cell t brand) => do
