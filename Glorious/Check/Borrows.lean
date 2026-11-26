@@ -75,7 +75,8 @@ cells, whose reads give its value away (`St.placedVals`). -/
 def placeVal (id : Nat) (x : String) (t : Ty) : M Unit := do
   unless (← get).placedVals.contains id do
     modify fun s =>
-      { s with placedVals := id :: s.placedVals, cells := s.cells.push (id, x, t) }
+      { s with placedVals := id :: s.placedVals, cells := s.cells.push (id, x, t)
+               placedNames := s.placedNames.push (s.owner, x, id) }
 
 /-- Something that may not come back is about to run: the values still waiting
 are let go if it does not. -/

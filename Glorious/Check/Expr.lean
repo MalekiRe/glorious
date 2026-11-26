@@ -475,15 +475,13 @@ partial def inferExprRef (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := 
     -- (A name that holds a `&mut` reference is borrowed through: `a[i] = v`
     -- of an `a: &mut [T]` writes what `a` is to, as `(*a)[i] = v` does.)
     | some (.val t id) => do
-      match ← find t with
-      | Ty.ref how _ _ =>
-        if uniq then
+      if uniq then
+        if let Ty.ref how _ _ ← find t then
           if let .con "&mut" [] ← find how then
             let named ← pushE (.name none x)
             return ← inferExpr scope amb (← pushE (.reborrow true named))
         throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
-      | _ =>
-        if uniq then throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
+      do
         -- A value a name holds is a place: borrowed, it is one from where
         -- it is first borrowed, its reads after uses of it (`placeVal`).
         -- (One whose value was given away before: borrowed, it would be
@@ -1976,13 +1974,23 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
   -- A name borrowed (`placeVal`) is a place till its block ends: nothing
   -- borrowed of it may be left after, and the elaborator keeps it as a
   -- variable (`St.placedLets`).
-  if let .var x := pat then
-    for (_, bd) in binds do
+  do
+    for (x, bd) in binds do
       if let .val _ bid := bd then
         if (← get).placedVals.contains bid then
           checkEscape bid s!"`{x}` could be used after its block has ended"
             (("something that uses it is the block's result", result) :: scopeRoots scope) amb
-          modify fun s => { s with placedLets := s.placedLets.push (s.owner, at_.1, at_.2, x) }
+          -- (Only borrowed, never given away: destroyed where its block
+          -- ends, as a variable's value is.)
+          let u := b.nameUseStmts false x rest
+          let tx := match bd with
+            | .val tx _ => tx
+            | _ => t
+          modify fun s =>
+            { s with placedLets := s.placedLets.push (s.owner, at_.1, at_.2, x)
+                     placedLetIds := bid :: s.placedLetIds
+                     dropCands := if u.valued || u.valuedInside then s.dropCands
+                       else s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, tx, pos) }
   pure result
 
 /-- `let mut x = value` and the statements after it (`inferStmts`). -/

@@ -83,9 +83,13 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
 mut` for the elaborator, as a variable the checker decided: what is
 checked already, not checked again. -/
 def placeLets (decls : List FnDecl) : M Unit := do
-  let ps := (← get).placedLets
-  if ps.isEmpty then return
-  let mine := ps.toList.filter fun p => decls.any (·.name == p.1)
+  let s ← get
+  let lets := s.placedLets.toList.filter fun p => decls.any (·.name == p.1)
+  -- (A name a clause binds: kept in a variable where the clause starts,
+  -- `Elab.heldFirst`.)
+  let params := (s.placedNames.toList.filter fun (owner, _, id) =>
+      decls.any (·.name == owner) && !s.placedLetIds.contains id).map (fun (owner, x, _) => (owner, 0, 0, x))
+  let mine := lets ++ params.eraseDups
   if mine.isEmpty then return
   let ds := mine.map fun (owner, l, c, x) => Elab.Decision.letMut owner l c x
   modify fun s =>

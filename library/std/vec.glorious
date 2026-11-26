@@ -175,8 +175,8 @@ fn greatest_from<A, T>(a: &A, n: Int, i: Int, m: T) -> T where A: Indexed<Elemen
 
 // The array with the elements at two places changed over.
 pub fn swap<T>(a: T, i: Int, j: Int) -> T where T: Index, T: Use<[0, *]> {
-    let x = a[i];
-    let y = a[j];
+    let x = Index::index(a, i);
+    let y = Index::index(a, j);
     index_set(index_set(a, i, y), j, x)
 }
 

@@ -8505,3 +8505,23 @@ kept (a unit checked in part is no unit's state, and was taken for a whole
 one by a later compile); the second keeps what it makes. `run`, `build` and
 the suite check everything before anything runs, as decided with the
 redesign.
+
+## Locals as places: a `let` borrowed stays a value
+
+A `let` the program writes is a place: `&x`, `&x.f` and `x[i]` borrow it
+where it is, whatever its text says, and the checker finds it so (the
+binding's brand is a loan's root, `placeVal`); the elaborator keeps it in a
+variable after the check (`St.placedLets`, written as a decided `let mut`).
+Before, the front end made a `let mut` of a name it saw borrowed, before
+anything was checked. Rules that come with it, as Rust's:
+
+- `x[i]` reads the element where it is, `*element_at(&x, i)` (`Indexed`),
+  as Rust's `x[i]` is `*x.index(i)`; a value taken whole by `Index` is
+  written `Index::index(x, i)` (`std::iter::of_from`, `std::vec::swap`; `index(x,
+  i)` is `x[i]`).
+- A borrow of a name after its value was given away is refused unless the
+  value is copied ("`x` is borrowed after its value is given away").
+- A place only borrowed is destroyed where its block ends.
+- A callable that only borrows a value holds the place, not the value.
+- A value the front end names to borrow it (`borrowed%N`) is still made a
+  variable by the front end.

@@ -578,6 +578,12 @@ structure St where
   /-- Each `let x` that is a place (`placedVals`), by its function and where
   it is: written `let mut x` for the elaborator. -/
   placedLets : Array (String × Nat × Nat × String) := #[]
+  /-- The brands of the bindings `placedLets` says. -/
+  placedLetIds : List Nat := []
+  /-- Each name made a place (`placeVal`): its function, the name and its
+  binding's brand. One no `let` binds is a clause's: kept in a variable
+  where the clause starts. -/
+  placedNames : Array (String × String × Nat) := #[]
   /-- The names holding values read so far in the group, by their bindings'
   brands: one borrowed after is borrowed after its value is given away. -/
   valReads : Std.HashSet Nat := {}

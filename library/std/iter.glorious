@@ -19,7 +19,7 @@ pub fn repeat<T>(x: T) -> Iter<T> where T: Use<[0, *]> { Iter({ Some((x, repeat(
 
 // The elements of an array.
 pub fn of<T, U>(a: T) -> Iter<U> where T: Len, T: Index<Elem = U>, T: Use<[0, *]>, U: Use<[0, *]> { of_from(a, 0) }
-fn of_from<T, U>(a: T, i: Int) -> Iter<U> where T: Len, T: Index<Elem = U>, T: Use<[0, *]>, U: Use<[0, *]> { Iter({ if(i < len(a)) { Some((a[i], of_from(a, i + 1))) } else { None } }) }
+fn of_from<T, U>(a: T, i: Int) -> Iter<U> where T: Len, T: Index<Elem = U>, T: Use<[0, *]>, U: Use<[0, *]> { Iter({ if(i < len(a)) { Some((Index::index(a, i), of_from(a, i + 1))) } else { None } }) }
 
 pub fn map<T, U, F>(it: Iter<T>, f: F) -> Iter<U> where T: Use<[1, 1]>, F: Fn<(T,), Output = U, Effects = {}>, F: Returns {
     Iter({ match(next(it)) { Some((x, rest)) => Some((f(x), map(rest, f))), None => None } })
