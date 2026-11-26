@@ -833,6 +833,7 @@ def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) 
   | .receiver call fn borrow => receiverBody call fn borrow annots b
   | .receiverHere call fn borrow => (receiverNode call fn borrow b).getD b
   | .receiverTemp call fn uniq root => (receiverTempNode call fn uniq root b).getD b
+  | .receiverField call fn uniq star => (receiverFieldNode call fn uniq star b).getD b
   | .derefHere id borrow => (derefNode id borrow b).getD b
   | .derefAssignHere id borrow => (derefAssignNode id borrow b).getD b
   | .derefRefHere id uniq borrow => (derefRefNode id uniq borrow b).getD b
@@ -881,7 +882,8 @@ def Decided.of (b : Blocks) : Decided := Id.run do
       | .eta owner _ _ | .letMut owner _ _ _ => { d with owners := d.owners.insert owner }
       | .etaHere owner _ _ _ _ => { d with owners := d.owners.insert owner }
       | .refPats id _ | .refPatsHere id _ => { d with closures := d.closures.insert id }
-      | .receiver call _ _ | .receiverHere call _ _ | .receiverTemp call _ _ _ => { d with calls := d.calls.insert call }
+      | .receiver call _ _ | .receiverHere call _ _ | .receiverTemp call _ _ _ | .receiverField call _ _ _ =>
+        { d with calls := d.calls.insert call }
       | .derefField id _ | .derefHere id _ | .derefAssignHere id _ | .derefRefHere id _ _ => { d with fields := d.fields.insert id }
       | .derefReceiver call | .compareByRef call | .compareHere call _ => { d with calls := d.calls.insert call }
   for (call, _) in b.dotChosen do d := { d with calls := d.calls.insert call }

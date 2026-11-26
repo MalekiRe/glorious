@@ -229,6 +229,10 @@ inductive Decision where
   checker read it on, not read again (`receiverNode`): of `fn` where given,
   the name borrowed (`some uniq`) or given as it is. -/
   | receiverHere (call : Nat) (fn : Option String) (borrow : Option Bool)
+  /-- The dot call `call`, its receiver a field of a name (through a
+  reference the name holds where `star`), borrowed where it is
+  (`receiverFieldNode`). -/
+  | receiverField (call : Nat) (fn : Option String) (uniq star : Bool)
   /-- The dot call `call`, its receiver no name and borrowed: kept in a
   variable of its own for the statement whose expression is the node
   `root` (its identity), and borrowed there (`receiverTempNode`). -/
@@ -345,6 +349,41 @@ def etaNode (node : Nat) (x : String) (arity : Nat) (id : Nat) (b : Flat.Body) :
   let c := b.clauses.size
   let b := { b with clauses := b.clauses.push ⟨ps.map Pattern.var, #[s]⟩ }
   pure { b with exprs := b.exprs.set! e (.closure id #[c]) }
+
+/-- The dot call `call`, its receiver a field of a name, `p.x.len()`,
+borrowed where it is, `len(&p.x)` (through the reference the name holds
+where `star`), of `fn` where given: as the checker reads it on and the
+elaborator writes it (`Decision.receiverField`). None where the receiver
+is not such a field. -/
+def receiverFieldNode (call : Nat) (fn : Option String) (uniq star : Bool) (b : Flat.Body) :
+    Option Flat.Body := do
+  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
+    | .call i _ _ | .tailCall i _ _ => i == call
+    | _ => false
+  let (tail, f, args) ← match b.exprs[e]! with
+    | .call _ f args => some (false, f, args)
+    | .tailCall _ f args => some (true, f, args)
+    | _ => none
+  let (callee, recv, rest) ← match b.expr f, fn with
+    | .fieldOf _ recv _, some g => some (Flat.FExpr.name none g, recv, args)
+    | _, _ =>
+      let callee := match fn with
+        | some g => Flat.FExpr.name none g
+        | none => b.expr f
+      if h : 0 < args.size then some (callee, args[0], args.extract 1 args.size) else none
+  -- (The way from the name to the field, and the outermost field's number.)
+  let rec chain (x : Flat.ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
+    match fuel, b.expr x with
+    | fuel + 1, .fieldOf fid inner name =>
+      match b.bare? inner with
+      | some root => some (root, [name], fid)
+      | none => (chain inner fuel).map fun (root, path, _) => (root, path ++ [name], fid)
+    | _, _ => none
+  let (x, path, fid) ← chain recv 64
+  if fid == 0 then none
+  let (fe, b) := b.add callee
+  let (ge, b) := b.add (.refField fid uniq x path star)
+  pure { b with exprs := b.exprs.set! e (if tail then .tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)) }
 
 /-- The dot call `call`, its receiver no name and borrowed (`&mut` where
 `uniq`), of `fn` where given: the statement's expression it is in, the

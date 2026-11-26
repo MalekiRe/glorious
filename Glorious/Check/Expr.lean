@@ -275,7 +275,25 @@ def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option S
   let some x := (match b.expr recv with
     | .name none x => some x
     | .ref _ x => some x
-    | _ => none) | return false
+    | _ => none) | do
+      -- (A field of a name, borrowed: the place, where it is,
+      -- `Elab.receiverFieldNode`; through the reference the name holds,
+      -- where it holds one.)
+      let some uniq := borrow | return false
+      let rec root (e : Flat.ExprId) (fuel : Nat) : Option String :=
+        match fuel, b.expr e with
+        | fuel + 1, .fieldOf _ inner _ => (b.bare? inner).orElse fun _ => root inner fuel
+        | _, _ => none
+      let some x := root recv 64 | return false
+      let star ← match scope.lookup x with
+        | some (.val t _) | some (.cell t _) =>
+          match ← find t with
+          | .ref .. => pure true
+          | _ => pure false
+        | _ => return false
+      let some b' := Elab.receiverFieldNode call fn uniq star b | return false
+      modify fun s => { s with body := b', decided := s.decided ++ [.receiverField call fn uniq star] }
+      return true
   let holdsRef := fun (t : Ty) => do
     match ← find t with
     | .ref .. => pure true
