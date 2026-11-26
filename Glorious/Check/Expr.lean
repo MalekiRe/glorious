@@ -118,6 +118,40 @@ def derefAt (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M Unit 
     if ← derefsFor t step then
       throwThe Elab.Said { msg := s!"`{x}.{step}` is a field of what `{x}` stands for (`Deref`)", decision := some (.derefField id uniq) }
 
+
+/-- The dot call `call` at `e0`, its receiver a name, written where it is
+(`Elab.receiverNode`): the name borrowed as `fn` takes it, given as it is
+where it holds a reference. Said for the elaborator
+(`Elab.Decision.receiverHere`). False where it is not such a call, or the
+name is a value borrowed for writing, which only a variable can be. -/
+def receiverHere (scope : Scope) (e0 : Flat.ExprId) (call : Nat) (fn : Option String)
+    (borrow : Option Bool) : M Bool := do
+  let b := (← get).body
+  let recv := match b.expr e0 with
+    | .call _ f args | .tailCall _ f args =>
+      match b.expr f, fn with
+      | .fieldOf _ r _, some _ => some r
+      | _, _ => args[0]?
+    | _ => none
+  let some recv := recv | return false
+  let some x := (match b.expr recv with
+    | .name none x => some x
+    | .ref _ x => some x
+    | _ => none) | return false
+  let holdsRef := fun (t : Ty) => do
+    match ← find t with
+    | .ref .. => pure true
+    | _ => pure false
+  let borrow ← match scope.lookup x, borrow with
+    | some (.val t _), some u => if ← holdsRef t then pure none else if u then return false else pure (some u)
+    | some (.cell t _), some u => if ← holdsRef t then pure none else pure (some u)
+    | some _, some _ => return false
+    | _, none => pure none
+    | none, _ => return false
+  let some b' := Elab.receiverNode call fn borrow b | return false
+  modify fun s => { s with body := b', decided := s.decided ++ [.receiverHere call fn borrow] }
+  pure true
+
 mutual
 
 /-- A value of a type with a `'static` lifetime in it, `&'static str`, read:
@@ -163,7 +197,18 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
   | .int _ => pure .int
   | .name .. | .label _ | .tuple _ => inferExprNamed scope amb n
   | .refField .. | .fieldOf .. | .proj .. => inferExprField scope amb e0 n
-  | .call .. | .tailCall .. | .closure .. => inferExprCall scope amb n
+  | .call id _ _ | .tailCall id _ _ =>
+    -- (A dot call whose receiver is a name, of a function decided only now
+    -- or taking it otherwise than written: written where it is and read
+    -- on, `receiverHere`.)
+    tryCatchThe Elab.Said (inferExprCall scope amb n) fun e => do
+      let some (.receiver c fn borrow) := e.decision | throwThe Elab.Said e
+      if c != id then throwThe Elab.Said e
+      -- (Once: one written so and refused again is read again whole.)
+      if (← get).decided.any (fun | .receiverHere c' _ _ => c' == id | _ => false) then throwThe Elab.Said e
+      unless ← receiverHere scope e0 id fn borrow do throwThe Elab.Said e
+      inferExprAt scope amb e0
+  | .closure .. => inferExprCall scope amb n
   | .handle subject arms => inferHandle scope amb e0 subject arms
   | .labelScope l body => do
     let t ← freshTy

@@ -82,7 +82,17 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
 /-- Each `let` of the group that is a place (`St.placedLets`) written `let
 mut` for the elaborator, as a variable the checker decided: what is
 checked already, not checked again. -/
-def placeLets (decls : List FnDecl) : M Unit := do
+def placeLets (decls : List FnDecl) (from_ : Nat) : M Unit := do
+  let s ← get
+  -- (What was written where it was found, `Elab.Decision.receiverHere`, in
+  -- the bodies later checks follow.)
+  let here := (s.decided.drop from_).filter fun
+    | .receiverHere .. => true
+    | _ => false
+  unless here.isEmpty do
+    modify fun s =>
+      { s with runFns := decls.foldl (fun m d =>
+          m.insert d.name (here.foldl (fun b dec => Elab.decideBody dec d.name d.annots b) ((m[d.name]?).getD d.body))) s.runFns }
   let s ← get
   let lets := s.placedLets.toList.filter fun p => decls.any (·.name == p.1)
   -- (A name a clause binds: kept in a variable where the clause starts,
@@ -106,7 +116,7 @@ unused (`first`). -/
 partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Option String := none) :
     M Unit := do
   let before ← get
-  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls) fun e => do
+  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls (before.decided.length)) fun e => do
     let isLetMut := match e.decision with
       | some (.letMut ..) => true
       | _ => false

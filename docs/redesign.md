@@ -341,6 +341,21 @@ where its value is given away, the value destroyed where the place ends
 if the flag is not set; the `letMut` decision gone) come before
 comparisons, receivers and fields.
 
+How the elaborator gets what was decided, as Rust has it: the checker
+keeps each node's adjustment in a table by the node's identity (Rust's
+`TypeckResults`: auto-borrow, auto-deref, the method a call is of, a
+pattern's binding mode), the program is never written again, and the next
+stage (MIR building) reads the program and the table. A trait's default
+body is checked once, generically (`Self` with the trait's bounds), so its
+adjustments are the same for every implementation; copies per type come
+after (monomorphization). Here the elaborator writes each decision in
+again by its call's identity (`decidedProgram`), and a default is checked
+once for each implementation (`Eq::!=@String`): a decision written where
+it is found must be written by the elaborator alike. The first kind so
+written is a dot call whose receiver is a name (`receiverHere`:
+`Elab.receiverNode`, one function both use on the node alone); the others
+follow the same way, and then defaults checked once.
+
 
 ## Expected size
 

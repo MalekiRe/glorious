@@ -223,6 +223,10 @@ inductive Decision where
   or of the function it is of, its receiver, a name, borrowed: given as the
   function takes it, borrowed (`&mut` where `some true`) or whole. -/
   | receiver (call : Nat) (fn : Option String) (borrow : Option Bool)
+  /-- The dot call `call`, its receiver a name, written where it is as the
+  checker read it on, not read again (`receiverNode`): of `fn` where given,
+  the name borrowed (`some uniq`) or given as it is. -/
+  | receiverHere (call : Nat) (fn : Option String) (borrow : Option Bool)
   /-- The field read `id` (or borrowed, `&mut` where `uniq`) is not one the
   value shows, and the value's type implements `Deref`: it is of what
   `Deref::deref` (`DerefMut::deref_mut`) gives (`Mut<T>` as its `T`). -/
@@ -232,6 +236,38 @@ inductive Decision where
   /-- The comparison `call`, `a == b`, is of what `a` and `b` are, borrowed:
   `eq(&a, &b)` (`Syntax.compareOps`). -/
   | compareByRef (call : Nat)
+
+/-- The dot call `call`'s node written where it is, as the checker reads it
+on (`Check.adjustingCall`) and the elaborator writes it: of `fn` where
+given, its receiver a name borrowed (`some uniq`) or given as it is. None
+where the receiver is no name: a value named for it is then made, read
+again (`receiverBody`). -/
+def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
+  let e ← (List.range b.exprs.size).find? fun i => match b.exprs[i]! with
+    | .call i _ _ | .tailCall i _ _ => i == call
+    | _ => false
+  let (tail, f, args) ← match b.exprs[e]! with
+    | .call _ f args => some (false, f, args)
+    | .tailCall _ f args => some (true, f, args)
+    | _ => none
+  let (callee, recv, rest) ← match b.expr f, fn with
+    | .fieldOf _ recv _, some g => some (Flat.FExpr.name none g, recv, args)
+    | _, _ =>
+      let callee := match fn with
+        | some g => Flat.FExpr.name none g
+        | none => b.expr f
+      if h : 0 < args.size then some (callee, args[0], args.extract 1 args.size) else none
+  let x ← match b.expr recv with
+    | .name none x => some x
+    | .ref _ x => some x
+    | _ => none
+  let given : Flat.FExpr := match borrow with
+    | some u => .ref u x
+    | none => .name none x
+  let (fe, b) := (b.exprs.size, { b with exprs := b.exprs.push callee })
+  let (ge, b) := (b.exprs.size, { b with exprs := b.exprs.push given })
+  let node : Flat.FExpr := if tail then .tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)
+  pure { b with exprs := b.exprs.set! e node }
 
 /-- What the checker says where it stops: why, and what it found to decide,
 where it stops for that; `result`
