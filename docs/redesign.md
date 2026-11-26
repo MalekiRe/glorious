@@ -457,7 +457,7 @@ The two left of "Then", looked at and left:
   for them would have to be the same in every run: hashes of the
   spelling, which say less than the spelling and save nothing.
   Not fewer lines: about the same (28,286 against 28,244); fewer string
-  tests (the marks' 150 sites, `traitBase` in the checker 30 of 52).
+  tests (the marks' sites, about 100, and `traitBase` in the checker, 30 of 52).
 - **Bodies as jobs across units.** A cold check runs ecs (0.93 s) and
   fleet (1.37 s) one after the other and every other unit under 25 ms; an
   edit takes the library from what is kept. Side by side across units
