@@ -709,6 +709,9 @@ structure Blocks where
   /-- Each whole number written where a scalar type is wanted, by its
   function and its place there: the type's name. -/
   scalarLits : Std.HashMap (String × Nat) String := {}
+  /-- The type the checker found of each expression, by its function and its
+  node's identity (`Check.St.nodeTys`): what Core's types are written from. -/
+  nodeTys : Std.HashMap (String × Nat) Syntax.TypeExpr := {}
   /-- Arguments given as other than written (`Check.argsChosen`), by the call
   and the place. -/
   argsChosen : Std.HashMap (Nat × Nat) Expr := {}

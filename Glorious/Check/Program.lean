@@ -1074,6 +1074,15 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         impls := implEs
         drops := s.dropSites.toList
         destroys := destroys.toList }
+    if Glorious.Trace.typesTraced then
+      let byFn := s.nodeTys.foldl (fun (m : Std.HashMap String (Nat × Nat)) (f, _, t) =>
+        let (n, holes) := m.getD f (0, 0)
+        m.insert f (n + 1, holes + (if (freeTys t).isEmpty then 0 else 1))) {}
+      for (f, (n, holes)) in byFn.toList do
+        if holes > 0 || f == "main" then
+          (dbgTrace s!"types: {f}: {n} read, {holes} not known" fun _ => (pure () : M Unit))
+      for (f, e, t) in s.nodeTys.reverse do
+        if f == "main" then (dbgTrace s!"type: main {e}: {showTy t}" fun _ => (pure () : M Unit))
     pure { given := .ofList s.given.toList, links := Elab.firstOf links
            coercions := Elab.firstOf s.coercions.toList, traits := traitInfo.index
            fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
@@ -1081,6 +1090,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
            derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes
            dotChosen := Elab.firstOf s.dotChosen, argsChosen := Elab.firstOf s.argsChosen
            scalarLits := s.scalarLits.foldl (fun m (f, e, t) => m.insert (f, e) t) {}
+           nodeTys := s.nodeTys.foldl (fun m (f, e, t) => m.insertIfNew (f, e) t.shape) {}
            decided := s.decided }).run st
 
 /-- Check a whole program. Gives what the elaborator needs to know about its

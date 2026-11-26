@@ -666,6 +666,12 @@ structure St where
   function and its node's identity there (`Flat.Body.idOf`), with the type:
   made that scalar in Core. -/
   scalarLits : List (String × Nat × String) := []
+  /-- The type of each expression read, by its function and its node's
+  identity there (rustc's `TypeckResults`): for the elaborator to write
+  Core's types from. Made whole (`zonk`) when its group is done. -/
+  nodeTys : List (String × Nat × Ty) := []
+  /-- Where `nodeTys` stood when the group being checked began. -/
+  nodeTysFrom : Nat := 0
   /-- Receivers of dot calls the checker chose to give as other than written,
   by the call and the argument's place: a field borrowed where it is, or a
   reference made where the call is given as it is. -/
@@ -1941,6 +1947,20 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   pure { tvars, rvars := (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
          edges := all.toList.filter (cset.contains ·.1), dups := mine.toList, ty := t,
          drops := unused.toList, stays := held.toList, statics := borrowless.toList }
+
+/-- A type as written, as far as it is known: one not known is `_`, a type
+parameter its name (the elaborator's `Blocks.nodeTys`). -/
+partial def Ty.shape : Ty → Syntax.TypeExpr
+  | .var _ => .hole
+  | .rigid (.param p _) => .name p []
+  | .rigid (.cond ..) => .hole
+  | .con n args => .name n (args.map Ty.shape)
+  | .tuple args => .tuple (args.map Ty.shape)
+  | .fn ps r _ _ _ => .fn (ps.map Ty.shape) r.shape
+  | .ref how t _ =>
+    match how with
+    | .con "&mut" [] => .ref true t.shape none
+    | _ => .ref false t.shape none
 
 /-- Does the type have one of a function's own type parameters in it? -/
 partial def Ty.hasRigid : Ty → Bool

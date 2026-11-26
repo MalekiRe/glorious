@@ -28,6 +28,9 @@ initialize enabled : Bool ← do pure (← IO.getEnv "GLORIOUS_TRACE").isSome
 /-- `GLORIOUS_TRACE=groups`: each group of functions named on standard error as
 its check starts, to see where a compile that does not end is. -/
 initialize groupsTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "groups")
+/-- `GLORIOUS_TRACE=types`: the type the checker found of each expression of
+`main`, and how many of each function's are not known, on standard error. -/
+initialize typesTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "types")
 
 initialize spans : IO.Ref (Array Span) ← IO.mkRef #[]
 initialize depth : IO.Ref Nat ← IO.mkRef 0

@@ -463,3 +463,32 @@ The two left of "Then", looked at and left:
   edit takes the library from what is kept. Side by side across units
   gains under a second once, nothing on an edit.
 
+## Step 2, as it is being done: the elaborator writes the certificate
+
+What `Infer` makes (`Infer.certifyM`), read closely: type and region
+inference over Core. It infers `main`, settles what that asks, and then
+writes each function at each signature it is used at (`instantiate`), with
+a hint for each binding: the type of each `let` (`Hint.ty`), a closure's
+type and the regions it is made with (`Hint.clo`), a handler's result, row
+and regions (`Hint.handler`), the regions each call chooses (`Hint.rgns`);
+and the declarations' instances it used (`DataInst`, `OpInst`). The proved
+checker (`Typing.checkTm`) reads these and nothing else beside Core.
+
+So `Infer` goes when the elaborator writes, for every Core node it makes,
+what `Infer` would have found. Done in stages, each checked by the proved
+checker on the suite before the next, `Infer` kept until the last:
+
+0. **The checker's types of each node** (rustc's `TypeckResults`): kept by
+   node identity for the elaborator (`St.nodeTys`), as `scalarLits` is.
+1. **Types without regions.** The elaborator writes each binding's Core
+   type from the checker's (`Hint.ty`, `Hint.clo` with no regions), and the
+   generated code's from what it generates (dictionaries, cells, lends,
+   copies); a certificate with `regions := false`, `loans := false`,
+   `strict := false`, checked beside `Infer`'s.
+2. **Ownership** (`strict`): which types are duplicable, from the checker's
+   copy analysis (`DataInst` dup flags).
+3. **Regions**: the checker's captures and lifetimes as Core's regions; each
+   function's region binders, each call's choice.
+4. **Loans**: the checker's loans as Core's `lend` regions.
+5. `Infer` deleted; the certificate is the elaborator's.
+

@@ -351,7 +351,9 @@ partial def shortenStatic (t : Ty) : M Ty := do
   go t 8
 
 partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := do
-  shortenStatic (← inferExprAt scope amb e0)
+  let t ← shortenStatic (← inferExprAt scope amb e0)
+  modify fun s => { s with nodeTys := (s.owner, s.body.idOf e0, t) :: s.nodeTys }
+  pure t
 
 partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := do
   -- A text written is a `&'static str`: its UTF-8 bytes, where the program

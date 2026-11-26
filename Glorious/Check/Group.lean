@@ -626,7 +626,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
     (dbgTrace s!"group: {", ".intercalate (decls.map (·.name))}" fun _ => (pure () : M Unit))
   let loansAt := (← get).loans.size
   let cellsAt := (← get).cells.size
-  modify fun s => { s with valReads := {}, altFound := {} }
+  modify fun s => { s with valReads := {}, altFound := {}, nodeTysFrom := s.nodeTys.length }
   let mut group : List (String × Ty) := []
   for d in decls do
     group := (d.name, ← freshTy) :: group
@@ -692,6 +692,12 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   (fun s => Glorious.Trace.said "loans" fun _ => (timedM "group: loans" (checkLoans loansAt cellsAt) : M Unit).run s : M Unit)
   (fun s => Glorious.Trace.said "bounds" fun _ => (timedM "group: bounds" (settleBounds decls defs) : M Unit).run s : M Unit)
   modify fun s => { s with assocUses := #[] }
+  -- (The types of what the group read, made whole: what they are found to
+  -- be is known now, `St.nodeTys`.)
+  let s ← get
+  let mine := s.nodeTys.take (s.nodeTys.length - s.nodeTysFrom)
+  let whole ← mine.mapM fun (f, n, t) => do pure (f, n, ← zonk t)
+  modify fun s => { s with nodeTys := whole ++ s.nodeTys.drop whole.length }
   -- A callable kept in a declared type's field with no type parameter of its
   -- own is called any number of times, as Rust's `Box<dyn Fn()>`; at most
   -- once where the type says it is used at most once (`Box<dyn FnOnce()>`).
