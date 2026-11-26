@@ -743,7 +743,7 @@ private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
         let vars := (List.range fields.length).map fun i => s!"%f{i}"
         let taken : Pattern := match names with
           | some ns =>
-            .ctor n none (.var recordMark :: (ns.zip vars).map fun (f, v) => .ctor (fieldMark f) none [.var v])
+            .ctor n none (.marked .record [] :: (ns.zip vars).map fun (f, v) => .marked (.field f) [.var v])
           | none => .ctor n none (vars.map Pattern.var)
         let writes : List Stmt := (places.toList.zip vars).map fun ((off, into, _, _, bytes), v) =>
           .expr (.call 0 (.name none "ptr_write") [place off, .int (8 * bytes), into (.name none v)])

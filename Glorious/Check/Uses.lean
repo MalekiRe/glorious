@@ -345,7 +345,7 @@ partial def binders (ctx : ACtx) : Pattern → List String
   | .wild | .int _ => []
   | .var x =>
     if (ctx.ctorOf x).isSome || (ctx.aliases[x]?).isSome then [] else [x]
-  | .ctor _ _ ps | .tuple ps => ps.flatMap (binders ctx)
+  | .ctor _ _ ps | .tuple ps | .marked _ ps => ps.flatMap (binders ctx)
 
 inductive Fit where
   | yes
@@ -364,7 +364,7 @@ mutual
 /-- Does a value match a pattern, and what does the pattern bind? -/
 partial def fit (ctx : ACtx) : Pattern → AVal → Fit × List (String × AVal)
   | .wild, _ => (.yes, [])
-  | .int _, _ => (.maybe, [])
+  | .int _, _ | .marked _ _, _ => (.maybe, [])
   | .var x, v =>
     match ctx.ctorOf x with
     | some c => fitData ctx c [] v
@@ -1696,7 +1696,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
 /-- Can this pattern fail to match? Decided from its shape alone. -/
 partial def irrefutable : Pattern → M Bool
   | .wild => pure true
-  | .int _ | .ctor _ _ _ => pure false
+  | .int _ | .ctor _ _ _ | .marked _ _ => pure false
   | .tuple ps => ps.allM irrefutable
   | .var x => do
     if (← resolveCtor x none).isSome then return false

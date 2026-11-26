@@ -11,23 +11,9 @@ public section
 
 namespace Glorious.Syntax
 
-/-- A surface pattern. A bare name is a binder unless it resolves to a
-constructor or a declared constant.
-
-A pattern written with field names, `Point { x, y: p, .. }`, leaves the parser
-as `Point(%record, %field:x(x), %field:y(p), %rest)`; where the program's names
-are resolved, and the declaration known, it becomes `Point(x, p)`. -/
-inductive Pattern where
-  | wild
-  | var (name : String)
-  | int (n : Int)
-  | ctor (name : String) (qual : Option String) (args : List Pattern)
-  | tuple (args : List Pattern)
-  deriving Inhabited, Hashable
-
-/-- What the compiler marks an expression with, beyond what it is written
-as: the callee of a call, `%as(value, type)`, each a node of its own kind,
-not a name. -/
+/-- What the compiler marks an expression or a pattern with, beyond what it
+is written as: the callee of a call, `%as(value, type)`, or a pattern's,
+`%refmut(Pattern)`, each a node of its own kind, not a name. -/
 inductive Mark where
   /-- What a dotted call is called on, kept marked until every function's
   declaration has been seen: `value.f(a)` borrows `value` if `f` is written to
@@ -92,6 +78,18 @@ inductive Mark where
   with a number of its own: if it turns out to be a value a trait leaves to
   implementations, it is that trait's function called with nothing. -/
   | path
+  /-- `&mut Pattern` and `&Pattern`: what a reference points to is matched,
+  and the pattern's names are references to its parts, until names are
+  resolved. -/
+  | byRef (uniq : Bool)
+  /-- `..` in a pattern written with field names, or a tuple's. -/
+  | rest
+  /-- `let name` in a pattern: `name` is a new name there, not the constant
+  or constructor of that name. -/
+  | letBind
+  /-- `mut name` in a pattern: what it binds is a variable, as `let mut`
+  makes one (`unmutItems`). -/
+  | mutBind
   deriving Inhabited, Hashable, BEq, Repr
 
 /-- How a mark is shown: `%as`. -/
@@ -101,6 +99,10 @@ def Mark.shown : Mark → String
   | .field name => s!"%field:{name}"
   | .comptime => "%comptime"
   | .path => "%path"
+  | .byRef uniq => if uniq then "%refmut" else "%ref"
+  | .rest => "%rest"
+  | .letBind => "%let"
+  | .mutBind => "%mut"
   | .receiver => "%receiver"
   | .through => "%through"
   | .borrow => "%borrow"
@@ -114,6 +116,23 @@ def Mark.shown : Mark → String
   | .focus => "%focus"
   | .destroyed => "%destroyed"
   | .inst => "%inst"
+
+/-- A surface pattern. A bare name is a binder unless it resolves to a
+constructor or a declared constant.
+
+A pattern written with field names, `Point { x, y: p, .. }`, leaves the parser
+as `Point(%record, %field:x(x), %field:y(p), %rest)`; where the program's names
+are resolved, and the declaration known, it becomes `Point(x, p)`. -/
+inductive Pattern where
+  | wild
+  | var (name : String)
+  | int (n : Int)
+  | ctor (name : String) (qual : Option String) (args : List Pattern)
+  | tuple (args : List Pattern)
+  /-- A pattern the compiler marks, `%refmut(Pattern)`, until names are
+  resolved (`Mark`). -/
+  | marked (m : Mark) (args : List Pattern)
+  deriving Inhabited, Hashable
 
 /-- A type as written in the source. -/
 inductive TypeExpr where
@@ -240,10 +259,6 @@ def packNames (name : String) : Option (List String) :=
   if name.startsWith "%is:" then some (((name.drop 4).toString.splitOn ",").filter (· != "")) else none
 
 
-/-- `&mut Pattern` and `&Pattern`: what a reference points to is matched, and
-the pattern's names are references to its parts. It is the pattern
-`%refmut(Pattern)` or `%ref(Pattern)` until names are resolved. -/
-def byRefMark (uniq : Bool) : String := if uniq then "%refmut" else "%ref"
 
 /-- A step to a field of one of a type's several constructors, `Circle#0`:
 only where a value was just found to be made by that constructor. -/
@@ -255,18 +270,9 @@ def splitCtorStep (step : String) : Option (String × Nat) :=
   | [ctor, i] => i.toNat?.map fun i => (ctor, i)
   | _ => none
 
-/-- The name that marks a call or a pattern as written with field names. -/
-def recordMark : String := "%record"
 
-/-- The name that stands for `..` in a pattern written with field names. -/
-def restMark : String := "%rest"
 
-/-- The name that wraps the value or pattern given for a field. -/
-def fieldMark (field : String) : String := s!"%field:{field}"
 
-/-- The field a marker names, if it is one. -/
-def fieldOfMark (name : String) : Option String :=
-  if name.startsWith "%field:" then some (name.drop 7).toString else none
 
 /-- The scalar types beside `Int`. A value of each is held as an integer: an
 integer type's own value, the code of a character, the bits of a floating
@@ -454,6 +460,10 @@ def cTypes : List (String × String) :=
    ("c_int", "i32"), ("c_uint", "u32"), ("c_long", "i64"), ("c_ulong", "u64"),
    ("c_longlong", "i64"), ("c_ulonglong", "u64"), ("c_size_t", "usize"), ("c_ssize_t", "isize"),
    ("c_float", "f32"), ("c_double", "f64")]
+
+/-- What a name `let name` binds is written as, told from a constant of its
+spelling (`Pattern.marked .letBind`). -/
+def letSuffix : String := "%let"
 
 def textCharName : String := "%char"
 
@@ -643,13 +653,7 @@ def variadicKey (global : String) : String :=
 /-- What a parse of type parameters marks `..T` with, among the defaults. -/
 def variadicMark : String := "%variadic"
 
-/-- `let name` in a pattern: `name` is a new name there, not the constant or
-constructor of that name. -/
-def letMark : String := "%let"
 
-/-- `mut name` in a pattern: what it binds is a variable, as `let mut` makes
-one (`unmutItems`). -/
-def mutPatMark : String := "%mut"
 
 /-- Said of a block, as `spreadMark` is: it is written where a value that is
 no callable is wanted, so it is run there and is its value. -/
@@ -981,7 +985,7 @@ def Item.withoutIntrinsics (items : List Item) : List Item :=
 /-- Every name a pattern could bind. -/
 partial def patternNames : Pattern → List String
   | .var x => [x]
-  | .ctor _ _ args => args.flatMap patternNames
+  | .ctor _ _ args | .marked _ args => args.flatMap patternNames
   | .tuple args => args.flatMap patternNames
   | _ => []
 
@@ -991,8 +995,8 @@ partial def selfPattern (self : String) : Pattern → Pattern
     .ctor (if name == "Self" then self else name) (if qual == some "Self" then some self else qual)
       (args.map (selfPattern self))
   | .tuple args => .tuple (args.map (selfPattern self))
+  | .marked m args => .marked m (args.map (selfPattern self))
   | p => p
-
 
 /-- How a name is used in what follows where it is bound: borrowed with `&`,
 changed or borrowed with `&mut`, a field of it borrowed, bound again. -/
@@ -1071,7 +1075,10 @@ def partName (x : String) (i : Nat) : String := s!"{x}.%{i}"
 /-- The names `mut name` binds in a pattern, and the pattern with each a
 plain name. -/
 partial def unmutPat : Pattern → Pattern × List String
-  | .ctor m none [.var x] => if m == mutPatMark then (.var x, [x]) else (.ctor m none [.var x], [])
+  | .marked .mutBind [.var x] => (.var x, [x])
+  | .marked m args =>
+    let parts := args.map unmutPat
+    (.marked m (parts.map (·.1)), parts.flatMap (·.2))
   | .ctor c q args =>
     let parts := args.map unmutPat
     (.ctor c q (parts.map (·.1)), parts.flatMap (·.2))

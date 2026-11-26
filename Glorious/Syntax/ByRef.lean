@@ -20,10 +20,7 @@ namespace Glorious.Syntax
 
 /-- Is this pattern one that binds by reference, and for writing? -/
 def byRef? : Pattern → Option (Bool × Pattern)
-  | .ctor name none [p] =>
-    if name == byRefMark true then some (true, p)
-    else if name == byRefMark false then some (false, p)
-    else none
+  | .marked (.byRef uniq) [p] => some (uniq, p)
   | _ => none
 
 /-- What the writing out needs to know of the names in patterns. -/
@@ -59,9 +56,8 @@ partial def shapeOf (rn : RefNames m) (way : List String) : Pattern → m (Patte
       pats := pats.push p
       names := names ++ ns
     pure (.tuple pats.toList, names)
+  | .marked _ _ => throw "a pattern that binds by reference is written once, around the whole pattern"
   | .ctor name qual args => do
-    if (byRef? (.ctor name qual args)).isSome then
-      throw "a pattern that binds by reference is written once, around the whole pattern"
     let (global, args) ← rn.ctor name qual args
     let mut pats : Array Pattern := #[]
     let mut names : List (String × List String) := []
@@ -77,7 +73,7 @@ read to be compared. -/
 partial def shapeTests (rn : RefNames m) (path : List Nat) :
     Pattern → m (Option (List (List Nat × Expr)))
   | .wild => pure (some [])
-  | .int _ => pure none
+  | .int _ | .marked _ _ => pure none
   | .var x => do
     match ← rn.kind x with
     | 0 => pure (some [])

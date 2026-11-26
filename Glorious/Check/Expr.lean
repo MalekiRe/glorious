@@ -1265,7 +1265,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               -- out what a program writes so, its names known.)
               let wrapped := clauses.zipIdx.map fun (c, k) => match c with
                 | .mk (p :: ps) body =>
-                  if valuePats.contains k then Clause.mk (.ctor (Syntax.byRefMark uniq) none [p] :: ps) body else c
+                  if valuePats.contains k then Clause.mk (.marked (.byRef uniq) [p] :: ps) body else c
                 | c => c
               -- (A constant, a constructor's other name too, is a test of a
               -- value read, as the resolver has it.)
@@ -2579,6 +2579,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
     if through then
       if let .ref _ inner _ ← find t then return ← inferPat p inner
   match p with
+  | .marked m _ => throw s!"`{m.shown}` in a pattern where it cannot be; this is a compiler defect"
   | .wild => do
     mustDrop t "`_` lets go of a value"
     -- If it is one to destroy, that happens when its clause is done.

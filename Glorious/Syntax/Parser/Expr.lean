@@ -47,11 +47,11 @@ partial def parsePatternRest : P Pattern := do
   | .ident "let" =>
     -- `let name`: a new name, whatever constant or constructor has it.
     advance
-    pure (.ctor letMark none [.var (← expectIdent)])
+    pure (.marked .letBind [.var (← expectIdent)])
   | .ident "mut" =>
     -- `mut name`: what it binds is a variable (`unmutItems`).
     advance
-    pure (.ctor mutPatMark none [.var (← expectIdent)])
+    pure (.marked .mutBind [.var (← expectIdent)])
   | .ident x =>
     advance
     let (qual, name) := splitPath (← parsePathRest x)
@@ -62,17 +62,17 @@ partial def parsePatternRest : P Pattern := do
       -- `Point { x, y: p }`: each field by name, `x` alone binding `x`; `..`
       -- lets the fields not named go.
       advance
-      let mut given : Array Pattern := #[.var recordMark]
+      let mut given : Array Pattern := #[.marked .record []]
       repeat
         if (← peek) == .punct "}" then break
         if (← peek) == .punct "." && (← peek 1) == .punct "." then
           advance
           advance
-          given := given.push (.var restMark)
+          given := given.push (.marked .rest [])
           break
         let field ← expectIdent
         let pat ← if ← acceptPunct ":" then parsePattern else pure (.var field)
-        given := given.push (.ctor (fieldMark field) none [pat])
+        given := given.push (.marked (.field field) [pat])
         if !(← acceptPunct ",") then break
       expectPunct "}"
       pure (.ctor name qual given.toList)
@@ -105,7 +105,7 @@ partial def parsePatternRest : P Pattern := do
     advance
     let uniq := (← peek) == .ident "mut"
     if uniq then advance
-    pure (.ctor (byRefMark uniq) none [← parsePattern])
+    pure (.marked (.byRef uniq) [← parsePattern])
   | .punct "(" =>
     let opened := (← read).base + (← get)
     advance
@@ -115,12 +115,12 @@ partial def parsePatternRest : P Pattern := do
     -- `(first, ..)`: the parts not written, however many the tuple has.
     -- How many is the checker's to find; until then `..` has a name.
     let rests := args.filter fun p => match p with
-      | .var r => r == restMark
+      | .marked .rest [] => true
       | _ => false
     if rests.length > 1 then failAt "a tuple pattern has one `..`"
     if rests.length == 1 then
       return .tuple (args.map fun p => match p with
-        | .var r => if r == restMark then .var (tupleRestName opened) else .var r
+        | .marked .rest [] => .var (tupleRestName opened)
         | p => p)
     match args with
     | [p] => if ← closedAfterComma then pure (.tuple [p]) else pure p
@@ -143,7 +143,7 @@ partial def parsePatternList : P (List Pattern) := do
     if (← peek) == .punct "." && (← peek 1) == .punct "." then
       advance
       advance
-      pure (.var restMark)
+      pure (.marked .rest [])
     else parsePattern
   expectPunct ")"
   pure out

@@ -1027,8 +1027,8 @@ partial def restClausesOf (all : List Pattern) (total : Nat) : List ClauseId →
     let asking : List (Pattern × Nat) := (first.zipIdx ++ lastAt).filter fun pj => !simple pj.1
     let matched ← if asking.isEmpty then pure body else do
       let byRef := fun (p : Pattern) => match p with
-        | .ctor m none [_] => if m == byRefMark false || m == byRefMark true then p else .ctor (byRefMark false) none [p]
-        | _ => .ctor (byRefMark false) none [p]
+        | .marked (.byRef _) [_] => p
+        | _ => .marked (.byRef false) [p]
       let pats := asking.map fun (pj : Pattern × Nat) => byRef pj.1
       let these ← mkC pats body
       let others ← mkC (asking.map fun _ => Pattern.wild)

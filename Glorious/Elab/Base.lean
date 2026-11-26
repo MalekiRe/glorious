@@ -1122,7 +1122,7 @@ partial def patVars : Pattern → List String
   | .wild => []
   | .var x => [x]
   | .int _ => []
-  | .ctor _ _ args | .tuple args => args.flatMap patVars
+  | .ctor _ _ args | .tuple args | .marked _ args => args.flatMap patVars
 
 open Flat in
 /-- The names a statement gives values that may hold what `tracked` names hold. -/
@@ -1494,7 +1494,7 @@ def isBinder (x : String) : M Bool := do
 checker decides it. -/
 partial def irrefutable : Pattern → M Bool
   | .wild => pure true
-  | .int _ | .ctor _ _ _ => pure false
+  | .int _ | .ctor _ _ _ | .marked _ _ => pure false
   | .tuple ps => ps.allM irrefutable
   | .var x => isBinder x
 

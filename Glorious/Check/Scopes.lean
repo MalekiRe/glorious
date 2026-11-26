@@ -19,6 +19,7 @@ inductive NPat where
 
 partial def normPat : Pattern → M NPat
   | .wild => pure .any
+  | .marked m _ => throw s!"`{m.shown}` in a pattern where it cannot be; this is a compiler defect"
   | .int n => pure (.int n)
   | .tuple ps => do
     pure (.tuple (← ps.mapM normPat))

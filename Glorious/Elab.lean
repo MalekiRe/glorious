@@ -64,6 +64,7 @@ mutual
 /-- A Core pattern and the names it binds, in binder order. -/
 partial def toCorePat : Pattern → M (Core.Pat × List String)
   | .wild => pure (.wild, [])
+  | .marked m _ => throw s!"`{m.shown}` in a pattern the checker passed; this is a compiler defect"
   | .int n => pure (.int n, [])
   | .tuple args => do
     let (ps, names) ← toCorePats args
@@ -952,6 +953,7 @@ partial def destructure (scope : Scope) (pat : Pattern) (i : Nat) (path : List N
   match pat with
   | .wild => pure scope
   | .int _ => throw "a `let` pattern must not be able to fail"
+  | .marked m _ => throw s!"`{m.shown}` in a pattern the checker passed; this is a compiler defect"
   | .var x =>
     if ← isBinder x then
       let a ← emit (.let_ (.place ⟨i, path⟩))

@@ -304,15 +304,15 @@ def noteUse (viewer : List String) (e : Entry) : R Unit := noteEdge viewer e.hom
 
 /-- The names a pattern says are new with `let name`. -/
 partial def forcedNames : Pattern → List String
-  | .ctor mark none [.var x] => if mark == letMark then [x] else []
-  | .ctor _ _ args => args.flatMap forcedNames
+  | .marked .letBind [.var x] => [x]
+  | .ctor _ _ args | .marked _ args => args.flatMap forcedNames
   | .tuple args => args.flatMap forcedNames
   | _ => []
 
 /-- A pattern with each `let name` written as the name it is told by. -/
 partial def unforce : Pattern → Pattern
-  | .ctor mark none [.var x] =>
-    if mark == letMark then .var (x ++ letMark) else .ctor mark none [.var x]
+  | .marked .letBind [.var x] => .var (x ++ letSuffix)
+  | .marked m args => .marked m (args.map unforce)
   | .ctor c q args => .ctor c q (args.map unforce)
   | .tuple args => .tuple (args.map unforce)
   | p => p
@@ -729,7 +729,7 @@ partial def aliased (fuel : Nat) (e : Entry) : R (Option String) := do
 each field it stands for. -/
 def restWritten (written : String) (e : Option Entry) (args : List Pattern) : R (List Pattern) := do
   let isRest := fun (p : Pattern) => match p with
-    | .var r => r == restMark
+    | .marked .rest [] => true
     | _ => false
   unless args.any isRest do return args
   if (args.filter isRest).length > 1 then throw s!"`{written}(..)`: `..` is written once"
@@ -754,11 +754,11 @@ partial def liftRefs (top : Bool) : Pattern → R (Pattern × List (String × Pa
   | .tuple ps => do
     let (ps, refs) ← liftRefsAll ps
     pure (.tuple ps, refs)
+  | .marked (.byRef uniq) args => do
+    if top then return (.marked (.byRef uniq) args, [])
+    let x := s!"%ref{← freshId}"
+    return (.var x, [(x, .marked (.byRef uniq) args)])
   | .ctor name qual args => do
-    if (byRef? (.ctor name qual args)).isSome then
-      if top then return (.ctor name qual args, [])
-      let x := s!"%ref{← freshId}"
-      return (.var x, [(x, .ctor name qual args)])
     let (args, refs) ← liftRefsAll args
     pure (.ctor name qual args, refs)
   | p => pure (p, [])
@@ -778,10 +778,8 @@ end
 seeing that they take every case. -/
 partial def throughRefs : Pattern → Pattern
   | .tuple ps => .tuple (ps.map throughRefs)
-  | .ctor name qual args =>
-    match byRef? (.ctor name qual args) with
-    | some (_, p) => throughRefs p
-    | none => .ctor name qual (args.map throughRefs)
+  | .marked (.byRef _) [p] => throughRefs p
+  | .ctor name qual args => .ctor name qual (args.map throughRefs)
   | p => p
 
 /-- A pattern as it is apart from the names it binds: two clauses whose
@@ -794,20 +792,20 @@ partial def patternShape : Pattern → String
   | .tuple ps => "(" ++ ",".intercalate (ps.map patternShape) ++ ")"
   | .ctor name qual args =>
     s!"{qual.getD ""}::{name}(" ++ ",".intercalate (args.map patternShape) ++ ")"
+  | .marked m args => s!"{m.shown}(" ++ ",".intercalate (args.map patternShape) ++ ")"
 
 /-- A constructor's patterns given by its fields' names, `C { a, b: p, .. }`,
 in the declared order; none where they are not given so. (`hint`: said
 after a field left out.) -/
 def orderedFieldPats (name : String) (entry : Option Entry) (args : List Pattern) (hint : String := "") :
     R (Option (List Pattern)) := do
-  let .var mark :: gave := args | return none
-  if mark != recordMark then return none
+  let .marked .record [] :: gave := args | return none
   let names ← fieldNamesOf name entry
   let rest := gave.any fun
-    | .var r => r == restMark
+    | .marked .rest [] => true
     | _ => false
   let gave := gave.filterMap fun
-    | .ctor mark none [p] => (fieldOfMark mark).map fun field => (field, p)
+    | .marked (.field field) [p] => some (field, p)
     | _ => none
   match orderFields name names gave (if rest then some Pattern.wild else none) with
   | .ok ps => pure (some ps)
@@ -862,14 +860,15 @@ partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
     if (fixedPatLen name).isSome then
       let args ← args.mapM (resolvePattern ctx)
       return (.ctor name none (args.map (·.1)), args.flatMap (·.2))
-    if (byRef? (.ctor name qual args)).isSome then
-      throw "a pattern that binds by reference, `&mut Pattern`, is written as a parameter of a clause"
     let (qual', name', entry) ← resolveValue ctx [] qual name
     let args ← match ← orderedFieldPats name entry args " (`..` lets the rest go)" with
       | some ps => pure ps
       | none => restWritten name entry args
     let args ← args.mapM (resolvePattern ctx)
     pure (.ctor name' qual' (args.map (·.1)), args.flatMap (·.2))
+  | .marked (.byRef _) _ =>
+    throw "a pattern that binds by reference, `&mut Pattern`, is written as a parameter of a clause"
+  | .marked m _ => throw s!"`{m.shown}` in a pattern where it cannot be; this is a compiler defect"
 
 
 /-! ### Names resolved in a flat body -/
@@ -1176,7 +1175,7 @@ partial def resolveClauseF (ctx : Ctx) (bound : List String) (c : ClauseId) : RF
   let pats := pats.map unforce
   let mut renamed := body.toList
   for x in forced do
-    renamed ← fbuild (Flat.renameStmts x (x ++ letMark) [] renamed)
+    renamed ← fbuild (Flat.renameStmts x (x ++ letSuffix) [] renamed)
   let pats ← pats.mapM fun p => liftM (resolvePattern ctx p)
   let body ← resolveStmtsF ctx (pats.flatMap (·.2) ++ bound) renamed
   fpushC ⟨pats.map (·.1), body.toArray⟩
