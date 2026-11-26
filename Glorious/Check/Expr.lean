@@ -277,11 +277,26 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
       modify fun s =>
         { s with fieldSites := s.fieldSites.push (id, false, t, numbered, chosen, s.owner, s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap)
-    | some (.val t _) => do
+    | some (.val t bid) => do
       match ← find t with
       | .ref _ _ _ => pure ()
       | .var _ => pure ()
       | _ =>
+        -- (A field of a value a name holds, borrowed: of the place,
+        -- `placeVal`, as of a variable.)
+        if !uniq && !star && !x.startsWith "%" then
+          if (← get).valReads.contains bid then
+            mustDup t s!"`{x}` is borrowed after its value is given away"
+          placeVal bid x t
+          let (field, numbered, chosen, through) ← fieldAtThrough t path
+          use scope (.var bid x .share numbered)
+          let cap ← freshCap
+          captures cap (.brand bid)
+          captures cap (.loan (← freshLoan (some bid) false none numbered))
+          throughBorrowed through false cap
+          modify fun s =>
+            { s with fieldSites := s.fieldSites.push (id, false, t, numbered, chosen, s.owner, s.pos) }
+          return .ref .shared field cap
         if x.startsWith "%through" || x.startsWith "%given" then
           throw "what a field is borrowed of here is a value that nothing holds, not a reference: give it a `let mut` first"
         throw s!"`{x}` is neither a variable nor a reference, so no field of it can be borrowed here: say what it is where it is bound (`let {x}: Type = ..`), or bind it with `let mut`"

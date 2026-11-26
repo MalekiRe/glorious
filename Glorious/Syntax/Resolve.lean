@@ -366,9 +366,15 @@ def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : Expr
       return some (← pushExpr (.labelScope "%block" #[first, ← pushStmt (.expr read)]))
   let base ← match placeOf b known a 64, throughRefOf b known a 64 with
     | none, none =>
-      -- (A name that holds a reference, `list: &Vec<T>`: through it.)
+      -- (A name that holds a reference, `list: &Vec<T>`: through it. Any
+      -- other name the clause binds is borrowed where it is, as Rust's
+      -- `x[i]` is `*x.index(i)`: a reference held is indexed through.)
       match b.expr a with
-      | .name none x => if known.lookup x == some 3 then pure (some a) else pure none
+      | .name none x =>
+        match known.lookup x with
+        | some 3 => pure (some a)
+        | some _ => some <$> pushExpr (.ref false x)
+        | none => pure none
       | _ =>
         -- (A field of a name bound by a pattern, or to what a call gives,
         -- which may be a reference: borrowed as `&x.f` is, through it if it
@@ -385,7 +391,7 @@ def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : Expr
           if fid != 0 && known.lookup x == some 0 then some <$> pushExpr (.refField fid false x path false)
           else pure none
         | none => pure none
-    | some (x, [], _), _ => if known.lookup x == some 1 then some <$> pushExpr (.ref false x) else pure none
+    | some (x, [], _), _ => some <$> pushExpr (.ref false x)
     | some (x, path, fid), _ =>
       if fid == 0 || known.lookup x != some 1 then pure none
       else some <$> pushExpr (.refField fid false x path false)
