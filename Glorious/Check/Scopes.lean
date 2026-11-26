@@ -313,15 +313,20 @@ def subjectOf (trait : String) (subject : Ty) : M (Ty × List Ty) := do
   | .tuple (self :: args) => pure (self, args)
   | other => pure (other, [])
 
+/-- The same of a bound's trait: one at its arguments is asked of the type
+alone. -/
+def subjectOfKey (trait : Syntax.TraitKey) (subject : Ty) : M (Ty × List Ty) :=
+  if trait.plain then subjectOf trait.base subject else pure (subject, [])
+
 /-- A trait asked of a type at arguments not decided, of a trait whose
 parameters there are the type where not written (`trait Add<R = Self>`):
 those arguments the type, as a use that does not write them has. With
 `known`, only where the type is decided. Whether one was. -/
-def defaultTraitArgs (trait : String) (subject : Ty) (keyed : List Ty := []) (known : Bool := false)
+def defaultTraitArgs (trait : Syntax.TraitKey) (subject : Ty) (keyed : List Ty := []) (known : Bool := false)
     (only : Option Nat := none) : M Bool := do
-  let some places := (← get).selfDefaults[Syntax.traitBase trait]? | return false
+  let some places := (← get).selfDefaults[trait.base]? | return false
   -- (Of a bound keyed by its arguments, `Add<Int>`, they are `keyed`.)
-  let (self, args) ← if keyed.isEmpty then subjectOf (Syntax.traitBase trait) subject else pure (subject, keyed)
+  let (self, args) ← if keyed.isEmpty then subjectOfKey trait subject else pure (subject, keyed)
   if known && only.isNone then if let .var _ ← find self then return false
   -- (For a whole number written: only where the other is a type of whole
   -- numbers, which it may then be.)
@@ -363,9 +368,27 @@ def fixedAt (at_ : List (Nat × Ty)) (want : Ty) : M Ty := do
   let cm ← (freeCaps want).eraseDups.mapM fun c => do pure (c, ← freshCap)
   pure (subst at_ [] cm want)
 
-/-- The trait at its arguments, as the one name an implementation of it has. -/
-def traitKey (trait : String) (args : List Ty) : M String := do
-  pure (Syntax.traitAt trait (← args.mapM spellTy))
+/-- A type as a key's argument is written (`Syntax.TraitKey`): as
+`spellTy` spells it, a type not known yet by its variable. -/
+partial def keyTy (t : Ty) (seen : List Nat := []) : M TypeExpr := do
+  match ← find t with
+  | .var id => do
+    if seen.contains id then return .name s!"?{id}" []
+    match ← projectionOf (.var id) with
+    | some p => keyTy p (id :: seen)
+    | none => pure (.name s!"?{id}" [])
+  | .con n args => do pure (.name n (← args.mapM (keyTy · seen)))
+  | .tuple args => do pure (.tuple (← args.mapM (keyTy · seen)))
+  | .fn ps r _ _ _ => do pure (.fn (← ps.mapM (keyTy · seen)) (← keyTy r seen))
+  | .ref how inner _ => do
+    let uniq := match ← find how with
+      | .con "&mut" [] => true
+      | _ => false
+    pure (.ref uniq (← keyTy inner seen) none)
+
+/-- The trait at its arguments, as the key an implementation of it has. -/
+def traitKey (trait : String) (args : List Ty) : M Syntax.TraitKey := do
+  pure (.at trait 0 (← args.mapM keyTy))
 
 /-- An implementation fitted to a use of it: its type parameters as the use
 has them (`hargs` the head's arguments, `args` the trait's). The
@@ -405,7 +428,7 @@ def argDecidedAt (v : Nat) : M Bool := do
   -- (Of the argument or a part of it: `(s, n)` of `Convert<(B, A)>`.)
   let has := fun (t : Ty) => mentionsVar v t
   for bd in (← get).bounds do
-    let base := Syntax.traitBase bd.trait
+    let base := bd.trait.base
     let (self, args) ← if bd.args.isEmpty then subjectOf base bd.ty else pure (bd.ty, bd.args)
     let mine ← args.anyM fun a => do pure (has (← zonk a))
     unless mine do continue
@@ -437,7 +460,7 @@ def implFitsAsIs (im : ImplDecl) (hargs args : List Ty) : M Bool := do
 the type's implementation gives the trait arguments made of its own type
 parameters (`impl<T> From<T> for Wrap<T>`), the arguments asked are made
 those, and the name is that implementation's. -/
-def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
+def implKey (trait : String) (self : Ty) (args : List Ty) : M Syntax.TraitKey := do
   -- (Of a type made of the function's own type parameters that the
   -- function is said to have it of, `(H, ..R): PutEach<S>`: met so, not by
   -- the implementation for its head.)
@@ -488,7 +511,7 @@ def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
             let key ← traitKey trait args
             let spelled ← spellTy (← zonk self)
             if (← get).implConds.contains (key, spelled) then return key
-          throw s!"which implementation of `{bareName trait}` this is, is not known here: `{showTy (← zonk self)}` may turn out to be a type that another implementation of `{Syntax.traitShown other.trait}` is for. Say it of the type, `where .. : {bareName trait}`"
+          throw s!"which implementation of `{bareName trait}` this is, is not known here: `{showTy (← zonk self)}` may turn out to be a type that another implementation of `{other.trait.shown}` is for. Say it of the type, `where .. : {bareName trait}`"
         return ← commit im
       | none =>
         match exact, maybe with
@@ -531,7 +554,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
     | other => headFor tr other
   let some (head, hargs) := known | return none
   let key ← try implKey tr self args catch _ => return none
-  let some im := (← implsOfHead (Syntax.traitBase key) head).find? fun im => im.trait == key | return none
+  let some im := (← implsOfHead key.base head).find? fun im => im.trait == key | return none
   let some said := im.assocs.lookup name | return none
   let some at_ ← fitHead im hargs args | return none
   equalUses im at_ hargs (← get).owner (← get).pos
@@ -582,7 +605,7 @@ def settleAssocs : M Unit := do
           left := left.push (tr, subject, name, a, owner, pos)
           continue
         throw e
-      let family ← implsOfHead (Syntax.traitBase key) head
+      let family ← implsOfHead key.base head
       match family.find? fun im => im.trait == key with
       | some im =>
         -- (Of several for the type, the one it fits as it is: of `impl<X>

@@ -522,19 +522,49 @@ partial def TypeExpr.spell : TypeExpr → String
   | .never => "!"
   | .hole => "_"
 
-/-- A trait at arguments, as one name: `From<Int>`. Without arguments it is
-the trait's own name. -/
-def traitAt (trait : String) (args : List String) : String :=
-  if args.isEmpty then trait else s!"{trait}<{", ".intercalate args}>"
+/-- A trait at its arguments, as an implementation of it is known, and a
+bound that asks for one: `From<Int>`, or the second of two implementations
+of `Get` written alike for one type, `Get#1<T>` (`fillDefaults`). Without
+arguments and number it is the trait itself. -/
+structure TraitKey where
+  /-- The trait's own name. -/
+  base : String
+  /-- Which of the implementations written alike for one type, from 0. -/
+  nth : Nat := 0
+  /-- The arguments it is at, as written (a type not known yet is the name
+  of its variable, `?3`). -/
+  args : List TypeExpr := []
+  deriving BEq, Hashable, Inhabited
 
-/-- The trait such a name is of. -/
-def traitBase (name : String) : String :=
-  -- (`Get#1<T>`: the second of two implementations of `Get` written the
-  -- same for one type; see `fillDefaults`.)
-  -- (Asked of every implementation for every bound: a name that has neither
-  -- is itself, with nothing made.)
-  if name.any fun c => c == '<' || c == '#' then (name.takeWhile fun c => c != '<' && c != '#').toString
-  else name
+/-- A type as it tells one key from another: what it is written as, without
+the lifetimes of its references and what its callables perform (what
+`TypeExpr.spell` shows of it). -/
+partial def TypeExpr.keyed : TypeExpr → TypeExpr
+  | .ref uniq t _ => .ref uniq t.keyed none
+  | .performs r _ => r.keyed
+  | t => t.mapParts TypeExpr.keyed
+
+/-- The trait itself, at no arguments. -/
+def TraitKey.of (base : String) : TraitKey := { base }
+
+/-- The trait at arguments, the `nth` implementation written alike. -/
+def TraitKey.at (base : String) (nth : Nat) (args : List TypeExpr) : TraitKey :=
+  { base, nth, args := args.map TypeExpr.keyed }
+
+/-- Is it the trait itself, at no arguments? -/
+def TraitKey.plain (k : TraitKey) : Bool := k.nth == 0 && k.args.isEmpty
+
+/-- As it is written: `From<Int>`. -/
+def TraitKey.shown (k : TraitKey) : String :=
+  if k.args.isEmpty then k.base else s!"{k.base}<{", ".intercalate (k.args.map (·.spell))}>"
+
+/-- As one name, for what is named after it in Core (the dictionary of an
+implementation, `implDictName`): `Get#1<T>`. -/
+def TraitKey.spelled (k : TraitKey) : String :=
+  let named := if k.nth == 0 then k.base else s!"{k.base}#{k.nth}"
+  if k.args.isEmpty then named else s!"{named}<{", ".intercalate (k.args.map (·.spell))}>"
+
+instance : ToString TraitKey := ⟨TraitKey.spelled⟩
 
 /-- What an implementation for every type, `impl<T: Show> Print for T`, is
 for, before it is written out for each type (`expandBlankets`). -/
@@ -573,12 +603,6 @@ def selfTypeOf (head : String) (args : List TypeExpr) : TypeExpr :=
   else if head == "(&)" then .ref false (args.headD (.tuple [])) none
   else .name head args
 
-/-- The name as it was written: without the number a second implementation
-written the same was given. -/
-def traitShown (name : String) : String :=
-  let whole := (name.splitOn "<").headD name
-  traitBase name ++ (name.drop whole.length).toString
-
 /-- The name under which an implementation keeps the `i`-th argument it gives
 its trait, among what it declares. -/
 def traitArgName (i : Nat) : String := s!"%traitArg{i}"
@@ -596,6 +620,9 @@ compiler's own: where a value is let go, its type's function is called, and a
 function that lets go of a value of a type it is generic in is given that
 type's, as it is given any trait's functions. -/
 def destroyTrait : String := "%Destroy"
+
+/-- The same, as a key (`TraitKey`). -/
+def destroyKey : TraitKey := .of destroyTrait
 
 /-- The value a scalar's name makes of an integer. -/
 def scalarValue (name : String) (n : Int) : Expr := .call 0 (.name (some "%prelude") name) [.int n]
@@ -939,7 +966,7 @@ inductive Item where
   /-- `impl<T, ...> Trait for Head<T, ...> where T: Other, ... { fn ... }`: the
   trait's functions for every type made with `Head`, on the conditions after
   `where`, each a type parameter and a trait it must have. -/
-  | impl (params : List String) (trait : String) (head : String) (args : List String)
+  | impl (params : List String) (trait : TraitKey) (head : String) (args : List String)
       (context : List (String × String)) (methods : List Item)
   /-- `impl Use<[lower, upper]> for Head {}`: how often a value of a declared
   type is to be used; no upper bound is `infinity`. -/

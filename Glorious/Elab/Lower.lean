@@ -129,9 +129,9 @@ def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Exc
     match item with
     | .fn name .. => srcKeys := srcKeys.insert name h
     | .impl _ trait head _ _ methods =>
-      srcKeys := srcKeys.insert (implDictName trait head) h
+      srcKeys := srcKeys.insert (implDictName trait.spelled head) h
       for m in methods do
-        if let .fn mname .. := m then srcKeys := srcKeys.insert (implFnName trait head mname) (mixHash h (hash mname))
+        if let .fn mname .. := m then srcKeys := srcKeys.insert (implFnName trait.spelled head mname) (mixHash h (hash mname))
     | _ => pure ()
   -- (Of what the checker said, each part summed entry by entry: the same
   -- whatever order it was gathered in.)

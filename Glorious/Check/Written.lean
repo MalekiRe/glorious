@@ -240,7 +240,7 @@ def writtenSignatures (st : St) (library : Bool := false) : List (String × Exce
   -- implementation's, by their names.)
   let implParams : Std.HashMap String (List (Nat × String)) := st.impls.foldl (fun m im =>
     im.methods.foldl (fun m item => match item with
-      | .fn f _ _ _ _ => m.insert (Syntax.implFnName im.trait im.head (Syntax.lastSegment f)) (im.pvars.map fun (p, v) => (v, p))
+      | .fn f _ _ _ _ => m.insert (Syntax.implFnName im.trait.spelled im.head (Syntax.lastSegment f)) (im.pvars.map fun (p, v) => (v, p))
       | _ => m) m) {}
   sorted.filterMap fun (name, scheme) =>
     match (writeSignature scheme (implParams.getD name [])).runE st with

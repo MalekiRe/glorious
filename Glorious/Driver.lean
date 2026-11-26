@@ -376,10 +376,12 @@ partial def checkUnsafeImpls (items : List Syntax.Item) : Except String Unit := 
     | _ => none
   for item in all do
     if let .impl _ tr head _ _ _ := item then
+      let tr := tr.base
       if denied.contains (last tr, last head) then
         throw s!"`{last head}` is said not to have `{last tr}` (`impl !{last tr} for {last head}`), and an implementation says it does"
   for item in all do
     if let .impl _ tr head _ _ _ := item then
+      let tr := tr.base
       let said := promised.contains (last tr, last head)
       if traits.contains (last tr) && !said then
         throw s!"`{last tr}` is an `unsafe trait`: its implementation for `{last head}` is written `unsafe impl {last tr} for {last head}`"
@@ -750,7 +752,7 @@ partial def hasDrop : List Syntax.Item → Bool
   | [] => false
   | .pub _ i :: rest => hasDrop (i :: rest)
   | .module _ (some body) :: rest => hasDrop body || hasDrop rest
-  | .impl _ tr _ _ _ _ :: rest => (tr.splitOn "::").getLast! == "Drop" || hasDrop rest
+  | .impl _ tr _ _ _ _ :: rest => Syntax.lastSegment tr.base == "Drop" || hasDrop rest
   | _ :: rest => hasDrop rest
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/

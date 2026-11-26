@@ -356,7 +356,7 @@ checked by: its own, or an implementation's (`implFnName`). -/
 partial def Item.bodies : Item → List (String × Body)
   | .fn n _ _ _ b => [(n, b)]
   | .impl _ tr head _ _ ms => ms.filterMap fun
-    | .fn m _ _ _ b => some (implFnName tr head m, b)
+    | .fn m _ _ _ b => some (implFnName tr.spelled head m, b)
     | _ => none
   | .pub _ item => item.bodies
   | _ => []

@@ -319,11 +319,9 @@ structure MethodSig where
   uses : List (String × Nat × Option Nat) := []
 
 structure ImplDecl where
-  /-- Its name: its trait at the arguments it gives it, numbered where two
-  are written alike for one type, `Get#1<T>` (`Syntax.traitAt`). -/
-  trait : String
-  /-- The trait's own name, `Get`. -/
-  base : String
+  /-- Its trait at the arguments it gives it, numbered where two are written
+  alike for one type, `Get#1<T>`. -/
+  trait : Syntax.TraitKey
   head : String
   params : List String
   /-- The conditions: each a trait and which of the head's arguments must have it. -/
@@ -367,11 +365,9 @@ structure ImplDecl where
 /-- A trait needed of a type at a call: of the type a trait's function is used
 at, or of a type parameter of the function called. -/
 structure Bound where
-  /-- The implementation's name it is of, once known (`Get<T>#1`), or the
-  trait's own. -/
-  trait : String
-  /-- The trait's own name, `Get`. -/
-  base : String
+  /-- The trait, at the arguments of the implementation it is of once that
+  is known (`Get#1<T>`). -/
+  trait : Syntax.TraitKey
   ty : Ty
   call : Nat
   slot : Nat
@@ -906,11 +902,11 @@ structure St where
   alone, while one group's bounds are settled: by the function, the trait,
   the type and arguments spelled, and what the function is given
   (`solveFitting`, `leavesFitting`). -/
-  solvedFit : PMap (String × String × List Nat × Traits.Givens) (Option Traits.Dict) := {}
+  solvedFit : PMap (String × Syntax.TraitKey × List Nat × Traits.Givens) (Option Traits.Dict) := {}
   /-- How each type's values are destroyed, as found in a group: by the type
   as the solver has it and what the function is given. -/
   destroyFit : Std.HashMap (Traits.STy × Traits.Givens) (Option Traits.Dict) := {}
-  leavesFit : PMap (String × String × List Nat) (List (String × Nat × Ty × List Ty)) := {}
+  leavesFit : PMap (String × Syntax.TraitKey × List Nat) (List (Syntax.TraitKey × Nat × Ty × List Ty)) := {}
   /-- Types all known, each a number: its head and its parts' numbers (see
   `internTy`). Made anew for each group's bounds, as the caches keyed by
   them are. -/
@@ -919,7 +915,7 @@ structure St where
   /-- What the implementation whose function is being checked says of types
   made of its type parameters, `(..R): Registers<S>`: the trait at its
   arguments and the type, spelled, as this function names them. -/
-  implConds : List (String × String) := []
+  implConds : List (Syntax.TraitKey × String) := []
   /-- What a trait leaves to the implementation for a type all known, by the
   trait, the name and the type spelled: found once in a function's check
   (`settleAssocs`), not again for each question that comes to it (a list of
@@ -940,7 +936,7 @@ structure St where
   dictByShape : Std.HashMap (String × List USize) Elab.DictE := {}
   /-- `leavesFit` by where the type and its arguments are, kept with them so
   that no other object comes to be there. -/
-  leavesAt : PMap (String × String × USize × List USize) (Ty × List Ty × List (String × Nat × Ty × List Ty)) := {}
+  leavesAt : PMap (String × Syntax.TraitKey × USize × List USize) (Ty × List Ty × List (Syntax.TraitKey × Nat × Ty × List Ty)) := {}
   /-- The implementations as `Traits.solve` sees them, in the same order. -/
   kimpls : Traits.ImplIndex := {}
   /-- The bounds of the scheme last instantiated, at that use. -/
@@ -1304,8 +1300,7 @@ def Ty.head : Ty → Option (String × List Ty)
 arguments: `Ty.head`, but a tuple of one or more that has none of the
 trait for its length is its first and the tuple of the rest
 (`Traits.consHead`), where the trait has one for `(H, ..R)`. -/
-def headFor (trait : String) (t : Ty) : M (Option (String × List Ty)) := do
-  let base := Syntax.traitBase trait
+def headFor (base : String) (t : Ty) : M (Option (String × List Ty)) := do
   let s ← get
   let none_ := fun (h : String) => (s.implsByHead.getD (base, h) #[]).isEmpty
   match t with

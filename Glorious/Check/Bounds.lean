@@ -49,7 +49,7 @@ def keyOf (t : Ty) : M (Option Nat) := do
 /-- The number a condition said in `owner` of a type made from type
 parameters is known by, `'%condition:owner:key:type`, kept also under
 `key:type` (`conditionKeys`). -/
-def conditionKey (owner key : String) (t : Ty) : M (Option Nat) := do
+def conditionKey (owner : String) (key : Syntax.TraitKey) (t : Ty) : M (Option Nat) := do
   let spelled ← spellTy t
   let name := s!"'%condition:{owner}:{key}:{spelled}"
   let known := (← get).rigidAt.contains name
@@ -79,7 +79,7 @@ partial def toSTy (t : Ty) : M Traits.STy := do
 /-- The numbers under which a condition of an implementation on a type made
 from its type parameters, `where (A, (B, ())): Fetch<W>`, is known in the
 implementation's functions: one for each function it was said in. -/
-def conditionKeys (key : String) (t : Ty) : M (List Nat) := do
+def conditionKeys (key : Syntax.TraitKey) (t : Ty) : M (List Nat) := do
   let said := s!"{key}:{← spellTy (← zonk t)}"
   let found := (((← get).conditionsAt[said]?).getD []).reverse.map (2 * · + 1)
   if !found.isEmpty then return found
@@ -92,7 +92,7 @@ def conditionKeys (key : String) (t : Ty) : M (List Nat) := do
 
 /-- The conditions written of what a trait leaves to an implementation,
 `where <H as Assoc>::Out: Act`, where `t` is that. -/
-def projectedCondition (key : String) (t : Ty) : M (List Nat) := do
+def projectedCondition (key : Syntax.TraitKey) (t : Ty) : M (List Nat) := do
   match ← find t with
   | .con n _ => if n == Syntax.projMark then conditionKeys key t else pure []
   | .var _ => if (← projectionOf t).isSome then conditionKeys key t else pure []
@@ -108,7 +108,7 @@ def implShown (im : ImplDecl) : String :=
 type parameters, as its where says, `T: Use<[0, *]>`, at most once where it
 says nothing: asked of what each is there. -/
 def askUses (im : ImplDecl) (at_ : List (Nat × Ty)) (pos : String) : M Unit := do
-  if im.trait == Syntax.destroyTrait then return
+  if im.trait == Syntax.destroyKey then return
   for (p, id) in im.pvars do
     if let some t := at_.lookup id then
       let (lower, upper) := (im.methods.findSome? fun
@@ -118,7 +118,7 @@ def askUses (im : ImplDecl) (at_ : List (Nat × Ty)) (pos : String) : M Unit := 
       if lower == 0 || upper.isNone then
         -- (Said as the implementation writes its type, which names the
         -- parameter: not the type here, which would be spelled each time.)
-        let whose := s!"{pos}the implementation of `{Syntax.traitShown im.trait}` for `{implShown im}`"
+        let whose := s!"{pos}the implementation of `{im.trait.shown}` for `{implShown im}`"
         if lower == 0 then
           modify fun s => { s with drops := s.drops.push (t, s!"{whose} may leave a `{p}` unused") }
         if upper.isNone then
@@ -127,7 +127,7 @@ def askUses (im : ImplDecl) (at_ : List (Nat × Ty)) (pos : String) : M Unit := 
 /-- The bounds on types a function is generic in that a bound comes down to,
 each with the number of its type. This is only to say what a function needs
 and to explain a failure: the evidence itself is `Traits.solve`'s. -/
-partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)) := do
+partial def leaves (pos : String) (trait : Syntax.TraitKey) (t : Ty) : M (List (Syntax.TraitKey × Nat × Ty)) := do
   let t ← find t
   -- (What a trait leaves to an implementation, not known here, of which a
   -- condition is written: that condition.)
@@ -135,22 +135,22 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
   match ← keyOf t with
   | some k => pure [(trait, k, t)]
   | none =>
-    let missing : M (List (String × Nat × Ty)) := do
+    let missing : M (List (Syntax.TraitKey × Nat × Ty)) := do
       throw s!"{pos}`{showTy (← zonk t)}` does not implement `{trait}`"
     -- (Its head's: a name, a tuple, a callable, a reference; of how a
     -- value is destroyed, one for every callable and every reference.)
     let head ← match t with
-      | .fn .. => pure (if trait == Syntax.destroyTrait then some ("(callable)", []) else t.head)
-      | .ref .. => pure (if trait == Syntax.destroyTrait then some ("(reference)", []) else t.head)
-      | t => headFor trait t
+      | .fn .. => pure (if trait == Syntax.destroyKey then some ("(callable)", []) else t.head)
+      | .ref .. => pure (if trait == Syntax.destroyKey then some ("(reference)", []) else t.head)
+      | t => headFor trait.base t
     match head with
     | some (n, args) =>
-      match (← get).kimpls.find trait n args.length with
+      match (← get).kimpls.find trait.spelled n args.length with
       | some (i, I) =>
         if let some im := (← get).impls[i]? then askUses im (← implAt im args) pos
-        let mut out : List (String × Nat × Ty) := []
+        let mut out : List (Syntax.TraitKey × Nat × Ty) := []
         for (tr', j) in I.context do
-          out := out ++ (← leaves pos tr' (args[j]?.getD .unit))
+          out := out ++ (← leaves pos (.of tr') (args[j]?.getD .unit))
         pure out
       | none => missing
     | none => missing
@@ -167,7 +167,7 @@ partial def toDictEShared (impls : Array ImplDecl) (marker : String → Bool) (d
       -- (Of a trait with no functions, every implementation is the same
       -- value, `()`: one, `Syntax.markerDict`, whatever its conditions are
       -- met by, which are not looked at.)
-      if (impls[i]?.map fun im => marker (im.base)).getD false then
+      if (impls[i]?.map fun im => marker (im.trait.base)).getD false then
         pure (Elab.DictE.impl Syntax.markerDict [])
       else
       let fn := (impls[i]?.map (·.dictFn)).getD ""
@@ -255,9 +255,9 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
 
 /-- The name of the implementation a condition of another comes down to: the
 trait itself, or the one chosen by fitting where there is a choice. -/
-def subKey (trait : String) (ty : Ty) (args : List Ty) : M String := do
+def subKey (trait : String) (ty : Ty) (args : List Ty) : M Syntax.TraitKey := do
   let several ← severalFor trait ((← headFor trait (← find ty)).map (·.1))
-  if args.isEmpty && !several then pure trait else implKey trait ty args
+  if args.isEmpty && !several then pure (.of trait) else implKey trait ty args
 
 /-- A condition's type and the trait's arguments with what traits leave to
 implementations in them, `<H as Touches>::List`, found where it can be. -/
@@ -336,9 +336,9 @@ mutual
 implementation found is looked for the same way, with the trait's arguments
 and the type the implementation says. Not proved, as `Traits.solve` is: what
 it finds is checked with the program's Core. -/
-partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (ty : Ty)
+partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : Syntax.TraitKey) (ty : Ty)
     (args : List Ty) : M (Option Traits.Dict) := do
-  if fuel == 0 || key == Syntax.destroyTrait then return ← solveFittingNow givens fuel key ty args
+  if fuel == 0 || key == Syntax.destroyKey then return ← solveFittingNow givens fuel key ty args
   -- (Found once in a group where the type is all known.)
   let some spelled ← fitKey ty args | solveFittingNow givens fuel key ty args
   let k := ((← get).owner, key, spelled, givens)
@@ -347,31 +347,31 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
   modify fun s => { s with solvedFit := s.solvedFit.insert k d }
   pure d
 
-partial def solveFittingNow (givens : Traits.Givens) (fuel : Nat) (key : String) (ty : Ty)
+partial def solveFittingNow (givens : Traits.Givens) (fuel : Nat) (key : Syntax.TraitKey) (ty : Ty)
     (args : List Ty) : M (Option Traits.Dict) := do
   if fuel == 0 then return none
   let ty ← find ty
-  if key == Syntax.destroyTrait then
+  if key == Syntax.destroyKey then
     -- How a value is destroyed: as before, by the type's shape alone.
     -- (Found once for each type in a group: the same dictionary object for
     -- each, so that it is written out once.)
     let sty := destroyShape givens (← toSTy ty)
     if let some d := (← get).destroyFit[(sty, givens)]? then return d
-    let d := Traits.solveIx (← get).kimpls givens 100000 key sty
+    let d := Traits.solveIx (← get).kimpls givens 100000 key.spelled sty
     modify fun s => { s with destroyFit := s.destroyFit.insert (sty, givens) d }
     return d
   for k in ← projectedCondition key ty do
-    if let some g := Traits.findGiven key k givens then return some (.given g)
-  if let some k ← keyOf ty then return (Traits.findGiven key k givens).map .given
+    if let some g := Traits.findGiven key.spelled k givens then return some (.given g)
+  if let some k ← keyOf ty then return (Traits.findGiven key.spelled k givens).map .given
   -- (What the function is given of a type made from its type parameters.)
   for k in ← conditionKeys key ty do
-    if let some g := Traits.findGiven key k givens then return some (.given g)
+    if let some g := Traits.findGiven key.spelled k givens then return some (.given g)
   -- (A function that performs something is not one an implementation for
   -- functions is for: what is written of `Self` there performs nothing.)
   if let .fn _ _ effs tail _ := ty then
     try unifyRow ⟨effs, tail⟩ ⟨[], none⟩ catch _ => return none
-  let some (h, hargs) ← headFor key ty | return none
-  let some (i, _) := (← get).kimpls.find key h hargs.length | return none
+  let some (h, hargs) ← headFor key.base ty | return none
+  let some (i, _) := (← get).kimpls.find key.spelled h hargs.length | return none
   let some im := (← get).impls[i]? | return none
   let some at_ ← fitHead im hargs args | return none
   unless ← fitConditions im at_ hargs (← get).owner "" do return none
@@ -395,9 +395,9 @@ end
 mutual
 
 /-- `leaves`, where implementations are chosen by fitting types. -/
-partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List (String × Ty) := []) (asking : List ((String × List Nat) × Ty) := []) : M (List (String × Nat × Ty × List Ty)) := do
-  if key == Syntax.destroyTrait then
+partial def leavesFitting (pos : String) (key : Syntax.TraitKey) (t : Ty) (args : List Ty) (owner : String := "")
+    (via : List (String × Ty) := []) (asking : List ((Syntax.TraitKey × List Nat) × Ty) := []) : M (List (Syntax.TraitKey × Nat × Ty × List Ty)) := do
+  if key == Syntax.destroyKey then
     -- (A type of nothing still to be found, and no type parameter: how it
     -- is destroyed asks nothing of anyone. What destroys it is found when
     -- the program is written, by its shape.)
@@ -422,17 +422,17 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
   let here := (key, spelled)
   if asking.any (·.1 == here) then
     let chain ← ((here, t) :: asking).reverse.mapM fun ((k, _), ty) => do pure s!"{k} of {showTy (← zonk ty)}"
-    throw s!"{pos}`{Syntax.traitShown key}` of `{showTy (← zonk t)}` asks itself: its implementation's conditions come back to it ({" -> ".intercalate chain})"
+    throw s!"{pos}`{key.shown}` of `{showTy (← zonk t)}` asks itself: its implementation's conditions come back to it ({" -> ".intercalate chain})"
   let ls ← leavesFittingNow pos key t args owner via ((here, t) :: asking)
   modify fun s => { s with leavesFit := s.leavesFit.insert k ls, leavesAt := s.leavesAt.insert at_ (t', args', ls) }
   pure ls
 
-partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List (String × Ty) := []) (asking : List ((String × List Nat) × Ty) := []) : M (List (String × Nat × Ty × List Ty)) := do
+partial def leavesFittingNow (pos : String) (key : Syntax.TraitKey) (t : Ty) (args : List Ty) (owner : String := "")
+    (via : List (String × Ty) := []) (asking : List ((Syntax.TraitKey × List Nat) × Ty) := []) : M (List (Syntax.TraitKey × Nat × Ty × List Ty)) := do
   let t ← find t
   -- (How a value is destroyed is found by the type's shape alone, as
   -- `solveFitting` finds it: no condition is left of what it finds.)
-  if key == Syntax.destroyTrait then
+  if key == Syntax.destroyKey then
     if (← solveFitting [] 1 key t []).isSome then return []
     -- (Nor is it asked of a callable, which is given up whole, as it is
     -- not of a bound's own type.)
@@ -447,24 +447,24 @@ partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner
     if let some i := (← get).rigidAt[said]? then return [(key, 2 * i + 1, t, args)]
   -- (What it was asked for, where it is a condition of another: said only
   -- where it is refused.)
-  let missing : M (List (String × Nat × Ty × List Ty)) := do
+  let missing : M (List (Syntax.TraitKey × Nat × Ty × List Ty)) := do
     let mut ws : List String := []
     for (tr, ty) in via do ws := ws ++ [s!"`{tr}` of `{showTy (← zonk ty)}`"]
     let because := match ws with
       | [] => ""
       | ws => s!", which {", which ".intercalate (ws.map (· ++ " needs"))}"
-    throw s!"{pos}`{showTy (← zonk t)}` does not implement `{Syntax.traitShown key}`{because}"
+    throw s!"{pos}`{showTy (← zonk t)}` does not implement `{key.shown}`{because}"
   if let .fn _ _ effs tail _ := t then
     try unifyRow ⟨effs, tail⟩ ⟨[], none⟩
-    catch _ => throw s!"{pos}`{showTy (← zonk t)}` performs effects, and `{Syntax.traitShown key}` is implemented for functions that perform none"
-  let some (h, hargs) ← headFor key t | missing
-  let some (i, _) := (← get).kimpls.find key h hargs.length | missing
+    catch _ => throw s!"{pos}`{showTy (← zonk t)}` performs effects, and `{key.shown}` is implemented for functions that perform none"
+  let some (h, hargs) ← headFor key.base t | missing
+  let some (i, _) := (← get).kimpls.find key.spelled h hargs.length | missing
   let some im := (← get).impls[i]? | missing
   let some at_ ← fitHead im hargs args | missing
   unless ← fitConditions im at_ hargs owner pos do return ← missing
   askUses im at_ pos
-  let mut out : List (String × Nat × Ty × List Ty) := []
-  let shown := Syntax.traitShown key
+  let mut out : List (Syntax.TraitKey × Nat × Ty × List Ty) := []
+  let shown := key.shown
   let this := ((shown.takeWhile (· != '<')).toString, t)
   for (tr, j) in im.context do
     let arg := hargs[j]?.getD .unit
@@ -482,7 +482,7 @@ reference to a value whose type implements it, found only once the
 bounds are met: refused, asking for the function by its name or for
 `(*r).name(..)` (what the call gives was typed as the trait's function's
 when it was read). -/
-def dotOwnInstead (call : Nat) (trait : String) (ty : Ty) (said : String) : M (Option Ty) := do
+def dotOwnInstead (call : Nat) (trait : Syntax.TraitKey) (ty : Ty) (said : String) : M Unit := do
   if let some alts := dotAltsOf (← get).modules call then
     if let some h ← headName 8 ty then
       if let some alt := alts.find? (·.startsWith (h ++ "::")) then
@@ -491,11 +491,10 @@ def dotOwnInstead (call : Nat) (trait : String) (ty : Ty) (said : String) : M (O
         throw s!"{said}: `{h}` has a function `{Syntax.lastSegment alt}` of its own, found only after the call was read: write `{bareName alt}(receiver, ..)`"
     if let .ref _ inner _ ← find ty then
       if let some h ← headName 8 inner then
-        if (← get).kimpls.has (Syntax.traitBase trait) h then
+        if (← get).kimpls.has trait.base h then
           -- (Found only once the call was read, and what it gives typed as
           -- the reference's: read through it where the call is.)
           throw s!"{said}: the receiver is a reference to a `{h}`, which has it, found only after the call was read: write `(*receiver).name(..)`"
-  pure none
 
 /-- A dot call's receiver, a name whose type was not known where the call
 is (`lateReceivers`), once the bounds of types whose heads are known have
@@ -531,10 +530,10 @@ implementations for that type's head. (One whose name says the trait's
 arguments, `Get<Value>`, and that does not have them apart, is found by its
 name.) -/
 def rekey (b : Bound) : M Bound := do
-  let several ← severalFor (b.base) ((← headFor b.trait (← find b.ty)).map (·.1))
-  if (← get).patterned && several && !b.trait.any (· == '#')
-      && (!b.args.isEmpty || b.trait == b.base) then
-    pure { b with trait := ← implKey (b.base) b.ty b.args }
+  let several ← severalFor (b.trait.base) ((← headFor b.trait.base (← find b.ty)).map (·.1))
+  if (← get).patterned && several && b.trait.nth == 0
+      && (!b.args.isEmpty || b.trait.plain) then
+    pure { b with trait := ← implKey (b.trait.base) b.ty b.args }
   else pure b
 
 /-- One function of a group given its type, once the group's bounds are
@@ -542,10 +541,10 @@ met (`settleBounds`): with the traits at arguments its bounds name, the
 conditions on types made from its implementation's parameters, and what
 it is given, each with this function's added. -/
 def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
-    (instSites : Array (String × Nat × String × String × List Ty)) (leafs : Array (String × Nat × Ty))
-    (heldIncl : List (Ty × Ty)) (d : FnDecl) (keyed : List (String × String × List Ty))
-    (compound : List (String × String × String × Ty)) (givensOf : List (String × List (String × Nat))) :
-    M (List (String × String × List Ty) × List (String × String × String × Ty)
+    (instSites : Array (String × Nat × String × String × List Ty)) (leafs : Array (Syntax.TraitKey × Nat × Ty))
+    (heldIncl : List (Ty × Ty)) (d : FnDecl) (keyed : List (Syntax.TraitKey × Syntax.TraitKey × List Ty))
+    (compound : List (String × Syntax.TraitKey × String × Ty)) (givensOf : List (String × List (String × Nat))) :
+    M (List (Syntax.TraitKey × Syntax.TraitKey × List Ty) × List (String × Syntax.TraitKey × String × Ty)
       × List (String × List (String × Nat))) := do
   let mut keyed := keyed
   let mut compound := compound
@@ -750,21 +749,21 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
       let (_, seen') ← openParams seen (← zonk subject)
       let (_, seen'') ← openParams seen' (← zonk a)
       seen := seen''
-  let mine : List (String × Nat × Ty) ← match d.impl with
+  let mine : List (Syntax.TraitKey × Nat × Ty) ← match d.impl with
     | some (im, _) =>
       -- (As it is now: another of its functions may have found more that
       -- it assumes.)
-      let im := ((← implsOfHead (im.base) im.head).find? (·.dictFn == im.dictFn)).getD im
+      let im := ((← implsOfHead (im.trait.base) im.head).find? (·.dictFn == im.dictFn)).getD im
       -- An implementation says what it assumes.
       let plain ← im.context.mapM fun (tr, j) => do
         let t := Ty.con s!"'{(im.params[j]?).getD ""}@{d.name}" []
-        pure (tr, ((← keyOf t).getD 0), t)
+        pure (Syntax.TraitKey.of tr, ((← keyOf t).getD 0), t)
       -- Those kept apart: the trait at its arguments, of a type
       -- parameter, as this function names the implementation's.
       let own := im.pvars.map fun (p, id) => (id, Ty.con s!"'{p}@{d.name}" [])
       let apart ← im.extra.mapM fun (tr, cargs, subject) => do
         let t := subst own [] [] subject
-        let key ← if cargs.isEmpty then pure tr else traitKey tr (cargs.map (subst own [] []))
+        let key ← if cargs.isEmpty then pure (Syntax.TraitKey.of tr) else traitKey tr (cargs.map (subst own [] []))
         match ← keyOf t with
         | some k => pure (key, k, t)
         | none =>
@@ -791,12 +790,12 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
       -- (A coercion is given nothing: what it lets go of a type it is
       -- generic in, or what what it calls does, is not destroyed.)
       if (← get).coercing.contains d.name then
-        inferred := inferred.filter (·.1 != Syntax.destroyTrait)
+        inferred := inferred.filter (·.1 != .of Syntax.destroyTrait)
       else if (← get).dropMode then
         -- (Last, in the order of the type parameters, whatever order the
         -- body asked them in: as the signature alone gives them.)
-        let byBody := inferred.filter (·.1 == Syntax.destroyTrait)
-        inferred := inferred.filter (·.1 != Syntax.destroyTrait)
+        let byBody := inferred.filter (·.1 == .of Syntax.destroyTrait)
+        inferred := inferred.filter (·.1 != .of Syntax.destroyTrait)
         -- (Each one its type has, as Rust gives every type parameter how
         -- its values are dropped: what the body does with one is not
         -- asked.)
@@ -804,7 +803,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
           let t := Ty.con s!"'{p}@{rigidOwner decls d}" []
           if (seen.lookup s!"'{p}@{rigidOwner decls d}").isSome then
             let k := (← keyOf t).getD 0
-            inferred := inferred ++ [(Syntax.destroyTrait, k, t)]
+            inferred := inferred ++ [(.of Syntax.destroyTrait, k, t)]
         -- (And of each type its signature says a trait leaves to an
         -- implementation, `<I as Iterator>::Item`: what the function is
         -- given values of as much as its type parameters.)
@@ -814,10 +813,10 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
             if let .var id := t then
               if scheme.tvars.contains id then
                 let k := (← keyOf t).getD 0
-                unless inferred.any (fun (tr, k', _) => tr == Syntax.destroyTrait && k' == k) do
-                  inferred := inferred ++ [(Syntax.destroyTrait, k, t)]
+                unless inferred.any (fun (tr, k', _) => tr == .of Syntax.destroyTrait && k' == k) do
+                  inferred := inferred ++ [(.of Syntax.destroyTrait, k, t)]
         for b in byBody do
-          unless inferred.any (fun (tr, k', _) => tr == Syntax.destroyTrait && k' == b.2.1) do
+          unless inferred.any (fun (tr, k', _) => tr == .of Syntax.destroyTrait && k' == b.2.1) do
             inferred := inferred ++ [b]
       -- Where traits are written of the function's type parameters, they
       -- are all a type parameter has: what the body needs of one must be
@@ -826,8 +825,8 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
         !["Fn", "RunsIn", "Environment", "Use", "Returns"].contains b.trait && !b.trait.startsWith "'"
       if ordinary.isEmpty then pure inferred
       else
-        let mut written : List (String × Nat × Ty) := []
-        let mut fittedKeys : Array (String × Nat) := #[]
+        let mut written : List (Syntax.TraitKey × Nat × Ty) := []
+        let mut fittedKeys : Array (Syntax.TraitKey × Nat) := #[]
         for (b, at_) in ordinary.zipIdx do
           let t := Ty.con s!"'{b.subject}@{rigidOwner decls d}" []
           if (seen.lookup s!"'{b.subject}@{rigidOwner decls d}").isSome then
@@ -840,19 +839,19 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
               if f == d.name && subject == b.subject && tr == b.trait then some args else none
             let args := (theirs[nth]?).getD (theirs.headD [])
             let key ← traitKey b.trait args
-            unless args.isEmpty || keyed.any (·.1 == key) do keyed := (key, b.trait, args) :: keyed
-            for tr in key :: (← supersAll b.trait) do
+            unless args.isEmpty || keyed.any (·.1 == key) do keyed := (key, .of b.trait, args) :: keyed
+            for tr in key :: (← supersOf (.of b.trait)) do
               unless written.any (fun w => w.1 == tr && w.2.1 == k) do
                 written := written ++ [(tr, k, t)]
         let blankets := (← get).blanketTraits
         for (tr, k, t) in inferred do
           if let .con n [] := t then
             -- (How a type parameter is destroyed is never written.)
-            unless tr == Syntax.destroyTrait || written.any (fun w => w.1 == tr && w.2.1 == k) do
+            unless tr == Syntax.destroyKey || written.any (fun w => w.1 == tr && w.2.1 == k) do
               -- (A trait every type has that has what is written of this
               -- one is had by it too: met where the function is used.)
-              let had := fun (c : String) => written.any fun w => Syntax.traitBase w.1 == c && w.2.1 == k
-              if blankets.any (fun (b, asked) => b == Syntax.traitBase tr && asked.all had) then
+              let had := fun (c : String) => written.any fun w => w.1.base == c && w.2.1 == k
+              if blankets.any (fun (b, asked) => b == tr.base && asked.all had) then
                 written := written ++ [(tr, k, t)]
               else
               -- A need of the trait at arguments nothing has decided yet is
@@ -861,7 +860,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
               let mut fitted := false
               if let some (_, _, args) := keyed.find? (·.1 == tr) then
                 for w in written do
-                  if !fitted && Syntax.traitBase w.1 == Syntax.traitBase tr && w.2.1 == k then
+                  if !fitted && w.1.base == tr.base && w.2.1 == k then
                     if let some (_, _, wargs) := keyed.find? (·.1 == w.1) then
                       if wargs.length == args.length then
                         let saved ← get
@@ -886,8 +885,8 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
     match keyed.find? (·.1 == tr) with
     | some (_, base, args) =>
       let args ← args.mapM fun a => do pure (← openParams seen (← zonk a)).1
-      bounds := bounds ++ [(base, Ty.tuple (self :: args))]
-    | none => bounds := bounds ++ [(tr, self)]
+      bounds := bounds ++ [(base.spelled, Ty.tuple (self :: args))]
+    | none => bounds := bounds ++ [(tr.spelled, self)]
   -- The types left to implementations that the function's type mentions.
   let mut assocs : List (String × Ty × String × Ty) := []
   for (tr, subject, name, a, owner, _) in (← get).assocUses do
@@ -903,7 +902,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
   let found := ((assocs.flatMap fun (_, subject, _, _) => freeTys subject) ++ carried.flatMap freeTys).eraseDups
   let scheme := { scheme with assocs, incls, tvars := (scheme.tvars ++ found).eraseDups,
                               rvars := (scheme.rvars ++ carried.flatMap freeRows).eraseDups }
-  givensOf := (d.name, mine.map fun (tr, k, _) => (tr, k)) :: givensOf
+  givensOf := (d.name, mine.map fun (tr, k, _) => (tr.spelled, k)) :: givensOf
   modify fun s =>
     { s with
       fns := s.fns.insert d.name { scheme with bounds := bounds }
@@ -982,7 +981,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if (← needsDestroying [] ty) || !(freeTys ty).isEmpty || hasParam ty then
         let id := 2000000000 + (← get).dropAsked
         modify fun s => { s with dropAsked := s.dropAsked + 1, dropSites := s.dropSites.push (site, id) }
-        pending := pending.push ⟨Syntax.destroyTrait, Syntax.destroyTrait, ty, id, 0, site.owner, pos, []⟩
+        pending := pending.push ⟨.of Syntax.destroyTrait, ty, id, 0, site.owner, pos, []⟩
   -- What is gone through to reach each borrowed field, for the elaborator.
   let sites := (← get).fieldSites
   modify fun s => { s with fieldSites := #[] }
@@ -1063,31 +1062,31 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- of exactly two arrays says what the two are. As deep as written.)
       for _ in List.range 8 do
         for b in pending do
-          let (self, wanted) ← subjectOf b.trait b.ty
+          let (self, wanted) ← subjectOfKey b.trait b.ty
           if wanted.isEmpty then continue
           let found ← match ← find self with
             | .con h args => pure (some (h, args))
             | _ => pure none
           if let some (h, args) := found then
-            let mine ← implsOfHead (b.base) h
+            let mine ← implsOfHead (b.trait.base) h
             if let [im] := mine then
               let at_ ← implAt im args
               for (given, want) in im.targs.zip wanted do
                 try unify want (← fixedAt at_ given) catch _ => pure ()
       for b in pending do
-        let (self, _) ← subjectOf b.trait b.ty
+        let (self, _) ← subjectOfKey b.trait b.ty
         if let .var v ← find self then
-          let mine ← implsOfBase (b.base)
+          let mine ← implsOfBase (b.trait.base)
           let (first, others) := mine.partition fun im => im.pvars.any (·.1 == Syntax.fallbackMark)
           if first.isEmpty then continue
           -- (The other traits asked of the same type.)
           let mut asked : List String := []
           for other in pending do
-            let (theirs, _) ← subjectOf other.trait other.ty
+            let (theirs, _) ← subjectOfKey other.trait other.ty
             if let .var w ← find theirs then
-              if w == v && other.trait != Syntax.destroyTrait
-                  && other.base != b.base then
-                asked := other.base :: asked
+              if w == v && other.trait != Syntax.destroyKey
+                  && other.trait.base != b.trait.base then
+                asked := other.trait.base :: asked
           let byBase := (← get).implsByBase
           let impls := (← get).impls
           let fitsAll := fun (head : String) => asked.all fun tr =>
@@ -1099,18 +1098,18 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- (The second time, those whose type was not decided the first.)
       if round == 1 && !undecided.contains at_ then continue
       if round == 0 then
-        if let .var _ ← find (← subjectOf b.trait b.ty).1 then undecided := at_ :: undecided
+        if let .var _ ← find (← subjectOfKey b.trait b.ty).1 then undecided := at_ :: undecided
       let goal ← zonk b.ty
       let fitting := (← get).patterned
       let named ← match goal with
         | .con h args => pure (some (h, args))
-        | .tuple _ => headFor b.trait goal
+        | .tuple _ => headFor b.trait.base goal
         | _ => pure (if fitting then goal.head else none)
       if let some (h, args) := named then
         -- (Where the type has several implementations of the trait, the one
         -- chosen makes the arguments fit when it is chosen.)
-        let several ← severalFor (b.base) (some h)
-        for im in ← implsOfHead (b.base) h do
+        let several ← severalFor (b.trait.base) (some h)
+        for im in ← implsOfHead (b.trait.base) h do
           if im.trait == b.trait && !several then
             -- (The implementation's own type parameters are this type's
             -- arguments here, not what another use of it made them.)
@@ -1145,17 +1144,17 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   timedM "bounds: settle" settleAssocs
   -- (What an implementation found only now performs is passed on.)
   settleRows (some fun _ => true) true
-  let mut keyed : List (String × String × List Ty) := []
+  let mut keyed : List (Syntax.TraitKey × Syntax.TraitKey × List Ty) := []
   let mut split : Array Bound := #[]
   for b in pending do
-    let (self, args) ← subjectOf b.trait b.ty
+    let (self, args) ← subjectOfKey b.trait b.ty
     -- (Where a type has several implementations of the trait, which one
     -- is chosen by fitting, arguments or none.)
     let several ← do
-      pure ((← get).patterned && (← severalFor b.trait ((← headFor b.trait (← find self)).map (·.1))))
+      pure ((← get).patterned && (← severalFor b.trait.base ((← headFor b.trait.base (← find self)).map (·.1))))
     if args.isEmpty && !several then split := split.push b
     else
-      let key ← try implKey b.trait self args
+      let key ← try implKey b.trait.base self args
         catch e => throw (inFunction b.owner (b.pos ++ e))
       unless keyed.any (·.1 == key) do keyed := (key, b.trait, args) :: keyed
       split := split.push { b with trait := key, ty := self, args := args }
@@ -1169,10 +1168,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       for (tr, cargs, subject) in im.extra do
         let t := subst own [] [] subject
         if (← keyOf t).isNone then
-          let key ← if cargs.isEmpty then pure tr else traitKey tr (cargs.map (subst own [] []))
+          let key ← if cargs.isEmpty then pure (Syntax.TraitKey.of tr) else traitKey tr (cargs.map (subst own [] []))
           let _ ← conditionKey d.name key t
   -- What the group's functions need of the types they are generic in.
-  let mut leafs : Array (String × Nat × Ty) := #[]
+  let mut leafs : Array (Syntax.TraitKey × Nat × Ty) := #[]
   -- (Those of a type whose head is known first: what their implementations
   -- say may decide what the others are of, `F: Into<S>` the `S` of a block
   -- named in place of a function that needs `S: Col`.)
@@ -1184,26 +1183,22 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     | _ => known := known.push b
   -- (Bounds of a receiver found to be read through its reference: of what
   -- it points to, `dotOwnInstead`.)
-  let mut retyped : Array (Nat × String × Ty) := #[]
   for b in known ++ #[none] ++ unknown do
     -- (Between: what those of known types decided of receivers.)
     let some b := b | checkLateReceivers; continue
     let b ← rekey b
     -- (How to destroy a type that nothing decides is not asked for.)
     let patterned := (← get).patterned
-    let leavesOf := fun (ty : Ty) => (if patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait ty b.args b.owner
+    let leavesOf := fun (ty : Ty) => (if patterned && b.trait != Syntax.destroyKey then leavesFitting b.pos b.trait ty b.args b.owner
         else (·.map fun (tr, k, t) => (tr, k, t, [])) <$> leaves b.pos b.trait ty : M _)
     let ls ← try (timedM "bounds: leaves" (leavesOf b.ty)) catch e =>
-      if b.trait == Syntax.destroyTrait then pure [] else do
-        match ← dotOwnInstead b.call b.trait b.ty e with
-        | some inner =>
-          retyped := retyped.push (b.call, b.trait, inner)
-          leavesOf inner
-        | none => throw (inFunction b.owner e)
+      if b.trait == Syntax.destroyKey then pure [] else do
+        dotOwnInstead b.call b.trait b.ty e
+        throw (inFunction b.owner e)
     for (tr, k, t, args) in ls do
       -- (One at arguments, `S: Get<Value>` that a condition comes down to,
       -- is said with them in the function's type, as one written is.)
-      unless args.isEmpty || keyed.any (·.1 == tr) do keyed := (tr, Syntax.traitBase tr, args) :: keyed
+      unless args.isEmpty || keyed.any (·.1 == tr) do keyed := (tr, .of tr.base, args) :: keyed
       unless leafs.any (fun x => x.1 == tr && x.2.1 == k) do leafs := leafs.push (tr, k, t)
   -- What a type parameter's trait says it performs stays a row of its own:
   -- that it is among what a function performs goes with the function's type,
@@ -1236,7 +1231,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- Conditions of an implementation on a type made from its parameters,
   -- `(A, B): Apart`, by the function and the trait at its arguments: the
   -- type as written, and the number it is known by in the function.
-  let mut compound : List (String × String × String × Ty) := []
+  let mut compound : List (String × Syntax.TraitKey × String × Ty) := []
   for d in decls do
     let (k, c, g) ← settleScheme decls defs instSites leafs heldIncl d keyed compound givensOf
     keyed := k
@@ -1254,10 +1249,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     | none => (call, [d]) :: table
   -- (A bound of a type not all decided waits for the others: meeting them
   -- may decide it. In the last round, what is left is refused.)
-  let mut waiting := (pending.map fun b =>
-    match retyped.find? fun (c, tr, _) => c == b.call && tr == b.trait with
-    | some (_, _, inner) => { b with ty := inner }
-    | none => b).toList
+  let mut waiting := pending.toList
   let mut round := 0
   -- (Rounds go on while one meets any: a type left to an implementation of
   -- a type left to another, as deep as it is written, is found one level a
@@ -1286,11 +1278,11 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let givens := (givensOf.lookup b.owner).getD []
     -- (A need at arguments decided since, by a written bound, `T: Unlinks<?>`
     -- with `T: Unlinks<T>` written: that bound's, its key spelled again.)
-    let b ← if b.args.isEmpty || givens.any (·.1 == b.trait) then pure b else do
+    let b ← if b.args.isEmpty || givens.any (·.1 == b.trait.spelled) then pure b else do
       match ← keyOf b.ty with
       | some k =>
-        let again ← traitKey (b.base) b.args
-        pure (if givens.contains (again, k) then { b with trait := again } else b)
+        let again ← traitKey (b.trait.base) b.args
+        pure (if givens.contains (again.spelled, k) then { b with trait := again } else b)
       | none => pure b
     let b ← timedM "bounds: rekey" (rekey b)
     -- What `Traits.coherent` asks of the assumptions.
@@ -1298,26 +1290,26 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       throw (inFunction b.owner s!"{b.pos}a bound is assumed twice; this is a compiler defect")
     -- How a value is destroyed: a part of its type that nothing decides, and
     -- the function is not given, has nothing to destroy.
-    let sty ← if b.trait == Syntax.destroyTrait then do pure (destroyShape givens (← toSTy b.ty))
+    let sty ← if b.trait == Syntax.destroyKey then do pure (destroyShape givens (← toSTy b.ty))
       else toSTy b.ty
     -- (A need of the trait of a type the implementation said has it: met by
     -- what it said.)
     -- (Spelled only where it is asked: most are met before.)
-    let saidOf : M (Option (String × String × String × Ty)) := do
+    let saidOf : M (Option (String × Syntax.TraitKey × String × Ty)) := do
       if compound.isEmpty then return none
       let spelled ← spellTy b.ty
       pure (compound.find? fun (owner, key, ty, _) =>
-        owner == b.owner && Syntax.traitBase key == b.base && ty == spelled)
-    let solve := fun (trait : String) (ty : Ty) (sty : Traits.STy) => do
+        owner == b.owner && key.base == b.trait.base && ty == spelled)
+    let solve := fun (trait : Syntax.TraitKey) (ty : Ty) (sty : Traits.STy) => do
       -- (As deep as a condition's conditions go: a list of sixteen, each
       -- apart from those after it, goes some hundreds deep.)
-      if (← get).patterned && b.trait != Syntax.destroyTrait then solveFitting givens 4000 trait ty b.args
+      if (← get).patterned && b.trait != Syntax.destroyKey then solveFitting givens 4000 trait ty b.args
       else
         -- (Of what a trait leaves to an implementation, not known here: the
         -- condition written of it.)
         let given ← (← projectedCondition trait ty).findSomeM? fun k => do
-          pure ((Traits.findGiven trait k givens).map Traits.Dict.given)
-        pure (given <|> Traits.solveIx kimpls givens 100000 trait sty)
+          pure ((Traits.findGiven trait.spelled k givens).map Traits.Dict.given)
+        pure (given <|> Traits.solveIx kimpls givens 100000 trait.spelled sty)
     let solved ← match ← timedM "bounds: solve" (solve b.trait b.ty sty) with
       | some d => pure (some d)
       | none =>
@@ -1330,27 +1322,24 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- (How a value of a type nothing here decides is destroyed: as one
       -- with nothing to destroy, as a part nothing decides is. Its place
       -- among what the call is given is kept: the callee takes one there.)
-      if b.trait == Syntax.destroyTrait then
+      if b.trait == Syntax.destroyKey then
         -- (A callable's is its own, given where it is given up.)
         let callable ← match ← find b.ty with
           | .fn .. => pure true
           | _ => pure false
         unless callable do
-          if let some d := Traits.solveIx kimpls givens 100000 b.trait (.con "(reference)" []) then
+          if let some d := Traits.solveIx kimpls givens 100000 b.trait.spelled (.con "(reference)" []) then
             table := record table b.call (← toDictEShared impls marker d)
         continue
       if !last && !(← zonk b.ty).ground then
         waiting := waiting ++ [b]
         continue
       -- (A dot call of a trait's function, of a value whose type does not
-      -- implement the trait but has a function of the name of its own: that
-      -- one, and the program read again.)
-      if let some inner ← dotOwnInstead b.call b.trait b.ty s!"{b.pos}`{b.trait}` is not implemented" then
-        if let some d ← solve b.trait inner (← toSTy inner) then
-          table := record table b.call (← toDictEShared impls marker d)
-          continue
+      -- implement the trait but has a function of the name of its own:
+      -- refused, saying so.)
+      dotOwnInstead b.call b.trait b.ty s!"{b.pos}`{b.trait}` is not implemented"
       for (tr, k, t) in ← leaves b.pos b.trait b.ty do
-        unless givens.contains (tr, k) do
+        unless givens.contains (tr.spelled, k) do
           match t with
           | .con n [] =>
             let hint := if (decls.find? (·.name == b.owner)).any (·.impl.isSome) then

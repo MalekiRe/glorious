@@ -522,7 +522,7 @@ def splitFieldItems (all items : List Syntax.Item) : List Syntax.Item :=
     | .pub _ inner => inner
     | other => other
   let dropped := all.filterMap fun item => match unwrap item with
-    | .impl _ tr head _ _ _ => if tr == "Drop" then some head else none
+    | .impl _ tr head _ _ _ => if tr == .of "Drop" then some head else none
     | _ => none
   let structs : Structs := all.filterMap fun item => match unwrap item with
     | (.fieldNames ctor names _) => if dropped.contains ctor then none else some (ctor, names)
@@ -622,7 +622,7 @@ under the name it is checked by. -/
 partial def Item.decide (f : String → List (Option TypeExpr) → Flat.Body → Flat.Body) : Syntax.Item → Syntax.Item
   | .fn name ps annots ret b => .fn name ps annots ret (f name annots b)
   | .impl ps tr head args ctx methods => .impl ps tr head args ctx (methods.map fun
-    | .fn m mps annots ret b => .fn m mps annots ret (f (implFnName tr head m) annots b)
+    | .fn m mps annots ret b => .fn m mps annots ret (f (implFnName tr.spelled head m) annots b)
     | item => Item.decide f item)
   | .traitInfo n supers defaults ps assocs => .traitInfo n supers (defaults.map fun
     | .fn m mps annots ret b => .fn m mps annots ret (f "" annots b)
@@ -677,7 +677,7 @@ def Decided.body (d : Decided) (b : Flat.Body) : Bool :=
 partial def Decided.item (d : Decided) : Syntax.Item → Bool
   | .fn name _ _ _ b => d.owners.contains name || d.body b
   | .impl _ tr head _ _ methods => methods.any fun
-    | .fn m _ _ _ b => d.owners.contains (implFnName tr head m) || d.body b
+    | .fn m _ _ _ b => d.owners.contains (implFnName tr.spelled head m) || d.body b
     | item => d.item item
   | .traitInfo _ _ defaults _ _ => defaults.any d.item
   | .module _ (some body) => body.any d.item

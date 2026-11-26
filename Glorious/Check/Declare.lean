@@ -368,6 +368,11 @@ partial def supersAll (tr : String) : M (List String) := do
       go fuel (seen ++ more) (rest ++ more)
   pure (go 64 [] [tr])
 
+/-- The same of a trait at its arguments: none (`supersAll` is of a trait
+itself). -/
+def supersOf (k : Syntax.TraitKey) : M (List Syntax.TraitKey) := do
+  if k.plain then pure ((← supersAll k.base).map .of) else pure []
+
 /-- The lifetimes a type names, but for `'_` and `'static`. -/
 partial def lifetimesOf (t : TypeExpr) : List String :=
   (match t with
@@ -566,11 +571,11 @@ def declareTrait (items : List Item) (name : String) (methods : List (String × 
 
 /-- An implementation read: what it is for, on what conditions, and what it
 leaves to its trait said (`declareTraits`). -/
-def declareImplIn (params : List String) (tr head : String) (args : List String) (context : List (String × String))
+def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) (args : List String) (context : List (String × String))
     (methods : List Item) : M Unit := do
-  let what := s!"`impl {tr} for {head}`"
+  let what := s!"`impl {tr.shown} for {head}`"
   -- `tr` is the trait at the arguments the implementation gives it.
-  let base := Syntax.traitBase tr
+  let base := tr.base
   let names ← match (← get).traits.lookup base with
     | some ns => pure ns
     | none => throw s!"{what}: unknown trait `{base}`"
@@ -627,9 +632,9 @@ def declareImplIn (params : List String) (tr head : String) (args : List String)
   -- A callable that takes hold of a value with a `drop` has to be
   -- called: what is and is not used is then counted, as it is where a
   -- program declares something that has to be used.
-  if tr == "Drop" then modify fun s => { s with anyMust := true }
-  if (← get).kimpls.has tr head then
-    throw s!"`{tr}` is implemented twice for `{head}`"
+  if tr == .of "Drop" then modify fun s => { s with anyMust := true }
+  if (← get).kimpls.has tr.spelled head then
+    throw s!"`{tr.shown}` is implemented twice for `{head}`"
   -- The arguments it gives its trait, and the types the trait leaves to it.
   let (arityOfTrait, assocNames) := ((← get).traitShape[base]?).getD (0, [])
   let (pmap, _, _) ← freshParams params
@@ -697,7 +702,7 @@ def declareImplIn (params : List String) (tr head : String) (args : List String)
   -- parts are: a `Drop` may ask its type parameters for traits without
   -- arguments, which every value of the type then has to have, and no
   -- more. Rust asks the same: as the type's declaration does.)
-  if tr == "Drop" && extra.any (·.1 != Syntax.destroyTrait) then
+  if tr == .of "Drop" && extra.any (·.1 != Syntax.destroyTrait) then
     throw s!"{what}: a `Drop` may ask its type parameters only for traits without arguments; keep what it needs in the value instead (a callable made where the trait is known)"
   let mut assocs : List (String × Ty) := []
   let mut gatParams : List (String × List (Bool × Nat)) := []
@@ -728,7 +733,7 @@ def declareImplIn (params : List String) (tr head : String) (args : List String)
         let targs := (List.range 16).filterMap fun i => methods.findSome? fun
           | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
           | _ => none
-        (p, Syntax.traitBase t', targs)
+        (p, t', targs)
       let projecting := pmap.filterMap fun (_, t) => match t with
         | .var id => some id
         | _ => none
@@ -810,24 +815,24 @@ def declareImplIn (params : List String) (tr head : String) (args : List String)
       let narrower := (Ty.fitsAll (other.pvars.map (·.2)) theirs mine []).isSome
       let wider := (Ty.fitsAll (pvars.map (·.2)) mine theirs []).isSome
       if narrower && wider then
-        throw s!"`{Syntax.traitShown other.trait}` is implemented twice for `{head}`"
+        throw s!"`{other.trait.shown}` is implemented twice for `{head}`"
       if !narrower && !wider && (Ty.meetAll mine theirs []).isSome then
-        throw s!"`impl {Syntax.traitShown tr} for {bareName head}`: some type fits this and another implementation of `{Syntax.traitShown other.trait}` for `{bareName head}` both, and neither asks more of it than the other: say which is for those, with an implementation for just them"
+        throw s!"`impl {tr.shown} for {bareName head}`: some type fits this and another implementation of `{other.trait.shown}` for `{bareName head}` both, and neither asks more of it than the other: say which is for those, with an implementation for just them"
   modify fun s =>
     { s with
       implsByBase := s.implsByBase.insert base ((s.implsByBase.getD base #[]).push s.impls.size)
       implsByHead := s.implsByHead.insert (base, head) ((s.implsByHead.getD (base, head) #[]).push s.impls.size)
       impls := s.impls.push
-        { trait := tr, base, head, params := args, context := ctx, methods,
-          dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra,
+        { trait := tr, head, params := args, context := ctx, methods,
+          dictFn := Elab.implDictName tr.spelled head, targs, assocs, pvars, fixed, equal, generic, extra,
           gatParams, extraEqual }
-      kimpls := s.kimpls.push ⟨tr, head, arity, ctx⟩ }
+      kimpls := s.kimpls.push ⟨tr.spelled, head, arity, ctx⟩ }
 
 
 /-- An implementation declared (`declareImplIn`): a callable in what it is
 for performs what is written of it, nothing where nothing is, as in a
 function's signature. -/
-def declareImpl (params : List String) (tr head : String) (args : List String) (context : List (String × String))
+def declareImpl (params : List String) (tr : Syntax.TraitKey) (head : String) (args : List String) (context : List (String × String))
     (methods : List Item) : M Unit := do
   modify fun s => { s with closedRows := true }
   try declareImplIn params tr head args context methods
@@ -901,7 +906,7 @@ def declareTraits (items : List Item) : M Unit := do
             implsByHead := s.implsByHead.insert (Syntax.destroyTrait, head)
               ((s.implsByHead.getD (Syntax.destroyTrait, head) #[]).push s.impls.size)
             impls := s.impls.push
-              ⟨Syntax.destroyTrait, Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
+              ⟨.of Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
                 Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, [], [], []⟩
             kimpls := s.kimpls.push ⟨Syntax.destroyTrait, head, arity, ctx⟩ }
   -- What `Traits.coherent` asks of the implementations.
@@ -915,8 +920,9 @@ def declareTraits (items : List Item) : M Unit := do
   -- A type that has a trait has the traits that one needs, on no more
   -- conditions than it has the first.
   let kimpls := (← get).kimpls
-  for I in kimpls.impls do
-    for s in ((← get).supers.lookup (Syntax.traitBase I.trait)).getD [] do
+  -- (Made side by side with the implementations, one for each: `impls`.)
+  for (I, im) in kimpls.impls.toList.zip (← get).impls.toList do
+    for s in ((← get).supers.lookup im.trait.base).getD [] do
       match kimpls.find s I.head I.arity with
       | some (_, J) =>
         for c in J.context do

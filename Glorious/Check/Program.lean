@@ -33,7 +33,7 @@ def groupKey (key : UInt64) (group : List FnDecl) : UInt64 :=
 implementations declared after the first `before` replaced by `written`
 (each implementation's trait and functions, in the order written), where
 those line up: none where they do not. -/
-def withImplBodies (st : St) (before : Nat) (written : List (String × List Item)) : Option St :=
+def withImplBodies (st : St) (before : Nat) (written : List (Syntax.TraitKey × List Item)) : Option St :=
   let given := st.impls.toList.drop before
   if written.length ≤ given.length && (written.zip given).all (fun (w, im) => w.1 == im.trait) then
     let replaced : List ImplDecl := given.zipIdx.map fun (im, k) =>
@@ -70,7 +70,7 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
         -- (And of the trait's function's own, what the trait says.)
         let uses := uses ++ sig.uses.map fun (p, lo, hi) =>
           ({ subject := p, trait := "Use", quantity := some (lo, hi) } : Syntax.Bound)
-        let name := Syntax.implFnName im.trait im.head m
+        let name := Syntax.implFnName im.trait.spelled im.head m
         -- (Its body, where the declaration has none: by its name.)
         let kept := (← get).fnBodies[name]?
         let body := if clauses.roots.isEmpty then kept.getD {} else clauses
@@ -618,7 +618,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
     -- depend on the bodies, so the ones put in their place are this
     -- program's, in the order its implementations are written. Where they
     -- do not line up, nothing kept is taken.)
-    let written : List (String × List Item) := items.filterMap fun
+    let written : List (Syntax.TraitKey × List Item) := items.filterMap fun
       | .impl _ tr _ _ _ methods => some (tr, methods)
       | _ => none
     let ours := fun (st : St) => withImplBodies st before written
@@ -1033,10 +1033,10 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     let traitsBy := Elab.firstOf s.traits
     let arityBy : Std.HashMap String Nat := s.methods.fold (fun m n sig => m.insert n sig.params.length) {}
     let implEs := (s.impls.toList.map fun im =>
-      let names := traitsBy.getD (im.base) []
+      let names := traitsBy.getD (im.trait.base) []
       (⟨im.dictFn, im.context.length + im.extra.length, names.map fun m =>
-        (Syntax.implFnName im.trait im.head m,
-          if im.trait == Syntax.destroyTrait then 1
+        (Syntax.implFnName im.trait.spelled im.head m,
+          if im.trait == .of Syntax.destroyTrait then 1
           else arityBy.getD m 0)⟩ :
         Elab.ImplE)) ++ [({ dictFn := Syntax.markerDict, conditions := 0, methods := [] } : Elab.ImplE)]
     -- How each type is destroyed, for the elaborator to write the function:
@@ -1044,7 +1044,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     -- which fields are destroyed, each by how its type is.
     let mut destroys : Array Elab.Destroy := #[]
     for im in s.impls do
-      if im.trait == Syntax.destroyTrait then
+      if im.trait == Syntax.destroyKey then
         let givens : Traits.Givens := im.context
         let place := fun (j : Nat) => (im.context.idxOf? (Syntax.destroyTrait, j)).map Elab.DictE.param
         let arity := im.params.length

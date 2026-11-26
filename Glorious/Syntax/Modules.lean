@@ -1376,7 +1376,7 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
       | item => pure item
     pure [.traitInfo (ownName ctx .trait name) supers defaults params assocs]
   | .impl ps tr head args context methods => do
-    let (tr', trEntry) ← resolveNamed ctx .trait [] tr
+    let (tr', trEntry) ← resolveNamed ctx .trait [] tr.base
     let (head', headEntry) ← resolveNamed ctx .type [] head
     -- An implementation is written beside the trait or beside the type, so
     -- that there is one place to look for it and no two can disagree.
@@ -1386,7 +1386,7 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
     if foreign trEntry && foreign headEntry && (trEntry.isSome || headEntry.isSome) then
       let homes := (trEntry.toList ++ headEntry.toList).filter (·.home != preludePath)
       unless homes.isEmpty do
-        throw s!"`impl {tr} for {head}` is written in {showPath ctx.here}: an implementation is written in the module of its trait or of its type"
+        throw s!"`impl {tr.shown} for {head}` is written in {showPath ctx.here}: an implementation is written in the module of its trait or of its type"
     let context ← context.mapM fun (p, bound) => do
       pure (p, (← resolveNamed ctx .trait [] bound).1)
     let generics := "Self" :: genericParams ps
@@ -1409,7 +1409,7 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
       | (.typeAlias name aps body) => do
         pure ((.typeAlias name aps (← resolveType ctx (genericParams ps) body)))
       | item => pure item
-    pure [.impl ps tr' head' args context methods]
+    pure [.impl ps (.of tr') head' args context methods]
   | item => resolveItem ctx item
 
 /-- The modules of a program, each with its items: `root` is the first, and a

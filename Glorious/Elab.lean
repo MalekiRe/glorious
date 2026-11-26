@@ -1650,10 +1650,10 @@ def untraitItem (tr : TraitInfo) : Syntax.Item → List Untraited
   | .impl params trait head _ context methods =>
     let own := methods.filterMap fun
       | .fn m _ annots ret b =>
-        let name := implFnName trait head m
+        let name := implFnName trait.spelled head m
         some (Untraited.fn name fun _ => untraitFn tr name params annots ret b)
       | _ => none
-    own ++ [.fn (implDictName trait head) fun _ => implDictItem tr trait head context.length]
+    own ++ [.fn (implDictName trait.spelled head) fun _ => implDictItem tr trait.spelled head context.length]
   | .fn name params annots ret b => [.fn name fun _ => untraitFn tr name params annots ret b]
   | item => [.item item]
 

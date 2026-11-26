@@ -427,7 +427,7 @@ private partial def parseItem : P Item := do
         Item.fn name ps (annots.map (·.map fix)) (ret.map fix)
           ((Flat.selfRewrite head (some (tr, Expr.type (.tuple [self])))).body (calledBody body))
       | other => other
-    pure (.impl params tr head args context.toList written)
+    pure (.impl params (.of tr) head args context.toList written)
   | .ident "coerce" =>
     advance
     let name ← match ← peek with
@@ -933,7 +933,7 @@ private partial def parseItemGroup : P (List Item) := do
     -- checker sees; `unsafe impl` is the promise.
     | items@(.trait name _ :: _) => pure (items ++ [.fieldNames (attrMark "unsafe_trait") [name] []])
     | items@(.impl _ tr head _ _ _ :: _) =>
-      pure (items ++ [.fieldNames (attrMark "unsafe_impl") [tr, head] []])
+      pure (items ++ [.fieldNames (attrMark "unsafe_impl") [tr.base, head] []])
     | _ => failAt "`unsafe` is written before `fn`, `trait` or `impl`, or before a block"
   | .ident "extern" =>
     parseExtern

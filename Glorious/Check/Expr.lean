@@ -1133,7 +1133,7 @@ partial def dotAltReading (scope : Scope) (amb : Row) (alts : List String) (a : 
     -- (Or a function of another trait, where the type has that trait.)
     let s ← get
     pure (alts.find? fun alt => match s.methods[alt]? with
-      | some sig => s.kimpls.has (Syntax.traitBase sig.trait) h
+      | some sig => s.kimpls.has (sig.trait) h
       | none => false)
 
 /-- How two functions take their first argument: `0` whole, `1` by a shared
@@ -1839,7 +1839,7 @@ partial def inferCallFn (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (
     -- ends with: of a trait whose other arguments are its type where not
     -- written, the type it is asked of is that one.)
     if let some (id, wanted) := (← get).wantResult then
-      if id == call && (← get).selfDefaults.contains (Syntax.traitBase sig.trait) then
+      if id == call && (← get).selfDefaults.contains (sig.trait) then
         if let .var _ ← find self then unify self wanted
     needBounds call [(sig.trait, subject)]
     let r ← applyTy scope amb s!"`{x}`" callee args call
@@ -1850,7 +1850,7 @@ partial def inferCallFn (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (
     -- (Of a type not decided at an argument that is a type of whole numbers
     -- where the trait's argument is its type where not written, `n + 1`:
     -- of that type, as an implementation that does not write it is.)
-    if let some places := (← get).selfDefaults[Syntax.traitBase sig.trait]? then
+    if let some places := (← get).selfDefaults[sig.trait]? then
       if let .var _ ← find self then
         for i in places do
           if let some a := targs[i]? then
