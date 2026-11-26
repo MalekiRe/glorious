@@ -256,7 +256,19 @@ What reading the next steps closely showed (measured on covey/fleet):
   lowers each function at each of its signatures and keeps one copy of each
   that lowers alike. What is left is the dictionaries' form itself
   (`untraitFn`, `implDictItem`), for what nothing reaches and for a given
-  bound passed on: some hundreds of lines, not 1.2k.
+  bound passed on: some hundreds of lines, not 1.2k. Read again: the form
+  is the specializer's input, not a second way of running the program.
+  `untraitCall` writes a call of a trait's function as a call of the
+  implementation's, by name, where the checker knows it, and passes the
+  implementations a generic function is given as arguments; `specCopy`
+  then copies each function for the implementations it is called with,
+  each `%dict k` a known implementation, so nothing `main` reaches takes
+  one. Doing it in one pass (copies made from the checker's findings
+  while the traits are written out) does the same work in one place;
+  the lines it saves are the dictionary values' own (`implDictItem`,
+  `dictExpr` where it is not known), used only by what nothing reaches,
+  which is elaborated for what the elaborator alone finds. Not worth its
+  risk before the checker finds those itself; left.
 - **Sema writing the certificate** (step 7): the certificate gives each
   function, closure and handler regions, loans and capabilities in Core's
   terms (`Typing.SigEntry`, `Hint`); the checker's lifetimes and captures
