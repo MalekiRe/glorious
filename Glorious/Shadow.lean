@@ -77,7 +77,7 @@ def rhsKind : Rhs → String
   | .prim _ _ => "prim"
   | .construct _ _ => "construct"
   | .place _ => "place"
-  | .closure _ _ => "closure"
+  | .closure f _ => s!"closure {f}"
   | .rebind _ _ => "rebind"
 
 /-- Each `let` of a computation, by its local's place, with the type its hint
@@ -134,7 +134,10 @@ def compare (items : List Syntax.Item) (out : Elab.Output) (cert : Cert) : Count
       for (level, t, kind) in letTypes d0 hs cl.body do
         c := { c with lets := c.lets + 1 }
         if (mine.find? (·.1 == level)).isNone then
-          let kind := (kind.splitOn " ").headD kind
+          let kind := match kind.splitOn " " with
+            | ["closure", f] => s!"closure of {((f.toNat?.bind (out.fnNames[·]?)).getD "").take 40}"
+            | k :: _ => k
+            | [] => kind
           c := { c with untyped := c.untyped.insert kind (c.untyped.getD kind 0 + 1) }
         match (mine.find? (·.1 == level)).bind (writtenShape env ·.2) with
         | some w =>

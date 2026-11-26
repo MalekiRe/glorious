@@ -238,6 +238,27 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
     if i ≥ level then noteTy i e0
   pure a
 
+/-- The type the checker found of what a list of statements gives: its last
+one's expression's, `()` where it ends with none. -/
+partial def stmtsTy (stmts : List Flat.StmtId) : M (Option Syntax.TypeExpr) := do
+  let s ← get
+  match stmts.getLast? with
+  | none => pure (some (.tuple []))
+  | some st =>
+    match s.body.stmt (s.body.unlocated st) with
+    | .expr e => pure ((← read).blocks.bind fun bl => bl.nodeTys[(s.owner, s.body.idOf e)]?)
+    | _ => pure (some (.tuple []))
+
+/-- The local `a` holds a value of the type `t` (where both are known). -/
+partial def noteTyIs (a : Atom) (t : Option Syntax.TypeExpr) : M Unit := do
+  if let (.var i, some t) := (a, t) then
+    modify fun s => { s with b := { s.b with tys := s.b.tys.push (i, t) } }
+
+/-- The type the checker found of the node `e`. -/
+partial def tyOf (e : Flat.ExprId) : M (Option Syntax.TypeExpr) := do
+  let s ← get
+  pure ((← read).blocks.bind fun bl => bl.nodeTys[(s.owner, s.body.idOf e)]?)
+
 /-- The local `i` holds what the node `e` gives: of the type the checker
 found of it (`Blocks.nodeTys`), where it found one. -/
 partial def noteTy (i : Nat) (e : Flat.ExprId) : M Unit := do
@@ -299,7 +320,7 @@ partial def elabExprAt (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M A
         if dps.isEmpty then return ← elabClosure scope clauses id destroy.toList
     | _, _ => pure ()
     let before := (← get).plain.length
-    let r ← elabCall scope false f args
+    let r ← elabCall scope false f args (some e0)
     -- The borrow a destruction passes is the compiler's, not the program's.
     if id == dropCallId then
       modify fun s => { s with plain := s.plain.drop (s.plain.length - before) }
@@ -308,7 +329,7 @@ partial def elabExprAt (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M A
     unless tailPos do throw "`tail` call is not in tail position"
     if let some why := (← get).noTail then
       throw s!"`tail` cannot be used here: {why}"
-    elabCall scope true f args
+    elabCall scope true f args (some e0)
   | .closure id clauses => elabClosure scope clauses id
   | .handle subject arms => elabHandle scope tailPos subject arms
   | .mark m => throw s!"`{m.shown}` is the compiler's mark of a call, not a value"
@@ -393,7 +414,8 @@ partial def lendCall (idx : Nat) (atoms : List Atom) : List (Nat × Bool) → M 
     let thunk ← emit (.let_ (.closure f atoms))
     emit (.lend uniq lentRef thunk [] [])
 
-partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : Array Flat.ExprId) : M Atom := do
+partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : Array Flat.ExprId)
+    (call : Option Flat.ExprId := none) : M Atom := do
   let b := (← get).body
   -- Whether what a reference points to was built by a constructor, at a
   -- path of field numbers: the cell is asked, and nothing is read out of it.
@@ -434,9 +456,15 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
   match b.expr f with
   | .name q x =>
     match ← resolveName scope q x with
-    | .local a => do elabApply scope isTail (← useLocal a) args
+    | .local a => do
+      let level := (← get).b.depth
+      let callee ← useLocal a
+      if let .var i := callee then
+        if i ≥ level then noteTy i f
+      elabApply scope isTail callee args
     | .cell c => do
       let callee ← emit (.mem .load [c])
+      if let .var i := callee then noteTy i f
       elabApply scope isTail callee args
     | .fn idx => do
       let gives := match (← read).bodies[x]? with
@@ -473,7 +501,18 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
         if (← get).b.done.isSome then pure (.int 0) else lendCall idx atoms borrows
       else
         let callee ← emit (.let_ (.closure idx []))
-        if let .var i := callee then noteTy i f
+        if let .var _ := callee then
+          -- (Of the callee's node; or, where that is one the checker did not
+          -- read, a trait's function written as its implementation's, of
+          -- what it is given and gives here.)
+          match ← tyOf f with
+          | some t => noteTyIs callee (some t)
+          | none =>
+            let given ← args.toList.mapM tyOf
+            let gives ← match call with
+              | some c => tyOf c
+              | none => pure none
+            noteTyIs callee (do pure (.fn (← given.mapM id) (← gives)))
         elabApply scope isTail callee args gives
     | .ctor info => do
       if isTail then throw s!"`tail` applies to calls, not to the constructor `{x}`"
@@ -699,6 +738,10 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Flat.StmtId → M 
     let idx ← addFn ⟨[body]⟩ s!"the scope of `{x}` in `{(← get).owner}`"
     let captured ← (captures.filterMap (fun y => scope.lookup y)).mapM useLocal
     let thunk ← emit (.let_ (.closure idx captured))
+    -- (A function of the cell's reference, giving what the rest gives.)
+    let held ← tyOf value
+    let gives ← stmtsTy rest
+    noteTyIs thunk (do pure (.fn [.ref true (← held) none] (← gives)))
     if tailPos then
       terminate (.cellTail a thunk)
       pure (.int 0)
@@ -948,6 +991,7 @@ partial def elabGuarded (scope : Scope) (tailPos : Bool) (cleanup : Atom) (rest 
   let idx ← addFn ⟨[body]⟩ s!"a guarded block in `{(← get).owner}`"
   let captured ← (captures.filterMap (fun x => scope.lookup x)).mapM useLocal
   let thunk ← emit (.let_ (.closure idx captured))
+  noteTyIs thunk ((← stmtsTy rest).map (.fn []))
   if tailPos then
     terminate (.guardTail cleanup thunk)
     pure (.int 0)
