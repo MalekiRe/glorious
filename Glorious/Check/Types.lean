@@ -1440,22 +1440,20 @@ partial def Ty.ground : Ty → Bool
   | .ref _ t _ => t.ground
 
 /-- The type parameters of a function a type mentions, by name. -/
-partial def Ty.rigidNames : Ty → List String
-  | .con n [] => if n.startsWith "'" then [n] else []
+partial def Ty.rigidNames : Ty → List Rigid
   | .con _ args | .tuple args => args.flatMap Ty.rigidNames
   | .fn ps r _ _ _ => (r :: ps).flatMap Ty.rigidNames
   | .ref h x _ => h.rigidNames ++ x.rigidNames
-  | .rigid r => [r.spelled]
+  | .rigid r => [r]
   | .var _ => []
 
 /-- A type with each of those that `named` says a variable in its place. -/
-partial def Ty.openRigids (named : List (String × Ty)) : Ty → Ty
-  | .con n [] => (named.lookup n).getD (.con n [])
+partial def Ty.openRigids (named : List (Rigid × Ty)) : Ty → Ty
   | .con n args => .con n (args.map (Ty.openRigids named))
   | .tuple args => .tuple (args.map (Ty.openRigids named))
   | .fn ps r effs tail cap => .fn (ps.map (Ty.openRigids named)) (r.openRigids named) effs tail cap
   | .ref h x cap => .ref (h.openRigids named) (x.openRigids named) cap
-  | .rigid r => (named.lookup r.spelled).getD (.rigid r)
+  | .rigid r => (named.lookup r).getD (.rigid r)
   | .var v => .var v
 
 /-- Could a pattern come to fit a type, once what is not yet known of the
@@ -1721,22 +1719,14 @@ def instantiate (s : Scheme) (via : Option String := none) (fixed : List (Nat ×
 
 /-- Replace a function's own type parameters, which stood for themselves while
 its body was checked, by variables. -/
-partial def openParams (seen : List (String × Ty)) : Ty → M (Ty × List (String × Ty))
+partial def openParams (seen : List (Rigid × Ty)) : Ty → M (Ty × List (Rigid × Ty))
   | .var id => pure (.var id, seen)
   | .rigid r =>
-    match seen.lookup r.spelled with
+    match seen.lookup r with
     | some t => pure (t, seen)
     | none => do
       let t ← freshTy
-      pure (t, (r.spelled, t) :: seen)
-  | .con n [] =>
-    if n.startsWith "'" then
-      match seen.lookup n with
-      | some t => pure (t, seen)
-      | none => do
-        let t ← freshTy
-        pure (t, (n, t) :: seen)
-    else pure (.con n [], seen)
+      pure (t, (r, t) :: seen)
   | .con n args => do
     let (args, seen) ← openAll seen args
     pure (.con n args, seen)
@@ -1757,7 +1747,7 @@ partial def openParams (seen : List (String × Ty)) : Ty → M (Ty × List (Stri
     let (t, seen) ← openParams seen t
     pure (.ref how t cap, seen)
 where
-  openAll (seen : List (String × Ty)) (ts : List Ty) : M (List Ty × List (String × Ty)) := do
+  openAll (seen : List (Rigid × Ty)) (ts : List Ty) : M (List Ty × List (Rigid × Ty)) := do
     let mut seen := seen
     let mut out : Array Ty := #[]
     for t in ts do

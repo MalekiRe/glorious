@@ -564,7 +564,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
     let intrinsic := d.bounds.filterMap fun b =>
       if ["Fn", "RunsIn", "Environment", "Use", "Label", "Returns"].contains b.trait then some b.subject else none
     for p in d.params do
-      let key := s!"'{p}@{rigidOwner decls d}"
+      let key := Rigid.param p (rigidOwner decls d)
       if !p.startsWith "'" && !intrinsic.contains p && (seen.lookup key).isNone then
         let fresh ← freshTy
         if let .var id := fresh then unmentioned := unmentioned ++ [id]
@@ -599,7 +599,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
   -- Use<[0, *]>`, as of its own.)
   for p in genericParams d.params do
     if rowOrLife p then continue
-    if let some param := seen.lookup s!"'{p}@{rigidOwner decls d}" then
+    if let some param := seen.lookup (Rigid.param p (rigidOwner decls d)) then
       let written := quantityOf p
       let (lower, upper) := written.getD (0, some 1)
       -- (What is needed of a reference to a `T` is not needed of a `T`.)
@@ -739,7 +739,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
                               tvars := scheme.tvars ++ unmentioned }
   -- The type parameters as written, for a call that writes types for them.
   let written := (d.params.filter fun p => !p.startsWith "'").map fun p =>
-    match seen.lookup s!"'{p}@{rigidOwner decls d}" with
+    match seen.lookup (Rigid.param p (rigidOwner decls d)) with
     | some (.var id) => if scheme.tvars.contains id then some id else none
     | _ => none
   modify fun s => { s with typeParams := (d.name, written) :: s.typeParams }
@@ -783,8 +783,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
       let inferred := leafs.toList.filter fun (_, _, k) =>
         match k with
         | .var id => scheme.tvars.contains id
-        | .rigid r => (seen.lookup r.spelled).isSome
-        | .con n [] => (seen.lookup n).isSome
+        | .rigid r => (seen.lookup r).isSome
         | _ => false
       -- How each type parameter it is given values of is destroyed: by
       -- its signature, whether or not its body lets one go, so that what
@@ -804,7 +803,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
         -- asked.)
         for p in (genericParams d.params).filter (!isLifetime ·) do
           let t := Ty.rigid (.param p (rigidOwner decls d))
-          if (seen.lookup s!"'{p}@{rigidOwner decls d}").isSome then
+          if (seen.lookup (Rigid.param p (rigidOwner decls d))).isSome then
             let k := (← keyOf t).getD 0
             inferred := inferred ++ [(.of Syntax.destroyTrait, k, t)]
         -- (And of each type its signature says a trait leaves to an
@@ -832,7 +831,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
         let mut fittedKeys : Array (Syntax.TraitKey × Nat) := #[]
         for (b, at_) in ordinary.zipIdx do
           let t := Ty.rigid (.param b.subject (rigidOwner decls d))
-          if (seen.lookup s!"'{b.subject}@{rigidOwner decls d}").isSome then
+          if (seen.lookup (Rigid.param b.subject (rigidOwner decls d))).isSome then
             let k := (← keyOf t).getD 0
             -- The trait at the arguments written, if it takes some: this
             -- bound's, where the trait is asked of the type more than
@@ -887,8 +886,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
   let mut bounds : List (String × Ty) := []
   for (tr, _, k) in mine do
     let self := match k with
-      | .rigid r => (seen.lookup r.spelled).getD k
-      | .con n [] => (seen.lookup n).getD k
+      | .rigid r => (seen.lookup r).getD k
       | k => k
     match keyed.find? (·.1 == tr) with
     | some (_, base, args) =>
