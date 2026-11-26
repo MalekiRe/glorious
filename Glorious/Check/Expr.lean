@@ -244,11 +244,14 @@ def Marks.undo (m : Marks) (s : St) : St :=
            fieldReads := s.fieldReads.shrink m.fieldReads, given := s.given.shrink m.given,
            coercions := s.coercions.shrink m.coercions, methodCalls := s.methodCalls.shrink m.methodCalls }
 
-/-- Whether the comparison `call` is of what is not copied, as found once it
-is read: compared by reference, written where it is (`Elab.compareNode`,
-`Elab.Decision.compareHere`). -/
+/-- Whether the comparison `call` is of what is not copied, or of what is not
+known yet, as found once it is read: compared by reference, written where
+it is (`Elab.compareNode`, `Elab.Decision.compareHere`), as Rust's
+operators always compare. (One not known yet may be found copied later:
+by reference it compares the same.) -/
 def compareHere (call : Nat) : M Bool := do
   let some (_, t) := (← get).compares.toList.reverse.find? (·.1 == call) | return false
+  if !(freeTys (← zonk t)).isEmpty then return true
   modify fun s => { s with seen := {} }
   if (← tyHasDrop [] t).isSome then return true
   tyOwnsOnce [] t
@@ -647,6 +650,26 @@ partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : N
       | .ok false s => .error e s
       | .error e' s => .error e' s
     | _ => .error e s
+
+/-- A statement's expression, `e`. Where a dot call in it is decided of a
+receiver that is no name and is borrowed, the receiver is kept in a
+variable of its own for the statement (`Elab.receiverTempNode`), what the
+first reading recorded taken back (`Marks`), and the expression read
+again, once a call. -/
+partial def inferRoot (scope : Scope) (amb : Row) (e : Flat.ExprId) : M Ty := fun s =>
+  let marks := Marks.of s
+  match inferExpr scope amb e s with
+  | .ok t s => .ok t s
+  | .error err s =>
+    match err.decision with
+    | some (.receiver c fn (some uniq)) =>
+      if s.decided.any (fun | .receiverTemp c' _ _ _ => c' == c | _ => false) then .error err s else
+      let root := s.body.idOf e
+      match Elab.receiverTempNode c fn uniq root s.body with
+      | some b' =>
+        inferRoot scope amb e { marks.undo s with body := b', decided := s.decided ++ [.receiverTemp c fn uniq root] }
+      | none => .error err s
+    | _ => .error err s
 
 /-- A call or a callable (`inferExpr`). -/
 partial def inferExprCall (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
@@ -2173,7 +2196,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     pure result
   | none => do
   let (at_, pos) := ((← get).at_, (← get).pos)
-  let t ← withLater (b.fvStmts (Elab.patVars pat) rest) (inferExpr scope amb value)
+  let t ← withLater (b.fvStmts (Elab.patVars pat) rest) (inferRoot scope amb value)
   -- A value given a name that nothing then uses is owned by the name: if it
   -- is one to destroy, that happens when the block ends.
   if let .var x := pat then
@@ -2425,9 +2448,9 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
         | _ =>
           let t ← inferExpr scope amb e
           return ← onError (finish t true) (· ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
-      finish (← inferExpr scope amb e) true
+      finish (← inferRoot scope amb e) true
     else do
-      let t ← withLater (b.fvStmts [] rest) (inferExpr scope amb e)
+      let t ← withLater (b.fvStmts [] rest) (inferRoot scope amb e)
       mustDrop t "the value of a statement is let go"
       -- If it is one to destroy, that happens here.
       modify fun s =>
