@@ -254,10 +254,11 @@ written again keeps what it was made of before it, which nothing reaches,
 and the node read is the one made last.)
 
 The dot call `call`'s node written where it is, as the checker reads it
-on (`Check.adjustingCall`) and the elaborator writes it: of `fn` where
+on (`Check.receiverHere`) and the elaborator writes it: of `fn` where
 given, its receiver a name borrowed (`some uniq`) or given as it is. None
-where the receiver is no name: a value named for it is then made, read
-again (`receiverBody`). -/
+where the receiver is no name: decided as before (`receiverBody`), where
+written so, a chain of calls read again at each link cost more than reading
+the function again (covey/fleet's `main`: 1.7 s from 1.1). -/
 def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
   let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .call i _ _ | .tailCall i _ _ => i == call

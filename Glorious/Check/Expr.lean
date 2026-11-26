@@ -179,14 +179,15 @@ def compareHere (scope : Scope) (args : Array Flat.ExprId) : M Bool := do
   if (← tyHasDrop [] t).isSome then return true
   tyOwnsOnce [] t
 
-/-- The dot call `call` at `e0`, its receiver a name, written where it is
+/-- The dot call `call`, its receiver a name, written where it is
 (`Elab.receiverNode`): the name borrowed as `fn` takes it, given as it is
 where it holds a reference. Said for the elaborator
 (`Elab.Decision.receiverHere`). False where it is not such a call, or the
 name is a value borrowed for writing, which only a variable can be. -/
-def receiverHere (scope : Scope) (e0 : Flat.ExprId) (call : Nat) (fn : Option String)
+def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option String)
     (borrow : Option Bool) : M Bool := do
   let b := (← get).body
+  let some e0 := node | return false
   let recv := match b.expr e0 with
     | .call _ f args | .tailCall _ f args =>
       match b.expr f, fn with
@@ -262,15 +263,15 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
     -- where it is by reference, `compareHere`.)
     if args.size == 2 && (((← get).body.name? f).bind fun (_, op) => compareOps.lookup op).isSome then
       let saved ← get
-      let t ← inferCallAdjusting scope amb e0 id n
+      let t ← inferExprCall scope amb n
       if ← compareHere scope args then
         set saved
         if let some b' := Elab.compareNode id (← get).body then
           modify fun s => { s with body := b', decided := s.decided ++ [.compareHere id] }
           return ← inferExprAt scope amb e0
       return t
-    inferCallAdjusting scope amb e0 id n
-  | .tailCall id _ _ => inferCallAdjusting scope amb e0 id n
+    receiverRetry scope amb e0 id n
+  | .tailCall id _ _ => receiverRetry scope amb e0 id n
   | .closure .. => inferExprCall scope amb n
   | .handle subject arms => inferHandle scope amb e0 subject arms
   | .labelScope l body => do
@@ -510,20 +511,32 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
       pure t
   | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
 
-/-- A call, where a dot call whose receiver is a name, of a function
-decided only now or taking it otherwise than written, is written where it
-is and read on (`receiverHere`). -/
-partial def inferCallAdjusting (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : Nat) (n : Flat.FExpr) : M Ty := do
-  -- (A dot call whose receiver is a name, of a function decided only now
-  -- or taking it otherwise than written: written where it is and read
-  -- on, `receiverHere`.)
-  tryCatchThe Elab.Said (inferExprCall scope amb n) fun e => do
-    let some (.receiver c fn borrow) := e.decision | throwThe Elab.Said e
-    if c != id then throwThe Elab.Said e
-    -- (Once: one written so and refused again is read again whole.)
-    if (← get).decided.any (fun | .receiverHere c' _ _ => c' == id | _ => false) then throwThe Elab.Said e
-    unless ← receiverHere scope e0 id fn borrow do throwThe Elab.Said e
-    inferExprAt scope amb e0
+/-- The call `id` at `e0`; where a dot call of a name is decided of a
+function only now, or taking its receiver otherwise than written: written
+where it is and read again (`receiverHere`, once a call). From the state
+where it was found, not one held while the call is read: holding it, every
+array the call grew was copied (a quarter of covey/fleet's check of `main`).
+What the first reading recorded of how names were read is taken back; the
+rest is recorded again, which asks no less. -/
+partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : Nat) (n : Flat.FExpr) : M Ty := fun s =>
+  -- (What the first reading recorded of how names were read is taken back:
+  -- read whole there, borrowed here. Only its size held, and the set of
+  -- names read, which is small.)
+  let (reads, uses, given, held) := (s.valReads, s.uses.size, s.givenReads.size, s.heldMoves.size)
+  let (dups, drops) := (s.dups.size, s.drops.size)
+  match inferExprCall scope amb n s with
+  | .ok a s => .ok a s
+  | .error e s =>
+    match e.decision with
+    | some (.receiver c fn borrow) =>
+      if c != id || s.decided.any (fun | .receiverHere c' _ _ => c' == c | _ => false) then .error e s else
+      let s := { s with valReads := reads, uses := s.uses.shrink uses, givenReads := s.givenReads.shrink given,
+                        heldMoves := s.heldMoves.shrink held, dups := s.dups.shrink dups, drops := s.drops.shrink drops }
+      match receiverHere scope c (some e0) fn borrow s with
+      | .ok true s => inferExprAt scope amb e0 s
+      | .ok false s => .error e s
+      | .error e' s => .error e' s
+    | _ => .error e s
 
 /-- A call or a callable (`inferExpr`). -/
 partial def inferExprCall (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
