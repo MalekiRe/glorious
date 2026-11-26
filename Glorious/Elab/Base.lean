@@ -351,9 +351,10 @@ def derefAssignNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option F
 
 /-- The comparison `call`, `a == b`, written where it is by reference:
 `eq(&a, &b)` (the function of `Syntax.compareOps`), as Rust's operators
-compare; a name that holds a reference given as it is (`refs`). As the
-checker reads it on and the elaborator writes it (`Decision.compareHere`).
-None where an operand is no name. -/
+compare; a name that holds a reference given as it is (`refs`); an
+operand that is no name kept in a variable of its own first, `{ let mut
+a' = f(); eq(&a', &b) }`. As the checker reads it on and the elaborator
+writes it (`Decision.compareHere`). -/
 def compareNode (call : Nat) (refs : List Bool) (b : Flat.Body) : Option Flat.Body := do
   let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .call i _ _ => i == call
@@ -363,13 +364,28 @@ def compareNode (call : Nat) (refs : List Bool) (b : Flat.Body) : Option Flat.Bo
     | _ => none
   let fn ← (b.name? f).bind fun (_, op) => Syntax.compareOps.lookup op
   let named := fun (a : Flat.ExprId) => (b.bare? a).filter fun x => !(Syntax.lastSegment x).front.isUpper
-  let x ← named l
-  let y ← named r
-  let given := fun (z : String) (k : Nat) => if refs.getD k false then Flat.FExpr.name none z else .ref false z
-  let (le, b) := b.add (given x 0)
-  let (re, b) := b.add (given y 1)
+  -- (An operand that is no name is kept in a variable of its own for the
+  -- comparison, in the order written, and borrowed.)
+  let operand := fun (b : Flat.Body) (a : Flat.ExprId) (k : Nat) =>
+    match named a with
+    | some x =>
+      let (r, b) := b.add (if refs.getD k false then .name none x else .ref false x)
+      (r, none, b)
+    | none =>
+      let held := s!"%compared{call}_{k}"
+      let s := b.stmts.size
+      let b := { b with stmts := b.stmts.push (.letMut held a) }
+      let (r, b) := b.add (.ref false held)
+      (r, some s, b)
+  let (le, ls, b) := operand b l 0
+  let (re, rs, b) := operand b r 1
   let (fe, b) := b.add (.name none fn)
-  pure { b with exprs := b.exprs.set! e (.call call fe #[le, re]) }
+  if ls.isNone && rs.isNone then
+    return { b with exprs := b.exprs.set! e (.call call fe #[le, re]) }
+  let (ce, b) := b.add (.call call fe #[le, re])
+  let last := b.stmts.size
+  let b := { b with stmts := b.stmts.push (.expr ce) }
+  pure { b with exprs := b.exprs.set! e (.labelScope "%block" ((ls.toList ++ rs.toList).toArray.push last)) }
 
 /-- The callable `id` with `clauses` in place of its own, where it is, as
 the checker reads it on and the elaborator writes it

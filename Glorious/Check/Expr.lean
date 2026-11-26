@@ -170,7 +170,9 @@ is read again written otherwise (`Marks.undo`). Only sizes held, and the
 small lists that are put back whole: held, the state would be copied
 where the call grows it. Taken back: how names were read and what was
 asked of their types, of traits and of coverage; the values the call's
-surroundings held. Asked again of the same call, one kept would be met
+surroundings held; and what the elaborator is told by the call
+(`argsChosen`, `dotChosen`, coercions, packs, field reads), of which it
+takes the first. Asked again of the same call, one kept would be met
 twice, once with what the first reading had. -/
 structure Marks where
   valReads : Std.HashSet Nat
@@ -190,6 +192,14 @@ structure Marks where
   instSites : Nat
   groupUses : Nat
   dropCands : Nat
+  dotChosen : List (Nat × String × Nat)
+  argsChosen : List ((Nat × Nat) × Expr)
+  packs : Nat
+  derefReads : Nat
+  fieldReads : Nat
+  given : Nat
+  coercions : Nat
+  methodCalls : Nat
 
 /-- Where `s`'s records stand (`Marks`). -/
 def Marks.of (s : St) : Marks :=
@@ -197,7 +207,10 @@ def Marks.of (s : St) : Marks :=
     givenReads := s.givenReads.size, heldMoves := s.heldMoves.size, dups := s.dups.size, drops := s.drops.size,
     bounds := s.bounds.size, pending := s.pending.size, compares := s.compares.size,
     fieldSites := s.fieldSites.size, partReads := s.partReads.size, instSites := s.instSites.size,
-    groupUses := s.groupUses.size, dropCands := s.dropCands.size }
+    groupUses := s.groupUses.size, dropCands := s.dropCands.size, dotChosen := s.dotChosen,
+    argsChosen := s.argsChosen, packs := s.packs.size, derefReads := s.derefReads.size,
+    fieldReads := s.fieldReads.size, given := s.given.size, coercions := s.coercions.size,
+    methodCalls := s.methodCalls.size }
 
 /-- `s` with what was recorded since `m` taken back. -/
 def Marks.undo (m : Marks) (s : St) : St :=
@@ -208,7 +221,10 @@ def Marks.undo (m : Marks) (s : St) : St :=
            pending := s.pending.shrink m.pending, compares := s.compares.shrink m.compares,
            fieldSites := s.fieldSites.shrink m.fieldSites, partReads := s.partReads.shrink m.partReads,
            instSites := s.instSites.shrink m.instSites, groupUses := s.groupUses.shrink m.groupUses,
-           dropCands := s.dropCands.shrink m.dropCands }
+           dropCands := s.dropCands.shrink m.dropCands, dotChosen := m.dotChosen, argsChosen := m.argsChosen,
+           packs := s.packs.shrink m.packs, derefReads := s.derefReads.shrink m.derefReads,
+           fieldReads := s.fieldReads.shrink m.fieldReads, given := s.given.shrink m.given,
+           coercions := s.coercions.shrink m.coercions, methodCalls := s.methodCalls.shrink m.methodCalls }
 
 /-- Whether the comparison `call` is of what is not copied, as found once it
 is read: compared by reference, written where it is (`Elab.compareNode`,
@@ -302,16 +318,10 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
     -- (A comparison of two names of a type that is not copied: read again
     -- where it is by reference, `compareHere`.)
     if args.size == 2 && (((← get).body.name? f).bind fun (_, op) => compareOps.lookup op).isSome then
-      -- (The state held while it is read, and put back whole: what
-      -- `Marks` takes back is not all that a comparison read by value
-      -- leaves, and a place read after was freed; a comparison is small.)
-      let saved ← get
+      let marks := Marks.of (← get)
       let t ← receiverRetry scope amb e0 id n
-      -- (Of two names: an operand kept in a variable of its own for it read
-      -- what it held through the wrong reference, and is decided as before.)
       let b := (← get).body
-      let names := args.all fun a => ((b.bare? a).filter fun x => !(Syntax.lastSegment x).front.isUpper).isSome
-      if names && (← compareHere id) then
+      if ← compareHere id then
         -- (A name that holds a reference is given as it is: `&T` compares
         -- as `T`.)
         let refs ← args.toList.mapM fun a => do
@@ -322,7 +332,7 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
             | _ => pure false
           | _ => pure false
         if let some b' := Elab.compareNode id refs b then
-          set { saved with body := b', decided := saved.decided ++ [Elab.Decision.compareHere id refs] }
+          modify fun s => { marks.undo s with body := b', decided := s.decided ++ [Elab.Decision.compareHere id refs] }
           return ← inferExprAt scope amb e0
       return t
     receiverRetry scope amb e0 id n
