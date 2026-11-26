@@ -229,6 +229,10 @@ inductive Decision where
   checker read it on, not read again (`receiverNode`): of `fn` where given,
   the name borrowed (`some uniq`) or given as it is. -/
   | receiverHere (call : Nat) (fn : Option String) (borrow : Option Bool)
+  /-- The dot call `call`, its receiver a value that is copied whose type
+  was known only after the call was read, the function taking it by
+  reference: given a copy of it, borrowed (`receiverCopyNode`). -/
+  | receiverCopy (call : Nat)
   /-- The dot call `call`, its receiver a field of a name (through a
   reference the name holds where `star`), borrowed where it is
   (`receiverFieldNode`). -/
@@ -355,6 +359,28 @@ def etaNode (node : Nat) (x : String) (arity : Nat) (id : Nat) (b : Flat.Body) :
   let c := b.clauses.size
   let b := { b with clauses := b.clauses.push ⟨ps.map Pattern.var, #[s]⟩ }
   pure { b with exprs := b.exprs.set! e (.closure id #[c]) }
+
+/-- The dot call `call`, its receiver a value that is copied, given a copy
+of it, borrowed: `{ let mut r = x; f(&r, ..) }`, written where it is
+(`Decision.receiverCopy`). For a receiver whose type was known only once
+the call's function was (`Check.checkLateReceivers`): the copy is the
+value, as a borrow of it would read it. -/
+def receiverCopyNode (call : Nat) (b : Flat.Body) : Option Flat.Body := do
+  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
+    | .call i _ _ | .tailCall i _ _ => i == call
+    | _ => false
+  let (f, args) ← match b.exprs[e]! with
+    | .call _ f args | .tailCall _ f args => some (f, args)
+    | _ => none
+  let some recv := args[0]? | none
+  let held := s!"%copied{call}"
+  let (ge, b) := b.add (.ref false held)
+  let (ce, b) := b.add (.call call f (#[ge] ++ args.extract 1 args.size))
+  let first := b.stmts.size
+  let b := { b with stmts := b.stmts.push (.letMut held recv) }
+  let last := b.stmts.size
+  let b := { b with stmts := b.stmts.push (.expr ce) }
+  pure { b with exprs := b.exprs.set! e (.labelScope "%block" #[first, last]) }
 
 /-- The dot call `call`, its receiver a field of a name, `p.x.len()`,
 borrowed where it is, `len(&p.x)` (through the reference the name holds

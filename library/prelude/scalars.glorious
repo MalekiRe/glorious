@@ -518,6 +518,8 @@ impl<'a, A> IndexedMut for &'a mut A where A: IndexedMut {
 }
 // How many a reference's elements are, as `len` of what it is to.
 impl<'a, A> Len for &'a A where A: Indexed { fn len(r: &'a A) -> Int { size_at(r) } }
+// How many bytes a text is, as `len` of it.
+impl<'a> Len for StrRef<'a> { fn len(s: StrRef<'a>) -> Int { s.len } }
 impl<'a, A> Len for &'a mut A where A: Indexed { fn len(r: &'a mut A) -> Int { size_at(&*r) } }
 
 // `a[i]` of a reference to an array: the element, read through it. (`a[i] =

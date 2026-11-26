@@ -1509,7 +1509,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
             | _ => (0, 0)
           if !b.exprs.any (fun n => match n with | .fieldOf _ e _ => b.bare? e == some x | _ => false) then
             if ← flagPlace s.owner line col x t pos b body then continue
-          throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and its type may have a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used", decision := some (.letMut s.owner line col x) }
+          throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and its type may have a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used" }
     unless (free && !heldDrop) || (← tyMustUse roots [] t).isSome do
       -- A value with a `drop` to run that is used on one path and not on
       -- another: where it is not, nothing would run its `drop`, since the
@@ -1548,7 +1548,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
             -- the whole.)
             if !b.exprs.any (fun n => match n with | .fieldOf _ e _ => b.bare? e == some x | _ => false) then
               if ← flagPlace owner line col x t pos b body then continue
-            throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used", decision := some (.letMut owner line col x) }
+            throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used" }
       continue
     -- (A value whose type has nothing to destroy, its type parameters each
     -- said to be copied, `A: Use<[0, *]>`: let go on a path that does not

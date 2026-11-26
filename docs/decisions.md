@@ -8555,3 +8555,20 @@ which another thread waits for. No type lets two threads reach one value
 otherwise, so no `Send`/`Sync` is asked: a type that would (a handle to
 memory changed in place, without the cell's taking) is the place to add
 them. `Scope::spawn_joined` borrows, and is waited for before it returns.
+
+## No program is read again for what is found of it
+
+Everything the checker finds once types are known, of how a program is to
+be read, is written where it is found and read on: the program is never
+checked again for it (`Elab.Decision` now says what was written where, for
+the elaborator to write alike). Two that were found only after the call
+was read, and with what the call gives already typed, are refused instead,
+asking for what Rust would have found at the call:
+
+- A trait's function called on a reference whose trait only what it points
+  to has, found only once the bounds are met: write `(*r).name(..)`
+  (Rust dereferences the receiver at the call). `tests/cases.cases`'
+  `first(&ns).abs()` is `(*first(&ns)).abs()`.
+- A receiver whose type is known only once the bounds are met, taken by
+  reference: a copied one is given a copy of it, borrowed; another is
+  refused, its type asked for where it is bound.

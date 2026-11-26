@@ -834,6 +834,7 @@ def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) 
   | .receiverHere call fn borrow => (receiverNode call fn borrow b).getD b
   | .receiverTemp call fn uniq root => (receiverTempNode call fn uniq root b).getD b
   | .receiverField call fn uniq star => (receiverFieldNode call fn uniq star b).getD b
+  | .receiverCopy call => (receiverCopyNode call b).getD b
   | .derefHere id borrow => (derefNode id borrow b).getD b
   | .derefAssignHere id borrow => (derefAssignNode id borrow b).getD b
   | .derefRefHere id uniq borrow => (derefRefNode id uniq borrow b).getD b
@@ -845,9 +846,17 @@ def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) 
   | .derefReceiver call =>
     ({ onExpr := fun go b e => match b.expr e with
         | .call i f args =>
-          if i != call || args.isEmpty then none else some (do
-            let args ← args.mapM go.ex
-            Flat.pushExpr (.call i (← go.ex f) (args.set! 0 (← Flat.pushExpr (.deref args[0]!)))))
+          if i != call then none else
+          -- (Its receiver where it is: the callee's, `recv.name(..)`, or
+          -- the first argument.)
+          match b.expr f with
+          | .fieldOf fid recv name => some (do
+            let callee ← Flat.pushExpr (.fieldOf fid (← Flat.pushExpr (.deref (← go.ex recv))) name)
+            Flat.pushExpr (.call i callee (← args.mapM go.ex)))
+          | _ =>
+            if args.isEmpty then none else some (do
+              let args ← args.mapM go.ex
+              Flat.pushExpr (.call i (← go.ex f) (args.set! 0 (← Flat.pushExpr (.deref args[0]!)))))
         | _ => none } : Flat.FRewrite).body b
 
 /-- Every function of an item with what the checker decided written in, each
@@ -882,7 +891,8 @@ def Decided.of (b : Blocks) : Decided := Id.run do
       | .eta owner _ _ | .letMut owner _ _ _ => { d with owners := d.owners.insert owner }
       | .etaHere owner _ _ _ _ => { d with owners := d.owners.insert owner }
       | .refPats id _ | .refPatsHere id _ => { d with closures := d.closures.insert id }
-      | .receiver call _ _ | .receiverHere call _ _ | .receiverTemp call _ _ _ | .receiverField call _ _ _ =>
+      | .receiver call _ _ | .receiverHere call _ _ | .receiverTemp call _ _ _ | .receiverField call _ _ _
+      | .receiverCopy call =>
         { d with calls := d.calls.insert call }
       | .derefField id _ | .derefHere id _ | .derefAssignHere id _ | .derefRefHere id _ _ => { d with fields := d.fields.insert id }
       | .derefReceiver call | .compareByRef call | .compareHere call _ => { d with calls := d.calls.insert call }

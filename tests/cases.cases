@@ -45,7 +45,7 @@ fn main() -> Int {
     say(q[0].0);
     let mut ns: Vec<Int> = Vec::new();
     ns.push(-4);
-    say(first(&ns).abs());
+    say((*first(&ns)).abs());
     say(v.index(0).s.len());
     0
 }

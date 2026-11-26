@@ -477,25 +477,32 @@ partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner
 end
 
 /-- A dot call of a trait's function, of a value whose type does not
-implement the trait but has a function of the name of its own: that one,
-decided where it is found (`Elab.Decision.receiver`). Of a reference to a
-value whose type implements it: of that value (`Elab.Decision.derefReceiver`),
-as Rust's receiver is dereferenced, `first(&v).abs()`. -/
-def dotOwnInstead (call : Nat) (trait : String) (ty : Ty) (said : String) : M Unit := do
+implement the trait but has a function of the name of its own, or is a
+reference to a value whose type implements it, found only once the
+bounds are met: refused, asking for the function by its name or for
+`(*r).name(..)` (what the call gives was typed as the trait's function's
+when it was read). -/
+def dotOwnInstead (call : Nat) (trait : String) (ty : Ty) (said : String) : M (Option Ty) := do
   if let some alts := dotAltsOf (← get).modules call then
     if let some h ← headName 8 ty then
       if let some alt := alts.find? (·.startsWith (h ++ "::")) then
-        throwThe Elab.Said { msg := said, decision := some (← receiverDecision call alt) }
+        -- (Found only once the call was read, and what it gives typed as
+        -- the trait's function's: said where the call is.)
+        throw s!"{said}: `{h}` has a function `{Syntax.lastSegment alt}` of its own, found only after the call was read: write `{bareName alt}(receiver, ..)`"
     if let .ref _ inner _ ← find ty then
       if let some h ← headName 8 inner then
         if (← get).kimpls.has (Syntax.traitBase trait) h then
-          throwThe Elab.Said { msg := said, decision := some (.derefReceiver call) }
+          -- (Found only once the call was read, and what it gives typed as
+          -- the reference's: read through it where the call is.)
+          throw s!"{said}: the receiver is a reference to a `{h}`, which has it, found only after the call was read: write `(*receiver).name(..)`"
+  pure none
 
 /-- A dot call's receiver, a name whose type was not known where the call
 is (`lateReceivers`), once the bounds of types whose heads are known have
-decided what they do, `F: Runs<O>` of `O`: where it is a value, and the
-function takes a reference, read again with it borrowed, as Rust borrows it
-(`Elab.Decision.receiver`); else given as it is. -/
+decided what they do, `F: Runs<O>` of `O`: where it is a value that is
+copied, and the function takes a reference to read it, given a copy of it,
+borrowed (`Elab.Decision.receiverCopy`); one not copied refused, its type
+asked for where it is bound, as Rust asks; else given as it is. -/
 def checkLateReceivers : M Unit := do
   let rs := (← get).lateReceivers
   modify fun s => { s with lateReceivers := #[] }
@@ -506,7 +513,15 @@ def checkLateReceivers : M Unit := do
       let uniq := match ← find how with
         | .con "&mut" [] => true
         | _ => false
-      throwThe Elab.Said { msg := "the receiver is borrowed", decision := some (.receiver call none (some uniq)) }
+      -- (Of what is copied, borrowed to be read: a copy of it, borrowed,
+      -- written where it is, `Elab.receiverCopyNode`. Else its type is
+      -- what was wanted where the call is, as Rust asks.)
+      modify fun s => { s with seen := {} }
+      let copied := !uniq && (← tyHasDrop [] given).isNone && !(← tyOwnsOnce [] given)
+      unless copied do
+        throw "the receiver's type is not known where the call is, and the function borrows it: say its type where the receiver is bound (`let x: Type = ..`)"
+      if let .ref _ inner _ ← find wanted then unify given inner
+      modify fun s => { s with decided := s.decided ++ [.receiverCopy call] }
     | _, _ => unify given wanted
 
 /-- A bound as its trait's implementations for the type it now has are told
@@ -1167,16 +1182,24 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     match ← find b.ty with
     | .var _ => unknown := unknown.push b
     | _ => known := known.push b
+  -- (Bounds of a receiver found to be read through its reference: of what
+  -- it points to, `dotOwnInstead`.)
+  let mut retyped : Array (Nat × String × Ty) := #[]
   for b in known ++ #[none] ++ unknown do
     -- (Between: what those of known types decided of receivers.)
     let some b := b | checkLateReceivers; continue
     let b ← rekey b
     -- (How to destroy a type that nothing decides is not asked for.)
-    let ls ← try (timedM "bounds: leaves" (if (← get).patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait b.ty b.args b.owner
-        else (·.map fun (tr, k, t) => (tr, k, t, [])) <$> leaves b.pos b.trait b.ty)) catch e =>
+    let patterned := (← get).patterned
+    let leavesOf := fun (ty : Ty) => (if patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait ty b.args b.owner
+        else (·.map fun (tr, k, t) => (tr, k, t, [])) <$> leaves b.pos b.trait ty : M _)
+    let ls ← try (timedM "bounds: leaves" (leavesOf b.ty)) catch e =>
       if b.trait == Syntax.destroyTrait then pure [] else do
-        dotOwnInstead b.call b.trait b.ty e
-        throw (inFunction b.owner e)
+        match ← dotOwnInstead b.call b.trait b.ty e with
+        | some inner =>
+          retyped := retyped.push (b.call, b.trait, inner)
+          leavesOf inner
+        | none => throw (inFunction b.owner e)
     for (tr, k, t, args) in ls do
       -- (One at arguments, `S: Get<Value>` that a condition comes down to,
       -- is said with them in the function's type, as one written is.)
@@ -1231,7 +1254,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     | none => (call, [d]) :: table
   -- (A bound of a type not all decided waits for the others: meeting them
   -- may decide it. In the last round, what is left is refused.)
-  let mut waiting := pending.toList
+  let mut waiting := (pending.map fun b =>
+    match retyped.find? fun (c, tr, _) => c == b.call && tr == b.trait with
+    | some (_, _, inner) => { b with ty := inner }
+    | none => b).toList
   let mut round := 0
   -- (Rounds go on while one meets any: a type left to an implementation of
   -- a type left to another, as deep as it is written, is found one level a
@@ -1319,7 +1345,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- (A dot call of a trait's function, of a value whose type does not
       -- implement the trait but has a function of the name of its own: that
       -- one, and the program read again.)
-      dotOwnInstead b.call b.trait b.ty s!"{b.pos}`{b.trait}` is not implemented"
+      if let some inner ← dotOwnInstead b.call b.trait b.ty s!"{b.pos}`{b.trait}` is not implemented" then
+        if let some d ← solve b.trait inner (← toSTy inner) then
+          table := record table b.call (← toDictEShared impls marker d)
+          continue
       for (tr, k, t) in ← leaves b.pos b.trait b.ty do
         unless givens.contains (tr, k) do
           match t with
