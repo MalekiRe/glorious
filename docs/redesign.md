@@ -328,6 +328,19 @@ The first slice, from the code as it is:
   checked, and `receiver`, `compareByRef` and `derefField` are found and
   written where they are met.
 
+What the first slice showed (landed: a `let` borrowed with `&`, indexed
+by a name known to hold a value, or borrowed by field, is a place; a
+closure's parameter borrowed is one where the clause starts): a place's
+value is destroyed where the place ends only where nothing gave it away
+on any path, and the counting of uses says that of a value, not of a
+place. A comparison taken by reference in place (`compareByRef` without
+reading the body again) leaves its operands alive where the by-value
+check counted them given away: who destroys them is the drop flag's
+question. So drop flags (Elab gives each place with a `drop` a flag, set
+where its value is given away, the value destroyed where the place ends
+if the flag is not set; the `letMut` decision gone) come before
+comparisons, receivers and fields.
+
 
 ## Expected size
 
