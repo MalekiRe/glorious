@@ -469,7 +469,7 @@ def declareEffect (items : List Item) (name : String) (params : List String) (op
                  else s.runExact.erase op.name }
 
 /-- A trait's declaration read: its functions' signatures (`declareTraits`). -/
-def declareTrait (items : List Item) (name : String) (methods : List (String × List TypeExpr × Option TypeExpr)) : M Unit := do
+def declareTrait (items : List Item) (name : String) (methods : List Syntax.MethodDecl) : M Unit := do
   if ((← get).traits.lookup name).isSome then throw s!"trait `{name}` is declared twice"
   let self ← match ← freshTy with
     | .var id => pure id
@@ -494,8 +494,8 @@ def declareTrait (items : List Item) (name : String) (methods : List (String × 
   -- A name its functions write after `|` in what they perform is a row
   -- it leaves to an implementation: held as the type of a callable that
   -- takes nothing, gives nothing and performs that row.
-  let asRows := methods.flatMap fun (_, _, ret) =>
-    match (Syntax.methodGenerics ret).1 with
+  let asRows := methods.flatMap fun md =>
+    match md.ret with
     | some (.performs _ effects) => effects.filterMap fun
       | (mark, [.name e []]) =>
         match e.splitOn "::" with
@@ -516,11 +516,9 @@ def declareTrait (items : List Item) (name : String) (methods : List (String × 
   -- shape of this trait: units checked side by side are put together.)
   modify fun s => { s with traitShape := s.traitShape.insert name (tparams.length, assocNames) }
   let mut index := 0
-  for (m, params, ret) in methods do
+  for md in methods do
+    let (m, params, ret, uses, ownNames) := (md.name, md.params, md.ret, md.uses, md.generics)
     -- (The type parameters of its own: a variable each.)
-    let (ret, ownNames) := Syntax.methodGenerics ret
-    let uses := ownNames.filterMap Syntax.useMarked
-    let ownNames := ownNames.filter (!·.startsWith "%")
     let mut mparams : List (String × Nat) := []
     -- (A lifetime among them is one of its lifetimes, as any written.)
     for g in ownNames.filter (!·.startsWith "'") do

@@ -222,7 +222,7 @@ def declared (path : List String) (items : List Item) (taken : List String := []
   -- each trait's its own, known by the trait's name and its.)
   let methodNames := items.flatMap fun item =>
     match (match item with | .pub _ i => i | i => i) with
-    | .trait _ methods => methods.map (·.1)
+    | .trait _ methods => methods.map (·.name)
     | _ => []
   for item in items do
     let (vis, item) := match item with
@@ -244,7 +244,8 @@ def declared (path : List String) (items : List Item) (taken : List String := []
     | .alias name _ _ => out := add out name .const
     | .trait name methods =>
       out := add out name .trait
-      for (m, _, _) in methods do
+      for md in methods do
+        let m := md.name
         if (methodNames.filter (· == m)).length > 1 then
           out := out.push ⟨m, ⟨path, mangle path (sharedMethodName name m), vis, .method⟩, vis, 0⟩
         else out := add out m .method
@@ -1015,7 +1016,7 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
               | i => i
             match item with
             | .effect _ _ ops => (ops.find? (·.name == own)).map (·.payload.length)
-            | .trait _ methods => (methods.find? (·.1 == own)).map (·.2.1.length)
+            | .trait _ methods => (methods.find? (·.name == own)).map (·.params.length)
             | _ => none
         if let some n := arity then
           let made := (← getThe St).made
@@ -1288,12 +1289,11 @@ def resolveItem (ctx : Ctx) : Item → R (List Item)
         | _ => none with
       | some names => names
       | none => []
-    let methods ← methods.mapM fun (m, ps, r) => do
+    let methods ← methods.mapM fun md => do
       -- (With the type parameters of its own, if it has some.)
-      let (r, own) := methodGenerics r
-      let known := "Self" :: extra ++ own
-      pure (methodName ctx name m, ← ps.mapM (resolveType ctx known),
-        withMethodGenerics (← r.mapM (resolveType ctx known)) own)
+      let known := "Self" :: extra ++ md.generics
+      pure { md with name := methodName ctx name md.name, params := ← md.params.mapM (resolveType ctx known),
+                     ret := ← md.ret.mapM (resolveType ctx known) }
     pure [.trait (ownName ctx .trait name) methods]
   | .use head lower upper => do
     let (head', entry) ← resolveNamed ctx .type [] head

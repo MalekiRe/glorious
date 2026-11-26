@@ -801,21 +801,6 @@ def Fixities.function (fix : Fixities) (op : String) (asPrefix : Bool) : String 
   | some (_, _, f) => f
   | none => op
 
-/-- What a trait's function gives, and the type parameters of its own. -/
-def methodGenerics (ret : Option TypeExpr) : Option TypeExpr × List String :=
-  match ret with
-  | some (.name mark (inner :: generics)) =>
-    if mark == "%generic" then
-      (some inner, generics.filterMap fun
-        | .name g [] => some g
-        | _ => none)
-    else (ret, [])
-  | _ => (ret, [])
-
-def withMethodGenerics (ret : Option TypeExpr) (generics : List String) : Option TypeExpr :=
-  if generics.isEmpty then ret
-  else some (.name "%generic" ((ret.getD (.tuple [])) :: generics.map fun g => .name g []))
-
 /-- A whole number as a type, for the length of a `[T; N]`: its bits from the
 lowest, `B1<B0<B1<Z>>>` for five. Each number is one type. -/
 partial def numberType : Nat → TypeExpr
@@ -838,17 +823,6 @@ structure Bound where
   /-- `for<'a>` before a callable bound: the lifetimes it is asked for at
   every one of. -/
   ranked : List String := []
-
-/-- How often an implementation's functions use a value of its type parameter
-`p`, `where T: Use<[lower, upper]>`, kept among its items. -/
-def useMark (p : String) (lower : Nat) (upper : Option Nat) : String :=
-  s!"%use:{p}:{lower}:{(upper.map toString).getD "*"}"
-
-/-- What `useMark` says. -/
-def useMarked (name : String) : Option (String × Nat × Option Nat) :=
-  match name.splitOn ":" with
-  | ["%use", p, lo, hi] => lo.toNat?.map fun lo => (p, lo, hi.toNat?)
-  | _ => none
 
 /-- `for<'a, 'b> fn(&'a T) -> &'a T`, a callable that takes any lifetimes for
 those named, is the type `%for<'a, 'b, fn(&'a T) -> &'a T>`. -/
@@ -957,6 +931,19 @@ def Cond.mapTypesM {m : Type → Type} [Monad m] (c : Cond) (f : TypeExpr → m 
   pure { c with subjectTy := ← c.subjectTy.mapM f, trait := .at c.trait.base c.trait.nth (← c.trait.written.mapM f),
                 equal := ← c.equal.mapM fun (n, t) => do pure (n, ← f t) }
 
+/-- A trait's function as the trait declares it: `fn name<generics>(params)
+-> ret where B: Use<[..]>`. -/
+structure MethodDecl where
+  name : String
+  params : List TypeExpr
+  ret : Option TypeExpr
+  /-- Its own type parameters, `fn map<B>(..)`. -/
+  generics : List String := []
+  /-- How often it uses a value of one of them, where it says:
+  `B: Use<[0, *]>`. -/
+  uses : List (String × Nat × Option Nat) := []
+  deriving Inhabited, Hashable
+
 /-- `impl<params> Trait<..> for Head<args> where context { methods }`: the
 trait's functions for every type made with `head`, on the conditions in
 `context`. (`α` is `Item`: what it gives.) -/
@@ -996,7 +983,7 @@ inductive Item where
   | coerce (name : String)
   /-- `trait Name { fn method(A, B) -> R; ... }`: functions a type may have.
   `Self` in a method's types is the type that has them. -/
-  | trait (name : String) (methods : List (String × List TypeExpr × Option TypeExpr))
+  | trait (name : String) (methods : List MethodDecl)
   /-- `impl<T, ...> Trait for Head<T, ...> where T: Other, ... { fn ... }`: the
   trait's functions for every type made with `Head`, on the conditions after
   `where`, each a type parameter and a trait it must have. -/

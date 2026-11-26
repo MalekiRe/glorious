@@ -533,7 +533,7 @@ private partial def parseTrait : P (List Item) := do
       supers := supers.push (← expectPath)
       if ← isOp "+" then advance else break
   expectPunct "{"
-  let mut methods : Array (String × List TypeExpr × Option TypeExpr) := #[]
+  let mut methods : Array MethodDecl := #[]
   let mut unsafeMethods : Array String := #[]
   let mut defaults : Array Item := (pdefaults.map fun (i, earlier, ty) =>
     Item.typeAlias (traitParamDefaultName i) earlier ty).toArray
@@ -564,7 +564,7 @@ private partial def parseTrait : P (List Item) := do
       let c ← expectIdent
       expectPunct ":"
       let ty ← parseType
-      methods := methods.push (c, [], some ty)
+      methods := methods.push { name := c, params := [], ret := some ty }
       if ← acceptPunct "=" then
         -- What an implementation has if it does not say.
         defaults := defaults.push (Item.fn c [] [] none (← valueFn))
@@ -600,7 +600,7 @@ private partial def parseTrait : P (List Item) := do
     let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
     -- `where T: Use<[0, *]>`: how often it uses a value of a type parameter
     -- of its own, carried among them.
-    let mut uses : Array String := #[]
+    let mut uses : Array (String × Nat × Option Nat) := #[]
     if (← peek) == .ident "where" then
       advance
       repeat
@@ -608,10 +608,10 @@ private partial def parseTrait : P (List Item) := do
         expectPunct ":"
         for b in ← parseBoundsOf p do
           match b.trait, b.quantity with
-          | "Use", some (lower, upper) => uses := uses.push (useMark p lower upper)
+          | "Use", some (lower, upper) => uses := uses.push (p, lower, upper)
           | _, _ => failAt "a trait's function says here only how often it uses a type parameter of its own: `T: Use<[0, *]>`"
         if !(← acceptPunct ",") then break
-    methods := methods.push (m, types.toList, withMethodGenerics ret (genericParams own ++ uses.toList))
+    methods := methods.push { name := m, params := types.toList, ret, generics := genericParams own, uses := uses.toList }
     if isUnsafe then unsafeMethods := unsafeMethods.push m
     if (← peek) == .punct "{" then
       -- A body: what an implementation gets if it does not write its own.

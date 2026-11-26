@@ -1716,8 +1716,8 @@ partial def eraseLifetimes (items : List Syntax.Item) : List Syntax.Item :=
     | .fn name ps annots ret b =>
       .fn name (params ps) (annots.map (·.map eraseLifetimesTy)) (ret.map eraseLifetimesTy) b
     | (.trait name methods) =>
-      (.trait name (methods.map fun (m, ps, r) =>
-        (m, ps.map eraseLifetimesTy, r.map eraseLifetimesTy)))
+      (.trait name (methods.map fun md =>
+        { md with params := md.params.map eraseLifetimesTy, ret := md.ret.map eraseLifetimesTy }))
     | .impl whole@{ params := ps, args := args, methods := methods, .. } =>
       .impl { whole with params := (params ps), args := (params args), methods := (eraseLifetimes methods) }
     | item => item

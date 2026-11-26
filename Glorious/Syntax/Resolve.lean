@@ -110,8 +110,8 @@ partial def givesReference : List Item → List String
     if gives then name :: givesReference rest else givesReference rest
   | .impl { methods := methods, .. } :: rest => givesReference methods ++ givesReference rest
   | .trait _ methods :: rest =>
-    methods.filterMap (fun (m, _, r) => match r with
-      | some (.ref ..) | some (.performs (.ref ..) _) => some m
+    methods.filterMap (fun md => match md.ret with
+      | some (.ref ..) | some (.performs (.ref ..) _) => some md.name
       | _ => none) ++ givesReference rest
   | _ :: rest => givesReference rest
 
@@ -124,8 +124,8 @@ partial def takesReference : List Item → List (String × Bool)
   | .module _ (some body) :: rest => takesReference body ++ takesReference rest
   | .fn name _ (some (.ref uniq _ _) :: _) _ _ :: rest => (name, uniq) :: takesReference rest
   | .trait _ methods :: rest =>
-    methods.filterMap (fun (m, ps, _) => match ps with
-      | .ref uniq _ _ :: _ => some (m, uniq)
+    methods.filterMap (fun md => match md.params with
+      | .ref uniq _ _ :: _ => some (md.name, uniq)
       | _ => none) ++ takesReference rest
   | _ :: rest => takesReference rest
 
@@ -767,8 +767,8 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
     | .fn name ps annots ret b => do
       pure (.fn name ps (← annots.mapM fun a => a.mapM ty) (← ret.mapM ty) (← mapTypes ty b))
     | (.trait name methods) => do
-      pure ((.trait name (← methods.mapM fun (m, ps, r) => do
-        pure (m, ← ps.mapM ty, ← r.mapM ty))))
+      pure ((.trait name (← methods.mapM fun md => do
+        pure { md with params := ← md.params.mapM ty, ret := ← md.ret.mapM ty })))
     | .impl whole@{ params := ps, trait := tr, head := head, args := args, context := context, methods := methods, .. } => do
       let tr := TraitKey.at tr.base tr.nth (← tr.written.mapM ty)
       let context ← context.mapM (·.mapTypesM ty)
@@ -900,7 +900,7 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
   let count := 0
   -- (The trait's functions, by the names the program has for them.)
   let (sizeName, alignName) := match all.findSome? (fun | (.trait n ms) => if n == layoutTrait then some ms else none | _ => none) with
-    | some [(s, _, _), (a, _, _)] => (s, a)
+    | some [s, a] => (s.name, a.name)
     | _ => ("SIZE", "ALIGN")
   -- (The types a field may be of: those declared, and those with none.)
   let known : Std.HashSet String := Std.HashSet.ofList (fieldsOf.toList.map (·.1) ++ ["Int"] ++ scalars.map (·.1))
