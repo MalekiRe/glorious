@@ -281,8 +281,8 @@ def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : F
   let given : Flat.FExpr := match borrow with
     | some u => .ref u x
     | none => .name none x
-  let (fe, b) := (b.exprs.size, { b with exprs := b.exprs.push callee })
-  let (ge, b) := (b.exprs.size, { b with exprs := b.exprs.push given })
+  let (fe, b) := b.add callee
+  let (ge, b) := b.add given
   let node : Flat.FExpr := if tail then .tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)
   pure { b with exprs := b.exprs.set! e node }
 
@@ -300,9 +300,9 @@ def derefNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Bo
   let given : Flat.FExpr := match borrow with
     | some u => .ref u x
     | none => .name none x
-  let (fe, b) := (b.exprs.size, { b with exprs := b.exprs.push (.name none "deref") })
-  let (ge, b) := (b.exprs.size, { b with exprs := b.exprs.push given })
-  let (ce, b) := (b.exprs.size, { b with exprs := b.exprs.push (.call (900000000000 + id) fe #[ge]) })
+  let (fe, b) := b.add (.name none "deref")
+  let (ge, b) := b.add given
+  let (ce, b) := b.add (.call (900000000000 + id) fe #[ge])
   pure { b with exprs := b.exprs.set! e (.fieldOf id ce f) }
 
 /-- The assignment `*(&mut x.path) = v` through the field borrow `id`, of
@@ -331,7 +331,7 @@ def derefAssignNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option F
   let given : Flat.FExpr := match borrow with
     | some u => .ref u x
     | none => .name none x
-  let push := fun (b : Flat.Body) (n : Flat.FExpr) => (b.exprs.size, { b with exprs := b.exprs.push n })
+  let push := fun (b : Flat.Body) (n : Flat.FExpr) => b.add n
   let pushS := fun (b : Flat.Body) (n : Flat.FStmt) => (b.stmts.size, { b with stmts := b.stmts.push n })
   let (s1, b) := pushS b (.let_ (.var named) value)
   let (fe, b) := push b (.name none "deref_mut")
@@ -360,7 +360,7 @@ def compareNode (call : Nat) (b : Flat.Body) : Option Flat.Body := do
   let named := fun (a : Flat.ExprId) => (b.bare? a).filter fun x => !(Syntax.lastSegment x).front.isUpper
   let x ← named l
   let y ← named r
-  let push := fun (b : Flat.Body) (n : Flat.FExpr) => (b.exprs.size, { b with exprs := b.exprs.push n })
+  let push := fun (b : Flat.Body) (n : Flat.FExpr) => b.add n
   let (fe, b) := push b (.name none fn)
   let (le, b) := push b (.ref false x)
   let (re, b) := push b (.ref false y)

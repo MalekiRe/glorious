@@ -866,7 +866,25 @@ structure Body where
   stmts : Array FStmt := #[]
   clauses : Array FClause := #[]
   roots : Array ClauseId := #[]
+  /-- Each node's identity, which no writing of the body again moves (as
+  Rust's `HirId`): a node made anew is known by its place where it is made;
+  one written again where it changed keeps the one it was made from; one a
+  decision writes from what it carries is known in a space of the
+  decision's own (`Body.pushAt`). What the checker finds of a node is kept
+  by it (`Check.St.scalarLits`), so the elaborator, whose body has not the
+  nodes the checker made to read it, finds it. -/
+  ids : Array Nat := #[]
   deriving Hashable, BEq
+
+/-- The identity of the node `e` (`Body.ids`). -/
+@[inline] def Body.idOf (b : Body) (e : ExprId) : Nat := b.ids.getD e e
+
+/-- `n` added, known by `id`, or by its place. -/
+@[inline] def Body.add (b : Body) (n : FExpr) (id : Option Nat := none) : ExprId × Body :=
+  let e := b.exprs.size
+  -- (A body made without them, its nodes known by their places.)
+  let ids := if b.ids.size == e then b.ids else b.ids ++ (List.range' b.ids.size (e - b.ids.size)).toArray
+  (e, { b with exprs := b.exprs.push n, ids := ids.push (id.getD e) })
 
 end Flat
 

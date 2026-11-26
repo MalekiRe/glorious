@@ -880,7 +880,7 @@ what it means is written to it anew. -/
 abbrev RF := StateT Flat.Body R
 
 open Flat in
-def fpush (n : FExpr) : RF ExprId := modifyGet fun b => (b.exprs.size, { b with exprs := b.exprs.push n })
+def fpush (n : FExpr) : RF ExprId := modifyGet fun b => b.add n
 open Flat in
 def fpushS (n : FStmt) : RF StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push n })
 open Flat in

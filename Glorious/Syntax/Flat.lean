@@ -101,9 +101,9 @@ def direct (b : Body) (e : ExprId) : Array ExprId :=
 /-- The body with each of its own clauses begun by `%unsafe`: what follows
 may name what is unsafe (`unsafe fn`). -/
 def unsafeBody (b : Body) : Body :=
-  let e := b.exprs.size
+  let (e, b) := b.add (.name none unsafeMark)
   let s := b.stmts.size
-  { b with exprs := b.exprs.push (.name none unsafeMark), stmts := b.stmts.push (.expr e),
+  { b with stmts := b.stmts.push (.expr e),
            clauses := b.roots.foldl (fun cs c => cs.modify c fun ⟨pats, body⟩ => ⟨pats, #[s] ++ body⟩) b.clauses }
 
 /-- The name an expression is, if it is one. -/
@@ -151,7 +151,7 @@ end Body
 /-- The nodes made so far. -/
 abbrev Build := StateM Body
 
-def pushExpr (e : FExpr) : Build ExprId := modifyGet fun b => (b.exprs.size, { b with exprs := b.exprs.push e })
+def pushExpr (e : FExpr) : Build ExprId := modifyGet fun b => b.add e
 def pushStmt (s : FStmt) : Build StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push s })
 def pushClause (c : FClause) : Build ClauseId := modifyGet fun b => (b.clauses.size, { b with clauses := b.clauses.push c })
 

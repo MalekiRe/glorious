@@ -1080,7 +1080,7 @@ def literalAt (t : Ty) (n : Int) (e : Option Nat := none) : M (Option (Option St
       if Glorious.fits n width then
         -- (Where it is written, `e`: made that scalar in Core.)
         if let some e := e then
-          modify fun s => { s with scalarLits := (s.owner, e, name) :: s.scalarLits }
+          modify fun s => { s with scalarLits := (s.owner, s.body.idOf e, name) :: s.scalarLits }
         pure (some none)
       else pure (some (some s!"`{n}` does not fit in `{name}`"))
     | _ => pure none
@@ -1093,7 +1093,7 @@ def textAt (t : Ty) (e : Flat.ExprId) : M Bool := do
   | .con name _ =>
     if Syntax.lastSegment name != "StrRef" then return false
     if ((← get).body.textCodes e).isNone then return false
-    modify fun s => { s with scalarLits := (s.owner, e, "%text") :: s.scalarLits }
+    modify fun s => { s with scalarLits := (s.owner, s.body.idOf e, "%text") :: s.scalarLits }
     pure true
   | _ => pure false
 

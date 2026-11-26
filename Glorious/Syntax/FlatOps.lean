@@ -427,7 +427,7 @@ abbrev FRewrite := FRewriteM Id
 section
 variable {m : Type → Type} [Monad m]
 
-private def pushE (e : FExpr) : StateT Body m ExprId := modifyGet fun b => (b.exprs.size, { b with exprs := b.exprs.push e })
+private def pushE (e : FExpr) (id : Option Nat := none) : StateT Body m ExprId := modifyGet fun b => b.add e id
 private def pushS (s : FStmt) : StateT Body m StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push s })
 private def pushC (c : FClause) : StateT Body m ClauseId := modifyGet fun b => (b.clauses.size, { b with clauses := b.clauses.push c })
 
@@ -438,7 +438,7 @@ partial def FRewriteM.ex (r : FRewriteM m) (e : ExprId) : StateT Body m ExprId :
   if let some made := r.onExpr r.go b e then return ← made
   let n := b.expr e
   let n' ← n.mapIds r.ex r.clause fun body => do pure (← r.stmtList body.toList).toArray
-  if n' == n then pure e else pushE n'
+  if n' == n then pure e else pushE n' (some ((← get).idOf e))
 
 partial def FRewriteM.clause (r : FRewriteM m) (c : ClauseId) : StateT Body m ClauseId := do
   if let some made := r.onClause r.go (← get) c then return ← made

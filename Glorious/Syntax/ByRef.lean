@@ -113,7 +113,7 @@ def Flat.byReference [MonadStateOf Flat.Body m] (rn : RefNames m) (clauses : Arr
     | none => 0
   let places := (List.range arity).filter fun i => cls.any fun c => ((c.pats[i]?).bind byRef?).isSome
   if places.isEmpty then return clauses
-  let push := fun (n : Flat.FExpr) => (modifyGet fun (b : Flat.Body) => (b.exprs.size, { b with exprs := b.exprs.push n }) : m Flat.ExprId)
+  let push := fun (n : Flat.FExpr) => (modifyGet fun (b : Flat.Body) => b.add n : m Flat.ExprId)
   let pushS := fun (n : Flat.FStmt) => (modifyGet fun (b : Flat.Body) => (b.stmts.size, { b with stmts := b.stmts.push n }) : m Flat.StmtId)
   let pushC := fun (n : Flat.FClause) => (modifyGet fun (b : Flat.Body) => (b.clauses.size, { b with clauses := b.clauses.push n }) : m Flat.ClauseId)
   let pushTree := fun (e : Expr) => (modifyGet fun (b : Flat.Body) => (Flat.flatExpr e).run b : m Flat.ExprId)

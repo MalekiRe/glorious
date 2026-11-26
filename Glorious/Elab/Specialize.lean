@@ -63,7 +63,7 @@ def internId (f : String) (ids : List Nat) : StateM Copies Nat := do
 /-- A body being written out for implementations, with the copies asked. -/
 abbrev SpecM := StateT Flat.Body (StateM Copies)
 
-def specPush (n : Flat.FExpr) : SpecM Flat.ExprId := modifyGet fun b => (b.exprs.size, { b with exprs := b.exprs.push n })
+def specPush (n : Flat.FExpr) : SpecM Flat.ExprId := modifyGet fun b => b.add n
 def specPushS (n : Flat.FStmt) : SpecM Flat.StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push n })
 def specPushC (n : Flat.FClause) : SpecM Flat.ClauseId := modifyGet fun b => (b.clauses.size, { b with clauses := b.clauses.push n })
 
@@ -955,7 +955,7 @@ def scalarLiterals (b : Blocks) (items : List Syntax.Item) : List Syntax.Item :=
   items.map fun item => Item.decide (fun name _ body =>
     if !owners.contains name then body else
     let rw : Flat.FRewrite :=
-      { onExpr := fun _ body e => (b.scalarLits[(name, e)]?).map fun t => do
+      { onExpr := fun _ body e => (b.scalarLits[(name, body.idOf e)]?).map fun t => do
           -- (A text where `&str` is wanted: its UTF-8 bytes, from the
           -- program's start, borrowed.)
           if t == "%text" then
