@@ -274,6 +274,20 @@ inductive Decision where
   `eq(&a, &b)` (`Syntax.compareOps`). -/
   | compareByRef (call : Nat)
 
+/-- Is `g` the function that reads an element where it is, `element_at`
+or `place_at` (`Syntax.elementRead`), which gives a reference to it? -/
+def elementCall (b : Flat.Body) (g : Flat.ExprId) : Bool :=
+  match b.name? g with
+  | some (_, x) => let n := Syntax.lastSegment x; n == "element_at" || n == "place_at"
+  | none => false
+
+/-- A receiver as written, the mark the resolver puts on one it could not
+tell how to give (`Syntax.receiverMark`) taken off. -/
+def unmarked (b : Flat.Body) (e : Flat.ExprId) : Flat.ExprId :=
+  match b.expr e with
+  | .call _ m #[r] => if b.bare? m == some Syntax.receiverMark then r else e
+  | _ => e
+
 /-- (Each of these finds the node by its identity from the last: a body
 written again keeps what it was made of before it, which nothing reaches,
 and the node read is the one made last.)
@@ -284,8 +298,11 @@ given, its receiver a name borrowed (`some uniq`) or given as it is. None
 where the receiver is no name: decided as before (`receiverBody`), where
 written so, a chain of calls read again at each link cost more than reading
 the function again (covey/fleet's `main`: 1.7 s from 1.1). -/
-def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
-  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
+def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : Flat.Body)
+    (at_ : Option Flat.ExprId := none) : Option Flat.Body := do
+  -- (The checker says which node: its body has copies of nodes it made to
+  -- read the call, with its number.)
+  let e ← at_.orElse fun _ => (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .call i _ _ | .tailCall i _ _ => i == call
     | _ => false
   let (tail, f, args) ← match b.exprs[e]! with
@@ -293,12 +310,12 @@ def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : F
     | .tailCall _ f args => some (true, f, args)
     | _ => none
   let (callee, recv, rest) ← match b.expr f, fn with
-    | .fieldOf _ recv _, some g => some (Flat.FExpr.name none g, recv, args)
+    | .fieldOf _ recv _, some g => some (Flat.FExpr.name none g, unmarked b recv, args)
     | _, _ =>
       let callee := match fn with
         | some g => Flat.FExpr.name none g
         | none => b.expr f
-      if h : 0 < args.size then some (callee, args[0], args.extract 1 args.size) else none
+      if h : 0 < args.size then some (callee, unmarked b args[0], args.extract 1 args.size) else none
   let named := match b.expr recv with
     | .name none x => some x
     | .ref _ x => some x
@@ -387,9 +404,9 @@ borrowed where it is, `len(&p.x)` (through the reference the name holds
 where `star`), of `fn` where given: as the checker reads it on and the
 elaborator writes it (`Decision.receiverField`). None where the receiver
 is not such a field. -/
-def receiverFieldNode (call : Nat) (fn : Option String) (uniq star : Bool) (b : Flat.Body) :
-    Option Flat.Body := do
-  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
+def receiverFieldNode (call : Nat) (fn : Option String) (uniq star : Bool) (b : Flat.Body)
+    (at_ : Option Flat.ExprId := none) : Option Flat.Body := do
+  let e ← at_.orElse fun _ => (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .call i _ _ | .tailCall i _ _ => i == call
     | _ => false
   let (tail, f, args) ← match b.exprs[e]! with
@@ -397,25 +414,46 @@ def receiverFieldNode (call : Nat) (fn : Option String) (uniq star : Bool) (b : 
     | .tailCall _ f args => some (true, f, args)
     | _ => none
   let (callee, recv, rest) ← match b.expr f, fn with
-    | .fieldOf _ recv _, some g => some (Flat.FExpr.name none g, recv, args)
+    | .fieldOf _ recv _, some g => some (Flat.FExpr.name none g, unmarked b recv, args)
     | _, _ =>
       let callee := match fn with
         | some g => Flat.FExpr.name none g
         | none => b.expr f
-      if h : 0 < args.size then some (callee, args[0], args.extract 1 args.size) else none
-  -- (The way from the name to the field, and the outermost field's number.)
-  let rec chain (x : Flat.ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
+      if h : 0 < args.size then some (callee, unmarked b args[0], args.extract 1 args.size) else none
+  -- (The way from the name to the field, and the outermost field's number;
+  -- or from what a reference points to, `v[0].s` of `*element_at(&v, 0)`.)
+  let rec chain (x : Flat.ExprId) (fuel : Nat) : Option (Sum String Flat.ExprId × List String × Nat) :=
     match fuel, b.expr x with
     | fuel + 1, .fieldOf fid inner name =>
-      match b.bare? inner with
-      | some root => some (root, [name], fid)
-      | none => (chain inner fuel).map fun (root, path, _) => (root, path ++ [name], fid)
+      match b.bare? inner, b.expr inner with
+      | some root, _ => some (.inl root, [name], fid)
+      | none, .deref r => some (.inr r, [name], fid)
+      -- (An element read where it is gives a reference to it.)
+      | none, .call _ g _ =>
+        if elementCall b g then some (.inr inner, [name], fid)
+        else (chain inner fuel).map fun (root, path, _) => (root, path ++ [name], fid)
+      | none, _ => (chain inner fuel).map fun (root, path, _) => (root, path ++ [name], fid)
     | _, _ => none
-  let (x, path, fid) ← chain recv 64
+  let (root, path, fid) ← chain recv 64
   if fid == 0 then none
   let (fe, b) := b.add callee
-  let (ge, b) := b.add (.refField fid uniq x path star)
-  pure { b with exprs := b.exprs.set! e (if tail then .tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)) }
+  let node := fun (ge : Flat.ExprId) =>
+    if tail then Flat.FExpr.tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)
+  match root with
+  | .inl x =>
+    let (ge, b) := b.add (.refField fid uniq x path star)
+    pure { b with exprs := b.exprs.set! e (node ge) }
+  | .inr r =>
+    -- (The reference kept for the call, the field borrowed through it:
+    -- `{ let r = element_at(&v, 0); len(&(*r).s) }`.)
+    let held := s!"%through{call}"
+    let first := b.stmts.size
+    let b := { b with stmts := b.stmts.push (.let_ (.var held) r) }
+    let (ge, b) := b.add (.refField fid uniq held path true)
+    let (ce, b) := b.add (node ge)
+    let last := b.stmts.size
+    let b := { b with stmts := b.stmts.push (.expr ce) }
+    pure { b with exprs := b.exprs.set! e (.labelScope "%block" #[first, last]) }
 
 /-- The dot call `call`, its receiver no name and borrowed (`&mut` where
 `uniq`), of `fn` where given: the statement's expression it is in, the
@@ -439,12 +477,12 @@ def receiverTempNode (call : Nat) (fn : Option String) (uniq : Bool) (root : Nat
     | .tailCall _ f args => some (true, f, args)
     | _ => none
   let (callee, recv, rest) ← match b.expr f, fn with
-    | .fieldOf _ recv _, some g => some (Flat.FExpr.name none g, recv, args)
+    | .fieldOf _ recv _, some g => some (Flat.FExpr.name none g, unmarked b recv, args)
     | _, _ =>
       let callee := match fn with
         | some g => Flat.FExpr.name none g
         | none => b.expr f
-      if h : 0 < args.size then some (callee, args[0], args.extract 1 args.size) else none
+      if h : 0 < args.size then some (callee, unmarked b args[0], args.extract 1 args.size) else none
   -- (A temporary: what a call gives. A name or a field of one is a place,
   -- borrowed where it is.)
   match b.expr recv with

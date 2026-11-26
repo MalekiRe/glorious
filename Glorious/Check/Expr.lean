@@ -272,6 +272,7 @@ def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option S
       | _, _ => args[0]?
     | _ => none
   let some recv := recv | return false
+  let recv := Elab.unmarked b recv
   let some x := (match b.expr recv with
     | .name none x => some x
     | .ref _ x => some x
@@ -281,22 +282,31 @@ def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option S
       -- where it holds one.)
       -- (What is no name, given whole: as it is written, the node itself.)
       if borrow.isNone then
-        let some b' := Elab.receiverNode call fn none b | return false
+        let some b' := Elab.receiverNode call fn none b (some e0) | return false
         modify fun s => { s with body := b', decided := s.decided ++ [.receiverHere call fn none] }
         return true
       let some uniq := borrow | return false
-      let rec root (e : Flat.ExprId) (fuel : Nat) : Option String :=
+      -- (Or of what a reference points to, `v[0].s`: through it.)
+      let rec root (e : Flat.ExprId) (fuel : Nat) : Option (Option String) :=
         match fuel, b.expr e with
-        | fuel + 1, .fieldOf _ inner _ => (b.bare? inner).orElse fun _ => root inner fuel
+        | fuel + 1, .fieldOf _ inner _ =>
+          match b.bare? inner, b.expr inner with
+          | some x, _ => some (some x)
+          | none, .deref _ => some none
+          | none, .call _ g _ => if Elab.elementCall b g then some none else root inner fuel
+          | none, _ => root inner fuel
         | _, _ => none
-      let some x := root recv 64 | return false
-      let star ← match scope.lookup x with
-        | some (.val t _) | some (.cell t _) =>
-          match ← find t with
-          | .ref .. => pure true
-          | _ => pure false
-        | _ => return false
-      let some b' := Elab.receiverFieldNode call fn uniq star b | return false
+      let some r := root recv 64 | return false
+      let star ← match r with
+        | none => pure true
+        | some x =>
+          match scope.lookup x with
+          | some (.val t _) | some (.cell t _) =>
+            match ← find t with
+            | .ref .. => pure true
+            | _ => pure false
+          | _ => return false
+      let some b' := Elab.receiverFieldNode call fn uniq star b (some e0) | return false
       modify fun s => { s with body := b', decided := s.decided ++ [.receiverField call fn uniq star] }
       return true
   let holdsRef := fun (t : Ty) => do
@@ -309,7 +319,7 @@ def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option S
     | some _, some _ => return false
     | _, none => pure none
     | none, _ => return false
-  let some b' := Elab.receiverNode call fn borrow b | return false
+  let some b' := Elab.receiverNode call fn borrow b (some e0) | return false
   modify fun s => { s with body := b', decided := s.decided ++ [.receiverHere call fn borrow] }
   pure true
 
@@ -1358,6 +1368,16 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                   let uniq := match ← find how with
                     | .con "&mut" [] => true
                     | _ => false
+                  -- (A value, which only a variable lets be borrowed for
+                  -- writing: the type's own function of the name, where it
+                  -- has one, as the program was read before.)
+                  if uniq then
+                    let before ← get
+                    let alt ← dotAltFor scope amb call a
+                    set { before with body := (← get).body, decided := (← get).decided, altFound := (← get).altFound }
+                    if let some alt := alt then
+                      if (what.splitOn s!"`{alt}`").length == 1 then
+                        throwThe Elab.Said { msg := e, decision := some (← receiverDecision call alt) }
                   throwThe Elab.Said { msg := e, decision := some (.receiver call none (some uniq)) }
         -- (Asked only once the function in scope does not fit: the program
         -- is read again, so what this finds on the way is not kept. The
