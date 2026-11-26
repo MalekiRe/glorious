@@ -196,7 +196,7 @@ def Flat.byReference [MonadStateOf Flat.Body m] (rn : RefNames m) (clauses : Arr
         let n ← push (.name none x)
         args := args.push (← if places.contains i then push (.deref n) else pure n)
       let callable ← push (.closure 0 rows)
-      let call ← push (.call 0 (← push (.name none "%shapes")) (args.push callable))
+      let call ← push (.call 0 (← push (.mark .shapes)) (args.push callable))
       pure #[← pushS (.expr call)]
     else pure #[]
   if byTest then

@@ -24,7 +24,7 @@ private def defaultAliases (name : String) (params : List String)
 of that type (`constItems`), in a body of its own. -/
 private def constValue (ty : TypeExpr) : P (Flat.Body × Flat.ExprId) := valueOf do
   let value ← markOf 0 .ascribe #[← parseBinary 0 false, ← mk (.type ty)]
-  callOf 0 none comptimeMark #[value]
+  markOf 0 .comptime #[value]
 
 /-- A function that takes nothing and gives the value written. -/
 private def valueFn : P Flat.Body := bodyOf do
@@ -752,7 +752,7 @@ private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
         let built : Expr := match names with
           | some ns =>
             .call 0 (.name none n)
-              (.name none recordMark :: (ns.zip reads).map fun (f, r) => .call 0 (.name none (fieldMark f)) [r])
+              (.mark .record :: (ns.zip reads).map fun (f, r) => .call 0 (.mark (.field f)) [r])
           | none => .call 0 (.name none n) reads
         let self := TypeExpr.name n []
         let usize := TypeExpr.name "usize" []
@@ -863,14 +863,13 @@ what that function gave. -/
 private def constItems (items : List Item) : List Item :=
   let one := fun (name : String) (b : Flat.Body) (e : Flat.ExprId) (item : Item) (wrap : Item → Item) =>
     match Flat.treeExpr b e with
-    | .call _ (.name none mark) [value] =>
+    | .call _ (.mark .comptime) [value] =>
       -- (A value written out, `3`, `Some(4)`, `"text"`, is one already: it
       -- stays a name for it, which a pattern can be.)
-      if mark == comptimeMark && writtenOut value then [wrap (Item.aliasOf name value)]
-      else if mark == comptimeMark then
+      if writtenOut value then [wrap (Item.aliasOf name value)]
+      else
         let fn := constFnName name
         [wrap (Item.aliasOf name (.call 0 (.name none fn) [])), wrap (Item.fnOf fn [] [] none [.mk [] [.expr value]])]
-      else [item]
     | _ => [item]
   items.flatMap fun
     | item@(.alias name b e) => one name b e item id

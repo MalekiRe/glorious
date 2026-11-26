@@ -275,7 +275,7 @@ structure ACtx where
 /-- What only computes: the machine's own operations and what builds a value. -/
 def intrinsics : Std.HashSet String :=
   Std.HashSet.ofList (Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1)
-    ++ ["cancel", "replace", "swap", "overwrite", "read_out", "transmute", "static_bytes", Syntax.foreignCall, "%shapes", "%never"])
+    ++ ["cancel", "replace", "swap", "overwrite", "read_out", "transmute", "static_bytes", Syntax.foreignCall, "%never"])
 
 /-- Where a path that ends at a call of a `probe` is said to leave to. -/
 def probeTarget : String := "%probe"
@@ -833,7 +833,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String 
     | value :: _ => runExpr ctx depth b env value
     | [] => pure [(.unknown, 0)]
   -- (Asking what a reference points to was built by only looks.)
-  | .mark .ctorIs => if ctx.lower then handedOn fun n => [(.unknown, n)] else general
+  | .mark .ctorIs | .mark .shapes => if ctx.lower then handedOn fun n => [(.unknown, n)] else general
   | .name q x =>
     if q.isNone && (env.lookup x).isSome then general
     else if let some c := ctx.ctorOf x then
@@ -1015,7 +1015,7 @@ partial def stillExpr (b : Body) (quiet : String → Bool) (e : ExprId) : Bool :
   | .call _ f args =>
     match b.expr f with
     | .name _ g => quiet g && args.all (stillExpr b quiet)
-    | .mark .ctorIs => args.all (stillExpr b quiet)
+    | .mark .ctorIs | .mark .shapes => args.all (stillExpr b quiet)
     | _ => false
   | _ => false
 
@@ -1033,7 +1033,7 @@ partial def firstUse (b : Body) (quiet : String → Bool) (x : String) (e : Expr
   | .call _ f args | .tailCall _ f args =>
     firstParts b quiet x (match b.expr f with
       | .name _ g => quiet g
-      | .mark .ctorIs => true
+      | .mark .ctorIs | .mark .shapes => true
       | _ => false) false (f :: args.toList)
   | .proj e _ => if isName b x e then some true else firstUse b quiet x e
   | .deref e => if isName b x e then none else firstUse b quiet x e

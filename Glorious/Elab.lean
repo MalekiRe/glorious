@@ -382,7 +382,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
   -- path of field numbers: the cell is asked, and nothing is read out of it.
   -- What the clauses of a callable that binds by reference ask of the values:
   -- the checker's to read, and nothing to do.
-  if b.bare? f == some "%shapes" then
+  if b.mark? f == some .shapes then
     return ← emit (.let_ (.construct 0 []))
   if let (some mark, r :: rest) := (b.mark? f, args.toList) then
     let rest := rest.map b.expr

@@ -74,10 +74,33 @@ inductive Mark where
   /-- `f<A, B>(args)`: the call, and beside it the types written, as a value
   written with its type is: `%inst(f(args), (A, B))`. -/
   | inst
+  /-- What the clauses of a callable that binds by reference ask of the
+  values they are given, as patterns, `%shapes(values.., { rows })`: the
+  checker's to read (that they cover every case), nothing to run. -/
+  | shapes
+  /-- The first argument of a value built by its fields' names, `Point(%record,
+  %field:y(2), %field:x(1))`, until the names are resolved and it is built
+  in the declared order. -/
+  | record
+  /-- The value given for the field `name` there. -/
+  | field (name : String)
+  /-- Said of a constant's value, `const NAME: T = value;`: worked out once,
+  at compile time, by a function of its own (`constFnName`, `NAME$const`),
+  whose result is then what every use of the name reads. -/
+  | comptime
+  /-- A name written through another, `Owner::NAME`, and not called, kept
+  with a number of its own: if it turns out to be a value a trait leaves to
+  implementations, it is that trait's function called with nothing. -/
+  | path
   deriving Inhabited, Hashable, BEq, Repr
 
 /-- How a mark is shown: `%as`. -/
 def Mark.shown : Mark → String
+  | .shapes => "%shapes"
+  | .record => "%record"
+  | .field name => s!"%field:{name}"
+  | .comptime => "%comptime"
+  | .path => "%path"
   | .receiver => "%receiver"
   | .through => "%through"
   | .borrow => "%borrow"
@@ -336,10 +359,6 @@ what two references are to, as it does. -/
 def compareOps : List (String × String) :=
   [("==", "eq"), ("!=", "ne"), ("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")]
 
-/-- A name written through another, `Owner::NAME`, and not called, kept with
-a number of its own: if it turns out to be a value a trait leaves to
-implementations, it is that trait's function called with nothing. -/
-def pathMark : String := "%path"
 
 
 
@@ -555,10 +574,6 @@ its trait, among what it declares. -/
 def traitArgName (i : Nat) : String := s!"%traitArg{i}"
 
 
-/-- Said of a constant's value, `const NAME: T = value;`: worked out once, at
-compile time, by a function of its own (`constFnName`, `NAME$const`), whose result is then
-what every use of the name reads. -/
-def comptimeMark : String := "%comptime"
 
 /-- The function that works out the constant `name` at compile time. -/
 def constFnName (name : String) : String := name ++ "$const"

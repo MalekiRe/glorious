@@ -979,7 +979,7 @@ partial def nestedRefsF (clauses : Array ClauseId) (within : Bool := false) : RF
         | some _ => Pattern.wild
         | none => throughRefs p, #[]⟩
     let args ← given.toArray.mapM fun x => fpush (.name none x)
-    let call ← fpush (.call 0 (← fpush (.name none "%shapes")) (args.push (← fpush (.closure 0 rows))))
+    let call ← fpush (.call 0 (← fpush (.mark .shapes)) (args.push (← fpush (.closure 0 rows))))
     pure [← fpushS (.expr call)]
   -- (Asked after the clauses are gone through: what the value is, and so
   -- where it holds references, is known from them by then.)
@@ -1079,21 +1079,20 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
             let args ← args.mapM (resolveExprF ctx bound)
             let mark ← fpush (.call 0 (← fpush (.mark .receiver)) #[receiver])
             return ← fpush (.call id (← fpush (.name none bd.entry.global)) (#[mark] ++ args))
-    if let (some mark, #[a]) := (b.bare? f, args) then
+    if let (some .path, #[a]) := (b.mark? f, args) then
       if let .name (some q) name := b.expr a then
-        if mark == pathMark then
-          -- `Owner::NAME`: a trait's function of that name called with
-          -- nothing, at the type `Owner`, if that is what `NAME` is here;
-          -- or else whatever `Owner::NAME` names.
-          let (_, _, entry) ← liftM (resolveValue ctx bound (some q) name)
-          let method := (lookupIn (ctx.of name) .value name).any (·.kind == .method)
-          if method && (entry.isNone || entry.any (·.kind == .method)) then
-            if q == "Self" then
-              return ← resolveExprF ctx bound (← fpush (.call id (← fpush (.name (some q) name)) #[]))
-            let inner ← fpush (.call id (← fpush (.name none name)) #[])
-            let ty ← fpush (.type (TypeExpr.tuple [.name q []]))
-            return ← resolveExprF ctx bound (← fpush (.call 0 (← fpush (.mark .inst)) #[inner, ty]))
-          return ← resolveExprF ctx bound (← fpush (.name (some q) name))
+        -- `Owner::NAME`: a trait's function of that name called with
+        -- nothing, at the type `Owner`, if that is what `NAME` is here;
+        -- or else whatever `Owner::NAME` names.
+        let (_, _, entry) ← liftM (resolveValue ctx bound (some q) name)
+        let method := (lookupIn (ctx.of name) .value name).any (·.kind == .method)
+        if method && (entry.isNone || entry.any (·.kind == .method)) then
+          if q == "Self" then
+            return ← resolveExprF ctx bound (← fpush (.call id (← fpush (.name (some q) name)) #[]))
+          let inner ← fpush (.call id (← fpush (.name none name)) #[])
+          let ty ← fpush (.type (TypeExpr.tuple [.name q []]))
+          return ← resolveExprF ctx bound (← fpush (.call 0 (← fpush (.mark .inst)) #[inner, ty]))
+        return ← resolveExprF ctx bound (← fpush (.name (some q) name))
     if let (some mark, #[value, ty]) := (b.mark? f, args) then
       if mark == .ascribe || mark == .inst then
         -- `let x: Type = value`: the type's names are resolved as types.
@@ -1119,7 +1118,7 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
           return ← fpush (.call id callable #[subject])
     if let .name qual name := b.expr f then
       if let some first := args[0]? then
-        if b.bare? first == some recordMark then
+        if b.mark? first == some .record then
           -- `Point { y: 2, x: 1 }`: computed as written, kept as declared.
           let (qual', name', entry) ← liftM (resolveValue ctx bound qual name)
           let names ← liftM (fieldNamesOf name entry)
@@ -1127,9 +1126,9 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
           for g in args.extract 1 args.size do
             match b.expr g with
             | .call _ m #[v] =>
-              match b.bare? m >>= fieldOfMark with
-              | some field => gave := gave.push (field, ← resolveExprF ctx bound v)
-              | none => pure ()
+              match b.mark? m with
+              | some (.field field) => gave := gave.push (field, ← resolveExprF ctx bound v)
+              | _ => pure ()
             | _ => pure ()
           let _ ← match orderFields name names (gave.toList.map fun (f, _) => (f, ())) none with
             | .ok r => pure r

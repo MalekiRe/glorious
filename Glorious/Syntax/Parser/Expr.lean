@@ -357,12 +357,12 @@ partial def parsePostfix (noBlock : Bool) : P ExprId := do
       if isRecord then
         let id := (← read).base + (← get) + 1
         advance
-        let mut given : Array ExprId := #[← mkName none recordMark]
+        let mut given : Array ExprId := #[← mk (.mark .record)]
         repeat
           if (← peek) == .punct "}" then break
           let field ← expectIdent
           let value ← if ← acceptPunct ":" then parseBinary 0 false else mkName none field
-          given := given.push (← callOf 0 none (fieldMark field) #[value])
+          given := given.push (← markOf 0 (.field field) #[value])
           if !(← acceptPunct ",") then break
         expectPunct "}"
         e ← mk (.call id e given)
@@ -598,7 +598,7 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
     -- leaves to implementations. What it is, is found with the names.
     let capitals := name.any Char.isUpper && name.all fun c => c.isUpper || c.isDigit || c == '_'
     if qual.isSome && capitals && (← peek) != .punct "(" && (← peek) != .punct "{" then
-      return ← callOf ((← read).base + (← get)) none pathMark #[← mkName qual name]
+      return ← markOf ((← read).base + (← get)) .path #[← mkName qual name]
     mkName qual name
   | .punct "@" =>
     advance

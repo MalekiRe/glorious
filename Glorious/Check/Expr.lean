@@ -723,7 +723,7 @@ partial def inferExprCall (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :=
     -- What the clauses of such a callable ask of the values they are given,
     -- as patterns: these have to cover every case, and say what the types
     -- are. A value written `*r` is what the reference points to.
-    if b.bare? f == some "%shapes" then
+    if b.mark? f == some .shapes then
       if let some (.closure _ clauses) := args.back?.map b.expr then
         let mut tys : Array Ty := #[]
         for a in args.pop do
