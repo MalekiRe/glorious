@@ -236,6 +236,9 @@ inductive Decision where
   (`derefAssignNode`): `x` borrowed `&mut` (`some true`) or given as it is,
   a reference. -/
   | derefAssignHere (id : Nat) (borrow : Option Bool)
+  /-- The comparison `call` of two names, written where it is by reference
+  (`compareNode`): `eq(&a, &b)`. -/
+  | compareHere (call : Nat)
   /-- The field read `id` (or borrowed, `&mut` where `uniq`) is not one the
   value shows, and the value's type implements `Deref`: it is of what
   `Deref::deref` (`DerefMut::deref_mut`) gives (`Mut<T>` as its `T`). -/
@@ -246,13 +249,17 @@ inductive Decision where
   `eq(&a, &b)` (`Syntax.compareOps`). -/
   | compareByRef (call : Nat)
 
-/-- The dot call `call`'s node written where it is, as the checker reads it
+/-- (Each of these finds the node by its identity from the last: a body
+written again keeps what it was made of before it, which nothing reaches,
+and the node read is the one made last.)
+
+The dot call `call`'s node written where it is, as the checker reads it
 on (`Check.adjustingCall`) and the elaborator writes it: of `fn` where
 given, its receiver a name borrowed (`some uniq`) or given as it is. None
 where the receiver is no name: a value named for it is then made, read
 again (`receiverBody`). -/
 def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
-  let e ← (List.range b.exprs.size).find? fun i => match b.exprs[i]! with
+  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .call i _ _ | .tailCall i _ _ => i == call
     | _ => false
   let (tail, f, args) ← match b.exprs[e]! with
@@ -283,7 +290,7 @@ it where it is: `deref(&x).f` (`borrow` is `some false`) or `deref(x).f`
 (`x` a reference), as the checker reads it on and the elaborator writes it
 (`Decision.derefHere`). -/
 def derefNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
-  let e ← (List.range b.exprs.size).find? fun i => match b.exprs[i]! with
+  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .fieldOf i _ _ => i == id
     | _ => false
   let (x, f) ← match b.exprs[e]! with
@@ -304,7 +311,7 @@ where `borrow` is none, a reference): the value computed first, so that
 reading it does not meet the borrow. As the checker reads it on and the
 elaborator writes it (`Decision.derefAssignHere`). -/
 def derefAssignNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
-  let s ← (List.range b.stmts.size).find? fun i => match b.stmts[i]! with
+  let s ← (List.range b.stmts.size).reverse.find? fun i => match b.stmts[i]! with
     | .assign t _ => match b.expr t with
       | .deref r => match b.expr r with
         | .refField i true _ _ false => i == id
@@ -336,6 +343,27 @@ def derefAssignNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option F
   let (s3, b) := pushS b (.assign dr ve)
   let (blk, b) := push b (.labelScope "%block" #[s1, s2, s3])
   pure { b with stmts := b.stmts.set! s (.expr blk) }
+
+/-- The comparison `call`, `a == b` of two names, written where it is by
+reference: `eq(&a, &b)` (the function of `Syntax.compareOps`), as Rust's
+operators compare. As the checker reads it on and the elaborator writes it
+(`Decision.compareHere`). None where an operand is no name. -/
+def compareNode (call : Nat) (b : Flat.Body) : Option Flat.Body := do
+  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
+    | .call i _ _ => i == call
+    | _ => false
+  let (f, l, r) ← match b.exprs[e]! with
+    | .call _ f #[l, r] => some (f, l, r)
+    | _ => none
+  let fn ← (b.name? f).bind fun (_, op) => Syntax.compareOps.lookup op
+  let named := fun (a : Flat.ExprId) => (b.bare? a).filter fun x => !(Syntax.lastSegment x).front.isUpper
+  let x ← named l
+  let y ← named r
+  let push := fun (b : Flat.Body) (n : Flat.FExpr) => (b.exprs.size, { b with exprs := b.exprs.push n })
+  let (fe, b) := push b (.name none fn)
+  let (le, b) := push b (.ref false x)
+  let (re, b) := push b (.ref false y)
+  pure { b with exprs := b.exprs.set! e (.call call fe #[le, re]) }
 
 /-- What the checker says where it stops: why, and what it found to decide,
 where it stops for that; `result`

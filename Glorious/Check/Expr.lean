@@ -164,6 +164,21 @@ def derefAssignHere (scope : Scope) (s : Flat.StmtId) : M Bool := do
   modify fun s => { s with body := b', decided := s.decided ++ [.derefAssignHere id borrow] }
   pure true
 
+/-- Whether a comparison's operands, `args`, are two names that hold what is
+not copied, as found once the comparison is read: compared by reference,
+written where it is (`Elab.compareNode`, `Elab.Decision.compareHere`). -/
+def compareHere (scope : Scope) (args : Array Flat.ExprId) : M Bool := do
+  let b := (← get).body
+  let names := args.toList.filterMap b.bare?
+  unless names.length == 2 && names.all (fun x => !(Syntax.lastSegment x).front.isUpper) do return false
+  let some t := (match names.head?.bind (fun x => scope.lookup x) with
+    | some (.val t _) => some t
+    | some (.cell t _) => some t
+    | _ => none) | return false
+  modify fun s => { s with seen := {} }
+  if (← tyHasDrop [] t).isSome then return true
+  tyOwnsOnce [] t
+
 /-- The dot call `call` at `e0`, its receiver a name, written where it is
 (`Elab.receiverNode`): the name borrowed as `fn` takes it, given as it is
 where it holds a reference. Said for the elaborator
@@ -242,17 +257,20 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
   | .int _ => pure .int
   | .name .. | .label _ | .tuple _ => inferExprNamed scope amb n
   | .refField .. | .fieldOf .. | .proj .. => inferExprField scope amb e0 n
-  | .call id _ _ | .tailCall id _ _ =>
-    -- (A dot call whose receiver is a name, of a function decided only now
-    -- or taking it otherwise than written: written where it is and read
-    -- on, `receiverHere`.)
-    tryCatchThe Elab.Said (inferExprCall scope amb n) fun e => do
-      let some (.receiver c fn borrow) := e.decision | throwThe Elab.Said e
-      if c != id then throwThe Elab.Said e
-      -- (Once: one written so and refused again is read again whole.)
-      if (← get).decided.any (fun | .receiverHere c' _ _ => c' == id | _ => false) then throwThe Elab.Said e
-      unless ← receiverHere scope e0 id fn borrow do throwThe Elab.Said e
-      inferExprAt scope amb e0
+  | .call id f args =>
+    -- (A comparison of two names of a type that is not copied: read again
+    -- where it is by reference, `compareHere`.)
+    if args.size == 2 && (((← get).body.name? f).bind fun (_, op) => compareOps.lookup op).isSome then
+      let saved ← get
+      let t ← inferCallAdjusting scope amb e0 id n
+      if ← compareHere scope args then
+        set saved
+        if let some b' := Elab.compareNode id (← get).body then
+          modify fun s => { s with body := b', decided := s.decided ++ [.compareHere id] }
+          return ← inferExprAt scope amb e0
+      return t
+    inferCallAdjusting scope amb e0 id n
+  | .tailCall id _ _ => inferCallAdjusting scope amb e0 id n
   | .closure .. => inferExprCall scope amb n
   | .handle subject arms => inferHandle scope amb e0 subject arms
   | .labelScope l body => do
@@ -491,6 +509,21 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
       modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos, 0) }
       pure t
   | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
+
+/-- A call, where a dot call whose receiver is a name, of a function
+decided only now or taking it otherwise than written, is written where it
+is and read on (`receiverHere`). -/
+partial def inferCallAdjusting (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : Nat) (n : Flat.FExpr) : M Ty := do
+  -- (A dot call whose receiver is a name, of a function decided only now
+  -- or taking it otherwise than written: written where it is and read
+  -- on, `receiverHere`.)
+  tryCatchThe Elab.Said (inferExprCall scope amb n) fun e => do
+    let some (.receiver c fn borrow) := e.decision | throwThe Elab.Said e
+    if c != id then throwThe Elab.Said e
+    -- (Once: one written so and refused again is read again whole.)
+    if (← get).decided.any (fun | .receiverHere c' _ _ => c' == id | _ => false) then throwThe Elab.Said e
+    unless ← receiverHere scope e0 id fn borrow do throwThe Elab.Said e
+    inferExprAt scope amb e0
 
 /-- A call or a callable (`inferExpr`). -/
 partial def inferExprCall (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
