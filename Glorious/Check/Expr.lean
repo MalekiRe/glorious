@@ -164,17 +164,57 @@ def derefAssignHere (scope : Scope) (s : Flat.StmtId) : M Bool := do
   modify fun s => { s with body := b', decided := s.decided ++ [.derefAssignHere id borrow] }
   pure true
 
-/-- Whether a comparison's operands, `args`, are two names that hold what is
-not copied, as found once the comparison is read: compared by reference,
-written where it is (`Elab.compareNode`, `Elab.Decision.compareHere`). -/
-def compareHere (scope : Scope) (args : Array Flat.ExprId) : M Bool := do
-  let b := (← get).body
-  let names := args.toList.filterMap b.bare?
-  unless names.length == 2 && names.all (fun x => !(Syntax.lastSegment x).front.isUpper) do return false
-  let some t := (match names.head?.bind (fun x => scope.lookup x) with
-    | some (.val t _) => some t
-    | some (.cell t _) => some t
-    | _ => none) | return false
+/-- What a reading of a call records, by where each record stood before it
+(`Marks.of`): what a first reading recorded is taken back before the call
+is read again written otherwise (`Marks.undo`). Only sizes held, and the
+small lists that are put back whole: held, the state would be copied
+where the call grows it. Taken back: how names were read and what was
+asked of their types, of traits and of coverage; the values the call's
+surroundings held. Asked again of the same call, one kept would be met
+twice, once with what the first reading had. -/
+structure Marks where
+  valReads : Std.HashSet Nat
+  temps : List (Ty × Nat)
+  later : List String
+  anon : List Ty
+  uses : Nat
+  givenReads : Nat
+  heldMoves : Nat
+  dups : Nat
+  drops : Nat
+  bounds : Nat
+  pending : Nat
+  compares : Nat
+  fieldSites : Nat
+  partReads : Nat
+  instSites : Nat
+  groupUses : Nat
+  dropCands : Nat
+
+/-- Where `s`'s records stand (`Marks`). -/
+def Marks.of (s : St) : Marks :=
+  { valReads := s.valReads, temps := s.temps, later := s.later, anon := s.anon, uses := s.uses.size,
+    givenReads := s.givenReads.size, heldMoves := s.heldMoves.size, dups := s.dups.size, drops := s.drops.size,
+    bounds := s.bounds.size, pending := s.pending.size, compares := s.compares.size,
+    fieldSites := s.fieldSites.size, partReads := s.partReads.size, instSites := s.instSites.size,
+    groupUses := s.groupUses.size, dropCands := s.dropCands.size }
+
+/-- `s` with what was recorded since `m` taken back. -/
+def Marks.undo (m : Marks) (s : St) : St :=
+  { s with valReads := m.valReads, temps := m.temps, later := m.later, anon := m.anon,
+           uses := s.uses.shrink m.uses, givenReads := s.givenReads.shrink m.givenReads,
+           heldMoves := s.heldMoves.shrink m.heldMoves, dups := s.dups.shrink m.dups,
+           drops := s.drops.shrink m.drops, bounds := s.bounds.shrink m.bounds,
+           pending := s.pending.shrink m.pending, compares := s.compares.shrink m.compares,
+           fieldSites := s.fieldSites.shrink m.fieldSites, partReads := s.partReads.shrink m.partReads,
+           instSites := s.instSites.shrink m.instSites, groupUses := s.groupUses.shrink m.groupUses,
+           dropCands := s.dropCands.shrink m.dropCands }
+
+/-- Whether the comparison `call` is of what is not copied, as found once it
+is read: compared by reference, written where it is (`Elab.compareNode`,
+`Elab.Decision.compareHere`). -/
+def compareHere (call : Nat) : M Bool := do
+  let some (_, t) := (← get).compares.toList.reverse.find? (·.1 == call) | return false
   modify fun s => { s with seen := {} }
   if (← tyHasDrop [] t).isSome then return true
   tyOwnsOnce [] t
@@ -262,12 +302,27 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
     -- (A comparison of two names of a type that is not copied: read again
     -- where it is by reference, `compareHere`.)
     if args.size == 2 && (((← get).body.name? f).bind fun (_, op) => compareOps.lookup op).isSome then
+      -- (The state held while it is read, and put back whole: what
+      -- `Marks` takes back is not all that a comparison read by value
+      -- leaves, and a place read after was freed; a comparison is small.)
       let saved ← get
-      let t ← inferExprCall scope amb n
-      if ← compareHere scope args then
-        set saved
-        if let some b' := Elab.compareNode id (← get).body then
-          modify fun s => { s with body := b', decided := s.decided ++ [.compareHere id] }
+      let t ← receiverRetry scope amb e0 id n
+      -- (Of two names: an operand kept in a variable of its own for it read
+      -- what it held through the wrong reference, and is decided as before.)
+      let b := (← get).body
+      let names := args.all fun a => ((b.bare? a).filter fun x => !(Syntax.lastSegment x).front.isUpper).isSome
+      if names && (← compareHere id) then
+        -- (A name that holds a reference is given as it is: `&T` compares
+        -- as `T`.)
+        let refs ← args.toList.mapM fun a => do
+          match (b.bare? a).bind (fun x => scope.lookup x) with
+          | some (.val t _) | some (.cell t _) =>
+            match ← find t with
+            | .ref .. => pure true
+            | _ => pure false
+          | _ => pure false
+        if let some b' := Elab.compareNode id refs b then
+          set { saved with body := b', decided := saved.decided ++ [Elab.Decision.compareHere id refs] }
           return ← inferExprAt scope amb e0
       return t
     receiverRetry scope amb e0 id n
@@ -519,24 +574,7 @@ array the call grew was copied (a quarter of covey/fleet's check of `main`).
 What the first reading recorded of how names were read is taken back; the
 rest is recorded again, which asks no less. -/
 partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : Nat) (n : Flat.FExpr) : M Ty := fun s =>
-  -- (What the first reading recorded of how names were read is taken back:
-  -- read whole there, borrowed here. Only its size held, and the set of
-  -- names read, which is small.)
-  let (reads, uses, given, held) := (s.valReads, s.uses.size, s.givenReads.size, s.heldMoves.size)
-  let (temps, later, anon) := (s.temps, s.later, s.anon)
-  let (dups, drops) := (s.dups.size, s.drops.size)
-  let (bounds, pend, cmps, sites, parts, insts, gUses, cands) :=
-    (s.bounds.size, s.pending.size, s.compares.size, s.fieldSites.size, s.partReads.size, s.instSites.size,
-     s.groupUses.size, s.dropCands.size)
-  -- (What the first reading asked, taken back: asked again, of the same
-  -- call, it would be met twice, once with what the first reading had.)
-  let undo := fun (s : St) =>
-    { s with valReads := reads, temps, later, anon, uses := s.uses.shrink uses, givenReads := s.givenReads.shrink given,
-             heldMoves := s.heldMoves.shrink held, dups := s.dups.shrink dups, drops := s.drops.shrink drops,
-             bounds := s.bounds.shrink bounds, pending := s.pending.shrink pend, compares := s.compares.shrink cmps,
-             fieldSites := s.fieldSites.shrink sites, partReads := s.partReads.shrink parts,
-             instSites := s.instSites.shrink insts, groupUses := s.groupUses.shrink gUses,
-             dropCands := s.dropCands.shrink cands }
+  let undo := Marks.of s
   match inferExprCall scope amb n s with
   | .ok a s => .ok a s
   | .error e s =>
@@ -554,10 +592,10 @@ partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : N
       match Elab.refPatsNode cid clauses b with
       | none => .error e s
       | some b' =>
-        inferExprAt scope amb e0 { undo s with body := b', decided := s.decided ++ [Elab.Decision.refPatsHere cid clauses] }
+        inferExprAt scope amb e0 { undo.undo s with body := b', decided := s.decided ++ [Elab.Decision.refPatsHere cid clauses] }
     | some (.receiver c fn borrow) =>
       if c != id || s.decided.any (fun | .receiverHere c' _ _ => c' == c | _ => false) then .error e s else
-      let s := undo s
+      let s := undo.undo s
       match receiverHere scope c (some e0) fn borrow s with
       | .ok true s => inferExprAt scope amb e0 s
       | .ok false s => .error e s

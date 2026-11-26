@@ -236,9 +236,10 @@ inductive Decision where
   (`derefAssignNode`): `x` borrowed `&mut` (`some true`) or given as it is,
   a reference. -/
   | derefAssignHere (id : Nat) (borrow : Option Bool)
-  /-- The comparison `call` of two names, written where it is by reference
-  (`compareNode`): `eq(&a, &b)`. -/
-  | compareHere (call : Nat)
+  /-- The comparison `call`, written where it is by reference
+  (`compareNode`): `eq(&a, &b)`, an operand that is a name holding a
+  reference given as it is (`refs`). -/
+  | compareHere (call : Nat) (refs : List Bool)
   /-- The callable `id`'s clauses the checker's, `&Pattern` (`refPats`),
   written where it is (`refPatsNode`), not read again. -/
   | refPatsHere (id : Nat) (clauses : List Clause)
@@ -348,11 +349,12 @@ def derefAssignNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option F
   let (blk, b) := push b (.labelScope "%block" #[s1, s2, s3])
   pure { b with stmts := b.stmts.set! s (.expr blk) }
 
-/-- The comparison `call`, `a == b` of two names, written where it is by
-reference: `eq(&a, &b)` (the function of `Syntax.compareOps`), as Rust's
-operators compare. As the checker reads it on and the elaborator writes it
-(`Decision.compareHere`). None where an operand is no name. -/
-def compareNode (call : Nat) (b : Flat.Body) : Option Flat.Body := do
+/-- The comparison `call`, `a == b`, written where it is by reference:
+`eq(&a, &b)` (the function of `Syntax.compareOps`), as Rust's operators
+compare; a name that holds a reference given as it is (`refs`). As the
+checker reads it on and the elaborator writes it (`Decision.compareHere`).
+None where an operand is no name. -/
+def compareNode (call : Nat) (refs : List Bool) (b : Flat.Body) : Option Flat.Body := do
   let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .call i _ _ => i == call
     | _ => false
@@ -363,10 +365,10 @@ def compareNode (call : Nat) (b : Flat.Body) : Option Flat.Body := do
   let named := fun (a : Flat.ExprId) => (b.bare? a).filter fun x => !(Syntax.lastSegment x).front.isUpper
   let x ← named l
   let y ← named r
-  let push := fun (b : Flat.Body) (n : Flat.FExpr) => b.add n
-  let (fe, b) := push b (.name none fn)
-  let (le, b) := push b (.ref false x)
-  let (re, b) := push b (.ref false y)
+  let given := fun (z : String) (k : Nat) => if refs.getD k false then Flat.FExpr.name none z else .ref false z
+  let (le, b) := b.add (given x 0)
+  let (re, b) := b.add (given y 1)
+  let (fe, b) := b.add (.name none fn)
   pure { b with exprs := b.exprs.set! e (.call call fe #[le, re]) }
 
 /-- The callable `id` with `clauses` in place of its own, where it is, as
