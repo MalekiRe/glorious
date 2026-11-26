@@ -238,8 +238,8 @@ def layoutOf (fields : Std.HashMap String (List String × List (List TypeExpr)))
       else if let some (s, a) := (if fresh.any (fun p => (heldNames f).contains p) then none else staticLayout fields [head] f) then
         acc := call 0 "layout_add" [acc, int s, int (max a 1)]
       else
-        let s := Expr.call 0 (.name none instMark) [call id "size_of" [], (TypeExpr.tuple [f]).asExpr]
-        let a := Expr.call 0 (.name none instMark) [call (id + 1) "align_of" [], (TypeExpr.tuple [f]).asExpr]
+        let s := Expr.call 0 (.mark .inst) [call id "size_of" [], (TypeExpr.tuple [f]).asExpr]
+        let a := Expr.call 0 (.mark .inst) [call (id + 1) "align_of" [], (TypeExpr.tuple [f]).asExpr]
         id := id + 2
         acc := call 0 "layout_add" [acc, s, a]
     variants := variants ++ [acc]
@@ -269,9 +269,9 @@ def reprOf (ctors : List (Option String × List TypeExpr)) (base : Nat) : Item �
     let mut layout := Expr.tuple [.int (if tagged then 1 else 0), .int 1]
     for (f, i) in fs.zipIdx do
       let ty := (TypeExpr.tuple [f]).asExpr
-      let size := Expr.call 0 (name instMark) [call id "size_of" [], ty]
-      let align := Expr.call 0 (name instMark) [call (id + 1) "align_of" [], ty]
-      let align' := Expr.call 0 (name instMark) [call (id + 2) "align_of" [], ty]
+      let size := Expr.call 0 (.mark .inst) [call id "size_of" [], ty]
+      let align := Expr.call 0 (.mark .inst) [call (id + 1) "align_of" [], ty]
+      let align' := Expr.call 0 (.mark .inst) [call (id + 2) "align_of" [], ty]
       id := id + 3
       offsets := offsets ++ [.let_ (.var s!"%o{i}") (call 0 "layout_start" [layout, align])]
       layout := call 0 "layout_add" [layout, size, align']
@@ -287,13 +287,13 @@ def reprOf (ctors : List (Option String × List TypeExpr)) (base : Nat) : Item �
       | some c => if fs.isEmpty then name c else call 0 c (vars.map name)
       | none => .tuple (vars.map name)
     stores := stores ++ [.mk [.var "%at", pat] (tag ++ offsets ++ writes ++ [.expr (.tuple [])])]
-    loads := loads ++ [.mk (if tagged then [.int k] else []) ((if tagged then [.expr (name unsafeMark)] else []) ++ offsets ++ reads ++ [.expr made])]
+    loads := loads ++ [.mk (if tagged then [.int k] else []) ((if tagged then [.expr (.mark .unsafe_)] else []) ++ offsets ++ reads ++ [.expr made])]
   let load : List Clause := if tagged then
       [.mk [.var "%at"] [.expr (call (id + 1) "match" [call 0 "ptr_read" [name "%at", .int (-8)],
         .closure id (loads ++ [.mk [.wild] [.expr (call (id + 2) "repr_bad" [name "%at"])]])])]]
     else loads.map fun ⟨_, body⟩ => .mk [.var "%at"] body
-  (Item.fnOf "repr_store" [] [] none (stores.map fun ⟨pats, body⟩ => .mk pats (.expr (name unsafeMark) :: body)),
-   Item.fnOf "repr_load" [] [] none (load.map fun ⟨pats, body⟩ => .mk pats (.expr (name unsafeMark) :: body)))
+  (Item.fnOf "repr_store" [] [] none (stores.map fun ⟨pats, body⟩ => .mk pats (.expr (.mark .unsafe_) :: body)),
+   Item.fnOf "repr_load" [] [] none (load.map fun ⟨pats, body⟩ => .mk pats (.expr (.mark .unsafe_) :: body)))
 
 /-- Is a field's type said, not a bare field name whose type is left to be
 found: of a type there is, or a type parameter. -/
@@ -427,7 +427,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
       if q.isSome && q != some "%prelude" then plain () else
       -- (`v.index(i)` as `v[i]` is.)
       let a := match b.expr a with
-        | .call _ rm #[r] => if b.bare? rm == some receiverMark then r else a
+        | .call _ rm #[r] => if b.mark? rm == some .receiver then r else a
         | _ => a
       match ← elementRead b known id a i with
       | some e => pure e
@@ -437,7 +437,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
       -- of a comparison's two (`Decision.compareByRef`), borrowed as `name`
       -- takes it.)
       let marked := fun (a : ExprId) => match b.expr a with
-        | .call _ rm #[r] => if b.bare? rm == some receiverMark then some r else none
+        | .call _ rm #[r] => if b.mark? rm == some .receiver then some r else none
         | _ => none
       if args0.all (marked · |>.isNone) then return ← plain ()
       let place := placeOf b known
@@ -478,7 +478,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
         | _ => pure none
       let givenOf := fun (k : Nat) (receiver : ExprId) => (do
         let borrowed := fun (uniq : Bool) => (do
-          pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.name none (if uniq then borrowMutMark else borrowMark))) #[receiver]) : Build ExprId)
+          pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark (if uniq then .borrowMut else .borrow))) #[receiver]) : Build ExprId)
           match taken[name]?, place receiver 64, throughRef receiver 64 with
             | some uniq, some (x, [], _), _ => pushExpr (.ref uniq x)
             | some uniq, some (x, path, fid), _ => if fid == 0 then pure receiver else pushExpr (.refField fid uniq x path false)
@@ -512,7 +512,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
                     | _ => pure none
                   if let some r := r then
                     let steps ← pushExpr (.tuple (← path.toArray.mapM fun s => pushExpr (.name none s)))
-                    let through ← pushExpr (.call (id + 600000 + k) (← pushExpr (.name none throughMark))
+                    let through ← pushExpr (.call (id + 600000 + k) (← pushExpr (.mark .through))
                       #[r, steps, ← pushExpr (.int (if uniq then 1 else 0))])
                     return through
                 -- (A value made where it is called on, `half(4).is_ok()`:
@@ -581,11 +581,11 @@ partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (Strin
         -- (`<S as Get<T>>::column(w)` too; and `let r: &T = ..`.)
         let givesRef : Bool := match b.expr value with
           | .call _ f args =>
-            if b.bare? f == some ascribeMark then
+            if b.mark? f == some .ascribe then
               match args[1]?.map b.expr with
               | some (.call _ g _) => b.bare? g == some "%ty(ref)" || b.bare? g == some "%ty(refmut)"
               | _ => false
-            else if b.bare? f == some instMark then
+            else if b.mark? f == some .inst then
               match args[0]?.map b.expr with
               | some (.call _ g _) => ((b.name? g).map fun (_, n) => taken.contains (givesKey n)).getD false
               | _ => false
@@ -603,7 +603,7 @@ partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (Strin
               | .call _ f args =>
                 match b.name? f, args[0]?.map b.expr with
                 | some (_, name), some (.call _ rm #[recv]) =>
-                  b.bare? rm == some receiverMark && b.bare? recv == some x && !taken.contains name
+                  b.mark? rm == some .receiver && b.bare? recv == some x && !taken.contains name
                 | _, _ => false
               | _ => false) st
           | _ => false
@@ -678,7 +678,7 @@ def Body.borrowsReceiver (b : Body) (taken : Std.HashMap String Bool) (body : Ar
   body.any fun s => b.anyStmt (fun n => match n with
     | .call _ f args =>
       match b.name? f, args[0]?.map b.expr with
-      | some (_, name), some (.call _ m _) => b.bare? m == some receiverMark && taken.contains name
+      | some (_, name), some (.call _ m _) => b.mark? m == some .receiver && taken.contains name
       | _, _ => false
     | _ => false) s
 

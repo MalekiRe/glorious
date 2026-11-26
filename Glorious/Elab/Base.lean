@@ -292,10 +292,10 @@ def elementCall (b : Flat.Body) (g : Flat.ExprId) : Bool :=
   | none => false
 
 /-- A receiver as written, the mark the resolver puts on one it could not
-tell how to give (`Syntax.receiverMark`) taken off. -/
+tell how to give (`Syntax.Mark.receiver`) taken off. -/
 def unmarked (b : Flat.Body) (e : Flat.ExprId) : Flat.ExprId :=
   match b.expr e with
-  | .call _ m #[r] => if b.bare? m == some Syntax.receiverMark then r else e
+  | .call _ m #[r] => if b.mark? m == some .receiver then r else e
   | _ => e
 
 /-- (Each of these finds the node by its identity from the last: a body

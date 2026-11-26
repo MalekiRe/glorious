@@ -25,6 +25,73 @@ inductive Pattern where
   | tuple (args : List Pattern)
   deriving Inhabited, Hashable
 
+/-- What the compiler marks an expression with, beyond what it is written
+as: the callee of a call, `%as(value, type)`, each a node of its own kind,
+not a name. -/
+inductive Mark where
+  /-- What a dotted call is called on, kept marked until every function's
+  declaration has been seen: `value.f(a)` borrows `value` if `f` is written to
+  take a reference first. -/
+  | receiver
+  /-- `&mut base.0`, where `base` is not a name but an expression that gives a
+  reference, leaves the parser's reading of an expression as the call
+  `%through(base, (steps), uniq)`. Where its statement is done being read, the
+  reference is given a name of its own first, and the borrow is through that. -/
+  | through
+  /-- `&value` where the value has no name. -/
+  | borrow
+  /-- `&mut value` where the value has no name. -/
+  | borrowMut
+  /-- `subject is Pattern` leaves the parser as the call `%is(subject, { Pattern
+  => })`. Where names are resolved, and so which names of the pattern are new,
+  it becomes a pattern callable applied to the subject: on a match `Ok` of the
+  values of those names, else `Err(())`. -/
+  | is_
+  /-- Whether what a reference points to was built by a constructor, at a path
+  of field numbers: `%ctor_is(r, 0, 1, Some)`. The compiler writes this where a
+  pattern binds by reference; it reads nothing out of the cell. -/
+  | ctorIs
+  /-- `let x: Type = value` leaves the parser as `let x = %as(value, type)`,
+  the type written as an expression so that it can sit among expressions: see
+  `TypeExpr.asExpr`. The checker makes the value that type; after it the value
+  stands alone. -/
+  | ascribe
+  /-- `move x`: the value of `x`, which is then not to be used again. -/
+  | move
+  /-- The statement a block written `unsafe { .. }` begins with: what follows
+  it in the block may name what is unsafe. -/
+  | unsafe_
+  /-- The first statement of a clause that only looks at a copy of what a
+  reference points to, to choose itself (`byReference`): what its patterns take
+  is not the clause's, and nothing of it is destroyed. -/
+  | observed
+  /-- The reference to a field of what a reference points to: the reference, and
+  the fields to go through by number. -/
+  | focus
+  /-- A callable with what destroys it if it is let go: `%destroyed(callable,
+  { .. })`, where the block destroys what the callable captured, by its names. -/
+  | destroyed
+  /-- `f<A, B>(args)`: the call, and beside it the types written, as a value
+  written with its type is: `%inst(f(args), (A, B))`. -/
+  | inst
+  deriving Inhabited, Hashable, BEq, Repr
+
+/-- How a mark is shown: `%as`. -/
+def Mark.shown : Mark → String
+  | .receiver => "%receiver"
+  | .through => "%through"
+  | .borrow => "%borrow"
+  | .borrowMut => "%borrow_mut"
+  | .is_ => "%is"
+  | .ctorIs => "%ctor_is"
+  | .ascribe => "%as"
+  | .move => "%move"
+  | .unsafe_ => "%unsafe"
+  | .observed => "%observed"
+  | .focus => "%focus"
+  | .destroyed => "%destroyed"
+  | .inst => "%inst"
+
 mutual
 
 inductive Expr where
@@ -67,6 +134,8 @@ inductive Expr where
   | refField (id : Nat) (uniq : Bool) (name : String) (path : List String) (star : Bool)
   /-- `e.name`: the field of that name. `id` tells this read from every other. -/
   | fieldOf (id : Nat) (e : Expr) (name : String)
+  /-- A mark, the callee of the call it is said of: `%as(value, type)`. -/
+  | mark (m : Mark)
 
 inductive Stmt where
   | let_ (pat : Pattern) (value : Expr)
@@ -115,11 +184,6 @@ def inFunction (name : String) (msg : String) : String :=
 
 instance : Inhabited Clause := ⟨.mk [] []⟩
 
-/-- `subject is Pattern` leaves the parser as the call `%is(subject, { Pattern
-=> })`. Where names are resolved, and so which names of the pattern are new,
-it becomes a pattern callable applied to the subject: on a match `Ok` of the
-values of those names, else `Err(())`. -/
-def isMark : String := "%is"
 
 /-- The values an `is` found, under the names it found them by: `%is:a,b` is
 the name of what builds them and of their type. A block that is given them
@@ -130,11 +194,6 @@ def packName (names : List String) : String := "%is:" ++ ",".intercalate names
 def packNames (name : String) : Option (List String) :=
   if name.startsWith "%is:" then some (((name.drop 4).toString.splitOn ",").filter (· != "")) else none
 
-/-- `&mut base.0`, where `base` is not a name but an expression that gives a
-reference, leaves the parser's reading of an expression as the call
-`%through(base, (steps), uniq)`. Where its statement is done being read, the
-reference is given a name of its own first, and the borrow is through that. -/
-def throughMark : String := "%through"
 
 /-- `&mut Pattern` and `&Pattern`: what a reference points to is matched, and
 the pattern's names are references to its parts. It is the pattern
@@ -247,19 +306,8 @@ def unitMark : String := "%unit"
 program can write these names. -/
 def textEndName : String := "%end"
 
-/-- The statement a block written `unsafe { .. }` begins with: what follows
-it in the block may name what is unsafe. -/
-def unsafeMark : String := "%unsafe"
 
-/-- The first statement of a clause that only looks at a copy of what a
-reference points to, to choose itself (`byReference`): what its patterns take
-is not the clause's, and nothing of it is destroyed. -/
-def observedMark : String := "%observed"
 
-/-- What a dotted call is called on, kept marked until every function's
-declaration has been seen: `value.f(a)` borrows `value` if `f` is written to
-take a reference first. -/
-def receiverMark : String := "%receiver"
 
 /-- The comparisons, each with the function of `Eq` or `Ord` that compares
 what two references are to, as it does. -/
@@ -271,14 +319,7 @@ a number of its own: if it turns out to be a value a trait leaves to
 implementations, it is that trait's function called with nothing. -/
 def pathMark : String := "%path"
 
-/-- Whether what a reference points to was built by a constructor, at a path
-of field numbers: `%ctor_is(r, 0, 1, Some)`. The compiler writes this where a
-pattern binds by reference; it reads nothing out of the cell. -/
-def ctorIsMark : String := "%ctor_is"
 
-/-- The reference to a field of what a reference points to: the reference, and
-the fields to go through by number. -/
-def focusMark : String := "%focus"
 
 /-- What a trait's `i`-th type parameter is where a use of the trait does not
 write it (`trait Add<R = Self>`), kept among what the trait gives
@@ -342,9 +383,6 @@ def captureSite (x : String) : String := s!"%capture:{x}"
 def captureSiteOf (name : String) : Option String :=
   if name.startsWith "%capture:" then some (name.drop 9).toString else none
 
-/-- A callable with what destroys it if it is let go: `%destroyed(callable,
-{ .. })`, where the block destroys what the callable captured, by its names. -/
-def destroyedMark : String := "%destroyed"
 
 /-- The head under which callables are destroyed: by giving them up. -/
 def callableHead : String := "(callable)"
@@ -513,11 +551,6 @@ def traitShown (name : String) : String :=
 its trait, among what it declares. -/
 def traitArgName (i : Nat) : String := s!"%traitArg{i}"
 
-/-- `let x: Type = value` leaves the parser as `let x = %as(value, type)`,
-the type written as an expression so that it can sit among expressions: see
-`TypeExpr.asExpr`. The checker makes the value that type; after it the value
-stands alone. -/
-def ascribeMark : String := "%as"
 
 /-- Said of a constant's value, `const NAME: T = value;`: worked out once, at
 compile time, by a function of its own (`constFnName`, `NAME$const`), whose result is then
@@ -604,17 +637,12 @@ def mutPatMark : String := "%mut"
 no callable is wanted, so it is run there and is its value. -/
 def nowMark : String := "%now"
 
-/-- `move x`: the value of `x`, which is then not to be used again. -/
-def moveMark : String := "%move"
 
 /-- Said of a block, where the names of what an `is` found are said: its
 clauses each take one tuple, and it is given where a callable of that many
 arguments is wanted, so each clause takes the arguments as its tuple's parts. -/
 def spreadMark : String := "%spread"
 
-/-- `f<A, B>(args)`: the call, and beside it the types written, as a value
-written with its type is: `%inst(f(args), (A, B))`. -/
-def instMark : String := "%inst"
 
 /-- In an implementation for another name of a type: the argument of the type
 that the name fixes, by its place. -/
@@ -627,13 +655,12 @@ def assocOfMark : String := "%assocOf"
 /-- What a name given to a value stands for, apart from the type it was
 written with: `let yes: Bool = Ok(());` stands for `Ok(())`. -/
 partial def aliasValue : Expr → Expr
-  | .call id (.name none mark) (value :: rest) =>
-    if mark == ascribeMark then aliasValue value else .call id (.name none mark) (value :: rest)
+  | .call _ (.mark .ascribe) (value :: _) => aliasValue value
   | e => e
 
 /-- Was the name given a value written with its type? -/
 def aliasTyped : Expr → Bool
-  | .call _ (.name none mark) (_ :: _) => mark == ascribeMark
+  | .call _ (.mark .ascribe) (_ :: _) => true
   | _ => false
 
 /-- In an implementation: what one of its conditions says a type left to the
@@ -841,6 +868,7 @@ inductive FExpr where
   | reborrow (uniq : Bool) (e : ExprId)
   | refField (id : Nat) (uniq : Bool) (name : String) (path : List String) (star : Bool)
   | fieldOf (id : Nat) (e : ExprId) (name : String)
+  | mark (m : Mark)
   deriving Inhabited, Hashable, BEq
 
 /-- A statement, its parts by place (`Syntax.Stmt`). -/
@@ -970,10 +998,6 @@ partial def selfPattern (self : String) : Pattern → Pattern
   | .tuple args => .tuple (args.map (selfPattern self))
   | p => p
 
-/-- `&value` and `&mut value` where the value has no name. -/
-def borrowMark : String := "%borrow"
-def borrowMutMark : String := "%borrow_mut"
-
 
 /-- How a name is used in what follows where it is bound: borrowed with `&`,
 changed or borrowed with `&mut`, a field of it borrowed, bound again. -/
@@ -1010,10 +1034,9 @@ def labelShort (name : String) : String :=
 partial def exprToPat : Expr → Except String Pattern
   | .int n => pure (.int n)
   | .name q x => pure (if q.isSome then .ctor x q [] else .var x)
+  -- A constant written with its type is its value.
+  | .call _ (.mark .ascribe) (value :: _) => exprToPat value
   | .call _ (.name q x) args => do
-    -- A constant written with its type is its value.
-    if q.isNone && x == ascribeMark then
-      if let value :: _ := args then return ← exprToPat value
     pure (.ctor x q (← args.mapM exprToPat))
   | .tuple args => do
     pure (.tuple (← args.mapM exprToPat))

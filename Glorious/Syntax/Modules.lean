@@ -1050,7 +1050,7 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
           unless id == 0 do
             modifyThe St fun s => { s with dotAlts := (id, alts) :: s.dotAlts }
           liftM (noteUse ctx.here first)
-          let mark ← fpush (.call 0 (← fpush (.name none receiverMark)) #[receiver])
+          let mark ← fpush (.call 0 (← fpush (.mark .receiver)) #[receiver])
           let call ← fpush (.call id (← fpush (.name none first.global)) (#[mark] ++ args))
           return ← resolveExprF ctx bound call
         if let some en := lookupIn (ctx.of name) .value name then
@@ -1061,7 +1061,7 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
               modifyThe St fun s => { s with dotAlts := (id, alts) :: s.dotAlts }
             -- (Marked: whether it is borrowed for the call is decided once
             -- every function's declaration has been seen.)
-            let mark ← fpush (.call 0 (← fpush (.name none receiverMark)) #[receiver])
+            let mark ← fpush (.call 0 (← fpush (.mark .receiver)) #[receiver])
             let call ← fpush (.call id (← fpush (.name none name)) (#[mark] ++ args))
             return ← resolveExprF ctx bound call
         -- A function of a type's own: found by its name alone, where one
@@ -1077,7 +1077,7 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
             liftM (noteUse ctx.here bd.entry)
             let receiver ← resolveExprF ctx bound receiver
             let args ← args.mapM (resolveExprF ctx bound)
-            let mark ← fpush (.call 0 (← fpush (.name none receiverMark)) #[receiver])
+            let mark ← fpush (.call 0 (← fpush (.mark .receiver)) #[receiver])
             return ← fpush (.call id (← fpush (.name none bd.entry.global)) (#[mark] ++ args))
     if let (some mark, #[a]) := (b.bare? f, args) then
       if let .name (some q) name := b.expr a then
@@ -1092,18 +1092,18 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
               return ← resolveExprF ctx bound (← fpush (.call id (← fpush (.name (some q) name)) #[]))
             let inner ← fpush (.call id (← fpush (.name none name)) #[])
             let ty ← fpushTree (TypeExpr.tuple [.name q []]).asExpr
-            return ← resolveExprF ctx bound (← fpush (.call 0 (← fpush (.name none instMark)) #[inner, ty]))
+            return ← resolveExprF ctx bound (← fpush (.call 0 (← fpush (.mark .inst)) #[inner, ty]))
           return ← resolveExprF ctx bound (← fpush (.name (some q) name))
-    if let (some mark, #[value, ty]) := (b.bare? f, args) then
-      if mark == ascribeMark || mark == instMark then
+    if let (some mark, #[value, ty]) := (b.mark? f, args) then
+      if mark == .ascribe || mark == .inst then
         -- `let x: Type = value`: the type's names are resolved as types.
         let ty ← liftM (resolveType ctx ctx.generics (TypeExpr.ofExpr (treeExpr b ty)))
         let value ← resolveExprF ctx bound value
-        return ← fpush (.call id (← fpush (.name none mark)) #[value, ← fpushTree ty.asExpr])
-    if let (some mark, #[subject, cl]) := (b.bare? f, args) then
+        return ← fpush (.call id (← fpush (.mark mark)) #[value, ← fpushTree ty.asExpr])
+    if let (some .is_, #[subject, cl]) := (b.mark? f, args) then
       if let .closure _ #[c] := b.expr cl then
         let ⟨pats, _⟩ := b.clause c
-        if let ([pat], true) := (pats, mark == isMark) then
+        if let [pat] := pats then
           -- `subject is Pattern`: a pattern callable applied to the subject,
           -- which gives what the pattern's new names stand for, or fails.
           let subject ← resolveExprF ctx bound subject

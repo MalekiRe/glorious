@@ -65,8 +65,8 @@ def fvClauses (b : Body) (cs : Array ClauseId) : List String := cs.toList.flatMa
 partial def movedExpr (b : Body) (e : ExprId) : List String :=
   let here := match b.expr e with
     | .call _ f #[a] =>
-      match b.bare? f, b.bare? a with
-      | some mark, some x => if mark == moveMark then some [x] else none
+      match b.mark? f, b.bare? a with
+      | some .move, some x => some [x]
       | _, _ => none
     | _ => none
   match here with
@@ -97,6 +97,7 @@ partial def hashExpr (b : Body) (e : ExprId) : UInt64 :=
   | .reborrow u x => mixHash 13 (mixHash (hash u) (b.hashExpr x))
   | .refField id u x path star => mixHash 14 (hash (id, u, x, path, star))
   | .fieldOf id x n => mixHash 15 (mixHash (hash (id, n)) (b.hashExpr x))
+  | .mark m => mixHash 16 (hash m)
 
 /-- A callable written with these clauses. -/
 partial def hashClosure (b : Body) (id : Nat) (cs : Array ClauseId) : UInt64 :=
@@ -529,7 +530,7 @@ def selfRewrite (self : String) (trait : Option (String × Expr)) : FRewrite whe
         let callee ← pushExpr (.name (some tr) z)
         let call ← pushExpr (.call id callee (← args.mapM go.ex))
         let ty ← flatExpr at_
-        pushExpr (.call 0 (← pushExpr (.name none instMark)) #[call, ty]))
+        pushExpr (.call 0 (← pushExpr (.mark .inst)) #[call, ty]))
       | _, _ => none
     | _ => none
   onPat := selfPattern self
@@ -538,10 +539,7 @@ def selfRewrite (self : String) (trait : Option (String × Expr)) : FRewrite whe
 not)? Asked first: most bodies have none. -/
 def Body.anyAscription (b : Body) : Bool :=
   b.exprs.any fun
-    | .call _ f #[_, _] =>
-      match b.bare? f with
-      | some mark => mark == ascribeMark || mark == instMark
-      | none => false
+    | .call _ f #[_, _] => b.mark? f == some .ascribe || b.mark? f == some .inst
     | _ => false
 
 /-- The ascriptions an expression has, `let x: Type = ..`: the places of the
@@ -550,10 +548,8 @@ partial def Body.ascriptionsExpr (b : Body) (e : ExprId) (acc : List ExprId) : L
   let rest := fun (_ : Unit) => (b.children e).foldr (fun x acc => b.ascriptionsExpr x acc) acc
   match b.expr e with
   | .call _ f #[v, ty] =>
-    match b.bare? f with
     -- (The type itself is not looked in.)
-    | some mark => if mark == ascribeMark || mark == instMark then ty :: b.ascriptionsExpr v acc else rest ()
-    | none => rest ()
+    if b.mark? f == some .ascribe || b.mark? f == some .inst then ty :: b.ascriptionsExpr v acc else rest ()
   | _ => rest ()
 
 /-- The ascriptions of a body, `let x: Type = ..`: each with the place of the
@@ -592,7 +588,7 @@ partial def nameBorrowsE (e : ExprId) : StateT (Array StmtId) Build ExprId := do
   -- (A field borrowed through what an expression points to,
   -- `%through(base, (steps), uniq)`: the base named first.)
   | .call id f #[base, steps, uniq] =>
-    if b.bare? f != some throughMark then return ← nameBorrowsChildren e
+    if b.mark? f != some .through then return ← nameBorrowsChildren e
     let (.tuple steps, .int uniq) := (b.expr steps, b.expr uniq) | nameBorrowsChildren e
     let base' ← nameBorrowsE base
     let name := s!"%through{id}"
@@ -601,13 +597,13 @@ partial def nameBorrowsE (e : ExprId) : StateT (Array StmtId) Build ExprId := do
     let path := steps.toList.filterMap b.bare?
     (pushExpr (.refField id (uniq == 1) name path true) : Build ExprId)
   | .call id f #[x] =>
-    match b.bare? f with
+    match b.mark? f with
     | some mark =>
       let x' ← nameBorrowsE x
-      if mark != borrowMark && mark != borrowMutMark then
+      if mark != .borrow && mark != .borrowMut then
         return ← if x' == x then pure e else (pushExpr (.call id f #[x']) : Build ExprId)
       let name := s!"borrowed%{id}"
-      let uniq := mark == borrowMutMark
+      let uniq := mark == .borrowMut
       let st ← (pushStmt (if uniq then .letMut name x' else .let_ (.var name) x') : Build StmtId)
       modify (·.push st)
       (pushExpr (.ref uniq name) : Build ExprId)
@@ -772,9 +768,9 @@ def Body.valueLike (b : Body) (e : ExprId) : Bool :=
   | .int _ => true
   | .name _ x => (lastSegment x).front.isUpper
   | .call _ f args =>
-    match b.bare? f, args.toList with
+    match b.mark? f, args.toList with
     | some mark, [_, ty] =>
-      mark != ascribeMark || (match TypeExpr.ofExpr (treeExpr b ty) with
+      mark != .ascribe || (match TypeExpr.ofExpr (treeExpr b ty) with
         | .ref _ _ _ => false
         | _ => true)
     | _, _ => true
@@ -834,7 +830,7 @@ def promoteRewrite : FRewrite where
       let isOf := fun (a : ExprId) =>
         match b.expr a with
         | .call _ m #[_, cl] =>
-          if b.bare? m == some isMark then
+          if b.mark? m == some .is_ then
             match b.expr cl with
             | .closure _ #[c] =>
               let ⟨ps, body⟩ := b.clause c

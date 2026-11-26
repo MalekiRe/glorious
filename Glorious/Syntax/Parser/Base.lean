@@ -230,6 +230,10 @@ def mkName (qual : Option String) (x : String) : P ExprId := mk (.name qual x)
 def callOf (id : Nat) (qual : Option String) (f : String) (args : Array ExprId) : P ExprId := do
   mk (.call id (← mkName qual f) args)
 
+/-- The call marked `m` of `args`, `%as(value, type)`. -/
+def markOf (id : Nat) (m : Syntax.Mark) (args : Array ExprId) : P ExprId := do
+  mk (.call id (← mk (.mark m)) args)
+
 /-- A value written out as a tree: a type among expressions, a scalar. -/
 def tree (e : Expr) : P ExprId := build (Flat.flatExpr e)
 
@@ -346,7 +350,7 @@ def fieldBorrow (id : Nat) (uniq : Bool) (root : FieldRoot) (path : List String)
   | .named x star => mk (.refField id uniq x path star)
   | .through base =>
     let steps ← mk (.tuple (← path.toArray.mapM (mkName none)))
-    callOf id none throughMark #[base, steps, ← mk (.int (if uniq then 1 else 0))]
+    markOf id .through #[base, steps, ← mk (.int (if uniq then 1 else 0))]
 
 /-- `&a[i]` and `&mut a[i]`: a reference to the element where it is, if `a`
 is a place: a variable, a field, what a reference points to, or an element
@@ -382,7 +386,7 @@ partial def hasThrough (b : Flat.Body) (e : ExprId) : Bool :=
   match b.expr e with
   | .call _ f args =>
     (match b.expr f with
-      | .name none g => g == throughMark
+      | .mark .through => true
       | _ => hasThrough b f) || args.any (hasThrough b)
   | _ => b.foldDirect (fun a x => a || hasThrough b x) false e
 
@@ -393,20 +397,23 @@ computed before the statement it is in. -/
 partial def hoistExpr (h : Hoist) (e : ExprId) : P Hoist := do
   match ← node e with
   | .call id f args =>
-    if let .name none g := ← node f then
-      if g == throughMark then
-        if let #[base, steps, uniq] := args then
-          if let (.tuple steps, .int uniq) := (← node steps, ← node uniq) then
-            let before := h.seen
-            let h ← hoistExpr { h with seen := false } base
-            let name := s!"%through{id}"
-            let path ← steps.toList.filterMapM fun s => do
-              match ← node s with
-              | .name none s => pure (some s)
-              | _ => pure none
-            modifyThe Flat.Body fun b => { b with exprs := b.exprs.set! e (.refField id (uniq == 1) name path true) }
-            return { h with lets := h.lets.push (name, base), seen := before, bad := h.bad || before }
-        return h
+    if let .mark .through := ← node f then
+      if let #[base, steps, uniq] := args then
+        if let (.tuple steps, .int uniq) := (← node steps, ← node uniq) then
+          let before := h.seen
+          let h ← hoistExpr { h with seen := false } base
+          let name := s!"%through{id}"
+          let path ← steps.toList.filterMapM fun s => do
+            match ← node s with
+            | .name none s => pure (some s)
+            | _ => pure none
+          modifyThe Flat.Body fun b => { b with exprs := b.exprs.set! e (.refField id (uniq == 1) name path true) }
+          return { h with lets := h.lets.push (name, base), seen := before, bad := h.bad || before }
+      return h
+    if let .mark _ := ← node f then
+      let h ← args.foldlM hoistExpr h
+      return { h with seen := true }
+    if let .name none _ := ← node f then
       let h ← args.foldlM hoistExpr h
       return { h with seen := true }
     -- (A function named through a path, `Vec::push`: naming it computes

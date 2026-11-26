@@ -275,7 +275,7 @@ structure ACtx where
 /-- What only computes: the machine's own operations and what builds a value. -/
 def intrinsics : Std.HashSet String :=
   Std.HashSet.ofList (Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1)
-    ++ ["cancel", "replace", "swap", "overwrite", "read_out", "transmute", "static_bytes", Syntax.foreignCall, Syntax.ctorIsMark, "%shapes", "%never"])
+    ++ ["cancel", "replace", "swap", "overwrite", "read_out", "transmute", "static_bytes", Syntax.foreignCall, "%shapes", "%never"])
 
 /-- Where a path that ends at a call of a `probe` is said to leave to. -/
 def probeTarget : String := "%probe"
@@ -626,7 +626,7 @@ partial def runList (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String ×
 
 partial def runExpr (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String × AVal)) (e : ExprId) : A Alts :=
   match b.expr e with
-  | .int _ => pure [(.unknown, 0)]
+  | .int _ | .mark _ => pure [(.unknown, 0)]
   | .name q x => do
     tick
     -- Naming the binding is not yet a use; calling it, taking it apart, or
@@ -827,13 +827,15 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String 
   | .label l =>
     -- Applying a label leaves for its scope.
     if ctx.lower then handedOn fun n => [(.gone ("@" ++ l), n)] else general
+  -- A value written with its type is the value: nothing is called.
+  | .mark .ascribe | .mark .inst | .mark .move =>
+    match args with
+    | value :: _ => runExpr ctx depth b env value
+    | [] => pure [(.unknown, 0)]
+  -- (Asking what a reference points to was built by only looks.)
+  | .mark .ctorIs => if ctx.lower then handedOn fun n => [(.unknown, n)] else general
   | .name q x =>
-    -- A value written with its type is the value: nothing is called.
-    if q.isNone && (x == Syntax.ascribeMark || x == Syntax.instMark || x == Syntax.moveMark) then
-      match args with
-      | value :: _ => runExpr ctx depth b env value
-      | [] => pure [(.unknown, 0)]
-    else if q.isNone && (env.lookup x).isSome then general
+    if q.isNone && (env.lookup x).isSome then general
     else if let some c := ctx.ctorOf x then
       let alts ← runList ctx depth b env args
       pure (alts.map fun (vs, n) =>
@@ -892,7 +894,7 @@ partial def runStmts (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String �
       let owning := match pat, b.expr value with
         | .var _, .closure _ _ => true
         | .var _, .call _ m #[c, _] =>
-          b.bare? m == some Syntax.ascribeMark && (match b.expr c with | .closure _ _ => true | _ => false)
+          b.mark? m == some .ascribe && (match b.expr c with | .closure _ _ => true | _ => false)
         | _, _ => false
       let found ← runExpr { ctx with owning := owning } depth b env value
       for (v, n) in found do
@@ -1013,6 +1015,7 @@ partial def stillExpr (b : Body) (quiet : String → Bool) (e : ExprId) : Bool :
   | .call _ f args =>
     match b.expr f with
     | .name _ g => quiet g && args.all (stillExpr b quiet)
+    | .mark .ctorIs => args.all (stillExpr b quiet)
     | _ => false
   | _ => false
 
@@ -1030,6 +1033,7 @@ partial def firstUse (b : Body) (quiet : String → Bool) (x : String) (e : Expr
   | .call _ f args | .tailCall _ f args =>
     firstParts b quiet x (match b.expr f with
       | .name _ g => quiet g
+      | .mark .ctorIs => true
       | _ => false) false (f :: args.toList)
   | .proj e _ => if isName b x e then some true else firstUse b quiet x e
   | .deref e => if isName b x e then none else firstUse b quiet x e

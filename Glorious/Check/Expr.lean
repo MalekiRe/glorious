@@ -367,6 +367,7 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
   let n ← node e0
   match n with
   | .int _ => pure .int
+  | .mark m => throw s!"`{m.shown}` is the compiler's mark of a call, not a value; this is a compiler defect"
   | .name _ x =>
     -- (A function that needs a trait of a type it is used at, named as a
     -- value: written where it is as a block that calls it, and read on,
@@ -713,12 +714,11 @@ partial def inferExprCall (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :=
     -- Whether what a reference points to was built by a constructor: the
     -- compiler's question where a pattern binds by reference. The reference
     -- is not used up, and nothing is read out of what it points to.
-    if let (some mark, some r) := (b.bare? f, args[0]?) then
-      if mark == Syntax.ctorIsMark then
-        let inner ← freshTy
-        unifyAt "a pattern that binds by reference" (.ref (← freshTy) inner (← freshCap))
-          (← inferPlace scope amb r)
-        return .int
+    if let (some .ctorIs, some r) := (b.mark? f, args[0]?) then
+      let inner ← freshTy
+      unifyAt "a pattern that binds by reference" (.ref (← freshTy) inner (← freshCap))
+        (← inferPlace scope amb r)
+      return .int
     -- What the clauses of such a callable ask of the values they are given,
     -- as patterns: these have to cover every case, and say what the types
     -- are. A value written `*r` is what the reference points to.
@@ -1878,21 +1878,20 @@ partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
     M (Option Ty) := do
   let b := (← get).body
   -- `let x: Type = value`: the value is made that type.
-  if let (some mark, #[operand]) := (b.bare? f, args) then
-    if mark == Syntax.moveMark then
-      -- `move x`: the value of `x`. That `x` is not used after is looked at
-      -- where its statement is.
-      match b.expr operand with
-      | .name none x =>
-        match scope.lookup x with
-        | some (.cell _ _) =>
-          throw s!"`move {x}`: `{x}` is a mutable variable, which holds a value while it is there; `replace({x}, value)` takes what it holds and leaves another"
-        | _ => return some (← inferExpr scope amb operand)
-      | .deref _ =>
-        throw "`move *reference` would leave the reference pointing at nothing until it is written again, and that is not followed: `replace(reference, value)` takes what is there and leaves another"
+  if let (some .move, #[operand]) := (b.mark? f, args) then
+    -- `move x`: the value of `x`. That `x` is not used after is looked at
+    -- where its statement is.
+    match b.expr operand with
+    | .name none x =>
+      match scope.lookup x with
+      | some (.cell _ _) =>
+        throw s!"`move {x}`: `{x}` is a mutable variable, which holds a value while it is there; `replace({x}, value)` takes what it holds and leaves another"
       | _ => return some (← inferExpr scope amb operand)
-  if let (some mark, #[value, ty]) := (b.bare? f, args) then
-    if mark == Syntax.instMark then
+    | .deref _ =>
+      throw "`move *reference` would leave the reference pointing at nothing until it is written again, and that is not followed: `replace(reference, value)` takes what is there and leaves another"
+    | _ => return some (← inferExpr scope amb operand)
+  if let (some mark, #[value, ty]) := (b.mark? f, args) then
+    if mark == .inst then
       -- `f<A, B>(..)`: the call, with the types written kept for when the
       -- function called is found.
       let tys ← match TypeExpr.ofExpr (Flat.treeExpr b ty) with
@@ -1906,7 +1905,7 @@ partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
         modify fun s => { s with instWith := none }
         throw "types are written, `f<A, B>(..)`, for a function of a module that has type parameters; what is called here is not one"
       return some t
-    if mark == Syntax.ascribeMark then
+    if mark == .ascribe then
       let expected ← resolveType (← get).rigidParams false (TypeExpr.ofExpr (Flat.treeExpr b ty))
       if ← textAt expected value then return some expected
       if let .int n := b.expr value then
@@ -2479,9 +2478,9 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
         throw (positioned line col s!"`{x}` is used after `move {x}` handed it on")
     onError (inferStmts scope amb (s :: rest) want) (positioned line col)
   | .expr e =>
-    match b.bare? e with
-    | some "%observed" => inferStmts scope amb rest want
-    | some "%unsafe" => do
+    match b.mark? e with
+    | some .observed => inferStmts scope amb rest want
+    | some .unsafe_ => do
       -- What follows in this block may name what is unsafe.
       let before := (← get).unsafeBlock
       modify fun s => { s with unsafeBlock := true }
@@ -2681,7 +2680,7 @@ partial def clauseGiven (body : List Flat.StmtId) (patterns : M Scope) (spared :
   -- (A clause that looks at a copy of what a reference points to owns none
   -- of it: nothing its patterns take is destroyed.)
   let observed := match body.head?.map fun s => b.stmt (b.unlocated s) with
-    | some (.expr e) => b.bare? e == some Syntax.observedMark
+    | some (.expr e) => b.mark? e == some .observed
     | _ => false
   modify fun s => { s with wildAt := if observed then none else some first, wildCount := 0 }
   let binds ← patterns

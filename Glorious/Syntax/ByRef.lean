@@ -177,7 +177,7 @@ def Flat.byReference [MonadStateOf Flat.Body m] (rn : RefNames m) (clauses : Arr
       else tests := tests.push p
     -- (Chosen by looking at a copy of what is pointed to: the copy is not
     -- the clause's, and what its patterns let go is not destroyed.)
-    let observed ← if byTest then pure #[] else pure #[← pushS (.expr (← push (.name none observedMark)))]
+    let observed ← if byTest then pure #[] else pure #[← pushS (.expr (← push (.mark .observed)))]
     inner := inner.push (← pushC ⟨tests.toList, observed ++ binds ++ body⟩)
   -- Asked of the cells, the clauses' tests are of numbers, which say nothing
   -- of whether every case is covered: the patterns as written say that, to
@@ -207,7 +207,7 @@ def Flat.byReference [MonadStateOf Flat.Body m] (rn : RefNames m) (clauses : Arr
     if !places.contains i then args := args.push (← push (.name none x))
     else if byTest then
       let tests ← ((asked.lookup i).getD []).mapM fun (path, ctor) =>
-        pushTree (.call 0 (.name none ctorIsMark)
+        pushTree (.call 0 (.mark .ctorIs)
           ([Expr.name none x] ++ path.map (fun (n : Nat) => Expr.int (n : Int)) ++ [ctor]))
       args := args.push (← push (.tuple tests.toArray))
     else args := args.push (← push (.deref (← push (.name none x))))

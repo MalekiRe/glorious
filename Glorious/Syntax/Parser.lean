@@ -23,7 +23,7 @@ private def defaultAliases (name : String) (params : List String)
 /-- A constant's value, `const NAME: T = value`: worked out at compile time,
 of that type (`constItems`), in a body of its own. -/
 private def constValue (ty : TypeExpr) : P (Flat.Body × Flat.ExprId) := valueOf do
-  let value ← callOf 0 none ascribeMark #[← parseBinary 0 false, ← tree ty.asExpr]
+  let value ← markOf 0 .ascribe #[← parseBinary 0 false, ← tree ty.asExpr]
   callOf 0 none comptimeMark #[value]
 
 /-- A function that takes nothing and gives the value written. -/
@@ -93,7 +93,7 @@ private partial def parseItem : P Item := do
     let (body, value) ← valueOf do
       let value ← parseBinary 0 false
       match ty with
-      | some ty => callOf 0 none ascribeMark #[value, ← tree ty.asExpr]
+      | some ty => markOf 0 .ascribe #[value, ← tree ty.asExpr]
       | none => pure value
     expectPunct ";"
     pure (.alias name body value)
@@ -852,7 +852,7 @@ private partial def writtenOut : Expr → Bool
   | .int _ => true
   | .name none x => (x.splitOn "::").getLastD x |>.front.isUpper
   | .tuple es => es.all writtenOut
-  | .call _ (.name none mark) [value, _] => mark == ascribeMark && writtenOut value
+  | .call _ (.mark .ascribe) [value, _] => writtenOut value
   | .call _ (.name q f) args =>
     (q == some "%prelude" || ((f.splitOn "::").getLastD f).front.isUpper || isScalar f) && args.all writtenOut
   | _ => false

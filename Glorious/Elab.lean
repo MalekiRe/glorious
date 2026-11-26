@@ -54,8 +54,8 @@ def borrowOf (b : Flat.Body) (e : Flat.ExprId) : Option (Bool × String) :=
   match b.expr e with
   | .ref uniq y => some (uniq, y)
   | .call _ f args =>
-    match b.bare? f, args[0]?.map b.expr with
-    | some mark, some (.ref uniq y) => if mark == Syntax.focusMark then some (uniq, y) else none
+    match b.mark? f, args[0]?.map b.expr with
+    | some .focus, some (.ref uniq y) => some (uniq, y)
     | _, _ => none
   | _ => none
 
@@ -272,16 +272,15 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
     | .int _ => throw "an integer has no fields"
   | .call id f args => do
     -- A value written with its type is the value: the type was the checker's.
-    if let (some mark, #[value, _]) := (b.bare? f, args) then
-      if mark == Syntax.ascribeMark || mark == Syntax.instMark then
-        return ← elabExpr scope tailPos value
-    if let (some mark, #[value]) := (b.bare? f, args) then
-      if mark == Syntax.moveMark then return ← elabExpr scope tailPos value
+    match b.mark? f, args with
+    | some .ascribe, #[value, _] | some .inst, #[value, _] | some .move, #[value] =>
+      return ← elabExpr scope tailPos value
     -- A callable with what destroys what it captured if it is let go.
-    if let (some mark, #[c, d]) := (b.bare? f, args) then
+    | some .destroyed, #[c, d] =>
       if let (.closure id clauses, .closure _ #[dc]) := (b.expr c, b.expr d) then
         let ⟨dps, destroy⟩ := b.clause dc
-        if mark == Syntax.destroyedMark && dps.isEmpty then return ← elabClosure scope clauses id destroy.toList
+        if dps.isEmpty then return ← elabClosure scope clauses id destroy.toList
+    | _, _ => pure ()
     let before := (← get).plain.length
     let r ← elabCall scope false f args
     -- The borrow a destruction passes is the compiler's, not the program's.
@@ -295,6 +294,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
     elabCall scope true f args
   | .closure id clauses => elabClosure scope clauses id
   | .handle subject arms => elabHandle scope tailPos subject arms
+  | .mark m => throw s!"`{m.shown}` is the compiler's mark of a call, not a value"
   | .labelScope l body => do
     let thunk ← elabClosure scope #[← epushC ⟨[.var (labelName l)], body⟩]
     if tailPos then
@@ -383,11 +383,11 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
   -- the checker's to read, and nothing to do.
   if b.bare? f == some "%shapes" then
     return ← emit (.let_ (.construct 0 []))
-  if let (some mark, r :: rest) := (b.bare? f, args.toList) then
+  if let (some mark, r :: rest) := (b.mark? f, args.toList) then
     let rest := rest.map b.expr
     -- A reference to a field of what a reference points to: the reference,
     -- one field further in at each step.
-    if mark == Syntax.focusMark then
+    if mark == .focus then
       let mut at_ ← elabExpr scope false r
       -- A step into one of a type's several constructors is followed by the
       -- constructor's name.
@@ -400,7 +400,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
             | none => throw s!"`{c}` is not a constructor"
           | _ => at_ ← emit (.mem .focus [at_, .int i])
       return at_
-    if mark == Syntax.ctorIsMark then
+    if mark == .ctorIs then
       let cell ← elabExpr scope false r
       let path := rest.dropLast.filterMap fun
         | .int n => some (Atom.int n)
@@ -612,12 +612,10 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Flat.StmtId → M 
       | _ => elabStmts scope tailPos sunk
     | [] => elabStmts scope tailPos sunk
   | .expr e => do
-    match b.bare? e, rest with
+    match b.mark? e, rest with
     -- Where `unsafe { .. }` begins: nothing to do.
-    | some "%unsafe", [] => emit (.let_ (.construct 0 []))
-    | some "%unsafe", rest => elabStmts scope tailPos rest
-    | some "%observed", [] => emit (.let_ (.construct 0 []))
-    | some "%observed", rest => elabStmts scope tailPos rest
+    | some .unsafe_, [] | some .observed, [] => emit (.let_ (.construct 0 []))
+    | some .unsafe_, rest | some .observed, rest => elabStmts scope tailPos rest
     | _, [] =>
       -- A borrow written in a statement can be a scope that lasts while the
       -- statement runs.
@@ -1456,7 +1454,7 @@ private partial def untraitExpr (tr : TraitInfo) (owner : String) (e : ExprId) :
         stmts := stmts.push (← pushStmt (.expr (← flatExpr h)))
       stmts := stmts.push (← pushStmt (.expr (← pushExpr (.tuple #[]))))
       let destroyer ← pushExpr (.closure 0 #[← pushClause ⟨[], stmts⟩])
-      pushExpr (.call 0 (← pushExpr (.name none Syntax.destroyedMark)) #[c, destroyer])
+      pushExpr (.call 0 (← pushExpr (.mark .destroyed)) #[c, destroyer])
   | n => do
     let n' ← n.mapIds (untraitExpr tr owner) (untraitClause tr owner)
       fun body => do pure (← untraitStmts tr owner (0, 0) body.toList).toArray
@@ -1836,12 +1834,12 @@ def unfieldRewrite (info : FieldInfo) : Flat.FRewrite where
                 -- (One `*` for each reference gone through.)
                 let stars := (c.toList.takeWhile (· == '*')).length
                 let rest := (c.drop stars).toString
-                let first := Expr.deref (.call 0 (.name none Syntax.focusMark) (acc.1 :: acc.2))
+                let first := Expr.deref (.call 0 (.mark .focus) (acc.1 :: acc.2))
                 ((List.range (stars - 1)).foldl (fun e _ => Expr.deref e) first,
                   stepOf n (if rest.isEmpty then none else some rest))
               else (acc.1, acc.2 ++ stepOf n (some c))
             | none => (acc.1, acc.2 ++ stepOf n none)) (base, [])
-        some (Flat.flatExpr (.call 0 (.name none Syntax.focusMark) (base :: steps)))
+        some (Flat.flatExpr (.call 0 (.mark .focus) (base :: steps)))
     | _ => none
 
 /-- What the checker found of fields, if anything. -/

@@ -101,10 +101,22 @@ def direct (b : Body) (e : ExprId) : Array ExprId :=
 /-- The body with each of its own clauses begun by `%unsafe`: what follows
 may name what is unsafe (`unsafe fn`). -/
 def unsafeBody (b : Body) : Body :=
-  let (e, b) := b.add (.name none unsafeMark)
+  let (e, b) := b.add (.mark .unsafe_)
   let s := b.stmts.size
   { b with stmts := b.stmts.push (.expr e),
            clauses := b.roots.foldl (fun cs c => cs.modify c fun ⟨pats, body⟩ => ⟨pats, #[s] ++ body⟩) b.clauses }
+
+/-- The mark an expression is, if it is one (`Syntax.Mark`). -/
+@[inline] def mark? (b : Body) (e : ExprId) : Option Mark :=
+  match b.expr e with
+  | .mark m => some m
+  | _ => none
+
+/-- Is the expression a call marked `m`, `%as(value, type)`? Its arguments. -/
+@[inline] def marked? (b : Body) (m : Mark) (e : ExprId) : Option (Array ExprId) :=
+  match b.expr e with
+  | .call _ f args => if b.mark? f == some m then some args else none
+  | _ => none
 
 /-- The name an expression is, if it is one. -/
 @[inline] def name? (b : Body) (e : ExprId) : Option (Option String × String) :=
@@ -188,6 +200,7 @@ partial def flatExpr : Expr → Build ExprId
   | .reborrow uniq e => do pushExpr (.reborrow uniq (← flatExpr e))
   | .refField id uniq x path star => pushExpr (.refField id uniq x path star)
   | .fieldOf id e x => do pushExpr (.fieldOf id (← flatExpr e) x)
+  | .mark m => pushExpr (.mark m)
 
 partial def flatStmt : Stmt → Build StmtId
   | .let_ p v => do pushStmt (.let_ p (← flatExpr v))
@@ -242,6 +255,7 @@ partial def treeExpr (b : Body) (e : ExprId) : Expr :=
   | .reborrow uniq e => .reborrow uniq (treeExpr b e)
   | .refField id uniq x path star => .refField id uniq x path star
   | .fieldOf id e x => .fieldOf id (treeExpr b e) x
+  | .mark m => .mark m
 
 partial def treeStmt (b : Body) (s : StmtId) : Stmt :=
   match b.stmt s with

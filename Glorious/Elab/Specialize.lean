@@ -274,15 +274,15 @@ partial def foldInt (fns : Std.HashMap String Flat.Body) (env : List (String × 
   | .int n => some n
   | .name none x => env.lookup x
   | .call _ fe args => do
-    let f ← b.bare? fe
     if fuel == 0 then none
     -- (A type written for a value, or for a function's parameters, says
     -- nothing of its number.)
-    if f == Syntax.ascribeMark || f == Syntax.instMark then
+    if b.mark? fe == some .ascribe || b.mark? fe == some .inst then
       match args[0]? with
       | some a => foldInt fns env (fuel - 1) b a
       | none => none
     else
+      let f ← b.bare? fe
       let vals ← args.toList.mapM (foldInt fns env (fuel - 1) b)
       let fits := fun (n : Int) =>
         if -9223372036854775808 ≤ n && n ≤ 9223372036854775807 then some n else none
@@ -312,12 +312,13 @@ def foldRewrite (known : Std.HashMap String Int) : Flat.FRewrite where
     | .call id fe args =>
       match b.bare? fe, args.toList with
       | some f, [] => known[f]?.map fun n => Flat.pushExpr (.int n)
-      | some mark, inner :: rest =>
+      | f, inner :: rest =>
+        if f.isNone && (b.mark? fe).isNone then none else
         match b.expr inner with
         | .call _ g #[] =>
           match b.bare? g >>= (known[·]?) with
           | some n =>
-            if mark == Syntax.instMark then some (Flat.pushExpr (.int n))
+            if b.mark? fe == some .inst then some (Flat.pushExpr (.int n))
             else some (do
               let v ← Flat.pushExpr (.int n)
               Flat.pushExpr (.call id fe (#[v] ++ rest.toArray)))
