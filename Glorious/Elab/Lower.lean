@@ -128,7 +128,7 @@ def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Exc
     let h := hash item
     match item with
     | .fn name .. => srcKeys := srcKeys.insert name h
-    | .impl _ trait head _ _ methods =>
+    | .impl { trait := trait, head := head, methods := methods, .. } =>
       srcKeys := srcKeys.insert (implDictName trait.spelled head) h
       for m in methods do
         if let .fn mname .. := m then srcKeys := srcKeys.insert (implFnName trait.spelled head mname) (mixHash h (hash mname))

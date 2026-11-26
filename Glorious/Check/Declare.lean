@@ -840,7 +840,7 @@ def declareTraits (items : List Item) : M Unit := do
           throw s!"trait `{name}` would need a type to have `{name}` to have it, through `{s}`"
       modify fun st => { st with supers := (name, supers) :: st.supers }
   for item in items do
-    if let .impl params tr head args context methods := item then
+    if let .impl { params := params, trait := tr, head := head, args := args, context := context, methods := methods, .. } := item then
       declareImpl params tr head args context methods
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each

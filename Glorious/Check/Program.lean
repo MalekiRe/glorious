@@ -620,7 +620,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
     -- program's, in the order its implementations are written. Where they
     -- do not line up, nothing kept is taken.)
     let written : List (Syntax.TraitKey × List Item) := items.filterMap fun
-      | .impl _ tr _ _ _ methods => some (tr, methods)
+      | .impl { trait := tr, methods := methods, .. } => some (tr, methods)
       | _ => none
     let ours := fun (st : St) => withImplBodies st before written
     let look := fun (k : UInt64) => (kept.lookup k).bind ours

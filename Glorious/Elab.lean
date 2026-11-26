@@ -1647,7 +1647,7 @@ inductive Untraited where
 /-- An item without traits (`Untraited`). -/
 def untraitItem (tr : TraitInfo) : Syntax.Item → List Untraited
   | (.trait _ _) => []
-  | .impl params trait head _ context methods =>
+  | .impl { params := params, trait := trait, head := head, context := context, methods := methods, .. } =>
     let own := methods.filterMap fun
       | .fn m _ annots ret b =>
         let name := implFnName trait.spelled head m
@@ -1718,8 +1718,8 @@ partial def eraseLifetimes (items : List Syntax.Item) : List Syntax.Item :=
     | (.trait name methods) =>
       (.trait name (methods.map fun (m, ps, r) =>
         (m, ps.map eraseLifetimesTy, r.map eraseLifetimesTy)))
-    | .impl ps tr head args context methods =>
-      .impl (params ps) tr head (params args) context (eraseLifetimes methods)
+    | .impl whole@{ params := ps, args := args, methods := methods, .. } =>
+      .impl { whole with params := (params ps), args := (params args), methods := (eraseLifetimes methods) }
     | item => item
 
 /-- The items with each declared type and effect as it was written, lifetimes
@@ -1880,7 +1880,7 @@ def collect (items : List Syntax.Item) :
       fns := fns.push (name, body)
     | .alias name b e => g := { g with aliases := g.aliases.insert name (Flat.treeExpr b e) }
     | .pub _ _ | .traitInfo .. | .module .. => pure ()
-    | .impl _ tr _ _ _ _ =>
+    | .impl { trait := tr, .. } =>
       throw s!"an implementation of `{tr}`: a program with traits is elaborated only after it is checked"
     | item =>
     match item with
@@ -1917,7 +1917,7 @@ def collect (items : List Syntax.Item) :
     | .import _ _ _ => pure ()
     | .trait name _ =>
       throw s!"trait `{name}`: a program with traits is elaborated only after it is checked"
-    | .impl _ tr _ _ _ _ =>
+    | .impl { trait := tr, .. } =>
       throw s!"an implementation of `{tr}`: a program with traits is elaborated only after it is checked"
   pure (g, fns.toList, names)
 

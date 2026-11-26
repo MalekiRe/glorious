@@ -425,7 +425,7 @@ private partial def parseItem : P Item := do
         Item.fn name ps (annots.map (·.map fix)) (ret.map fix)
           ((Flat.selfRewrite head (some (tr, Expr.type (.tuple [self])))).body (calledBody body))
       | other => other
-    pure (.impl params (.at tr 0 (trArgs.toList.map (substTypeExpr callable))) head args context.toList written)
+    pure (.impl { params := params, trait := (.at tr 0 (trArgs.toList.map (substTypeExpr callable))), head := head, args := args, context := context.toList, methods := written })
   | .ident "coerce" =>
     advance
     let name ← match ← peek with
@@ -666,7 +666,7 @@ private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
   if name == "fallback" then
     let items ← next
     return items.map fun
-      | .impl ps tr head args context methods => .impl (ps ++ [fallbackMark]) tr head args context methods
+      | .impl whole@{ params := ps, .. } => .impl { whole with params := (ps ++ [fallbackMark]) }
       | item => item
   let known := match name, arg with
     | "non_exhaustive", "" => true
@@ -930,7 +930,7 @@ private partial def parseItemGroup : P (List Item) := do
     -- `unsafe trait`: one whose implementations promise more than the
     -- checker sees; `unsafe impl` is the promise.
     | items@(.trait name _ :: _) => pure (items ++ [.fieldNames (attrMark "unsafe_trait") [name] []])
-    | items@(.impl _ tr head _ _ _ :: _) =>
+    | items@(.impl { trait := tr, head := head, .. } :: _) =>
       pure (items ++ [.fieldNames (attrMark "unsafe_impl") [tr.base, head] []])
     | _ => failAt "`unsafe` is written before `fn`, `trait` or `impl`, or before a block"
   | .ident "extern" =>
@@ -1710,7 +1710,7 @@ def reflectionsOf (fix : Fixities) (items : List Item) (base : Nat) (records : L
   let fix := if tables.isEmpty then fix else ((tables.lookup path).getD fix)
   let (gitems, ⟨_, glocal, _⟩) ← parseItems { toks := gtoks, fix, records, base, tables, path, fixed } ⟨0, #[], {}⟩
   pure ((gitems ++ glocal.toList).map fun
-    | .impl ps tr h args ctx ms => Item.impl ps tr h args ctx (ms ++ [.typeAlias askedOnlyName [] (.tuple [])])
+    | .impl whole@{ methods := ms, .. } => Item.impl { whole with methods := (ms ++ [.typeAlias askedOnlyName [] (.tuple [])]) }
     | other => other)
 
 /-- Parse a source text, given the fixities already in scope. Returns the items

@@ -335,7 +335,7 @@ def Item.aliasOf (name : String) (value : Expr) : Item :=
 without its clauses (whose bodies `Item.bodies` gives). -/
 partial def Item.declared : Item → Item
   | .fn n ps annots ret _ => .fn n ps annots ret {}
-  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map Item.declared)
+  | .impl whole@{ methods := ms, .. } => .impl { whole with methods := (ms.map Item.declared) }
   | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map Item.declared) ps assocs
   | .module n body => .module n (body.map (·.map Item.declared))
   | .pub parent item => .pub parent item.declared
@@ -345,7 +345,7 @@ partial def Item.declared : Item → Item
 partial def Item.allBodies : Item → List Body
   | .fn _ _ _ _ b => [b]
   | .alias _ b _ => [b]
-  | .impl _ _ _ _ _ ms => ms.flatMap Item.allBodies
+  | .impl { methods := ms, .. } => ms.flatMap Item.allBodies
   | .traitInfo _ _ ds _ _ => ds.flatMap Item.allBodies
   | .module _ (some body) => body.flatMap Item.allBodies
   | .pub _ item => item.allBodies
@@ -355,7 +355,7 @@ partial def Item.allBodies : Item → List Body
 checked by: its own, or an implementation's (`implFnName`). -/
 partial def Item.bodies : Item → List (String × Body)
   | .fn n _ _ _ b => [(n, b)]
-  | .impl _ tr head _ _ ms => ms.filterMap fun
+  | .impl { trait := tr, head := head, methods := ms, .. } => ms.filterMap fun
     | .fn m _ _ _ b => some (implFnName tr.spelled head m, b)
     | _ => none
   | .pub _ item => item.bodies
@@ -365,7 +365,7 @@ partial def Item.bodies : Item → List (String × Body)
 implementations, traits' defaults and modules too. -/
 partial def Item.mapBodies (f : Body → Body) : Item → Item
   | .fn n ps annots ret b => .fn n ps annots ret (f b)
-  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map (·.mapBodies f))
+  | .impl whole@{ methods := ms, .. } => .impl { whole with methods := (ms.map (·.mapBodies f)) }
   | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map (·.mapBodies f)) ps assocs
   | .module n (some body) => .module n (some (body.map (·.mapBodies f)))
   | .pub parent item => .pub parent (item.mapBodies f)
@@ -375,7 +375,7 @@ partial def Item.mapBodies (f : Body → Body) : Item → Item
 too. -/
 partial def Item.compact : Item → Item
   | .alias n b e => let (e, nb) := (compactExpr b e).run {}; .alias n nb e
-  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map Item.compact)
+  | .impl whole@{ methods := ms, .. } => .impl { whole with methods := (ms.map Item.compact) }
   | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map Item.compact) ps assocs
   | .module n (some body) => .module n (some (body.map Item.compact))
   | .pub parent item => .pub parent item.compact

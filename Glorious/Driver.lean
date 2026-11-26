@@ -151,7 +151,7 @@ def namesInBody (acc : List String) (b : Syntax.Flat.Body) : List String :=
 /-- The names written in an item that is not one of the library's functions. -/
 partial def namesInItem (acc : List String) : Syntax.Item → List String
   | .fn _ _ _ _ b => namesInBody acc b
-  | .impl _ _ _ _ _ methods => methods.foldl namesInItem acc
+  | .impl { methods := methods, .. } => methods.foldl namesInItem acc
   | .traitInfo _ _ defaults _ _ => defaults.foldl namesInItem acc
   | .alias _ b _ => namesInBody acc b
   | (.coerce name) => name :: acc
@@ -375,12 +375,12 @@ partial def checkUnsafeImpls (items : List Syntax.Item) : Except String Unit := 
       if mark == Syntax.attrMark "negative_impl" then some (last tr, last head) else none
     | _ => none
   for item in all do
-    if let .impl _ tr head _ _ _ := item then
+    if let .impl { trait := tr, head := head, .. } := item then
       let tr := tr.base
       if denied.contains (last tr, last head) then
         throw s!"`{last head}` is said not to have `{last tr}` (`impl !{last tr} for {last head}`), and an implementation says it does"
   for item in all do
-    if let .impl _ tr head _ _ _ := item then
+    if let .impl { trait := tr, head := head, .. } := item then
       let tr := tr.base
       let said := promised.contains (last tr, last head)
       if traits.contains (last tr) && !said then
@@ -752,7 +752,7 @@ partial def hasDrop : List Syntax.Item → Bool
   | [] => false
   | .pub _ i :: rest => hasDrop (i :: rest)
   | .module _ (some body) :: rest => hasDrop body || hasDrop rest
-  | .impl _ tr _ _ _ _ :: rest => Syntax.lastSegment tr.base == "Drop" || hasDrop rest
+  | .impl { trait := tr, .. } :: rest => Syntax.lastSegment tr.base == "Drop" || hasDrop rest
   | _ :: rest => hasDrop rest
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/

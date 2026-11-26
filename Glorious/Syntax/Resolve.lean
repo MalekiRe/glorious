@@ -108,7 +108,7 @@ partial def givesReference : List Item → List String
       | .performs (.ref ..) _ => true
       | _ => false
     if gives then name :: givesReference rest else givesReference rest
-  | .impl _ _ _ _ _ methods :: rest => givesReference methods ++ givesReference rest
+  | .impl { methods := methods, .. } :: rest => givesReference methods ++ givesReference rest
   | .trait _ methods :: rest =>
     methods.filterMap (fun (m, _, r) => match r with
       | some (.ref ..) | some (.performs (.ref ..) _) => some m
@@ -653,7 +653,7 @@ partial def promoteItem : Item → Item
     .fn name ps annots ret { b with roots }
   | .pub parent item => .pub parent (promoteItem item)
   | .module name (some inner) => .module name (some (inner.map promoteItem))
-  | .impl ps tr head args context methods => .impl ps tr head args context (methods.map promoteItem)
+  | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map promoteItem) }
   | item => item
 
 /-- Every item made so (`promoteItem`), each as an earlier compile made it
@@ -700,7 +700,7 @@ partial def borrowReceivers (items : List Item) (memo : FrontMemo := {}) : List 
         let c' ← nameBorrowsClause (← receiverClause taken (refs.map (·, 3)) values c)
         if promote && borrows then promoteFnClause annots c' else pure c' : Build ClauseId)).run b
       .fn name ps annots ret { b with roots }
-    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map (go promote))
+    | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map (go promote)) }
     | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map (go false)) params assocs
     | .alias name b value =>
       let (value, b) := (receiverExpr taken [] value).run b
@@ -752,7 +752,7 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
         newArgs := newArgs.push name
         fresh := fresh.push name
         fixed := fixed.push ((.typeAlias (fixedArgName j) [] (← ty (.name a []))))
-    pure (Item.impl (ps ++ fresh.toList) tr head newArgs.toList context (methods ++ fixed.toList))
+    pure (Item.impl { params := (ps ++ fresh.toList), trait := tr, head := head, args := newArgs.toList, context := context, methods := (methods ++ fixed.toList) })
   let rec item : Item → Except String Item
     -- (What is said of a type parameter: `F: Fn<(Int,), Output = Bool>`.)
     | .bounds f bs => do
@@ -770,7 +770,7 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
     | (.trait name methods) => do
       pure ((.trait name (← methods.mapM fun (m, ps, r) => do
         pure (m, ← ps.mapM ty, ← r.mapM ty))))
-    | .impl ps tr head args context methods => do
+    | .impl { params := ps, trait := tr, head := head, args := args, context := context, methods := methods, .. } => do
       let tr := TraitKey.at tr.base tr.nth (← tr.written.mapM ty)
       let context ← context.mapM (·.mapTypesM ty)
       let methods ← methods.mapM fun
@@ -883,12 +883,12 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
   -- (A type whose `Layout` is written out by hand has that one: `[T; N]`'s.)
   let ownLayout : Std.HashSet String := all.foldl (init := {}) fun s item =>
     match item with
-    | .impl _ tr h _ _ _ => if tr == .of layoutTrait then s.insert h else s
+    | .impl { trait := tr, head := h, .. } => if tr == .of layoutTrait then s.insert h else s
     | _ => s
   -- (And one whose `Repr` is: none is written for it.)
   let ownRepr : Std.HashSet String := all.foldl (init := {}) fun s item =>
     match item with
-    | .impl _ tr h _ _ _ => if tr == .of reprTrait then s.insert h else s
+    | .impl { trait := tr, head := h, .. } => if tr == .of reprTrait then s.insert h else s
     | _ => s
   -- (Each declared type's constructors, by name, with their fields.)
   let ctorsOf : Std.HashMap String (List String × List (Option String × List TypeExpr)) := all.foldl (init := {}) fun m item =>
@@ -929,14 +929,14 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
           | _ => false
         let nothing := fun (f : TypeExpr) => isParam f || (staticLayout fieldsOf [head] f).any (·.1 == 0)
         let dropped := all.any fun
-          | .impl _ tr h _ _ _ => lastSegment tr.base == "Drop" && h == head
+          | .impl { trait := tr, head := h, .. } => lastSegment tr.base == "Drop" && h == head
           | _ => false
         if hasNil && !dropped && fs.all nothing then
           let m := hps.zip fresh
           let asked := (fs.filterMap fun f => match f with
             | .name x [] => m.lookup x
             | _ => none).eraseDups
-          [Item.impl fresh (.of nilTrait) head fresh (asked.map (Cond.of · nilTrait)) []]
+          [Item.impl { params := fresh, trait := (.of nilTrait), head := head, args := fresh, context := (asked.map (Cond.of · nilTrait)), methods := [] }]
         else []
       | _ => []
     -- (`Repr`, of a declared type or a tuple, its fields written where
@@ -950,14 +950,11 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
     let reprs : List Item := match (ctors.filter fun _ => !ownRepr.contains head).filter (·.all fun (_, fs) => fs.all (plainType fieldsOf [head])) with
       | some cs =>
         let (store, load) := reprOf cs (8000000000000000 + 100000 * count)
-        [Item.impl fresh (.of reprTrait) head fresh ((fresh.filter (!·.startsWith "'")).flatMap fun p => [Cond.of p reprTrait, Cond.of p layoutTrait])
-          [store, load, .typeAlias askedOnlyName [] (.tuple [])]]
+        [Item.impl { params := fresh, trait := (.of reprTrait), head := head, args := fresh, context := ((fresh.filter (!·.startsWith "'")).flatMap fun p => [Cond.of p reprTrait, Cond.of p layoutTrait]), methods := [store, load, .typeAlias askedOnlyName [] (.tuple [])] }]
       | none => []
     if ownLayout.contains head then nils ++ reprs else
-    (nils ++ reprs ++ [Item.impl fresh (.of layoutTrait) head fresh ((fresh.filter (!·.startsWith "'")).map (Cond.of · layoutTrait))
-      -- (Checked only where something asks it: `askedOnlyName`.)
-      [Item.fnOf sizeName [] [] (some int) [.mk [] [.expr sizeE]], Item.fnOf alignName [] [] (some int) [.mk [] [.expr alignE]],
-       .typeAlias askedOnlyName [] (.tuple [])]])
+    (nils ++ reprs ++ [Item.impl { params := fresh, trait := (.of layoutTrait), head := head, args := fresh, context := ((fresh.filter (!·.startsWith "'")).map (Cond.of · layoutTrait)), methods := [Item.fnOf sizeName [] [] (some int) [.mk [] [.expr sizeE]], Item.fnOf alignName [] [] (some int) [.mk [] [.expr alignE]],
+       .typeAlias askedOnlyName [] (.tuple [])] }])
   -- (After what is written out beside a declaration, `fieldNames`.)
   let rec beside : List Item → List Item × List Item
     | ((.fieldNames m ns ps)) :: rest =>
@@ -968,7 +965,7 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
   -- (Each type's made from where it is among them, the type, and what the
   -- types declared are.)
   let dropped := all.filterMap fun
-    | .impl _ tr h _ _ _ => if lastSegment tr.base == "Drop" then some h else none
+    | .impl { trait := tr, head := h, .. } => if lastSegment tr.base == "Drop" then some h else none
     | _ => none
   let ctx := mixHash (hash "layouts") (hash (unorderedHash fieldsOf, hasNil, sizeName, alignName, dropped))
   let implKept := fun (memo : FrontMemo) (count : Nat) (h : String) (ps : List String) =>
@@ -1020,11 +1017,11 @@ asks more of the type is the one for those (as for any two). In each copy
 copies'. The copies come after everything else. -/
 def expandBlankets (items : List Item) : List Item := Id.run do
   let blankets := items.filterMap fun
-    | .impl ps tr head [t] ctx ms => if head == blanketHead then some (ps, tr, t, ctx, ms) else none
+    | .impl { params := ps, trait := tr, head := head, args := [t], context := ctx, methods := ms, .. } => if head == blanketHead then some (ps, tr, t, ctx, ms) else none
     | _ => none
   if blankets.isEmpty then return items
   let rest := items.filter fun
-    | .impl _ _ head _ _ _ => head != blanketHead
+    | .impl { head := head, .. } => head != blanketHead
     | _ => true
   let declared : List (String × List String) := rest.filterMap fun
     | (.struct n ps _) | .pub _ ((.struct n ps _)) | (.enum n ps _)
@@ -1035,7 +1032,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
   -- (Which trait each implementation is of, at which arguments, for which
   -- head.)
   let implOf : Item → Option (String × String × List String) := fun
-    | .impl _ tr head _ _ _ => some (tr.base, head, tr.written.map (·.spell))
+    | .impl { trait := tr, head := head, .. } => some (tr.base, head, tr.written.map (·.spell))
     | _ => none
   let mut known : Std.HashSet (String × String × List String) := .ofList (rest.filterMap implOf)
   -- (Which traits each head has some implementation of.)
@@ -1101,8 +1098,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
             .fn m fps (annots.map (·.map (substTypeExpr [(t, self)]))) (ret.map (substTypeExpr [(t, self)]))
               (named.body ((shiftRewrite shift).body b))
           | item => item
-        out := out.push (.impl (fresh ++ ps.filter (· != t)) (tr.mapWritten (substTypeExpr [(t, self)])) h fresh ctx'
-          (ms' ++ [(.typeAlias (blanketName t) [] self)]))
+        out := out.push (.impl { params := (fresh ++ ps.filter (· != t)), trait := (tr.mapWritten (substTypeExpr [(t, self)])), head := h, args := fresh, context := ctx', methods := (ms' ++ [(.typeAlias (blanketName t) [] self)]) })
         known := known.insert (tr.base, h, mine)
         has := has.insert (tr.base, h)
         byBlanket := byBlanket.insert (tr.base, h, mine) (givers ++ [b])
@@ -1138,12 +1134,12 @@ def traitArgDefaults (items : List Item) : List Item := Id.run do
     | .bounds f bs => .bounds f (bs.map fun b => { b with args := fill b.trait (.name b.subject []) b.args })
     | .pub parent i => .pub parent (go i)
     | .module name (some inner) => .module name (some (inner.map go))
-    | .impl ps tr head args context methods =>
+    | .impl whole@{ trait := tr, head := head, args := args, context := context, .. } =>
       let filled := fill tr.base (selfOf head args) tr.written
       -- (What it asks of its type parameters, `where T: Add`, the same.)
       let context := context.map fun (c : Cond) =>
         { c with trait := .at c.trait.base c.trait.nth (fill c.trait.base (.name c.subject []) c.trait.written) }
-      .impl ps (.at tr.base tr.nth filled) head args context methods
+      .impl { whole with trait := (.at tr.base tr.nth filled), context }
     | item => item
   pure (items.map go)
 
@@ -1169,7 +1165,7 @@ def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
   let defaultKeys : Std.HashMap String UInt64 := defaults.foldl (fun m (n, fns) => m.insertIfNew n (hash fns)) {}
   let (_, out, memo) := Trace.timed "fill: defaults" fun _ => items.zipIdx.foldl (init := (({} : Std.HashMap (String × String × List String) Nat), #[], memo))
     fun (seen, out, memo) (item, index) => match item with
-    | .impl ps tr head args context methods =>
+    | .impl { params := ps, trait := tr, head := head, args := args, context := context, methods := methods, .. } =>
       let targs := tr.written
       let given := targs.map (·.spell)
       let before := seen.getD (tr.base, head, given) 0
@@ -1209,7 +1205,7 @@ def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
                 | .ok b => b
                 | .error _ => b)
           | item => item
-        [.impl ps (TraitKey.at tr.base before targs) head args context all]
+        [.impl { params := ps, trait := (TraitKey.at tr.base before targs), head := head, args := args, context := context, methods := all }]
       (seen.insert (tr.base, head, given) (before + 1), out ++ made.toArray, memo)
     | item => (seen, out.push item, memo)
   (out.toList, memo)

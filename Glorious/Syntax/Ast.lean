@@ -960,6 +960,19 @@ def Cond.mapTypesM {m : Type → Type} [Monad m] (c : Cond) (f : TypeExpr → m 
   pure { c with subjectTy := ← c.subjectTy.mapM f, trait := .at c.trait.base c.trait.nth (← c.trait.written.mapM f),
                 equal := ← c.equal.mapM fun (n, t) => do pure (n, ← f t) }
 
+/-- `impl<params> Trait<..> for Head<args> where context { methods }`: the
+trait's functions for every type made with `head`, on the conditions in
+`context`. (`α` is `Item`: what it gives.) -/
+structure ImplOf (α : Type) where
+  params : List String
+  /-- The trait, at the arguments the implementation gives it. -/
+  trait : TraitKey
+  head : String
+  args : List String
+  context : List Cond
+  methods : List α
+  deriving Hashable
+
 inductive Item where
   /-- An enum: its type parameters and its constructors with their fields. -/
   | enum (name : String) (params : List String) (ctors : List (String × List TypeExpr))
@@ -984,8 +997,7 @@ inductive Item where
   /-- `impl<T, ...> Trait for Head<T, ...> where T: Other, ... { fn ... }`: the
   trait's functions for every type made with `Head`, on the conditions after
   `where`, each a type parameter and a trait it must have. -/
-  | impl (params : List String) (trait : TraitKey) (head : String) (args : List String)
-      (context : List Cond) (methods : List Item)
+  | impl (i : ImplOf Item)
   /-- `impl Use<[lower, upper]> for Head {}`: how often a value of a declared
   type is to be used; no upper bound is `infinity`. -/
   | use (head : String) (lower : Nat) (upper : Option Nat)

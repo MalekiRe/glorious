@@ -522,7 +522,7 @@ def splitFieldItems (all items : List Syntax.Item) : List Syntax.Item :=
     | .pub _ inner => inner
     | other => other
   let dropped := all.filterMap fun item => match unwrap item with
-    | .impl _ tr head _ _ _ => if tr == .of "Drop" then some head else none
+    | .impl { trait := tr, head := head, .. } => if tr == .of "Drop" then some head else none
     | _ => none
   let structs : Structs := all.filterMap fun item => match unwrap item with
     | (.fieldNames ctor names _) => if dropped.contains ctor then none else some (ctor, names)
@@ -535,9 +535,9 @@ def splitFieldItems (all items : List Syntax.Item) : List Syntax.Item :=
     if b.exprs.any borrowed then (splitFieldsRewrite structs).body b else b
   items.map fun
     | .fn name ps annots ret b => .fn name ps annots ret (split b)
-    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map fun
+    | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map fun
         | .fn m mps annots ret b => .fn m mps annots ret (split b)
-        | item => item)
+        | item => item) }
     | item => item
 
 /-! ## What the checker decided, written into a flat body -/
@@ -621,9 +621,9 @@ def decideBody (d : Decision) (name : String) (b : Flat.Body) : Flat.Body :=
 under the name it is checked by. -/
 partial def Item.decide (f : String → List (Option TypeExpr) → Flat.Body → Flat.Body) : Syntax.Item → Syntax.Item
   | .fn name ps annots ret b => .fn name ps annots ret (f name annots b)
-  | .impl ps tr head args ctx methods => .impl ps tr head args ctx (methods.map fun
+  | .impl whole@{ trait := tr, head := head, methods := methods, .. } => .impl { whole with methods := (methods.map fun
     | .fn m mps annots ret b => .fn m mps annots ret (f (implFnName tr.spelled head m) annots b)
-    | item => Item.decide f item)
+    | item => Item.decide f item) }
   | .traitInfo n supers defaults ps assocs => .traitInfo n supers (defaults.map fun
     | .fn m mps annots ret b => .fn m mps annots ret (f "" annots b)
     | item => item) ps assocs
@@ -676,7 +676,7 @@ def Decided.body (d : Decided) (b : Flat.Body) : Bool :=
 /-- Does an item have something in it the checker decided of? -/
 partial def Decided.item (d : Decided) : Syntax.Item → Bool
   | .fn name _ _ _ b => d.owners.contains name || d.body b
-  | .impl _ tr head _ _ methods => methods.any fun
+  | .impl { trait := tr, head := head, methods := methods, .. } => methods.any fun
     | .fn m _ _ _ b => d.owners.contains (implFnName tr.spelled head m) || d.body b
     | item => d.item item
   | .traitInfo _ _ defaults _ _ => defaults.any d.item
