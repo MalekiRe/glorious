@@ -152,6 +152,7 @@ partial def tyHoldsLoan (loan : Nat) (t : Ty) (suspended : Bool := false)
         if r' == v then
           if ← lives.anyM (capHoldsLoan loan · suspended plain) then return true
     pure false
+  | .rigid _ => pure false
   | .con _ args | .tuple args => args.anyM (tyHoldsLoan loan · suspended plain)
   | .fn _ _ _ _ cap => capHoldsLoan loan cap suspended plain
   | .ref _ t cap => do
@@ -508,7 +509,7 @@ partial def refCaps : Ty → List Nat
   | .ref _ inner cap => cap :: refCaps inner
   | .fn ps r _ _ cap => cap :: (ps.flatMap refCaps ++ refCaps r)
   | .con _ args | .tuple args => args.flatMap refCaps
-  | .var _ => []
+  | .var _ | .rigid _ => []
 
 /-- A function's type with the lifetimes of its parameters and result each
 anew, and what each captured captured by the new one too: the type of a call
@@ -526,6 +527,7 @@ partial def freshSigCaps (t : Ty) : M Ty := do
   let rec go (t : Ty) : StateT (List (Nat × Nat)) M Ty := do
     match ← (find t : M Ty) with
     | .var id => pure (.var id)
+    | .rigid r => pure (.rigid r)
     | .con n args => pure (.con n (← args.mapM go))
     | .tuple args => pure (.tuple (← args.mapM go))
     -- (A callable's own capture stays what it is: what it may do, jump to
@@ -1013,6 +1015,7 @@ where
   /-- Where a type mentions type variables and capture variables, and how. -/
   occurrences (s : St) (pos : Variance) : Ty → List ((Bool × Nat) × Variance)
     | .var id => [((false, id), pos)]
+    | .rigid _ => []
     | .tuple ts => ts.flatMap (occurrences s pos)
     | .ref how inner cap =>
       ((true, cap), pos) :: (match how with

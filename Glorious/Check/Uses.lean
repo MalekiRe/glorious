@@ -90,6 +90,7 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty)
 /-- Does a type mention a type parameter the function being checked wrote?
 What such a type is, is known only where the function is used. -/
 partial def hasParam : Ty → Bool
+  | .rigid _ => true
   | .con n [] => n.startsWith "'" && n.length > 1
   | .con _ args => args.any hasParam
   | .tuple args => args.any hasParam
@@ -107,6 +108,7 @@ def borrowsOnlyStatic (t : Ty) : M Bool := do
 
 /-- The type parameters a type mentions (`hasParam`'s). -/
 partial def paramNames : Ty → List String
+  | .rigid r => [r.spelled]
   | .con n [] => if n.startsWith "'" && n.length > 1 then [n] else []
   | .con _ args => args.flatMap paramNames
   | .tuple args => args.flatMap paramNames
@@ -1309,7 +1311,7 @@ def usesEnv (arity : Nat) : AVal :=
 /-- Does a value of this type hold a callable that can jump to a label? -/
 partial def tyJumps (t : Ty) : M Bool := do
   match ← find t with
-  | .var _ => pure false
+  | .var _ | .rigid _ => pure false
   | .con _ args | .tuple args => args.anyM tyJumps
   | .ref _ inner _ => tyJumps inner
   | .fn ps r _ _ cap => do
@@ -1500,6 +1502,11 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     -- (Nor of a type said to be used any number of times, `impl Use<[0, *]>
     -- for Ptr<T>`, a handle: copied, it has nothing of its own to destroy.)
     let copied ← match ← find t with
+      | .rigid r =>
+        let named := match r with
+          | .param p _ => s.copyParams.contains p
+          | .cond .. => false
+        pure (named || (← usedAnyNumber r.spelled))
       | .con n [] => pure (n.startsWith "'" && s.copyParams.contains (((n.drop 1).takeWhile (· != '@')).toString) || (← usedAnyNumber n))
       | .con n _ => usedAnyNumber n
       | _ => pure false

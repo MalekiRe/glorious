@@ -294,6 +294,7 @@ partial def spellTy (t : Ty) (seen : List Nat := []) : M String := do
     match ← projectionOf (.var id) with
     | some p => spellTy p (id :: seen)
     | none => pure s!"?{id}"
+  | .rigid r => pure r.spelled
   | .con n [] => pure n
   | .con n args => do pure s!"{n}<{", ".intercalate (← args.mapM (spellTy · seen))}>"
   | .tuple args => do pure s!"({", ".intercalate (← args.mapM (spellTy · seen))})"
@@ -377,6 +378,7 @@ partial def keyTy (t : Ty) (seen : List Nat := []) : M TypeExpr := do
     match ← projectionOf (.var id) with
     | some p => keyTy p (id :: seen)
     | none => pure (.name s!"?{id}" [])
+  | .rigid r => pure (.name r.spelled [])
   | .con n args => do pure (.name n (← args.mapM (keyTy · seen)))
   | .tuple args => do pure (.tuple (← args.mapM (keyTy · seen)))
   | .fn ps r _ _ _ => do pure (.fn (← ps.mapM (keyTy · seen)) (← keyTy r seen))
@@ -415,6 +417,7 @@ def fitHead (im : ImplDecl) (hargs args : List Ty) (said : Option String := none
 /-- Whether a type has the variable in it. -/
 partial def mentionsVar (v : Nat) : Ty → Bool
   | .var w => w == v
+  | .rigid _ => false
   | .con _ args | .tuple args => args.any (mentionsVar v)
   | .ref _ t _ => mentionsVar v t
   | .fn ps r _ _ _ => ps.any (mentionsVar v) || mentionsVar v r
@@ -550,6 +553,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
     | _ => pure (subject, [])
   let (self, args) ← subjectOf tr subject
   let known ← match ← find self with
+    | .rigid _ => pure none
     | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))
     | other => headFor tr other
   let some (head, hargs) := known | return none
@@ -591,6 +595,7 @@ def settleAssocs : M Unit := do
         continue
     let (self, args) ← subjectOf tr subject
     let known ← match ← find self with
+      | .rigid _ => pure none
       | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))
       | other => headFor tr other
     let ground ← args.allM fun x => do pure (freeTys (← zonk x)).isEmpty
@@ -765,6 +770,7 @@ partial def tyHolds (brand : Nat) (t : Ty) : M Bool := do
         if r' == v then
           if ← lives.anyM (capHolds brand ·) then return true
     pure false
+  | .rigid _ => pure false
   | .con _ args | .tuple args => args.anyM (tyHolds brand)
   | .fn ps r effs tail cap => do
     if ← capHolds brand cap then return true
@@ -924,6 +930,7 @@ So a `&mut [T]` used twice is not a `T` used twice. -/
 partial def tyHoldsVar (visiting : List String) (id : Nat) (t : Ty) : M Bool := do
   match ← find t with
   | .var v => pure (v == id)
+  | .rigid _ => pure false
   | .tuple args => args.anyM (tyHoldsVar visiting id)
   | .fn _ _ _ _ _ | .ref _ _ _ => pure false
   -- (A `[T; 0]` holds no `T`.)

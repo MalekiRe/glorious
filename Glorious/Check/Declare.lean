@@ -351,6 +351,7 @@ def freshParams (names : List String) :
 function is given performs nothing its caller would have to handle. -/
 partial def closeRows : Ty → Ty
   | .var id => .var id
+  | .rigid r => .rigid r
   | .con n args => .con n (args.map closeRows)
   | .tuple args => .tuple (args.map closeRows)
   | .fn ps r _ _ cap => .fn (ps.map closeRows) (closeRows r) [] none cap
@@ -1027,7 +1028,7 @@ def declare (items : List Item) : M Unit := do
             | .fn ps r _ _ cap => cap :: (ps.flatMap callables ++ callables r)
             | .con _ args | .tuple args => args.flatMap callables
             | .ref _ t _ => callables t
-            | .var _ => []
+            | .var _ | .rigid _ => []
           for cap in sig.fields.flatMap callables do
             captures cap .once
             if must then captures cap .must

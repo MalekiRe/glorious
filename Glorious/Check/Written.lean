@@ -63,6 +63,11 @@ partial def writeTy (t : Ty) : StateT Names M String := do
       let n := nextName taken
       modify fun s => { s with tys := s.tys ++ [(v, n)] }
       pure n
+  | .rigid r =>
+    let p := bareName r.spelled
+    unless ((← get).tys.map (·.2)).contains p do
+      modify fun s => { s with tys := s.tys ++ [(0, p)] }
+    pure p
   | .con n [] =>
     if n.startsWith "'" then
       let p := bareName n

@@ -32,31 +32,32 @@ def rigidOwner (decls : List FnDecl) (d : FnDecl) : String :=
 generic in: a type nothing has decided, or one of the function's own type
 parameters. -/
 def keyOf (t : Ty) : M (Option Nat) := do
+  let numbered := fun (r : Rigid) => do
+    let s ← get
+    match s.rigidAt[r]? with
+    | some i => pure (some (2 * i + 1))
+    | none =>
+      let i := s.rigidKeys.size
+      modify fun s => { s with rigidKeys := s.rigidKeys.push r, rigidAt := s.rigidAt.insert r i }
+      pure (some (2 * i + 1))
   match ← find t with
   | .var id => pure (some (2 * id))
-  | .con n [] =>
-    if n.startsWith "'" then
-      let s ← get
-      match s.rigidAt[n]? with
-      | some i => pure (some (2 * i + 1))
-      | none =>
-        let i := s.rigidKeys.size
-        modify fun s => { s with rigidKeys := s.rigidKeys.push n, rigidAt := s.rigidAt.insert n i }
-        pure (some (2 * i + 1))
-    else pure none
+  | .rigid r => numbered r
+  -- (A lifetime's mark, `'`, as a type of its own.)
+  | .con n [] => if n.startsWith "'" then numbered (.param n "") else pure none
   | _ => pure none
 
 /-- The number a condition said in `owner` of a type made from type
 parameters is known by, `'%condition:owner:key:type`, kept also under
 `key:type` (`conditionKeys`). -/
 def conditionKey (owner : String) (key : Syntax.TraitKey) (t : Ty) : M (Option Nat) := do
-  let spelled ← spellTy t
-  let name := s!"'%condition:{owner}:{key}:{spelled}"
-  let known := (← get).rigidAt.contains name
-  let k ← keyOf (Ty.con name [])
+  let written ← keyTy t
+  let r := Rigid.cond owner key written
+  let known := (← get).rigidAt.contains r
+  let k ← keyOf (.rigid r)
   unless known do
-    if let some i := (← get).rigidAt[name]? then
-      modify fun s => { s with conditionsAt := s.conditionsAt.alter s!"{key}:{spelled}" fun
+    if let some i := (← get).rigidAt[r]? then
+      modify fun s => { s with conditionsAt := s.conditionsAt.alter (key, written) fun
         | some is => some (i :: is)
         | none => some [i] }
   pure k
@@ -74,19 +75,20 @@ partial def toSTy (t : Ty) : M Traits.STy := do
     | .tuple args => pure (.con s!"(tuple{args.length})" (← args.mapM toSTy))
     | .fn _ _ _ _ _ => pure (.con "(callable)" [])
     | .ref _ _ _ => pure (.con "(reference)" [])
+    | .rigid r => pure (.con r.spelled [])
     | .var _ => pure (.var 0)
 
 /-- The numbers under which a condition of an implementation on a type made
 from its type parameters, `where (A, (B, ())): Fetch<W>`, is known in the
 implementation's functions: one for each function it was said in. -/
 def conditionKeys (key : Syntax.TraitKey) (t : Ty) : M (List Nat) := do
-  let said := s!"{key}:{← spellTy (← zonk t)}"
+  let said := (key, ← keyTy (← zonk t))
   let found := (((← get).conditionsAt[said]?).getD []).reverse.map (2 * · + 1)
   if !found.isEmpty then return found
   -- (Of what a trait leaves to an implementation, not known here: the
   -- condition written of it, `where <H as Assoc>::Out: Act`.)
   let some p ← projectionOf t | return []
-  let said := s!"{key}:{← spellTy p}"
+  let said := (key, ← keyTy p)
   pure ((((← get).conditionsAt[said]?).getD []).reverse.map (2 * · + 1))
 
 
@@ -200,6 +202,7 @@ partial def fieldSTy (tvars places : List Nat) : Ty → Traits.STy
   | .tuple args => .con s!"(tuple{args.length})" (args.map (fieldSTy tvars places))
   | .fn _ _ _ _ _ => .con "(callable)" []
   | .ref _ _ _ => .con "(reference)" []
+  | .rigid r => .con r.spelled []
 
 /-- The types a value of this type directly holds. -/
 def partsOf (t : Ty) : M (List Ty) := do
@@ -443,8 +446,7 @@ partial def leavesFittingNow (pos : String) (key : Syntax.TraitKey) (t : Ty) (ar
   -- one made of none has none.)
   let t' ← zonk t
   if Ty.hasRigid t' then
-    let said := s!"'%condition:{owner}:{key}:{← spellTy t'}"
-    if let some i := (← get).rigidAt[said]? then return [(key, 2 * i + 1, t, args)]
+    if let some i := (← get).rigidAt[Rigid.cond owner key (← keyTy t')]? then return [(key, 2 * i + 1, t, args)]
   -- (What it was asked for, where it is a condition of another: said only
   -- where it is refused.)
   let missing : M (List (Syntax.TraitKey × Nat × Ty × List Ty)) := do
@@ -756,11 +758,11 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
       let im := ((← implsOfHead (im.trait.base) im.head).find? (·.dictFn == im.dictFn)).getD im
       -- An implementation says what it assumes.
       let plain ← im.context.mapM fun (tr, j) => do
-        let t := Ty.con s!"'{(im.params[j]?).getD ""}@{d.name}" []
+        let t := .rigid (.param ((im.params[j]?).getD "") d.name)
         pure (Syntax.TraitKey.of tr, ((← keyOf t).getD 0), t)
       -- Those kept apart: the trait at its arguments, of a type
       -- parameter, as this function names the implementation's.
-      let own := im.pvars.map fun (p, id) => (id, Ty.con s!"'{p}@{d.name}" [])
+      let own := im.pvars.map fun (p, id) => (id, Ty.rigid (.param p d.name))
       let apart ← im.extra.mapM fun (tr, cargs, subject) => do
         let t := subst own [] [] subject
         let key ← if cargs.isEmpty then pure (Syntax.TraitKey.of tr) else traitKey tr (cargs.map (subst own [] []))
@@ -775,12 +777,13 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
           pure (key, own.getD 0, t)
       for (key, _, t) in apart do
         if (← keyOf t).isNone then
-          compound := (d.name, key, ← spellTy t, Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" []) :: compound
+          compound := (d.name, key, ← spellTy t, Ty.rigid (.cond d.name key (← keyTy t))) :: compound
       pure (plain ++ apart)
     | none =>
       let inferred := leafs.toList.filter fun (_, _, k) =>
         match k with
         | .var id => scheme.tvars.contains id
+        | .rigid r => (seen.lookup r.spelled).isSome
         | .con n [] => (seen.lookup n).isSome
         | _ => false
       -- How each type parameter it is given values of is destroyed: by
@@ -800,7 +803,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
         -- its values are dropped: what the body does with one is not
         -- asked.)
         for p in (genericParams d.params).filter (!isLifetime ·) do
-          let t := Ty.con s!"'{p}@{rigidOwner decls d}" []
+          let t := Ty.rigid (.param p (rigidOwner decls d))
           if (seen.lookup s!"'{p}@{rigidOwner decls d}").isSome then
             let k := (← keyOf t).getD 0
             inferred := inferred ++ [(.of Syntax.destroyTrait, k, t)]
@@ -828,7 +831,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
         let mut written : List (Syntax.TraitKey × Nat × Ty) := []
         let mut fittedKeys : Array (Syntax.TraitKey × Nat) := #[]
         for (b, at_) in ordinary.zipIdx do
-          let t := Ty.con s!"'{b.subject}@{rigidOwner decls d}" []
+          let t := Ty.rigid (.param b.subject (rigidOwner decls d))
           if (seen.lookup s!"'{b.subject}@{rigidOwner decls d}").isSome then
             let k := (← keyOf t).getD 0
             -- The trait at the arguments written, if it takes some: this
@@ -845,7 +848,11 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
                 written := written ++ [(tr, k, t)]
         let blankets := (← get).blanketTraits
         for (tr, k, t) in inferred do
-          if let .con n [] := t then
+          let named := match t with
+            | .rigid r => some r.spelled
+            | .con n [] => some n
+            | _ => none
+          if let some n := named then
             -- (How a type parameter is destroyed is never written.)
             unless tr == Syntax.destroyKey || written.any (fun w => w.1 == tr && w.2.1 == k) do
               -- (A trait every type has that has what is written of this
@@ -880,6 +887,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
   let mut bounds : List (String × Ty) := []
   for (tr, _, k) in mine do
     let self := match k with
+      | .rigid r => (seen.lookup r.spelled).getD k
       | .con n [] => (seen.lookup n).getD k
       | k => k
     match keyed.find? (·.1 == tr) with
@@ -1164,7 +1172,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- looked for.)
   for d in decls do
     if let some (im, _) := d.impl then
-      let own := im.pvars.map fun (p, id) => (id, Ty.con s!"'{p}@{d.name}" [])
+      let own := im.pvars.map fun (p, id) => (id, Ty.rigid (.param p d.name))
       for (tr, cargs, subject) in im.extra do
         let t := subst own [] [] subject
         if (← keyOf t).isNone then
@@ -1340,8 +1348,12 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       dotOwnInstead b.call b.trait b.ty s!"{b.pos}`{b.trait}` is not implemented"
       for (tr, k, t) in ← leaves b.pos b.trait b.ty do
         unless givens.contains (tr, k) do
-          match t with
-          | .con n [] =>
+          let named := match t with
+            | .rigid r => some r.spelled
+            | .con n [] => some n
+            | _ => none
+          match named with
+          | some n =>
             let hint := if (decls.find? (·.name == b.owner)).any (·.impl.isSome) then
               s!": add `where {bareName n}: {tr}` to the implementation" else ""
             throw (inFunction b.owner

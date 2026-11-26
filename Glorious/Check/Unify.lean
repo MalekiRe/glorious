@@ -26,6 +26,7 @@ partial def apart (a b : Ty) : M Bool := do
   match ← find a, ← find b with
   | .var _, _ => pure false
   | _, .var _ => pure false
+  | .rigid r, .rigid s => pure (r != s)
   | .con n as, .con m bs =>
     if n != m || as.length != bs.length then pure true else anyApart as bs
   | .tuple as, .tuple bs => if as.length != bs.length then pure true else anyApart as bs
@@ -50,6 +51,7 @@ where
 partial def sameTy (a b : Ty) : M Bool := do
   match ← find a, ← find b with
   | .var i, .var j => pure (i == j)
+  | .rigid r, .rigid s => pure (r == s)
   | .con n as, .con m bs => if n != m || as.length != bs.length then pure false else all as bs
   | .tuple as, .tuple bs => if as.length != bs.length then pure false else all as bs
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
@@ -88,6 +90,7 @@ partial def unify (a b : Ty) : M Unit := do
   | .var i, .var j => if i == j then pure () else bindTy i b
   | .var i, _ => bindTy i b
   | _, .var j => bindTy j a
+  | .rigid r, .rigid s => if r == s then pure () else mismatch a b
   | .con n as, .con m bs =>
     if n == m && as.length == bs.length then unifyAll as bs else mismatch a b
   | .tuple as, .tuple bs => if as.length == bs.length then unifyAll as bs else mismatch a b

@@ -170,7 +170,7 @@ partial def capsOf : Ty → List Nat
   | .ref how t c => capsOf how ++ capsOf t ++ [c]
   | .fn ps r effs _ c => ps.flatMap capsOf ++ capsOf r ++ effs.flatMap (·.2.flatMap capsOf) ++ [c]
   | .con _ args | .tuple args => args.flatMap capsOf
-  | .var _ => []
+  | .var _ | .rigid _ => []
 
 /-- The lifetimes of the references a type is made of, outermost first. -/
 partial def refCapsOf : Ty → List Nat
@@ -275,7 +275,7 @@ def schemeWithin (body sig : Scheme) : Bool :=
     | .ref how t c => (c, capsOf t) :: implied how ++ implied t
     | .fn ps r _ _ _ => ps.flatMap implied ++ implied r
     | .con _ args | .tuple args => args.flatMap implied
-    | .var _ => []
+    | .var _ | .rigid _ => []
   let within := (implied sig.ty).filterMap fun (c, inner) =>
     (caps.idxOf? c).map fun k => (lifeAt k, inner.filterMap fun c' => (caps.idxOf? c').map lifeAt)
   let close := fun (h : List String) => h ++ h.flatMap fun x => ((within.lookup x).getD [])
@@ -327,6 +327,7 @@ def beyondSignature (name : String) (sig body : Scheme) : String :=
 /-- A type with its variables and captures numbered (to see where two differ). -/
 partial def showTyCaps : Ty → String
   | .var id => s!"?{id}"
+  | .rigid r => r.spelled
   | .con n args => if args.isEmpty then n else s!"{n}<{", ".intercalate (args.map showTyCaps)}>"
   | .tuple args => s!"({", ".intercalate (args.map showTyCaps)})"
   | .fn ps r _ _ cap => s!"fn^{cap}({", ".intercalate (ps.map showTyCaps)}) -> {showTyCaps r}"
@@ -972,6 +973,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
 /-- The declared types a type is made of. -/
 partial def namedIn : Ty → List String
   | .var _ => []
+  | .rigid r => [r.spelled]
   | .con name args => name :: args.flatMap namedIn
   | .tuple args => args.flatMap namedIn
   | .fn params ret effs _ _ =>

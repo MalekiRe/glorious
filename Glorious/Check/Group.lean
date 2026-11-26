@@ -231,7 +231,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
       -- (One an implementation's function writes is its trait's of
       -- the same name, which the trait's declaration makes its own.)
       if d.impl.isNone then lifetimes := (cap, p) :: lifetimes
-    else rigid := rigid ++ [(p, Ty.con s!"'{p}@{rigidOwner decls d}" [])]
+    else rigid := rigid ++ [(p, Ty.rigid (.param p (rigidOwner decls d)))]
   -- An implementation written for another name of its type: the
   -- arguments the name fixes are those types here, not parameters.
   if let some (im, _) := d.impl then

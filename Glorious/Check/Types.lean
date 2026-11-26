@@ -18,6 +18,24 @@ open Syntax
 
 /-! ## Types -/
 
+/-- A type the function being checked is generic in, known by what it is
+(not a name spelled for it): a type parameter, or a type made from them that
+a condition of an implementation is said of. -/
+inductive Rigid where
+  /-- The type parameter `name` of `owner` (`T` of `f`). -/
+  | param (name owner : String)
+  /-- A type made from `owner`'s type parameters that a condition of its
+  implementation is said of, `where (A, B): Apart`: the trait at its
+  arguments, and the type as written (`keyTy`). -/
+  | cond (owner : String) (key : Syntax.TraitKey) (ty : Syntax.TypeExpr)
+  deriving BEq, Hashable, Inhabited
+
+/-- The name it had when it was a named type, `'T@f`: what a type
+parameter's maps are still keyed by (`openParams`' `seen`). -/
+def Rigid.spelled : Rigid → String
+  | .param name owner => s!"'{name}@{owner}"
+  | .cond owner key ty => s!"'%condition:{owner}:{key}:{ty.spell}"
+
 inductive Ty where
   /-- A type not yet known. -/
   | var (id : Nat)
@@ -34,6 +52,8 @@ inductive Ty where
   and the borrow it comes from. `how` is `Ty.uniq` for `&mut`, `Ty.shared` for
   `&`, or a variable where a function works with either. -/
   | ref (how : Ty) (t : Ty) (cap : Nat)
+  /-- A type the function being checked is generic in (`Rigid`). -/
+  | rigid (r : Rigid)
 
 /-- A set of effects, possibly open. -/
 structure Row where
@@ -79,7 +99,7 @@ def Ty.parts : Ty → List Ty
   | .con _ args | .tuple args => args
   | .fn ps r effs _ _ => ps ++ [r] ++ effs.flatMap (·.2)
   | .ref how t _ => [how, t]
-  | .var _ => []
+  | .var _ | .rigid _ => []
 
 /-- Something a callable has captured: a label, by the brand of its scope, or a
 value of some type. -/
@@ -969,12 +989,13 @@ structure St where
   groupUses : Array GroupUse := #[]
   /-- A function's own type parameters that bounds were needed of, each with
   the number it has for `Traits.solve`. -/
-  rigidKeys : Store String := {}
-  /-- The number of each of `rigidKeys`, by its name. -/
-  rigidAt : Std.HashMap String Nat := {}
+  rigidKeys : Store Rigid := {}
+  /-- The number of each of `rigidKeys`. -/
+  rigidAt : Std.HashMap Rigid Nat := {}
   /-- The numbers of the conditions said of a type made from type parameters
-  (`'%condition:owner:key:type`), under `key:type`, of every owner. -/
-  conditionsAt : Std.HashMap String (List Nat) := {}
+  (`Rigid.cond`), by the trait at its arguments and the type, of every
+  owner. -/
+  conditionsAt : Std.HashMap (Syntax.TraitKey × Syntax.TypeExpr) (List Nat) := {}
   /-- Where the statement being checked starts. -/
   at_ : Nat × Nat := (0, 0)
   /-- Variables whose value is destroyed if its type turns out to have `Drop`:
@@ -1277,6 +1298,7 @@ partial def flattenRow (r : Row) : M Row := do
 /-- Two types written the same, once what is known of them is filled in. -/
 partial def Ty.same : Ty → Ty → Bool
   | .var i, .var j => i == j
+  | .rigid r, .rigid s => r == s
   | .con n as, .con m bs => n == m && as.length == bs.length && (as.zip bs).all fun (x, y) => x.same y
   | .tuple as, .tuple bs => as.length == bs.length && (as.zip bs).all fun (x, y) => x.same y
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
@@ -1294,6 +1316,7 @@ def Ty.head : Ty → Option (String × List Ty)
   | .fn ps r _ _ _ => some (s!"(fn{ps.length})", ps ++ [r])
   | .ref (.con "&mut" []) t _ => some ("(&mut)", [t])
   | .ref _ t _ => some ("(&)", [t])
+  | .rigid r => some (r.spelled, [])
   | .var _ => none
 
 /-- The head a type has as the implementations of a trait are for, and its
@@ -1354,6 +1377,7 @@ partial def Ty.fits (vars : List Nat) (pattern term : Ty) (found : List (Nat × 
     else match t with
       | .var w => if v == w then some found else none
       | _ => none
+  | .rigid r, .rigid s => if r == s then some found else none
   | .con n as, .con m bs => if n == m && as.length == bs.length then Ty.fitsAll vars as bs found else none
   | .tuple as, .tuple bs => if as.length == bs.length then Ty.fitsAll vars as bs found else none
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
@@ -1390,6 +1414,7 @@ partial def Ty.meets (a b : Ty) (found : List (Nat × Ty)) : Option (List (Nat �
   | .var v, .var w => if v == w then some found else some ((v, .var w) :: found)
   | .var v, t => some ((v, t) :: found)
   | t, .var w => some ((w, t) :: found)
+  | .rigid r, .rigid s => if r == s then some found else none
   | .con n as, .con m bs => if n == m && as.length == bs.length then Ty.meetAll as bs found else none
   | .tuple as, .tuple bs => if as.length == bs.length then Ty.meetAll as bs found else none
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
@@ -1408,7 +1433,7 @@ end
 /-- Is everything in a type known: no variable, and no type parameter of the
 function it is in? -/
 partial def Ty.ground : Ty → Bool
-  | .var _ => false
+  | .var _ | .rigid _ => false
   | .con n args => !n.startsWith "'" && args.all Ty.ground
   | .tuple args => args.all Ty.ground
   | .fn ps r _ _ _ => r.ground && ps.all Ty.ground
@@ -1420,6 +1445,7 @@ partial def Ty.rigidNames : Ty → List String
   | .con _ args | .tuple args => args.flatMap Ty.rigidNames
   | .fn ps r _ _ _ => (r :: ps).flatMap Ty.rigidNames
   | .ref h x _ => h.rigidNames ++ x.rigidNames
+  | .rigid r => [r.spelled]
   | .var _ => []
 
 /-- A type with each of those that `named` says a variable in its place. -/
@@ -1429,6 +1455,7 @@ partial def Ty.openRigids (named : List (String × Ty)) : Ty → Ty
   | .tuple args => .tuple (args.map (Ty.openRigids named))
   | .fn ps r effs tail cap => .fn (ps.map (Ty.openRigids named)) (r.openRigids named) effs tail cap
   | .ref h x cap => .ref (h.openRigids named) (x.openRigids named) cap
+  | .rigid r => (named.lookup r.spelled).getD (.rigid r)
   | .var v => .var v
 
 /-- Could a pattern come to fit a type, once what is not yet known of the
@@ -1441,6 +1468,7 @@ partial def Ty.mayFit (pattern term : Ty) : Bool :=
   match pattern, term with
   | .var _, _ => true
   | _, .var _ => true
+  | .rigid _, _ | _, .rigid _ => true
   | .con n as, .con m bs =>
     (m.startsWith "'" && bs.isEmpty) || (n.startsWith "'" && as.isEmpty)
       || (n == m && as.length == bs.length && (as.zip bs).all fun (x, y) => x.mayFit y)
@@ -1456,7 +1484,7 @@ partial def Ty.mayFit (pattern term : Ty) : Bool :=
 parameter: the instance of an effect it names can then be an effect of its
 own. -/
 partial def Ty.written : Ty → Option Syntax.TypeExpr
-  | .var _ => none
+  | .var _ | .rigid _ => none
   | .con n args =>
     if n.startsWith "'" then none
     else (args.mapM Ty.written).map (Syntax.TypeExpr.name n)
@@ -1511,6 +1539,7 @@ mutual
 
 partial def showTy : Ty → String
   | .var _ => "_"
+  | .rigid r => if bareName r.spelled == Syntax.neverParam then "!" else bareName r.spelled
   | .con n [] => if bareName n == Syntax.neverParam then "!" else if n == "Z" then "0" else bareName n
   | .con n args =>
     -- (A length is shown as the number, and an array with one as written.)
@@ -1544,13 +1573,14 @@ mutual
 
 partial def freeTys : Ty → List Nat
   | .var id => [id]
+  | .rigid _ => []
   | .con _ args | .tuple args => args.flatMap freeTys
   | .fn ps r effs _ _ =>
     ps.flatMap freeTys ++ freeTys r ++ effs.flatMap (fun e => e.2.flatMap freeTys)
   | .ref how t _ => freeTys how ++ freeTys t
 
 partial def freeRows : Ty → List Nat
-  | .var _ => []
+  | .var _ | .rigid _ => []
   | .con _ args | .tuple args => args.flatMap freeRows
   | .fn ps r effs tail _ =>
     ps.flatMap freeRows ++ freeRows r ++ effs.flatMap (fun e => e.2.flatMap freeRows)
@@ -1560,7 +1590,7 @@ partial def freeRows : Ty → List Nat
 end
 
 partial def freeCaps : Ty → List Nat
-  | .var _ => []
+  | .var _ | .rigid _ => []
   | .con _ args | .tuple args => args.flatMap freeCaps
   | .fn ps r effs _ cap =>
     cap :: (ps.flatMap freeCaps ++ freeCaps r ++ effs.flatMap (fun e => e.2.flatMap freeCaps))
@@ -1693,6 +1723,12 @@ def instantiate (s : Scheme) (via : Option String := none) (fixed : List (Nat ×
 its body was checked, by variables. -/
 partial def openParams (seen : List (String × Ty)) : Ty → M (Ty × List (String × Ty))
   | .var id => pure (.var id, seen)
+  | .rigid r =>
+    match seen.lookup r.spelled with
+    | some t => pure (t, seen)
+    | none => do
+      let t ← freshTy
+      pure (t, (r.spelled, t) :: seen)
   | .con n [] =>
     if n.startsWith "'" then
       match seen.lookup n with
@@ -1910,6 +1946,7 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
 
 /-- Does the type have one of a function's own type parameters in it? -/
 partial def Ty.hasRigid : Ty → Bool
+  | .rigid _ => true
   | .con n args => n.startsWith "'" || args.any Ty.hasRigid
   | .tuple args => args.any Ty.hasRigid
   | .ref _ t _ => Ty.hasRigid t
