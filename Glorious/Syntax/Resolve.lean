@@ -741,7 +741,7 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
   -- parameters is a type: `impl T for Option<Int>`. It is fixed, as an
   -- argument another name of the type fixes is.
   let concrete := fun (ps : List String) (tr : TraitKey) (head : String) (args : List String)
-      (context : List (String × String)) (methods : List Item) => do
+      (context : List Cond) (methods : List Item) => do
     let mut newArgs : Array String := #[]
     let mut fresh : Array String := #[]
     let mut fixed : Array Item := #[]
@@ -772,6 +772,7 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
         pure (m, ← ps.mapM ty, ← r.mapM ty))))
     | .impl ps tr head args context methods => do
       let tr := TraitKey.at tr.base tr.nth (← tr.written.mapM ty)
+      let context ← context.mapM (·.mapTypesM ty)
       let methods ← methods.mapM fun
         | (.typeAlias name aps body) => do pure ((.typeAlias name aps (← ty body)))
         | m => item m
@@ -935,7 +936,7 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
           let asked := (fs.filterMap fun f => match f with
             | .name x [] => m.lookup x
             | _ => none).eraseDups
-          [Item.impl fresh (.of nilTrait) head fresh (asked.map (·, nilTrait)) []]
+          [Item.impl fresh (.of nilTrait) head fresh (asked.map (Cond.of · nilTrait)) []]
         else []
       | _ => []
     -- (`Repr`, of a declared type or a tuple, its fields written where
@@ -949,11 +950,11 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
     let reprs : List Item := match (ctors.filter fun _ => !ownRepr.contains head).filter (·.all fun (_, fs) => fs.all (plainType fieldsOf [head])) with
       | some cs =>
         let (store, load) := reprOf cs (8000000000000000 + 100000 * count)
-        [Item.impl fresh (.of reprTrait) head fresh ((fresh.filter (!·.startsWith "'")).flatMap fun p => [(p, reprTrait), (p, layoutTrait)])
+        [Item.impl fresh (.of reprTrait) head fresh ((fresh.filter (!·.startsWith "'")).flatMap fun p => [Cond.of p reprTrait, Cond.of p layoutTrait])
           [store, load, .typeAlias askedOnlyName [] (.tuple [])]]
       | none => []
     if ownLayout.contains head then nils ++ reprs else
-    (nils ++ reprs ++ [Item.impl fresh (.of layoutTrait) head fresh ((fresh.filter (!·.startsWith "'")).map (·, layoutTrait))
+    (nils ++ reprs ++ [Item.impl fresh (.of layoutTrait) head fresh ((fresh.filter (!·.startsWith "'")).map (Cond.of · layoutTrait))
       -- (Checked only where something asks it: `askedOnlyName`.)
       [Item.fnOf sizeName [] [] (some int) [.mk [] [.expr sizeE]], Item.fnOf alignName [] [] (some int) [.mk [] [.expr alignE]],
        .typeAlias askedOnlyName [] (.tuple [])]])
@@ -1049,11 +1050,11 @@ def expandBlankets (items : List Item) : List Item := Id.run do
   -- (What a function generic in `T` may take a trait of `T` to be met by.)
   let mut out : Array Item := (blankets.map fun (_, tr, t, ctx, _) =>
     (.fieldNames (attrMark "blanket_impl")
-      (tr.base :: ctx.filterMap fun (p, c) => if p == t then some c else none) [])).toArray
+      (tr.base :: ctx.filterMap fun (c : Cond) => if c.subject == t then some c.trait.base else none) [])).toArray
   let mut copies := 0
   -- (How many traits of its type each asks: tried first.)
   let askedOf := fun (b : Nat) => match blankets[b]? with
-    | some (_, _, t, ctx, _) => (ctx.filter fun (pc : String × String) => pc.1 == t).length
+    | some (_, _, t, ctx, _) => (ctx.filter fun (c : Cond) => c.subject == t).length
     | none => 0
   let order := (List.range blankets.length).mergeSort fun a b => askedOf a ≥ askedOf b
   let blankets := order.filterMap fun b => blankets[b]?
@@ -1061,7 +1062,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
   for _ in List.range (blankets.length + 1) do
     let mut more := false
     for ((ps, tr, t, ctx, ms), b) in blankets.zipIdx do
-      let asked := ctx.filterMap fun (p, c) => if p == t then some c else none
+      let asked := ctx.filterMap fun (c : Cond) => if c.subject == t then some c.trait.base else none
       let bodies := tr.written
       for (h, hps) in heads do
         let fresh := hps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%b{j}" else s!"%b{j}"
@@ -1071,7 +1072,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
         if givers.contains b then continue
         -- (One that asks more already gave it this type: that one is its.)
         let asksOf := fun (g : Nat) => match blankets[g]? with
-          | some (_, _, t', ctx', _) => (ctx'.filter fun (pc : String × String) => pc.1 == t').length
+          | some (_, _, t', ctx', _) => (ctx'.filter fun (c : Cond) => c.subject == t').length
           | none => 0
         if givers.any (fun g => asksOf g > asked.length) then continue
         let mineToo := givers.any (· != b)
@@ -1081,9 +1082,9 @@ def expandBlankets (items : List Item) : List Item := Id.run do
         if h.startsWith "(tuple" && h != "(tuple0)" && has.contains (tr.base, consHead) then continue
         if h.startsWith "(fn" && has.contains (tr.base, "%Fn") then continue
         unless asked.all (fun c => has.contains (c, h)) do continue
-        let ctx' := ctx.zipIdx.map fun ((p, c), k) => if p == t then (s!"%subject{k}", c) else (p, c)
-        let subjects := (ctx.zipIdx.filter fun ((p, _), _) => p == t).map fun (_, k) =>
-          (.typeAlias (ctxSubjectName k) [] self)
+        let ctx' := ctx.zipIdx.map fun (c, k) =>
+          let c := c.mapTypes (substTypeExpr [(t, self)])
+          if c.subject == t then { c with subject := s!"%subject{k}", subjectTy := some self } else c
         copies := copies + 1
         let shift := 100000000000000 * copies
         -- (`self_name()` in it: this type's name.)
@@ -1101,7 +1102,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
               (named.body ((shiftRewrite shift).body b))
           | item => item
         out := out.push (.impl (fresh ++ ps.filter (· != t)) (tr.mapWritten (substTypeExpr [(t, self)])) h fresh ctx'
-          (ms' ++ subjects ++ [(.typeAlias (blanketName t) [] self)]))
+          (ms' ++ [(.typeAlias (blanketName t) [] self)]))
         known := known.insert (tr.base, h, mine)
         has := has.insert (tr.base, h)
         byBlanket := byBlanket.insert (tr.base, h, mine) (givers ++ [b])
@@ -1140,13 +1141,9 @@ def traitArgDefaults (items : List Item) : List Item := Id.run do
     | .impl ps tr head args context methods =>
       let filled := fill tr.base (selfOf head args) tr.written
       -- (What it asks of its type parameters, `where T: Add`, the same.)
-      let asked := context.zipIdx.flatMap fun ((subject, ctr), k) =>
-        let cgiven := (List.range 64).filterMap fun i => methods.findSome? fun
-          | .typeAlias n _ body => if n == ctxArgName k i then some body else none
-          | _ => none
-        let cfilled := fill ctr (.name subject []) cgiven
-        (cfilled.drop cgiven.length).zipIdx.map fun (t, j) => Item.typeAlias (ctxArgName k (cgiven.length + j)) [] t
-      .impl ps (.at tr.base tr.nth filled) head args context (methods ++ asked)
+      let context := context.map fun (c : Cond) =>
+        { c with trait := .at c.trait.base c.trait.nth (fill c.trait.base (.name c.subject []) c.trait.written) }
+      .impl ps (.at tr.base tr.nth filled) head args context methods
     | item => item
   pure (items.map go)
 

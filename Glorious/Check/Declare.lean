@@ -572,7 +572,7 @@ def declareTrait (items : List Item) (name : String) (methods : List (String × 
 
 /-- An implementation read: what it is for, on what conditions, and what it
 leaves to its trait said (`declareTraits`). -/
-def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) (args : List String) (context : List (String × String))
+def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) (args : List String) (context : List Syntax.Cond)
     (methods : List Item) : M Unit := do
   let what := s!"`impl {tr.shown} for {head}`"
   -- `tr` is the trait at the arguments the implementation gives it.
@@ -599,15 +599,13 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
   -- A condition is a trait of one of the head's arguments; or, said
   -- with the trait's own arguments or of a type parameter inside an
   -- argument, one kept apart (`extra`, below).
-  let general := fun (k : Nat) (p : String) =>
-    !args.contains p || methods.any fun
-      | .typeAlias n _ _ => n == Syntax.ctxArgName k 0
-      | _ => false
-  let ctx ← (context.zipIdx.filter fun ((p, _), k) => !general k p).mapM fun ((p, t'), _) => do
+  let general := fun (c : Syntax.Cond) => !args.contains c.subject || !c.trait.written.isEmpty
+  let ctx ← (context.filter (!general ·)).mapM fun c => do
+    let t' := c.trait.base
     unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
-    match args.idxOf? p with
+    match args.idxOf? c.subject with
     | some j => pure (t', j)
-    | none => throw s!"{what}: `{p}` is not one of its type parameters"
+    | none => throw s!"{what}: `{c.subject}` is not one of its type parameters"
   -- A type parameter said to have a trait has every trait that one needs.
   let mut closed : List (String × Nat) := []
   for (t', j) in ctx do
@@ -660,24 +658,20 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
   modify fun s => { s with projecting := pmap.filterMap fun (_, t) => match t with
     | .var id => some id
     | _ => none }
-  for ((p, t'), k) in context.zipIdx do
-    if general k p then
+  for c in context do
+    if general c then
+      let (p, t') := (c.subject, c.trait.base)
       unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
-      let subject ← match pmap.lookup p with
-        | some t => pure t
-        | none =>
-          match methods.findSome? fun
-              | .typeAlias n _ body => if n == Syntax.ctxSubjectName k then some body else none
-              | _ => none with
-          | some body => zonk (← resolveType pmap false body)
-          | none => throw s!"{what}: `{p}` is not one of its type parameters"
+      let subject ← match pmap.lookup p, c.subjectTy with
+        | some t, _ => pure t
+        | none, some body => zonk (← resolveType pmap false body)
+        | none, none => throw s!"{what}: `{p}` is not one of its type parameters"
+      let arity := (((← get).traitShape[t']?).map (·.1)).getD 0
+      if c.trait.written.length < arity then
+        throw s!"{what}: `{Syntax.lastSegment t'}` takes arguments: `{p}: {Syntax.lastSegment t'}<..>`"
       let mut cargs : List Ty := []
-      for i in List.range ((((← get).traitShape[t']?).map (·.1)).getD 0) do
-        match methods.findSome? fun
-            | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
-            | _ => none with
-        | some body => cargs := cargs ++ [← zonk (← resolveType pmap false body)]
-        | none => throw s!"{what}: `{Syntax.lastSegment t'}` takes arguments: `{p}: {Syntax.lastSegment t'}<..>`"
+      for body in c.trait.written.take arity do
+        cargs := cargs ++ [← zonk (← resolveType pmap false body)]
       extra := extra ++ [(t', cargs, subject)]
   modify fun s => { s with projecting := [] }
   -- A type parameter inside one of the head's arguments (`H` of
@@ -686,7 +680,7 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
   -- (Not of a callable's parameters and result: a callable holds no
   -- value of those to destroy. Nor of a list of types.)
   if (← get).dropMode && !head.startsWith "(fn" then
-    let said := context.filterMap fun (p, t') => if t' == Syntax.destroyTrait then some p else none
+    let said := context.filterMap fun c => if c.trait.base == Syntax.destroyTrait then some c.subject else none
     for p in genericParams params do
       if !args.contains p && !p.startsWith "'" && !p.startsWith ".." && !said.contains p then
         if let some subject := pmap.lookup p then
@@ -722,11 +716,7 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
       unless ids.isEmpty do gatParams := gatParams ++ [(a, ids)]
       -- (`K::Got` of a type parameter: of the trait written of it here,
       -- `K: KindOf<T>`, with its arguments.)
-      let written := context.zipIdx.map fun ((p, t'), k) =>
-        let targs := (List.range 16).filterMap fun i => methods.findSome? fun
-          | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
-          | _ => none
-        (p, t', targs)
+      let written := context.map fun c => (c.subject, c.trait.base, c.trait.written)
       let projecting := pmap.filterMap fun (_, t) => match t with
         | .var id => some id
         | _ => none
@@ -750,37 +740,27 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
   -- What its conditions say of types left to implementations.
   let mut equal : List (Nat × String × String × Ty) := []
   let mut extraEqual : List (Ty × String × String × Ty) := []
-  for m in methods do
-    if let .typeAlias n _ body := m then
-      if let some (k, name) := Syntax.equalArgParts n then
-        match context[k]? with
-        | some (subject, asked) =>
-          let left := (((← get).traitShape[asked]?).map (·.2)).getD []
-          unless left.contains name do
-            throw s!"{what}: `{Syntax.lastSegment asked}` leaves no type `{name}` to its implementations"
-          match args.idxOf? subject with
-          | some j => equal := equal ++ [(j, asked, name, ← resolveType pmap false body)]
-          | none =>
-            -- (Of another type parameter, or of a type made of them.)
-            let whole ← match pmap.lookup subject with
-              | some t => pure t
-              | none =>
-                match methods.findSome? fun
-                    | .typeAlias n _ b => if n == Syntax.ctxSubjectName k then some b else none
-                    | _ => none with
-                | some b => zonk (← resolveType pmap false b)
-                | none => throw s!"{what}: `{subject}` is not one of its type parameters"
-            -- (The trait's own arguments go with the type asked of.)
-            let mut cargs : List Ty := []
-            for i in List.range ((((← get).traitShape[asked]?).map (·.1)).getD 0) do
-              match methods.findSome? fun
-                  | .typeAlias n _ b => if n == Syntax.ctxArgName k i then some b else none
-                  | _ => none with
-              | some b => cargs := cargs ++ [← zonk (← resolveType pmap false b)]
-              | none => pure ()
-            let whole := if cargs.isEmpty then whole else Ty.tuple (whole :: cargs)
-            extraEqual := extraEqual ++ [(whole, asked, name, ← resolveType pmap false body)]
-        | none => pure ()
+  for c in context do
+    for (name, body) in c.equal do
+      let (subject, asked) := (c.subject, c.trait.base)
+      let left := (((← get).traitShape[asked]?).map (·.2)).getD []
+      unless left.contains name do
+        throw s!"{what}: `{Syntax.lastSegment asked}` leaves no type `{name}` to its implementations"
+      match args.idxOf? subject with
+      | some j => equal := equal ++ [(j, asked, name, ← resolveType pmap false body)]
+      | none =>
+        -- (Of another type parameter, or of a type made of them.)
+        let whole ← match pmap.lookup subject, c.subjectTy with
+          | some t, _ => pure t
+          | none, some b => zonk (← resolveType pmap false b)
+          | none, none => throw s!"{what}: `{subject}` is not one of its type parameters"
+        -- (The trait's own arguments go with the type asked of.)
+        let arity := (((← get).traitShape[asked]?).map (·.1)).getD 0
+        let mut cargs : List Ty := []
+        for b in c.trait.written.take arity do
+          cargs := cargs ++ [← zonk (← resolveType pmap false b)]
+        let whole := if cargs.isEmpty then whole else Ty.tuple (whole :: cargs)
+        extraEqual := extraEqual ++ [(whole, asked, name, ← resolveType pmap false body)]
   if let some other := (← get).impls.find? fun I => I.trait == tr && I.head == head then
     unless fixed.isEmpty && other.fixed.isEmpty do
       throw s!"{what}: `{head}` already has an implementation of `{base}`, under this name or another of its names; a type has one"
@@ -825,7 +805,7 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
 /-- An implementation declared (`declareImplIn`): a callable in what it is
 for performs what is written of it, nothing where nothing is, as in a
 function's signature. -/
-def declareImpl (params : List String) (tr : Syntax.TraitKey) (head : String) (args : List String) (context : List (String × String))
+def declareImpl (params : List String) (tr : Syntax.TraitKey) (head : String) (args : List String) (context : List Syntax.Cond)
     (methods : List Item) : M Unit := do
   modify fun s => { s with closedRows := true }
   try declareImplIn params tr head args context methods

@@ -720,26 +720,8 @@ def aliasTyped : Expr → Bool
   | .call _ (.mark .ascribe) (_ :: _) => true
   | _ => false
 
-/-- In an implementation: what one of its conditions says a type left to the
-implementations of a trait is, `where I: Iterator<Item = A>`. The name says
-which condition, by its place, and which type. -/
-def equalArgName (condition : Nat) (name : String) : String := s!"%equal:{condition}:{name}"
 
-/-- The name under which an implementation keeps an argument its condition
-gives a trait: `where R: Get<T>` keeps `T` as the first of its condition's. -/
-def ctxArgName (condition i : Nat) : String := s!"%ctx:{condition}:{i}"
 
-/-- And the type a condition is of, where that is not one of the
-implementation's type parameters: `where (A, B): Apart`. -/
-def ctxSubjectName (condition : Nat) : String := s!"%ctxOf:{condition}"
-
-/-- The parts of such a name. -/
-def equalArgParts (n : String) : Option (Nat × String) :=
-  if n.startsWith "%equal:" then
-    match (n.drop 7).toString.splitOn ":" with
-    | [k, name] => k.toNat?.map (·, name)
-    | _ => none
-  else none
 
 /-- In a written row, the row parameter that stands for the rest of it. -/
 def rowMark : String := "%row"
@@ -950,6 +932,34 @@ structure Body where
 
 end Flat
 
+/-- A condition of an implementation, after `where` or in `impl<T: Show>`:
+a trait asked of one of its type parameters, or of a type made of them. -/
+structure Cond where
+  /-- The type parameter it is of; where it is of a type made of them
+  (`subjectTy`), a name of its own, `%subject{k}`. -/
+  subject : String
+  /-- The type it is of, where that is no type parameter: `(A, B): Apart`. -/
+  subjectTy : Option TypeExpr := none
+  /-- The trait, at the arguments written: `R: Get<T>`. -/
+  trait : TraitKey
+  /-- What it says the trait leaves to the implementation for it:
+  `I: Iterator<Item = A>`. -/
+  equal : List (String × TypeExpr) := []
+  deriving Inhabited, Hashable
+
+/-- `subject: trait`, of a type parameter, at no arguments. -/
+def Cond.of (subject trait : String) : Cond := { subject, trait := .of trait }
+
+/-- The same condition with each type in it written anew by `f`. -/
+def Cond.mapTypes (c : Cond) (f : TypeExpr → TypeExpr) : Cond :=
+  { c with subjectTy := c.subjectTy.map f, trait := c.trait.mapWritten f,
+           equal := c.equal.map fun (n, t) => (n, f t) }
+
+/-- The same, in a monad. -/
+def Cond.mapTypesM {m : Type → Type} [Monad m] (c : Cond) (f : TypeExpr → m TypeExpr) : m Cond := do
+  pure { c with subjectTy := ← c.subjectTy.mapM f, trait := .at c.trait.base c.trait.nth (← c.trait.written.mapM f),
+                equal := ← c.equal.mapM fun (n, t) => do pure (n, ← f t) }
+
 inductive Item where
   /-- An enum: its type parameters and its constructors with their fields. -/
   | enum (name : String) (params : List String) (ctors : List (String × List TypeExpr))
@@ -975,7 +985,7 @@ inductive Item where
   trait's functions for every type made with `Head`, on the conditions after
   `where`, each a type parameter and a trait it must have. -/
   | impl (params : List String) (trait : TraitKey) (head : String) (args : List String)
-      (context : List (String × String)) (methods : List Item)
+      (context : List Cond) (methods : List Item)
   /-- `impl Use<[lower, upper]> for Head {}`: how often a value of a declared
   type is to be used; no upper bound is `infinity`. -/
   | use (head : String) (lower : Nat) (upper : Option Nat)

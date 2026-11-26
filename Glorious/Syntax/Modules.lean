@@ -1387,8 +1387,10 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
       let homes := (trEntry.toList ++ headEntry.toList).filter (·.home != preludePath)
       unless homes.isEmpty do
         throw s!"`impl {tr.shown} for {head}` is written in {showPath ctx.here}: an implementation is written in the module of its trait or of its type"
-    let context ← context.mapM fun (p, bound) => do
-      pure (p, (← resolveNamed ctx .trait [] bound).1)
+    let context ← context.mapM fun (c : Cond) => do
+      let named := (← resolveNamed ctx .trait [] c.trait.base).1
+      let c ← c.mapTypesM (resolveType ctx (genericParams ps))
+      pure { c with trait := .at named c.trait.nth c.trait.written }
     let generics := "Self" :: genericParams ps
     let methods ← methods.mapM fun
       | .fn m mps annots ret b => do

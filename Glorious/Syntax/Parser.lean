@@ -227,16 +227,12 @@ private partial def parseItem : P Item := do
     let callableBound := fun (b : Bound) => b.trait == "Fn" || b.trait == "RunsIn"
     let mut calls : Array Bound := (early.filter callableBound).toArray
     let early := early.filter (!callableBound ·)
-    let mut context : Array (String × String) := #[]
+    let mut context : Array Cond := #[]
     -- (What `impl<T: Show>` asked of its parameters, as `where` asks it.)
     for b in early do
       if b.quantity.isSome || !b.ranked.isEmpty then
         failAt "what is asked of a parameter of an implementation is written after `where`"
-      context := context.push (b.subject, b.trait)
-      for (a, place) in b.args.zipIdx do
-        given := given.push (.typeAlias (ctxArgName (context.size - 1) place) [] a)
-      for (name, ty) in b.assoc do
-        given := given.push (.typeAlias (equalArgName (context.size - 1) name) [] ty)
+      context := context.push { subject := b.subject, trait := .at b.trait 0 b.args, equal := b.assoc }
     if (← peek) == .ident "where" then
       advance
       repeat
@@ -245,10 +241,9 @@ private partial def parseItem : P Item := do
         let named := match ← peek, ← peek 1 with
           | .ident _, .punct ":" => true
           | _, _ => false
-        let p ← if named then expectIdent else do
+        let (p, subjectTy) ← if named then pure (← expectIdent, none) else do
           let subject ← parseType
-          given := given.push (.typeAlias (ctxSubjectName context.size) [] subject)
-          pure s!"%subject{context.size}"
+          pure (s!"%subject{context.size}", some subject)
         expectPunct ":"
         if named && params.contains p then
           match ← peek with
@@ -266,24 +261,24 @@ private partial def parseItem : P Item := do
             continue
           | _ => pure ()
         let asked ← expectPath
-        context := context.push (p, asked)
+        let mut cargs : Array TypeExpr := #[]
+        let mut equal : Array (String × TypeExpr) := #[]
         -- `I: Iterator<Item = A>`: what the trait leaves to `I`'s
         -- implementation is that type.
         if ← isOp "<" then
           advance
-          let mut place := 0
           repeat
             if ← isOp ">" then break
             if (← peek 1) == .punct "=" then
               let name ← expectIdent
               expectPunct "="
-              given := given.push (.typeAlias (equalArgName (context.size - 1) name) [] (← parseType))
+              equal := equal.push (name, ← parseType)
             else
               -- `R: Get<T>`: the trait at an argument.
-              given := given.push (.typeAlias (ctxArgName (context.size - 1) place) [] (← parseType))
-              place := place + 1
+              cargs := cargs.push (← parseType)
             if !(← acceptPunct ",") then break
           expectOp ">"
+        context := context.push { subject := p, subjectTy, trait := .at asked 0 cargs.toList, equal := equal.toList }
         if !(← acceptPunct ",") then break
     -- A type parameter said to be a callable is that callable's type:
     -- `F: Fn<(A, B), Output = R, Effects = {E}>` is `fn(A, B) -> R / {E}`,
@@ -316,6 +311,7 @@ private partial def parseItem : P Item := do
     given := given.map fun
       | .typeAlias n ps body => .typeAlias n ps (substTypeExpr callable body)
       | item => item
+    context := context.map (·.mapTypes (substTypeExpr callable))
     -- An argument that is one of the implementation's type parameters, the
     -- first time it is written, is that parameter. Any other is a type the
     -- argument has to be: `impl<T, R> Get<T> for (Column<T>, R)` is for the
