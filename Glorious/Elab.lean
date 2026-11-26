@@ -235,11 +235,15 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
   -- (The local that holds what the expression gives, made here: of the type
   -- the checker found of it, `Blocks.nodeTys`.)
   if let .var i := a then
-    if i ≥ level then
-      let s ← get
-      if let some t := ((← read).blocks.bind fun bl => bl.nodeTys[(s.owner, s.body.idOf e0)]?) then
-        set { s with b := { s.b with tys := s.b.tys.push (i, t) } }
+    if i ≥ level then noteTy i e0
   pure a
+
+/-- The local `i` holds what the node `e` gives: of the type the checker
+found of it (`Blocks.nodeTys`), where it found one. -/
+partial def noteTy (i : Nat) (e : Flat.ExprId) : M Unit := do
+  let s ← get
+  if let some t := ((← read).blocks.bind fun bl => bl.nodeTys[(s.owner, s.body.idOf e)]?) then
+    set { s with b := { s.b with tys := s.b.tys.push (i, t) } }
 
 partial def elabExprAt (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Atom := do
   let b := (← get).body
@@ -469,6 +473,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
         if (← get).b.done.isSome then pure (.int 0) else lendCall idx atoms borrows
       else
         let callee ← emit (.let_ (.closure idx []))
+        if let .var i := callee then noteTy i f
         elabApply scope isTail callee args gives
     | .ctor info => do
       if isTail then throw s!"`tail` applies to calls, not to the constructor `{x}`"

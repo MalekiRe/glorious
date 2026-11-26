@@ -2144,7 +2144,12 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
       throwThe Elab.Said e
     match head with
     | .ctor .. | .op _ | .prim | .pack _ | .host _ => inferCallBuiltin scope amb args call x head
-    | .fn .. | .method _ | .const _ => inferCallFn scope amb args call x head
+    | .fn t .. =>
+      -- (The callee at this call: what the elaborator's closure of it is,
+      -- `St.nodeTys`.)
+      modify fun s => { s with nodeTys := (s.owner, s.body.idOf f, t) :: s.nodeTys }
+      inferCallFn scope amb args call x head
+    | .method _ | .const _ => inferCallFn scope amb args call x head
     | _ => inferCallPlace scope amb args call x head
   | .label l => do
     applyTy scope amb s!"the label `@{l}`" (← inferExpr scope amb f) args call

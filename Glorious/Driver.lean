@@ -1028,9 +1028,9 @@ def compileSource (src : String) (check : Bool := true)
     -- certificate's, `Shadow`.)
     if Trace.typesTraced then
       if let some c := types then
-        let n := Shadow.compare out c
+        let n := Shadow.compare declared out c
         let said := "\n".intercalate (s!"shadow: {n.lets} lets, {n.typed} with the checker's type, {n.same} of the same shape"
-          :: n.differ.map ("shadow: " ++ ·))
+          :: s!"shadow: without one: {n.untyped.toList}" :: n.differ.map ("shadow: " ++ ·))
         dbgTrace said fun _ => pure ()
     pure { compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made with
       types := Thunk.pure types }
