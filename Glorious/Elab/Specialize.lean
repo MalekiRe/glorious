@@ -357,12 +357,6 @@ How many parts the `..` of `(first, ..)` stands for is known once the
 tuple's type is. The checker says so, and the program is then read with that
 many `_` written in its place. -/
 
-partial def restPat (id count : Nat) : Pattern → Pattern
-  | .tuple ps => .tuple (ps.flatMap fun
-      | .var x => if Syntax.tupleRestOf x == some id then List.replicate count Pattern.wild else [.var x]
-      | p => [restPat id count p])
-  | .ctor c q ps => .ctor c q (ps.map (restPat id count))
-  | p => p
 
 /-! ## A variable whose fields are borrowed apart
 
@@ -832,6 +826,7 @@ written with. -/
 def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) (b : Flat.Body) : Flat.Body :=
   match d with
   | .rest id count => restBody id count b
+  | .restHere id count => (restNode id count b).getD b
   | .eta owner x arity => if name == owner then etaBody owner x arity b else b
   | .letMut owner line col x => if name == owner then (letMutRewriteF line col x).body b else b
   | .refPats id clauses => refPatsBody id clauses b
@@ -881,7 +876,7 @@ def Decided.of (b : Blocks) : Decided := Id.run do
   let mut d : Decided := {}
   for decision in b.decided do
     d := match decision with
-      | .rest id _ => { d with rests := d.rests.insert id }
+      | .rest id _ | .restHere id _ => { d with rests := d.rests.insert id }
       | .eta owner _ _ | .letMut owner _ _ _ => { d with owners := d.owners.insert owner }
       | .etaHere owner _ _ _ _ => { d with owners := d.owners.insert owner }
       | .refPats id _ | .refPatsHere id _ => { d with closures := d.closures.insert id }

@@ -2511,7 +2511,15 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
       | .tuple parts =>
         if parts.length + 1 < ps.length then
           throw s!"a tuple pattern with {ps.length - 1} parts and `..`, of a tuple of {parts.length}"
-        throwThe Elab.Said { msg := "`..` in a tuple pattern", decision := some (.rest id (parts.length + 1 - ps.length)) }
+        -- (Written where it is, in the body as in the pattern read here,
+        -- `Elab.restNode`: nothing was read of it before.)
+        let count := parts.length + 1 - ps.length
+        match Elab.restNode id count (← get).body with
+        | some b' =>
+          modify fun s => { s with body := b', decided := s.decided ++ [.restHere id count] }
+          return ← inferPat (Elab.restPat id count (.tuple ps)) t
+        | none =>
+          throwThe Elab.Said { msg := "`..` in a tuple pattern", decision := some (.rest id count) }
       | _ => throw "`..` in a tuple pattern stands for the parts not written, and how many the tuple has is not known here: say its type"
     -- (`()` of a reference to `()`: there is nothing in it to borrow.)
     if ps.isEmpty then

@@ -210,6 +210,8 @@ is in is checked again with it, not the program. -/
 inductive Decision where
   /-- `..` in the tuple pattern `id` stands for `count` parts. -/
   | rest (id count : Nat)
+  /-- The same, written where it is (`restNode`), not read again. -/
+  | restHere (id count : Nat)
   /-- In `owner`, the function `x` named as a value is a block that calls it. -/
   | eta (owner x : String) (arity : Nat)
   /-- In `owner`, what the `let` of `x` at `line:col` binds is kept in a
@@ -296,6 +298,27 @@ def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : F
   let (ge, b) := b.add given
   let node : Flat.FExpr := if tail then .tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)
   pure { b with exprs := b.exprs.set! e node }
+
+/-- A pattern with `..` of the tuple pattern `id` written as `count` `_`. -/
+partial def restPat (id count : Nat) : Pattern → Pattern
+  | .tuple ps => .tuple (ps.flatMap fun
+      | .var x => if Syntax.tupleRestOf x == some id then List.replicate count Pattern.wild else [.var x]
+      | p => [restPat id count p])
+  | .ctor c q ps => .ctor c q (ps.map (restPat id count))
+  | p => p
+
+/-- Every pattern of the body with `..` of the tuple pattern `id` written as
+`count` parts, where it is: the patterns of `let`s and of clauses, in place,
+no node made anew (`Decision.restHere`). None where none has it. -/
+def restNode (id count : Nat) (b : Flat.Body) : Option Flat.Body := do
+  let has := fun (p : Pattern) => restPat id count p != p
+  let stmts := b.stmts.map fun s => match s with
+    | .let_ p v => if has p then .let_ (restPat id count p) v else s
+    | s => s
+  let clauses := b.clauses.map fun c =>
+    if c.pats.any has then ⟨c.pats.map (restPat id count), c.body⟩ else c
+  if stmts == b.stmts && clauses == b.clauses then none
+  pure { b with stmts, clauses }
 
 /-- The function `x` named as a value at the node whose identity is `node`,
 written where it is as a block that calls it, `{ (a, b) => x(a, b) }`, the

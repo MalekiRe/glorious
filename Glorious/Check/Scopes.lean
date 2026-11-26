@@ -674,7 +674,14 @@ def runPending : M Unit := do
   settleAssocsAll
   runProjections true
   settleRows (some fun _ => true) true
-  let pending := (← get).pending
+  -- (Each `..` of a tuple pattern written as the parts it stands for, as
+  -- found where it was read, `Elab.Decision.restHere`.)
+  let rests := (← get).decided.filterMap fun
+    | .restHere id count => some (id, count)
+    | _ => none
+  let pending := (← get).pending.map fun p =>
+    if rests.isEmpty then p
+    else { p with rows := p.rows.map (·.map fun pat => rests.foldl (fun q (id, c) => Elab.restPat id c q) pat) }
   modify fun s => { s with pending := #[] }
   for p in pending do
     let rows ← p.rows.mapM (·.mapM normPat)
