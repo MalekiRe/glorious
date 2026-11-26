@@ -946,11 +946,10 @@ def writeLayouts (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
     let reprs : List Item := match (ctors.filter fun _ => !ownRepr.contains head).filter (·.all fun (_, fs) => fs.all (plainType fieldsOf [head])) with
       | some cs =>
         let (store, load) := reprOf cs (8000000000000000 + 100000 * count)
-        [Item.impl { params := fresh, trait := (.of reprTrait), head := head, args := fresh, context := ((fresh.filter (!·.startsWith "'")).flatMap fun p => [Cond.of p reprTrait, Cond.of p layoutTrait]), methods := [store, load, .typeAlias askedOnlyName [] (.tuple [])] }]
+        [Item.impl { params := fresh, trait := (.of reprTrait), head := head, args := fresh, context := ((fresh.filter (!·.startsWith "'")).flatMap fun p => [Cond.of p reprTrait, Cond.of p layoutTrait]), methods := [store, load], askedOnly := true }]
       | none => []
     if ownLayout.contains head then nils ++ reprs else
-    (nils ++ reprs ++ [Item.impl { params := fresh, trait := (.of layoutTrait), head := head, args := fresh, context := ((fresh.filter (!·.startsWith "'")).map (Cond.of · layoutTrait)), methods := [Item.fnOf sizeName [] [] (some int) [.mk [] [.expr sizeE]], Item.fnOf alignName [] [] (some int) [.mk [] [.expr alignE]],
-       .typeAlias askedOnlyName [] (.tuple [])] }])
+    (nils ++ reprs ++ [Item.impl { params := fresh, trait := (.of layoutTrait), head := head, args := fresh, context := ((fresh.filter (!·.startsWith "'")).map (Cond.of · layoutTrait)), methods := [Item.fnOf sizeName [] [] (some int) [.mk [] [.expr sizeE]], Item.fnOf alignName [] [] (some int) [.mk [] [.expr alignE]]], askedOnly := true }])
   -- (After what is written out beside a declaration, `fieldNames`.)
   let rec beside : List Item → List Item × List Item
     | ((.fieldNames m ns ps)) :: rest =>
@@ -1094,7 +1093,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
             .fn m fps (annots.map (·.map (substTypeExpr [(t, self)]))) (ret.map (substTypeExpr [(t, self)]))
               (named.body ((shiftRewrite shift).body b))
           | item => item
-        out := out.push (.impl { whole with params := (fresh ++ ps.filter (· != t)), trait := (tr.mapWritten (substTypeExpr [(t, self)])), head := h, args := fresh, context := ctx', methods := (ms' ++ [(.typeAlias (blanketName t) [] self)]) })
+        out := out.push (.impl { whole with params := (fresh ++ ps.filter (· != t)), trait := (tr.mapWritten (substTypeExpr [(t, self)])), head := h, args := fresh, context := ctx', methods := ms', blanket := some t })
         known := known.insert (tr.base, h, mine)
         has := has.insert (tr.base, h)
         byBlanket := byBlanket.insert (tr.base, h, mine) (givers ++ [b])

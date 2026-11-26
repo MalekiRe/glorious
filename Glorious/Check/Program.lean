@@ -710,13 +710,9 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
     -- name none of the unit's functions, where no coercion is: checked
     -- before the others, so that what was found of them is kept where only
     -- a function's body changed.
-    let blanket := fun (im : ImplDecl) => im.methods.any fun
-      | .typeAlias n _ _ => (Syntax.blanketParam n).isSome
-      | _ => false
+    let blanket := fun (im : ImplDecl) => im.blanket.isSome
     -- (And those the compiler writes that nothing may ask, `Reflect`.)
-    let packed := fun (im : ImplDecl) => im.methods.any fun
-      | .typeAlias n _ _ => n == Syntax.askedOnlyName
-      | _ => false
+    let packed := fun (im : ImplDecl) => im.askedOnly
     let mut copies : Array (String × FnDecl × Bool) := #[]
     for im in ((← get).impls.toList.drop before).filter (fun im => blanket im || packed im) do
       for d in ← implFnDecls im do copies := copies.push (im.dictFn, d, packed im)

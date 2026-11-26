@@ -103,9 +103,7 @@ def implWanted (d : FnDecl) (rigid : List (String × Ty)) : M (Option (Ty × Str
         else pure (Ty.con im.head parts)
       -- (`Self` written in its body is that type; so is `T` in a copy of
       -- an implementation for every type, `impl<T: Show> .. for T`.)
-      let blanket := im.methods.filterMap fun
-        | .typeAlias n _ _ => (Syntax.blanketParam n).map (·, self)
-        | _ => none
+      let blanket := im.blanket.toList.map (·, self)
       modify fun s => { s with rigidParams := s.rigidParams ++ [("Self", self)] ++ blanket }
       -- The trait at the arguments the implementation gives it, and the
       -- types it leaves to the implementation as the implementation says.

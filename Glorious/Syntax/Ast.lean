@@ -581,14 +581,6 @@ instance : ToString TraitKey := ⟨TraitKey.spelled⟩
 for, before it is written out for each type (`expandBlankets`). -/
 def blanketHead : String := "(any)"
 
-/-- The name under which a copy of such an implementation keeps the type it
-is for, as what its type parameter `T` stands for in its functions. -/
-def blanketName (param : String) : String := s!"%blanket:{param}"
-
-/-- The name of the type alias that says an implementation the compiler
-wrote is checked only where something asks it (`reflectionsOf`). -/
-def askedOnlyName : String := "%asked"
-
 /-- The type a tuple of one or more is as its first and the tuple of the
 rest, `(H, ..R)` (`Traits.consHead`, the same name). -/
 def consHead : String := "%Cons"
@@ -600,10 +592,6 @@ def snocHead : String := "%Snoc"
 /-- `..P` as a callable's arguments, `Fn<(..P)>`: as many as the tuple `P`
 has, of its types. -/
 def spreadParams : String := "%Spread"
-
-/-- The type parameter a name made by `blanketName` is for. -/
-def blanketParam (name : String) : Option String :=
-  if name.startsWith "%blanket:" then some (name.drop 9).toString else none
 
 /-- The type an implementation is for, from the name it is made with and its
 arguments: see `Ty.head` in the checker for the names. -/
@@ -961,6 +949,12 @@ structure ImplOf (α : Type) where
   /-- The arguments of the head it fixes, by their place: `impl T for
   Option<Int>`, or one written for another name of a type. -/
   fixed : List (Nat × TypeExpr) := []
+  /-- A copy, for one type, of an implementation for every type,
+  `impl<T: Show> Print for T`: its type parameter `T` (`expandBlankets`). -/
+  blanket : Option String := none
+  /-- One the compiler wrote that is checked only where something asks it
+  (`Reflect`, `Layout`). -/
+  askedOnly : Bool := false
   deriving Hashable
 
 inductive Item where

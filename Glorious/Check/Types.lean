@@ -346,6 +346,11 @@ structure ImplDecl where
   /-- How often its functions use a value of a type parameter, where it
   says: `T: Use<[0, *]>`. -/
   uses : List (String × Nat × Option Nat) := []
+  /-- A copy for one type of one for every type: its type parameter
+  (`Syntax.ImplOf.blanket`). -/
+  blanket : Option String := none
+  /-- Checked only where something asks it (`Syntax.ImplOf.askedOnly`). -/
+  askedOnly : Bool := false
   params : List String
   /-- The conditions: each a trait and which of the head's arguments must have it. -/
   context : List (String × Nat)

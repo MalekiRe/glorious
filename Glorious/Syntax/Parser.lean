@@ -1712,7 +1712,7 @@ def reflectionsOf (fix : Fixities) (items : List Item) (base : Nat) (records : L
   let fix := if tables.isEmpty then fix else ((tables.lookup path).getD fix)
   let (gitems, ⟨_, glocal, _⟩) ← parseItems { toks := gtoks, fix, records, base, tables, path, fixed } ⟨0, #[], {}⟩
   pure ((gitems ++ glocal.toList).map fun
-    | .impl whole@{ methods := ms, .. } => Item.impl { whole with methods := (ms ++ [.typeAlias askedOnlyName [] (.tuple [])]) }
+    | .impl whole => Item.impl { whole with askedOnly := true }
     | other => other)
 
 /-- Parse a source text, given the fixities already in scope. Returns the items
