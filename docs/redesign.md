@@ -356,6 +356,18 @@ written is a dot call whose receiver is a name (`receiverHere`:
 `Elab.receiverNode`, one function both use on the node alone); the others
 follow the same way, and then defaults checked once.
 
+Patterns by reference written in place (the `match`'s callable given its
+`&Pattern` clauses where it is) read freed memory in covey/debugtext: the
+clauses are copied into new nodes, and what the checker found of a literal
+is kept by the node's place in the body (`Blocks.scalarLits`, by owner and
+`ExprId`). The checker's body grows with the nodes inference makes
+(`pushE`); the elaborator's does not; so a literal copied after is at
+another place in each, and the elaborator wrote `1.5` as what another
+literal was found to be. Rust's tables are by `HirId`, which no rewrite
+moves. So the node functions here move nodes and never copy one that
+holds a literal; copying clauses waits on identities for nodes that stay
+(step 4, ids), and patterns by reference are decided as before.
+
 
 ## Expected size
 
