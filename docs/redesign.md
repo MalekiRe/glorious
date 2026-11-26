@@ -440,3 +440,17 @@ Left of locals as places, with why:
   borrowed for writing).
 - The front end's own temporaries (`borrowed%N`) stay variables it makes:
   it names them in the body the checker reads, and again after.
+
+The two left of "Then", looked at and left:
+
+- **Ids for types and names** (interned, compared and hashed as numbers).
+  Measured on covey/fleet's edit check (1.0 s): hashing strings is under
+  1% of its time and comparing types about 1%; what costs is bound solving
+  (0.5 s of `main`'s check) and loans (0.18 s), which read types as they
+  are, not names. A rewrite of every type and name in the checker for a
+  few percent: not now.
+- **Bodies as jobs across units.** A cold check runs ecs (0.93 s) and
+  fleet (1.37 s) one after the other and every other unit under 25 ms; an
+  edit takes the library from what is kept. Side by side across units
+  gains under a second once, nothing on an edit.
+
