@@ -1357,6 +1357,17 @@ def edgesOfSource (c : Nat) : M (List (Nat × Captured × Option (String × Nat)
     | some (src, what) => if src == c then some (i, what, (s.capEdgeNames.get? i).join) else none
     | none => none)
 
+
+/-- A `let x` at `line:col` whose value one path gives away and another
+does not: kept in a variable with a flag, set where it is given away, that
+destroys it where its block ends if it is not (the elaborator's, from the
+drop site `givenSite`), as Rust's drop flags do. What was checked holds of
+it as written: it is not read again (`placeLets` writes it `let mut`). -/
+def flagPlace (owner : String) (line col : Nat) (x : String) (t : Ty) (pos : String) : M Unit :=
+  modify fun st =>
+    { st with dropCands := st.dropCands.push (⟨owner, line, col, Syntax.givenSite x, false⟩, t, pos)
+              flagged := pos :: st.flagged
+              placedLets := st.placedLets.push (owner, line, col, x) }
 /-- With the types of a function known: note which of its calls certainly come
 back, and look at each binding that may have to be used. `fnTy` is the
 function's type.
@@ -1487,6 +1498,9 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
           let (line, col) := match place with
             | [line, col] => (line, col)
             | _ => (0, 0)
+          if line != 0 && !b.exprs.any (fun n => match n with | .fieldOf _ e _ => b.bare? e == some x | _ => false) then
+            flagPlace s.owner line col x t pos
+            continue
           throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and its type may have a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used", decision := some (.letMut s.owner line col x) }
     unless (free && !heldDrop) || (← tyMustUse roots [] t).isSome do
       -- A value with a `drop` to run that is used on one path and not on
@@ -1522,6 +1536,11 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
             let (line, col) := match place with
               | [line, col] => (line, col)
               | _ => (0, 0)
+            -- (Not one whose part is given away, `eat(p.a)`: the flag is of
+            -- the whole.)
+            if line != 0 && !b.exprs.any (fun n => match n with | .fieldOf _ e _ => b.bare? e == some x | _ => false) then
+              flagPlace owner line col x t pos
+              continue
             throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used", decision := some (.letMut owner line col x) }
       continue
     -- (A value whose type has nothing to destroy, its type parameters each

@@ -8531,3 +8531,14 @@ anything was checked. Rules that come with it, as Rust's:
 - A place whose parts are read (`x.f`, which may give the part away) is
   not destroyed whole where its block ends; a callable that reads a part
   of a value takes the value, not the place.
+
+## Drop flags in place of reading a body again
+
+A `let` whose value one path gives away and another does not, with a
+`drop` to run, is kept in a variable with a flag where the checker finds
+it (`flagPlace`): set where the value is given away, it destroys the value
+where the block ends if not, as Rust's drop flags do. The body is not read
+again (the `letMut` decision stays only for a parameter, and for a value a
+field of which is read, `eat(p.a)`, where the flag would be of the whole).
+A callable stored in a declaration that took such a value, `Job { run: {
+eat(n) } }`, holds it and destroys it with itself: accepted, as Rust's.
