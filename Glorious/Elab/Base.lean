@@ -239,6 +239,9 @@ inductive Decision where
   /-- The comparison `call` of two names, written where it is by reference
   (`compareNode`): `eq(&a, &b)`. -/
   | compareHere (call : Nat)
+  /-- The callable `id`'s clauses the checker's, `&Pattern` (`refPats`),
+  written where it is (`refPatsNode`), not read again. -/
+  | refPatsHere (id : Nat) (clauses : List Clause)
   /-- The field read `id` (or borrowed, `&mut` where `uniq`) is not one the
   value shows, and the value's type implements `Deref`: it is of what
   `Deref::deref` (`DerefMut::deref_mut`) gives (`Mut<T>` as its `T`). -/
@@ -365,6 +368,22 @@ def compareNode (call : Nat) (b : Flat.Body) : Option Flat.Body := do
   let (le, b) := push b (.ref false x)
   let (re, b) := push b (.ref false y)
   pure { b with exprs := b.exprs.set! e (.call call fe #[le, re]) }
+
+/-- The callable `id` with `clauses` in place of its own, where it is, as
+the checker reads it on and the elaborator writes it
+(`Decision.refPatsHere`). The nodes the clauses are made of are known in a
+space of the callable's own (`Flat.Body.ids`): the same in the checker's
+body as in the elaborator's, where what the checker found of a literal in
+them is looked for. -/
+def refPatsNode (id : Nat) (clauses : List Clause) (b : Flat.Body) : Option Flat.Body := do
+  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
+    | .closure i _ => i == id
+    | _ => false
+  let start := b.exprs.size
+  let (cs, b) := (clauses.toArray.mapM Flat.flatClause).run b
+  let space := (1 <<< 62) + id * 1000000
+  let ids := (List.range' start (b.exprs.size - start)).foldl (fun ids k => ids.set! k (space + (k - start))) b.ids
+  pure { b with exprs := b.exprs.set! e (.closure id cs), ids }
 
 /-- What the checker says where it stops: why, and what it found to decide,
 where it stops for that; `result`

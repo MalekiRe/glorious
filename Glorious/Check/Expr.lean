@@ -523,15 +523,41 @@ partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : N
   -- read whole there, borrowed here. Only its size held, and the set of
   -- names read, which is small.)
   let (reads, uses, given, held) := (s.valReads, s.uses.size, s.givenReads.size, s.heldMoves.size)
+  let (temps, later, anon) := (s.temps, s.later, s.anon)
   let (dups, drops) := (s.dups.size, s.drops.size)
+  let (bounds, pend, cmps, sites, parts, insts, gUses, cands) :=
+    (s.bounds.size, s.pending.size, s.compares.size, s.fieldSites.size, s.partReads.size, s.instSites.size,
+     s.groupUses.size, s.dropCands.size)
+  -- (What the first reading asked, taken back: asked again, of the same
+  -- call, it would be met twice, once with what the first reading had.)
+  let undo := fun (s : St) =>
+    { s with valReads := reads, temps, later, anon, uses := s.uses.shrink uses, givenReads := s.givenReads.shrink given,
+             heldMoves := s.heldMoves.shrink held, dups := s.dups.shrink dups, drops := s.drops.shrink drops,
+             bounds := s.bounds.shrink bounds, pending := s.pending.shrink pend, compares := s.compares.shrink cmps,
+             fieldSites := s.fieldSites.shrink sites, partReads := s.partReads.shrink parts,
+             instSites := s.instSites.shrink insts, groupUses := s.groupUses.shrink gUses,
+             dropCands := s.dropCands.shrink cands }
   match inferExprCall scope amb n s with
   | .ok a s => .ok a s
   | .error e s =>
     match e.decision with
+    -- (A callable given here whose clauses match what a reference points
+    -- to: written so where it is, `refPatsHere`, once.)
+    | some (.refPats cid clauses) =>
+      let b := s.body
+      let isArg := match b.expr e0 with
+        | .call _ _ args | .tailCall _ _ args => args.any fun a => match b.expr a with
+          | .closure i _ => i == cid
+          | _ => false
+        | _ => false
+      if !isArg || s.decided.any (fun | .refPatsHere c' _ => c' == cid | _ => false) then .error e s else
+      match Elab.refPatsNode cid clauses b with
+      | none => .error e s
+      | some b' =>
+        inferExprAt scope amb e0 { undo s with body := b', decided := s.decided ++ [Elab.Decision.refPatsHere cid clauses] }
     | some (.receiver c fn borrow) =>
       if c != id || s.decided.any (fun | .receiverHere c' _ _ => c' == c | _ => false) then .error e s else
-      let s := { s with valReads := reads, uses := s.uses.shrink uses, givenReads := s.givenReads.shrink given,
-                        heldMoves := s.heldMoves.shrink held, dups := s.dups.shrink dups, drops := s.drops.shrink drops }
+      let s := undo s
       match receiverHere scope c (some e0) fn borrow s with
       | .ok true s => inferExprAt scope amb e0 s
       | .ok false s => .error e s

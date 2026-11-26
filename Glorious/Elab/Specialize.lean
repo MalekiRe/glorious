@@ -840,6 +840,7 @@ def decideBody (d : Decision) (name : String) (annots : List (Option TypeExpr)) 
   | .derefHere id borrow => (derefNode id borrow b).getD b
   | .derefAssignHere id borrow => (derefAssignNode id borrow b).getD b
   | .compareHere call => (compareNode call b).getD b
+  | .refPatsHere id clauses => (refPatsNode id clauses b).getD b
   | .derefField id uniq => derefBody id uniq annots b
   | .compareByRef call => compareBody call annots b
   | .derefReceiver call =>
@@ -880,7 +881,7 @@ def Decided.of (b : Blocks) : Decided := Id.run do
     d := match decision with
       | .rest id _ => { d with rests := d.rests.insert id }
       | .eta owner _ _ | .letMut owner _ _ _ => { d with owners := d.owners.insert owner }
-      | .refPats id _ => { d with closures := d.closures.insert id }
+      | .refPats id _ | .refPatsHere id _ => { d with closures := d.closures.insert id }
       | .receiver call _ _ | .receiverHere call _ _ => { d with calls := d.calls.insert call }
       | .derefField id _ | .derefHere id _ | .derefAssignHere id _ => { d with fields := d.fields.insert id }
       | .derefReceiver call | .compareByRef call | .compareHere call => { d with calls := d.calls.insert call }
