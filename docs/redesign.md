@@ -308,6 +308,26 @@ type; Elab borrows them, in a cell of the value where it is a `let`); then
 fields through `Deref`; then receivers; then patterns by reference; then
 drop flags; then the front passes and `Decision` go.
 
+The first slice, from the code as it is:
+
+- A value binding has a brand already (`inferPat`'s `.val t id`, with
+  `bindLoans`). `&x` of one (`inferExprRef`, refused today: the front
+  passes make it a cell first) is a loan of that brand, as of a cell; the
+  brand is put among `St.cells` where it is first borrowed, and each read
+  of the name after is a use of it (`.var id x .move`), so `checkLoans`
+  refuses one that moves it while a loan lasts; `checkEscape` where its
+  block ends. Each such binding is said (`St.placed`: owner, name, site).
+- Elab writes a binding `St.placed` names as it writes a `let mut`: the
+  moved flag that `let mut` of a value given away already has
+  (`Syntax.movedFlag`, `markMoves`) destroys it where it was not used,
+  from the drop site the checker records for it as for a cell's
+  (`givenSite`).
+- Then the front passes stop making cells of what is borrowed
+  (`promoteHeld`, `promoteRewrite`, `borrowedOnly`), a `%receiver(x)` of a
+  value is `&x` or `x` as the callee takes it, decided where the call is
+  checked, and `receiver`, `compareByRef` and `derefField` are found and
+  written where they are met.
+
 
 ## Expected size
 
