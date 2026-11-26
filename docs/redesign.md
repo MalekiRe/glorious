@@ -430,3 +430,17 @@ Together about 7–8k fewer lines: under 20k.
 - **Copies per use can grow the program** where one generic function is used
   at many types; the certificate already lists each of those, so the checker
   sees no more than now.
+
+Left of locals as places, with why:
+
+- A name that may hold a reference, indexed (`d[1]` of a closure's `d:
+  &mut Vec<Int>`), is given whole to `index` and its `let` kept a variable
+  by the front end. Borrowed in place it becomes a place, and so a
+  variable in the elaborator's program; but `&mut d` of a name holding a
+  `&mut` is, to the checker, a borrow again through it (`&mut *d`), and to
+  the elaborator, of a variable, a borrow of the variable: `place_at` was
+  given `&&mut Vec` (`vec_must_be_at` read a field of a reference). Done
+  when the checker writes the borrow again where it reads it (`&mut *d`),
+  as it writes the other things it finds.
+- The front end's own temporaries (`borrowed%N`) stay variables it makes:
+  it names them in the body the checker reads, and again after.
