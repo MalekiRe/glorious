@@ -8525,3 +8525,9 @@ anything was checked. Rules that come with it, as Rust's:
 - A callable that only borrows a value holds the place, not the value.
 - A value the front end names to borrow it (`borrowed%N`) is still made a
   variable by the front end.
+- A field of a value a pattern binds may be borrowed, `Some(c) =>
+  len_at(&c.xs)`, as Rust allows; before it was refused ("neither a
+  variable nor a reference").
+- A place whose parts are read (`x.f`, which may give the part away) is
+  not destroyed whole where its block ends; a callable that reads a part
+  of a value takes the value, not the place.

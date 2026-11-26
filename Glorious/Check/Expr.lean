@@ -1980,8 +1980,9 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
         if (← get).placedVals.contains bid then
           checkEscape bid s!"`{x}` could be used after its block has ended"
             (("something that uses it is the block's result", result) :: scopeRoots scope) amb
-          -- (Only borrowed, never given away: destroyed where its block
-          -- ends, as a variable's value is.)
+          -- (Only borrowed, never given away, nor a part of it read, which
+          -- may give that part away: destroyed where its block ends, as a
+          -- variable's value is.)
           let u := b.nameUseStmts false x rest
           let tx := match bd with
             | .val tx _ => tx
@@ -1989,7 +1990,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
           modify fun s =>
             { s with placedLets := s.placedLets.push (s.owner, at_.1, at_.2, x)
                      placedLetIds := bid :: s.placedLetIds
-                     dropCands := if u.valued || u.valuedInside then s.dropCands
+                     dropCands := if u.valued || u.valuedInside || u.looked then s.dropCands
                        else s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, tx, pos) }
   pure result
 
@@ -2383,7 +2384,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   -- (A value it only borrows, `&x` of one not a reference: as a place.)
   let borrowsOnly := fun (x : String) => clauses.all fun c =>
     let u := b.nameUseClause false x c
-    !u.valued && !u.valuedInside
+    !u.valued && !u.valuedInside && !u.looked
   captureAll scope cap (b.fvClauses clauses) (fun x => clauses.any (assignsClause b x))
     (fun x => clauses.any fun c =>
       let u := b.nameUseClause false x c

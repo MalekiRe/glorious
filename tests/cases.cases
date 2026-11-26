@@ -7076,7 +7076,7 @@ fn main() -> Int { let (a, b) = ((1, 2), 5); first(&a) + b }
 #### It is still not a variable: it cannot be assigned to or borrowed with `&mut`.
 fn main() -> Int { let x = 3; let r = &x; x = 4; *r }
 #### expect
-error: 1:31: in `main`: `x` is not a mutable variable, so it cannot be borrowed
+error: 1:43: in `main`: `x` is not a mutable variable: write `let mut x` where it is bound to change it
 #### case
 fn bump(r: &mut Int) { *r = *r + 1; }
 fn main() -> Int { let x = 3; bump(&mut x); x }
@@ -13257,7 +13257,7 @@ use std::vec::{Vec};
 struct C { n: Int, xs: Vec<Int> }
 fn main() -> Int { match(Some(C { n: 1, xs: Vec::from_array([4, 5]) })) { Some(c) => len_at(&c.xs) + c.n, None => 0 } }
 #### expect
-error: 3:86: in `main`: `c` is neither a variable nor a reference, so no field of it can be borrowed here: say what it is where it is bound (`let c: Type = ..`), or bind it with `let mut`
+3
 #### case
 use std::vec::{Vec};
 struct C { n: Int, xs: Vec<Int> }
