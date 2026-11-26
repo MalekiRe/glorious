@@ -377,6 +377,18 @@ of the `match` had recorded. (The commit that landed identities says the
 literals were then right; that was not seen: the program did not get to
 run.) Both are what is still in the way.
 
+Receivers that are chains of calls (`App::new().relation(..).relation(..)`,
+covey/fleet's `main`) stay decisions. Written in place, each link read
+the chain below it again (1.75 s from 1.13 for fleet's check). Keeping
+each call's reading (its type and where the records stood after it) to
+take instead of reading it again did not help: the same link was decided
+again and again (over a hundred times for the innermost), never finding
+its own decision recorded. What it looks like, not yet shown: the chain
+is read inside a speculative reading that puts the state back whole when
+it is done, taking back what was written in place. A decision found in a
+speculative reading has to outlive it, as one that checks the group again
+does.
+
 
 ## Expected size
 
