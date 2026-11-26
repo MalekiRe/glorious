@@ -113,10 +113,7 @@ def askUses (im : ImplDecl) (at_ : List (Nat × Ty)) (pos : String) : M Unit := 
   if im.trait == Syntax.destroyKey then return
   for (p, id) in im.pvars do
     if let some t := at_.lookup id then
-      let (lower, upper) := (im.methods.findSome? fun
-        | .typeAlias n _ _ => (Syntax.useMarked n).bind fun (q, lo, hi) =>
-            if q == p then some (lo, hi) else none
-        | _ => none).getD (0, some 1)
+      let (lower, upper) := (im.uses.lookup p).getD (0, some 1)
       if lower == 0 || upper.isNone then
         -- (Said as the implementation writes its type, which names the
         -- parameter: not the type here, which would be spelled each time.)

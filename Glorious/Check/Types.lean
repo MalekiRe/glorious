@@ -343,6 +343,9 @@ structure ImplDecl where
   alike for one type, `Get#1<T>`. -/
   trait : Syntax.TraitKey
   head : String
+  /-- How often its functions use a value of a type parameter, where it
+  says: `T: Use<[0, *]>`. -/
+  uses : List (String × Nat × Option Nat) := []
   params : List String
   /-- The conditions: each a trait and which of the head's arguments must have it. -/
   context : List (String × Nat)

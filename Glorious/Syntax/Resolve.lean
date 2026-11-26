@@ -740,19 +740,18 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
   -- An argument of an implementation's type that is not one of its type
   -- parameters is a type: `impl T for Option<Int>`. It is fixed, as an
   -- argument another name of the type fixes is.
-  let concrete := fun (ps : List String) (tr : TraitKey) (head : String) (args : List String)
-      (context : List Cond) (methods : List Item) => do
+  let concrete := fun (whole : ImplOf Item) => do
     let mut newArgs : Array String := #[]
     let mut fresh : Array String := #[]
-    let mut fixed : Array Item := #[]
-    for (a, j) in args.zipIdx do
-      if ps.contains a || head.startsWith "(tuple" then newArgs := newArgs.push a
+    let mut fixed := whole.fixed
+    for (a, j) in whole.args.zipIdx do
+      if whole.params.contains a || whole.head.startsWith "(tuple" then newArgs := newArgs.push a
       else
         let name := s!"%fixed{j}"
         newArgs := newArgs.push name
         fresh := fresh.push name
-        fixed := fixed.push ((.typeAlias (fixedArgName j) [] (← ty (.name a []))))
-    pure (Item.impl { params := (ps ++ fresh.toList), trait := tr, head := head, args := newArgs.toList, context := context, methods := (methods ++ fixed.toList) })
+        fixed := fixed ++ [(j, ← ty (.name a []))]
+    pure (Item.impl { whole with params := whole.params ++ fresh.toList, args := newArgs.toList, fixed })
   let rec item : Item → Except String Item
     -- (What is said of a type parameter: `F: Fn<(Int,), Output = Bool>`.)
     | .bounds f bs => do
@@ -770,31 +769,28 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
     | (.trait name methods) => do
       pure ((.trait name (← methods.mapM fun (m, ps, r) => do
         pure (m, ← ps.mapM ty, ← r.mapM ty))))
-    | .impl { params := ps, trait := tr, head := head, args := args, context := context, methods := methods, .. } => do
+    | .impl whole@{ params := ps, trait := tr, head := head, args := args, context := context, methods := methods, .. } => do
       let tr := TraitKey.at tr.base tr.nth (← tr.written.mapM ty)
       let context ← context.mapM (·.mapTypesM ty)
       let methods ← methods.mapM fun
         | (.typeAlias name aps body) => do pure ((.typeAlias name aps (← ty body)))
         | m => item m
+      let fixed ← whole.fixed.mapM fun (j, t) => do pure (j, ← ty t)
       -- For a type whose last parameter is `..T`: the arguments written from
       -- there on are one tuple, an argument the implementation fixes.
-      let (ps, args, methods) := match byName[variadicKey head]? with
+      let (ps, args, fixed) := match byName[variadicKey head]? with
         | some (_, .name kk []) =>
           match kk.toNat? with
           | some k =>
-            let fixedOf := fun (j : Nat) => methods.findSome? fun
-              | (.typeAlias n [] body) => if n == fixedArgName j then some body else none
-              | _ => none
             let parts := (args.drop k).zipIdx.map fun (a, i) =>
-              if ps.contains a then TypeExpr.name a [] else (fixedOf (k + i)).getD (.name a [])
-            let rest := methods.filter fun
-              | (.typeAlias n [] _) => !((List.range args.length).drop k |>.any (fixedArgName · == n))
-              | _ => true
+              if ps.contains a then TypeExpr.name a [] else (fixed.lookup (k + i)).getD (.name a [])
+            let rest := fixed.filter fun (j, _) => j < k
             let name := s!"%fixed{k}"
             (ps.filter (fun p => !((List.range args.length).drop k |>.any (s!"%fixed{·}" == p))) ++ [name],
-              args.take k ++ [name], rest ++ [(.typeAlias (fixedArgName k) [] (.tuple parts))])
-          | none => (ps, args, methods)
-        | _ => (ps, args, methods)
+              args.take k ++ [name], rest ++ [(k, .tuple parts)])
+          | none => (ps, args, fixed)
+        | _ => (ps, args, fixed)
+      let whole := { whole with params := ps, trait := tr, args, context, methods, fixed }
       -- An implementation for another name of a type, `impl T for
       -- Option<A>`, is one for the type the name stands for, with the
       -- arguments the name fixes said beside it.
@@ -803,7 +799,7 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
         let given := aps.zip args
         let mut newArgs : Array String := #[]
         let mut fresh : Array String := #[]
-        let mut fixed : Array Item := #[]
+        let mut fixed := whole.fixed
         for (targ, j) in targs.zipIdx do
           let named := match targ with
             | .name p [] => given.lookup p
@@ -814,9 +810,9 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
             let name := s!"%fixed{j}"
             newArgs := newArgs.push name
             fresh := fresh.push name
-            fixed := fixed.push ((.typeAlias (fixedArgName j) [] (← ty targ)))
-        concrete (ps ++ fresh.toList) tr target newArgs.toList context (methods ++ fixed.toList)
-      | _ => concrete ps tr head args context methods
+            fixed := fixed ++ [(j, ← ty targ)]
+        concrete { whole with params := ps ++ fresh.toList, head := target, args := newArgs.toList, fixed }
+      | _ => concrete whole
     -- A name given a value with its type written, `let Just: fn(Int) ->
     -- Option<Int> = Ok;`.
     | .alias name b value => do
@@ -1017,7 +1013,7 @@ asks more of the type is the one for those (as for any two). In each copy
 copies'. The copies come after everything else. -/
 def expandBlankets (items : List Item) : List Item := Id.run do
   let blankets := items.filterMap fun
-    | .impl { params := ps, trait := tr, head := head, args := [t], context := ctx, methods := ms, .. } => if head == blanketHead then some (ps, tr, t, ctx, ms) else none
+    | .impl whole@{ params := ps, trait := tr, head := head, args := [t], context := ctx, methods := ms, .. } => if head == blanketHead then some (ps, tr, t, ctx, ms, whole) else none
     | _ => none
   if blankets.isEmpty then return items
   let rest := items.filter fun
@@ -1045,20 +1041,20 @@ def expandBlankets (items : List Item) : List Item := Id.run do
     | (.fieldNames mark [tr, head] _) => if mark == attrMark "negative_impl" then some (last tr, last head) else none
     | _ => none
   -- (What a function generic in `T` may take a trait of `T` to be met by.)
-  let mut out : Array Item := (blankets.map fun (_, tr, t, ctx, _) =>
+  let mut out : Array Item := (blankets.map fun (_, tr, t, ctx, _, _) =>
     (.fieldNames (attrMark "blanket_impl")
       (tr.base :: ctx.filterMap fun (c : Cond) => if c.subject == t then some c.trait.base else none) [])).toArray
   let mut copies := 0
   -- (How many traits of its type each asks: tried first.)
   let askedOf := fun (b : Nat) => match blankets[b]? with
-    | some (_, _, t, ctx, _) => (ctx.filter fun (c : Cond) => c.subject == t).length
+    | some (_, _, t, ctx, _, _) => (ctx.filter fun (c : Cond) => c.subject == t).length
     | none => 0
   let order := (List.range blankets.length).mergeSort fun a b => askedOf a ≥ askedOf b
   let blankets := order.filterMap fun b => blankets[b]?
   -- (A copy may give what another asks: as many rounds as there are.)
   for _ in List.range (blankets.length + 1) do
     let mut more := false
-    for ((ps, tr, t, ctx, ms), b) in blankets.zipIdx do
+    for ((ps, tr, t, ctx, ms, whole), b) in blankets.zipIdx do
       let asked := ctx.filterMap fun (c : Cond) => if c.subject == t then some c.trait.base else none
       let bodies := tr.written
       for (h, hps) in heads do
@@ -1069,7 +1065,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
         if givers.contains b then continue
         -- (One that asks more already gave it this type: that one is its.)
         let asksOf := fun (g : Nat) => match blankets[g]? with
-          | some (_, _, t', ctx', _) => (ctx'.filter fun (c : Cond) => c.subject == t').length
+          | some (_, _, t', ctx', _, _) => (ctx'.filter fun (c : Cond) => c.subject == t').length
           | none => 0
         if givers.any (fun g => asksOf g > asked.length) then continue
         let mineToo := givers.any (· != b)
@@ -1098,7 +1094,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
             .fn m fps (annots.map (·.map (substTypeExpr [(t, self)]))) (ret.map (substTypeExpr [(t, self)]))
               (named.body ((shiftRewrite shift).body b))
           | item => item
-        out := out.push (.impl { params := (fresh ++ ps.filter (· != t)), trait := (tr.mapWritten (substTypeExpr [(t, self)])), head := h, args := fresh, context := ctx', methods := (ms' ++ [(.typeAlias (blanketName t) [] self)]) })
+        out := out.push (.impl { whole with params := (fresh ++ ps.filter (· != t)), trait := (tr.mapWritten (substTypeExpr [(t, self)])), head := h, args := fresh, context := ctx', methods := (ms' ++ [(.typeAlias (blanketName t) [] self)]) })
         known := known.insert (tr.base, h, mine)
         has := has.insert (tr.base, h)
         byBlanket := byBlanket.insert (tr.base, h, mine) (givers ++ [b])
@@ -1165,7 +1161,7 @@ def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
   let defaultKeys : Std.HashMap String UInt64 := defaults.foldl (fun m (n, fns) => m.insertIfNew n (hash fns)) {}
   let (_, out, memo) := Trace.timed "fill: defaults" fun _ => items.zipIdx.foldl (init := (({} : Std.HashMap (String × String × List String) Nat), #[], memo))
     fun (seen, out, memo) (item, index) => match item with
-    | .impl { params := ps, trait := tr, head := head, args := args, context := context, methods := methods, .. } =>
+    | .impl whole@{ trait := tr, head := head, args := args, methods := methods, .. } =>
       let targs := tr.written
       let given := targs.map (·.spell)
       let before := seen.getD (tr.base, head, given) 0
@@ -1205,7 +1201,7 @@ def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
                 | .ok b => b
                 | .error _ => b)
           | item => item
-        [.impl { params := ps, trait := (TraitKey.at tr.base before targs), head := head, args := args, context := context, methods := all }]
+        [.impl { whole with trait := (TraitKey.at tr.base before targs), methods := all }]
       (seen.insert (tr.base, head, given) (before + 1), out ++ made.toArray, memo)
     | item => (seen, out.push item, memo)
   (out.toList, memo)

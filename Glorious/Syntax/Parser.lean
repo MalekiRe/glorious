@@ -228,6 +228,7 @@ private partial def parseItem : P Item := do
     let mut calls : Array Bound := (early.filter callableBound).toArray
     let early := early.filter (!callableBound ·)
     let mut context : Array Cond := #[]
+    let mut uses : Array (String × Nat × Option Nat) := #[]
     -- (What `impl<T: Show>` asked of its parameters, as `where` asks it.)
     for b in early do
       if b.quantity.isSome || !b.ranked.isEmpty then
@@ -256,7 +257,7 @@ private partial def parseItem : P Item := do
           | .ident "Use" =>
             for b in ← parseBoundsOf p do
               if let some (lower, upper) := b.quantity then
-                given := given.push (.typeAlias (useMark p lower upper) [] .hole)
+                uses := uses.push (p, lower, upper)
             if !(← acceptPunct ",") then break
             continue
           | _ => pure ()
@@ -343,6 +344,7 @@ private partial def parseItem : P Item := do
     let params := if written.any (fun t => match t with | .name n [] => n == elidedLife | _ => false) then params ++ [elidedLife] else params
     let mut names : Array String := #[]
     let mut fresh : Array String := #[]
+    let mut fixed : Array (Nat × TypeExpr) := #[]
     for (t, j) in written.zipIdx do
       let plain := match t with
         | .name p [] => if params.contains p && !names.contains p then some p else none
@@ -353,7 +355,7 @@ private partial def parseItem : P Item := do
         let name := s!"%fixed{j}"
         names := names.push name
         fresh := fresh.push name
-        given := given.push (.typeAlias (fixedArgName j) [] t)
+        fixed := fixed.push (j, t)
     let args := names.toList
     let params := params ++ fresh.toList
     expectPunct "{"
@@ -425,7 +427,7 @@ private partial def parseItem : P Item := do
         Item.fn name ps (annots.map (·.map fix)) (ret.map fix)
           ((Flat.selfRewrite head (some (tr, Expr.type (.tuple [self])))).body (calledBody body))
       | other => other
-    pure (.impl { params := params, trait := (.at tr 0 (trArgs.toList.map (substTypeExpr callable))), head := head, args := args, context := context.toList, methods := written })
+    pure (.impl { params := params, trait := (.at tr 0 (trArgs.toList.map (substTypeExpr callable))), head := head, args := args, context := context.toList, methods := written, uses := uses.toList, fixed := fixed.toList })
   | .ident "coerce" =>
     advance
     let name ← match ← peek with

@@ -1375,7 +1375,7 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
         else pure (.typeAlias n aps body)
       | item => pure item
     pure [.traitInfo (ownName ctx .trait name) supers defaults params assocs]
-  | .impl { params := ps, trait := tr, head := head, args := args, context := context, methods := methods, .. } => do
+  | .impl whole@{ params := ps, trait := tr, head := head, context := context, methods := methods, .. } => do
     let (tr', trEntry) ← resolveNamed ctx .trait [] tr.base
     let (head', headEntry) ← resolveNamed ctx .type [] head
     -- An implementation is written beside the trait or beside the type, so
@@ -1412,7 +1412,8 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
         pure ((.typeAlias name aps (← resolveType ctx (genericParams ps) body)))
       | item => pure item
     let written ← tr.written.mapM (resolveType ctx (genericParams ps))
-    pure [.impl { params := ps, trait := (.at tr' tr.nth written), head := head', args := args, context := context, methods := methods }]
+    let fixed ← whole.fixed.mapM fun (j, t) => do pure (j, ← resolveType ctx (genericParams ps) t)
+    pure [.impl { whole with trait := (.at tr' tr.nth written), head := head', context, methods, fixed }]
   | item => resolveItem ctx item
 
 /-- The modules of a program, each with its items: `root` is the first, and a

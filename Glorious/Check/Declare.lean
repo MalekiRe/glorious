@@ -573,7 +573,7 @@ def declareTrait (items : List Item) (name : String) (methods : List (String × 
 /-- An implementation read: what it is for, on what conditions, and what it
 leaves to its trait said (`declareTraits`). -/
 def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) (args : List String) (context : List Syntax.Cond)
-    (methods : List Item) : M Unit := do
+    (methods : List Item) (uses : List (String × Nat × Option Nat)) (fixedWritten : List (Nat × Syntax.TypeExpr)) : M Unit := do
   let what := s!"`impl {tr.shown} for {head}`"
   -- `tr` is the trait at the arguments the implementation gives it.
   let base := tr.base
@@ -731,12 +731,8 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
         throw s!"{what}: `{n}` is not a type `{base}` leaves to an implementation"
   -- The arguments fixed by the name the implementation was written for.
   let mut fixed : List (Nat × Ty) := []
-  for j in List.range arity do
-    match methods.findSome? fun
-        | .typeAlias n _ body => if n == Syntax.fixedArgName j then some body else none
-        | _ => none with
-    | some body => fixed := fixed ++ [(j, ← resolveType pmap false body)]
-    | none => pure ()
+  for (j, body) in fixedWritten do
+    if j < arity then fixed := fixed ++ [(j, ← resolveType pmap false body)]
   -- What its conditions say of types left to implementations.
   let mut equal : List (Nat × String × String × Ty) := []
   let mut extraEqual : List (Ty × String × String × Ty) := []
@@ -796,7 +792,7 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
       implsByBase := s.implsByBase.insert base ((s.implsByBase.getD base #[]).push s.impls.size)
       implsByHead := s.implsByHead.insert (base, head) ((s.implsByHead.getD (base, head) #[]).push s.impls.size)
       impls := s.impls.push
-        { trait := tr, head, params := args, context := ctx, methods,
+        { trait := tr, head, params := args, context := ctx, methods, uses,
           dictFn := Elab.implDictName tr.spelled head, targs, assocs, pvars, fixed, equal, generic, extra,
           gatParams, extraEqual }
       kimpls := s.kimpls.push ⟨tr, head, arity, ctx.map fun (c, j) => (.of c, j)⟩ }
@@ -805,10 +801,9 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
 /-- An implementation declared (`declareImplIn`): a callable in what it is
 for performs what is written of it, nothing where nothing is, as in a
 function's signature. -/
-def declareImpl (params : List String) (tr : Syntax.TraitKey) (head : String) (args : List String) (context : List Syntax.Cond)
-    (methods : List Item) : M Unit := do
+def declareImpl (i : Syntax.ImplOf Item) : M Unit := do
   modify fun s => { s with closedRows := true }
-  try declareImplIn params tr head args context methods
+  try declareImplIn i.params i.trait i.head i.args i.context i.methods i.uses i.fixed
   finally modify fun s => { s with closedRows := false }
 
 /-- Read the traits and their implementations. Types are declared by now. -/
@@ -840,8 +835,7 @@ def declareTraits (items : List Item) : M Unit := do
           throw s!"trait `{name}` would need a type to have `{name}` to have it, through `{s}`"
       modify fun st => { st with supers := (name, supers) :: st.supers }
   for item in items do
-    if let .impl { params := params, trait := tr, head := head, args := args, context := context, methods := methods, .. } := item then
-      declareImpl params tr head args context methods
+    if let .impl i := item then declareImpl i
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each
   -- type, on condition that each type parameter can be destroyed, and that
@@ -880,7 +874,7 @@ def declareTraits (items : List Item) : M Unit := do
             implsByHead := s.implsByHead.insert (Syntax.destroyTrait, head)
               ((s.implsByHead.getD (Syntax.destroyTrait, head) #[]).push s.impls.size)
             impls := s.impls.push
-              ⟨.of Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
+              ⟨.of Syntax.destroyTrait, head, [], (List.range arity).map (s!"T{·}"), ctx, [],
                 Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, [], [], []⟩
             kimpls := s.kimpls.push ⟨Syntax.destroyKey, head, arity, keys⟩ }
   -- What `Traits.coherent` asks of the implementations.

@@ -701,9 +701,6 @@ arguments is wanted, so each clause takes the arguments as its tuple's parts. -/
 def spreadMark : String := "%spread"
 
 
-/-- In an implementation for another name of a type: the argument of the type
-that the name fixes, by its place. -/
-def fixedArgName (j : Nat) : String := s!"%fixed:{j}"
 
 /-- `<T as Trait>::Name`, the type or row the trait leaves to `T`'s
 implementation under that name, is the type `%assocOf<T, Trait, Name>`. -/
@@ -971,6 +968,12 @@ structure ImplOf (α : Type) where
   args : List String
   context : List Cond
   methods : List α
+  /-- How often its functions use a value of a type parameter, where it
+  says: `T: Use<[0, *]>`. -/
+  uses : List (String × Nat × Option Nat) := []
+  /-- The arguments of the head it fixes, by their place: `impl T for
+  Option<Int>`, or one written for another name of a type. -/
+  fixed : List (Nat × TypeExpr) := []
   deriving Hashable
 
 inductive Item where

@@ -63,10 +63,8 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
         let lifetimes := (genericParams written).filter isLifetime
         -- (How often its functions use a value of a type parameter, where the
         -- implementation says it.)
-        let uses := im.methods.filterMap fun
-          | .typeAlias n _ _ => (Syntax.useMarked n).map fun (p, lo, hi) =>
-              ({ subject := p, trait := "Use", quantity := some (lo, hi) } : Syntax.Bound)
-          | _ => none
+        let uses := im.uses.map fun (p, lo, hi) =>
+          ({ subject := p, trait := "Use", quantity := some (lo, hi) } : Syntax.Bound)
         -- (And of the trait's function's own, what the trait says.)
         let uses := uses ++ sig.uses.map fun (p, lo, hi) =>
           ({ subject := p, trait := "Use", quantity := some (lo, hi) } : Syntax.Bound)
