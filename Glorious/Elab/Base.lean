@@ -295,15 +295,21 @@ def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : F
         | some g => Flat.FExpr.name none g
         | none => b.expr f
       if h : 0 < args.size then some (callee, args[0], args.extract 1 args.size) else none
-  let x ← match b.expr recv with
+  let named := match b.expr recv with
     | .name none x => some x
     | .ref _ x => some x
     | _ => none
-  let given : Flat.FExpr := match borrow with
-    | some u => .ref u x
-    | none => .name none x
+  -- (A receiver given whole that is no name is the node itself, as it is
+  -- written; one borrowed is a name.)
+  let given : Option Flat.FExpr ← match borrow, named with
+    | some u, some x => some (some (.ref u x))
+    | none, some x => some (some (.name none x))
+    | none, none => some none
+    | some _, none => none
   let (fe, b) := b.add callee
-  let (ge, b) := b.add given
+  let (ge, b) := match given with
+    | some n => b.add n
+    | none => (recv, b)
   let node : Flat.FExpr := if tail then .tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)
   pure { b with exprs := b.exprs.set! e node }
 
@@ -576,6 +582,10 @@ structure Said where
   msg : String
   decision : Option Decision := none
   result : Bool := false
+  /-- Of "has no field": the head of the type it is not a field of (a dot
+  call's receiver's, `value.name(..)`), so that whoever looks for the type's
+  own function of the name need not read the receiver again. -/
+  subject : Option String := none
 
 instance : Coe String Said := ⟨fun msg => { msg }⟩
 

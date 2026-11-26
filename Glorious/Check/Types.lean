@@ -587,6 +587,12 @@ structure St where
   /-- The names holding values read so far in the group, by their bindings'
   brands: one borrowed after is borrowed after its value is given away. -/
   valReads : Std.HashSet Nat := {}
+  /-- A dot call's receiver's own function, as found by reading the
+  receiver on a copy (`dotAltFor`), by the receiver's node: found once in
+  a body. Each link of a chain of calls read the chain below it so, and
+  each of those its own: twice as many reads for each link. Empty between
+  groups. -/
+  altFound : Std.HashMap Nat (Option String) := {}
   /-- Where such variables are, as the count of uses knows a binding: one of
   them may hold a value with `Drop` that some paths use and others do not,
   since its cleanup asks whether it was. -/

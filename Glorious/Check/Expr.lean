@@ -279,6 +279,11 @@ def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option S
       -- (A field of a name, borrowed: the place, where it is,
       -- `Elab.receiverFieldNode`; through the reference the name holds,
       -- where it holds one.)
+      -- (What is no name, given whole: as it is written, the node itself.)
+      if borrow.isNone then
+        let some b' := Elab.receiverNode call fn none b | return false
+        modify fun s => { s with body := b', decided := s.decided ++ [.receiverHere call fn none] }
+        return true
       let some uniq := borrow | return false
       let rec root (e : Flat.ExprId) (fuel : Nat) : Option String :=
         match fuel, b.expr e with
@@ -1058,6 +1063,14 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Flat.ExprId)
   match dotAltsOf (← get).modules call with
   | none => pure none
   | some alts =>
+    -- (Found already of this receiver: `St.altFound`.)
+    if let some found := (← get).altFound[a]? then return found
+    let found ← dotAltReading scope amb alts a
+    modify fun s => { s with altFound := s.altFound.insert a found }
+    pure found
+
+/-- What `dotAltFor` finds, read anew. -/
+partial def dotAltReading (scope : Scope) (amb : Row) (alts : List String) (a : Flat.ExprId) : M (Option String) := do
     let saved ← get
     -- (What the receiver itself is found to need read again, a dot call in
     -- it of a type's own function, is passed on first.)
@@ -1091,7 +1104,9 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Flat.ExprId)
             runProjections false
             headName 8 ty
       | none => pure none
-    set saved
+    -- (What was found of receivers on the way is kept: `St.altFound`.)
+    let found := (← get).altFound
+    set { saved with altFound := found }
     let some h := h | return none
     if let some own := alts.find? (·.startsWith (h ++ "::")) then return some own
     -- (Or a function of another trait, where the type has that trait.)
@@ -2105,25 +2120,39 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
     -- (`value.name(..)` where `name` is no field: if types have a function of
     -- their own of that name, that is what was meant, and which one could
     -- not be told by the name alone.)
-    let callee ← tryCatchThe Elab.Said (inferExpr scope amb f) fun said => do
+    -- (Read, and where it fails put back as it was but for what was written
+    -- in place while it was read, which is of the program: read again, it
+    -- would be decided again, and a chain of calls was read anew at each
+    -- link, three times a link.)
+    let before ← get
+    let callee ← (fun s => match inferExpr scope amb f s with
+      | .ok t s => .ok (Sum.inl t) s
+      | .error e s => .ok (Sum.inr e) { before with body := s.body, decided := s.decided, altFound := s.altFound } : M (Ty ⊕ Elab.Said))
+    let callee ← match callee with
+      | .inl t => pure t
+      | .inr said => do
       let e := said.msg
       match b.expr f with
       | .fieldOf _ recv name =>
         let theirs := (((← get).fns.toList.filter fun (fn, _) => fn.endsWith s!"::{name}").map (·.1)).mergeSort (· ≤ ·)
         -- (Taken for a field because some type has a field of the name: the
-        -- function of the value's type's own, if it has one; read again.)
+        -- function of the value's type's own, if it has one; the type said
+        -- where the field was not found, or the receiver read again.)
         if call != 0 && (e.splitOn "has no field").length > 1 then
           let saved ← get
-          let found ← try some <$> inferExpr scope amb recv catch _ => pure none
-          let head ← match found with
-            | some ty => do
-              let rec go (fuel : Nat) (t : Ty) : M (Option String) := do
-                match fuel, ← find t with
-                | fuel + 1, .ref _ inner _ => go fuel inner
-                | _, .con n _ => pure (some n)
-                | _, _ => pure none
-              go 8 ty
-            | none => pure none
+          let head ← match said.subject with
+            | some h => pure (some h)
+            | none => do
+              let found ← try some <$> inferExpr scope amb recv catch _ => pure none
+              match found with
+              | some ty => do
+                let rec go (fuel : Nat) (t : Ty) : M (Option String) := do
+                  match fuel, ← find t with
+                  | fuel + 1, .ref _ inner _ => go fuel inner
+                  | _, .con n _ => pure (some n)
+                  | _, _ => pure none
+                go 8 ty
+              | none => pure none
           set saved
           if let some h := head then
             let own := s!"{h}::{name}"
@@ -2288,7 +2317,7 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
     (want : Option (Ty × Option Elab.Site)) (x : String) (value : Flat.ExprId) : M Ty := do
   let b := (← get).body
   let (at_, pos) := ((← get).at_, (← get).pos)
-  let t ← withLater (b.fvStmts [x] rest) (inferExpr scope amb value)
+  let t ← withLater (b.fvStmts [x] rest) (inferRoot scope amb value)
   -- The variable lives until the end of this block: nothing that can reach
   -- it may be left over afterwards.
   let brand ← freshBrand
@@ -2384,7 +2413,7 @@ partial def inferAssignStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
     match whole with
     | some none => pure ()
     | some (some why) => throw s!"the assigned value: {why}"
-    | none => unifyAt "the assigned value" expected (← inferExpr scope amb value)
+    | none => unifyAt "the assigned value" expected (← inferRoot scope amb value)
     use scope written
   inferStmts scope amb rest want
 
