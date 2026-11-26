@@ -238,8 +238,8 @@ def layoutOf (fields : Std.HashMap String (List String × List (List TypeExpr)))
       else if let some (s, a) := (if fresh.any (fun p => (heldNames f).contains p) then none else staticLayout fields [head] f) then
         acc := call 0 "layout_add" [acc, int s, int (max a 1)]
       else
-        let s := Expr.call 0 (.mark .inst) [call id "size_of" [], (TypeExpr.tuple [f]).asExpr]
-        let a := Expr.call 0 (.mark .inst) [call (id + 1) "align_of" [], (TypeExpr.tuple [f]).asExpr]
+        let s := Expr.call 0 (.mark .inst) [call id "size_of" [], Expr.type (.tuple [f])]
+        let a := Expr.call 0 (.mark .inst) [call (id + 1) "align_of" [], Expr.type (.tuple [f])]
         id := id + 2
         acc := call 0 "layout_add" [acc, s, a]
     variants := variants ++ [acc]
@@ -268,7 +268,7 @@ def reprOf (ctors : List (Option String × List TypeExpr)) (base : Nat) : Item �
     let mut offsets : List Stmt := []
     let mut layout := Expr.tuple [.int (if tagged then 1 else 0), .int 1]
     for (f, i) in fs.zipIdx do
-      let ty := (TypeExpr.tuple [f]).asExpr
+      let ty := Expr.type (.tuple [f])
       let size := Expr.call 0 (.mark .inst) [call id "size_of" [], ty]
       let align := Expr.call 0 (.mark .inst) [call (id + 1) "align_of" [], ty]
       let align' := Expr.call 0 (.mark .inst) [call (id + 2) "align_of" [], ty]
@@ -583,7 +583,7 @@ partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (Strin
           | .call _ f args =>
             if b.mark? f == some .ascribe then
               match args[1]?.map b.expr with
-              | some (.call _ g _) => b.bare? g == some "%ty(ref)" || b.bare? g == some "%ty(refmut)"
+              | some (.type (.ref ..)) => true
               | _ => false
             else if b.mark? f == some .inst then
               match args[0]?.map b.expr with
@@ -1210,7 +1210,7 @@ def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
           | .fn m fps annots _ b =>
             Item.fn m fps (annots.map fun _ => none) none
               ((shiftRewrite (10000000000 * (index + 1))).body
-                ((selfRewrite head (some (tr, (TypeExpr.tuple [self]).asExpr))).body b))
+                ((selfRewrite head (some (tr, Expr.type (.tuple [self])))).body b))
           -- (A type's default is written against `Self` too.)
           | (.typeAlias n takes body) => (.typeAlias n takes (TypeExpr.withSelf self body))
           | item => item

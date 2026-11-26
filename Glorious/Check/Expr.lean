@@ -368,6 +368,7 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
   match n with
   | .int _ => pure .int
   | .mark m => throw s!"`{m.shown}` is the compiler's mark of a call, not a value; this is a compiler defect"
+  | .type _ => throw "a type written among expressions is no value; this is a compiler defect"
   | .name _ x =>
     -- (A function that needs a trait of a type it is used at, named as a
     -- value: written where it is as a block that calls it, and read on,
@@ -471,7 +472,7 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
       let (fields, result) ← instCtor sig
       unless fields.isEmpty do arityError s!"constructor `{x}`" fields.length 0
       if let some ty := written then
-        unifyAt s!"`{x}` is written with a type" (← resolveType [] false (TypeExpr.ofExpr ty)) result
+        unifyAt s!"`{x}` is written with a type" (← resolveType [] false (ty.typeWritten)) result
       pure result
     | .op _ => throw s!"operation `{x}` must be called"
     | .prim => throw s!"intrinsic `{x}` must be called"
@@ -1486,7 +1487,7 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
     let (fields, result) ← instCtor sig
     -- A name given to the constructor with a type: built at that type.
     if let some ty := written then
-      let said ← resolveType [] false (TypeExpr.ofExpr ty)
+      let said ← resolveType [] false (ty.typeWritten)
       unifyAt s!"`{x}` is written with a type" said (.fn fields result [] none (← freshCap))
     checkArgs scope amb s!"constructor `{x}`" fields args call
     -- What the type's declaration asks of its parameters.
@@ -1894,7 +1895,7 @@ partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
     if mark == .inst then
       -- `f<A, B>(..)`: the call, with the types written kept for when the
       -- function called is found.
-      let tys ← match TypeExpr.ofExpr (Flat.treeExpr b ty) with
+      let tys ← match b.typeAt ty with
         | .tuple tys => (tys.filter fun
             | .name l [] => !l.startsWith "'"
             | _ => true).mapM (resolveType (← get).rigidParams false)
@@ -1906,7 +1907,7 @@ partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
         throw "types are written, `f<A, B>(..)`, for a function of a module that has type parameters; what is called here is not one"
       return some t
     if mark == .ascribe then
-      let expected ← resolveType (← get).rigidParams false (TypeExpr.ofExpr (Flat.treeExpr b ty))
+      let expected ← resolveType (← get).rigidParams false (b.typeAt ty)
       if ← textAt expected value then return some expected
       if let .int n := b.expr value then
         match ← literalAt expected n value with

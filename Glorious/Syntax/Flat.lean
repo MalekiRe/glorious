@@ -112,6 +112,13 @@ def unsafeBody (b : Body) : Body :=
   | .mark m => some m
   | _ => none
 
+/-- The type written where `e` is, among expressions (`FExpr.type`); `_`
+where it is none. -/
+@[inline] def typeAt (b : Body) (e : ExprId) : TypeExpr :=
+  match b.expr e with
+  | .type t => t
+  | _ => .hole
+
 /-- Is the expression a call marked `m`, `%as(value, type)`? Its arguments. -/
 @[inline] def marked? (b : Body) (m : Mark) (e : ExprId) : Option (Array ExprId) :=
   match b.expr e with
@@ -201,6 +208,7 @@ partial def flatExpr : Expr → Build ExprId
   | .refField id uniq x path star => pushExpr (.refField id uniq x path star)
   | .fieldOf id e x => do pushExpr (.fieldOf id (← flatExpr e) x)
   | .mark m => pushExpr (.mark m)
+  | .type t => pushExpr (.type t)
 
 partial def flatStmt : Stmt → Build StmtId
   | .let_ p v => do pushStmt (.let_ p (← flatExpr v))
@@ -256,6 +264,7 @@ partial def treeExpr (b : Body) (e : ExprId) : Expr :=
   | .refField id uniq x path star => .refField id uniq x path star
   | .fieldOf id e x => .fieldOf id (treeExpr b e) x
   | .mark m => .mark m
+  | .type t => .type t
 
 partial def treeStmt (b : Body) (s : StmtId) : Stmt :=
   match b.stmt s with

@@ -23,7 +23,7 @@ private def defaultAliases (name : String) (params : List String)
 /-- A constant's value, `const NAME: T = value`: worked out at compile time,
 of that type (`constItems`), in a body of its own. -/
 private def constValue (ty : TypeExpr) : P (Flat.Body × Flat.ExprId) := valueOf do
-  let value ← markOf 0 .ascribe #[← parseBinary 0 false, ← tree ty.asExpr]
+  let value ← markOf 0 .ascribe #[← parseBinary 0 false, ← mk (.type ty)]
   callOf 0 none comptimeMark #[value]
 
 /-- A function that takes nothing and gives the value written. -/
@@ -93,7 +93,7 @@ private partial def parseItem : P Item := do
     let (body, value) ← valueOf do
       let value ← parseBinary 0 false
       match ty with
-      | some ty => markOf 0 .ascribe #[value, ← tree ty.asExpr]
+      | some ty => markOf 0 .ascribe #[value, ← mk (.type ty)]
       | none => pure value
     expectPunct ";"
     pure (.alias name body value)
@@ -425,7 +425,7 @@ private partial def parseItem : P Item := do
       | .fn name ps annots ret body =>
         let fix := unnamed ps ∘ TypeExpr.withSelf self ∘ called
         Item.fn name ps (annots.map (·.map fix)) (ret.map fix)
-          ((Flat.selfRewrite head (some (tr, (TypeExpr.tuple [self]).asExpr))).body (calledBody body))
+          ((Flat.selfRewrite head (some (tr, Expr.type (.tuple [self])))).body (calledBody body))
       | other => other
     pure (.impl params tr head args context.toList written)
   | .ident "coerce" =>

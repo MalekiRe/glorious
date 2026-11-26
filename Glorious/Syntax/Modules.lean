@@ -1091,15 +1091,15 @@ partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF Exp
             if q == "Self" then
               return ← resolveExprF ctx bound (← fpush (.call id (← fpush (.name (some q) name)) #[]))
             let inner ← fpush (.call id (← fpush (.name none name)) #[])
-            let ty ← fpushTree (TypeExpr.tuple [.name q []]).asExpr
+            let ty ← fpush (.type (TypeExpr.tuple [.name q []]))
             return ← resolveExprF ctx bound (← fpush (.call 0 (← fpush (.mark .inst)) #[inner, ty]))
           return ← resolveExprF ctx bound (← fpush (.name (some q) name))
     if let (some mark, #[value, ty]) := (b.mark? f, args) then
       if mark == .ascribe || mark == .inst then
         -- `let x: Type = value`: the type's names are resolved as types.
-        let ty ← liftM (resolveType ctx ctx.generics (TypeExpr.ofExpr (treeExpr b ty)))
+        let ty ← liftM (resolveType ctx ctx.generics (b.typeAt ty))
         let value ← resolveExprF ctx bound value
-        return ← fpush (.call id (← fpush (.mark mark)) #[value, ← fpushTree ty.asExpr])
+        return ← fpush (.call id (← fpush (.mark mark)) #[value, ← fpush (.type ty)])
     if let (some .is_, #[subject, cl]) := (b.mark? f, args) then
       if let .closure _ #[c] := b.expr cl then
         let ⟨pats, _⟩ := b.clause c

@@ -340,7 +340,7 @@ partial def parsePostfix (noBlock : Bool) : P ExprId := do
         let mut args ← parseArgs
         while !noBlock && (← peek) == .punct "{" do
           args := args ++ [← parseBraces]
-        e ← markOf 0 .inst #[← mk (.call id e args.toArray), ← tree (TypeExpr.tuple tys).asExpr]
+        e ← markOf 0 .inst #[← mk (.call id e args.toArray), ← mk (.type (TypeExpr.tuple tys))]
     | .punct "(" =>
       let id := (← read).base + (← get) + 1
       advance
@@ -413,7 +413,7 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
       let id := (← read).base + (← get) + 1
       advance
       return ← markOf 0 .inst
-        #[← mk (.call id (← mkName (some knownTrait) "VALUE") #[]), ← tree (TypeExpr.tuple [.name x []]).asExpr]
+        #[← mk (.call id (← mkName (some knownTrait) "VALUE") #[]), ← mk (.type (TypeExpr.tuple [.name x []]))]
   match ← peek with
   | .int n =>
     let v ← plainInt false n
@@ -454,7 +454,7 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
         | .name none x => pure (TypeExpr.name x [])
         | _ => failAt "`[x; n]` is an array of so many, `n` a number or a length a type parameter stands for (`const N: Int`): a list of a length found as the program runs is a `Vec`, made with `push`"
       return ← markOf 0 .inst #[← mk (.call (numbered opened 900000) (← preludeFn "fixed_repeat_of") #[first]),
-        ← tree (TypeExpr.tuple [length]).asExpr]
+        ← mk (.type (TypeExpr.tuple [length]))]
     let mut elements : Array ExprId := #[first]
     while ← acceptPunct "," do
       if (← peek) == .punct "]" then break
@@ -493,7 +493,7 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
       while !noBlock && (← peek) == .punct "{" do
         args := args ++ [← parseBraces]
     markOf 0 .inst #[← mk (.call id (← mkName (some trait) name) args.toArray),
-      ← tree (TypeExpr.tuple (self :: targs)).asExpr]
+      ← mk (.type (TypeExpr.tuple (self :: targs)))]
   | .ident "move" =>
     advance
     -- `move (a, b) { body }`: the block, holding the values `a` and `b`
@@ -554,7 +554,7 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
       -- (Known by the place of `const`: what it needs is given there.)
       let call ← mk (.call id (← mkName none fn) #[])
       if types.isEmpty then pure call
-      else markOf 0 .inst #[call, ← tree (TypeExpr.tuple (types.map (TypeExpr.name · []))).asExpr]
+      else markOf 0 .inst #[call, ← mk (.type (TypeExpr.tuple (types.map (TypeExpr.name · []))))]
     | _ => failAt "expected a block after `const`"
   | .ident "fn" =>
     -- `fn(a: A, b) -> R / {E} { body }`: a callable written out. A type may
@@ -578,7 +578,7 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
     else
       -- With types written it is the callable, of the type they make.
       let ty := TypeExpr.fn (annots.toList.map (·.getD .hole)) (ret.getD .hole)
-      markOf 0 .ascribe #[written, ← tree ty.asExpr]
+      markOf 0 .ascribe #[written, ← mk (.type ty)]
   | .ident x =>
     if x.startsWith "'" then failAt "a lifetime is not a value"
     if x == "unsafe" && (← peek 1) == .punct "{" then
@@ -610,7 +610,7 @@ partial def parsePrimary (noBlock : Bool) : P ExprId := do
       expectPunct "{"
       let body ← parseStmts
       expectPunct "}"
-      return ← markOf 0 .ascribe #[← mk (.labelScope l body), ← tree ty.asExpr]
+      return ← markOf 0 .ascribe #[← mk (.labelScope l body), ← mk (.type ty)]
     if !noBlock && (← peek) == .punct "{" then
       advance
       let body ← parseStmts
@@ -745,7 +745,7 @@ partial def parseStmts : P (Array StmtId) := do
       expectPunct "="
       let value ← parseBinary 0 false
       let value ← match typed with
-        | some ty => markOf 0 .ascribe #[value, ← tree ty.asExpr]
+        | some ty => markOf 0 .ascribe #[value, ← mk (.type ty)]
         | none => pure value
       expectPunct ";"
       if let some name := mutName then

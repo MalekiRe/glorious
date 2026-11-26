@@ -295,6 +295,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
   | .closure id clauses => elabClosure scope clauses id
   | .handle subject arms => elabHandle scope tailPos subject arms
   | .mark m => throw s!"`{m.shown}` is the compiler's mark of a call, not a value"
+  | .type _ => throw "a type written among expressions is no value"
   | .labelScope l body => do
     let thunk ← elabClosure scope #[← epushC ⟨[.var (labelName l)], body⟩]
     if tailPos then

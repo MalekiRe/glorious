@@ -53,7 +53,7 @@ inductive Mark where
   | ctorIs
   /-- `let x: Type = value` leaves the parser as `let x = %as(value, type)`,
   the type written as an expression so that it can sit among expressions: see
-  `TypeExpr.asExpr`. The checker makes the value that type; after it the value
+  `Expr.type`. The checker makes the value that type; after it the value
   stands alone. -/
   | ascribe
   /-- `move x`: the value of `x`, which is then not to be used again. -/
@@ -91,6 +91,26 @@ def Mark.shown : Mark → String
   | .focus => "%focus"
   | .destroyed => "%destroyed"
   | .inst => "%inst"
+
+/-- A type as written in the source. -/
+inductive TypeExpr where
+  /-- A named type applied to arguments, a generic parameter, or, in a
+  declaration, a bare field name whose type is to be inferred. -/
+  | name (name : String) (args : List TypeExpr)
+  | tuple (args : List TypeExpr)
+  /-- `fn(A, B) -> R`. Its effects are inferred, unless the result says them. -/
+  | fn (params : List TypeExpr) (ret : TypeExpr)
+  /-- `R / {E, F<T>}`, written as the result of a callable: what it gives and
+  the effects it performs, all of them. `/ {}` is a callable that performs
+  nothing. -/
+  | performs (ret : TypeExpr) (effects : List (String × List TypeExpr))
+  /-- `&T` or `&mut T`, or with a lifetime `&'a T`, `&'a mut T`. -/
+  | ref (uniq : Bool) (t : TypeExpr) (life : Option String)
+  /-- `!`. -/
+  | never
+  /-- `_`: to be inferred. -/
+  | hole
+  deriving Inhabited, Hashable, BEq
 
 mutual
 
@@ -136,6 +156,8 @@ inductive Expr where
   | fieldOf (id : Nat) (e : Expr) (name : String)
   /-- A mark, the callee of the call it is said of: `%as(value, type)`. -/
   | mark (m : Mark)
+  /-- A type among expressions, where one is written: `%as(value, type)`. -/
+  | type (t : TypeExpr)
 
 inductive Stmt where
   | let_ (pat : Pattern) (value : Expr)
@@ -425,25 +447,6 @@ def lastSegment (name : String) : String :=
 /-- The function of an implementation: `method` of `trait` for `head`. -/
 def implFnName (trait head method : String) : String := s!"{trait}::{method}@{head}"
 
-/-- A type as written in the source. -/
-inductive TypeExpr where
-  /-- A named type applied to arguments, a generic parameter, or, in a
-  declaration, a bare field name whose type is to be inferred. -/
-  | name (name : String) (args : List TypeExpr)
-  | tuple (args : List TypeExpr)
-  /-- `fn(A, B) -> R`. Its effects are inferred, unless the result says them. -/
-  | fn (params : List TypeExpr) (ret : TypeExpr)
-  /-- `R / {E, F<T>}`, written as the result of a callable: what it gives and
-  the effects it performs, all of them. `/ {}` is a callable that performs
-  nothing. -/
-  | performs (ret : TypeExpr) (effects : List (String × List TypeExpr))
-  /-- `&T` or `&mut T`, or with a lifetime `&'a T`, `&'a mut T`. -/
-  | ref (uniq : Bool) (t : TypeExpr) (life : Option String)
-  /-- `!`. -/
-  | never
-  /-- `_`: to be inferred. -/
-  | hole
-  deriving Inhabited, Hashable
 
 /-- A written type with each type directly in it made by `f`. -/
 def TypeExpr.mapParts (f : TypeExpr → TypeExpr) : TypeExpr → TypeExpr
@@ -704,34 +707,10 @@ def neverParam : String := "%never"
 to the module the implementation is written in. -/
 def inherentMark : String := "%inherent"
 
-/-- A type as an expression, for the one place a type sits among expressions. -/
-partial def TypeExpr.asExpr : TypeExpr → Expr
-  | .name x args => .call 0 (.name none ("%ty:" ++ x)) (args.map asExpr)
-  | .tuple args => .call 0 (.name none "%ty(tuple)") (args.map asExpr)
-  | .fn ps r => .call 0 (.name none "%ty(fn)") (asExpr r :: ps.map asExpr)
-  | .performs r effects =>
-    .call 0 (.name none "%ty(performs)")
-      (asExpr r :: effects.map fun (e, args) => .call 0 (.name none ("%ty:" ++ e)) (args.map asExpr))
-  | .ref uniq t life =>
-    .call 0 (.name none (if uniq then "%ty(refmut)" else "%ty(ref)"))
-      [asExpr t, .name none ("%ty:" ++ life.getD "")]
-  | .never => .name none "%ty(never)"
-  | .hole => .name none "%ty(hole)"
-
-/-- The type an expression made by `TypeExpr.asExpr` is. -/
-partial def TypeExpr.ofExpr : Expr → TypeExpr
-  | .call _ (.name none "%ty(tuple)") args => .tuple (args.map ofExpr)
-  | .call _ (.name none "%ty(fn)") (r :: ps) => .fn (ps.map ofExpr) (ofExpr r)
-  | .call _ (.name none "%ty(performs)") (r :: effects) =>
-    .performs (ofExpr r) (effects.filterMap fun
-      | .call _ (.name none e) args => some ((e.drop 4).toString, args.map ofExpr)
-      | _ => none)
-  | .call _ (.name none "%ty(refmut)") [t, .name none life] =>
-    .ref true (ofExpr t) (if life == "%ty:" then none else some (life.drop 4).toString)
-  | .call _ (.name none "%ty(ref)") [t, .name none life] =>
-    .ref false (ofExpr t) (if life == "%ty:" then none else some (life.drop 4).toString)
-  | .call _ (.name none x) args => .name (x.drop 4).toString (args.map ofExpr)
-  | .name none "%ty(never)" => .never
+/-- The type an expression is where a type is written among expressions
+(`Expr.type`); `_` where it is none. -/
+def Expr.typeWritten : Expr → TypeExpr
+  | .type t => t
   | _ => .hole
 
 /-! Generic parameters are written in one list: type parameters, lifetimes
@@ -869,6 +848,7 @@ inductive FExpr where
   | refField (id : Nat) (uniq : Bool) (name : String) (path : List String) (star : Bool)
   | fieldOf (id : Nat) (e : ExprId) (name : String)
   | mark (m : Mark)
+  | type (t : TypeExpr)
   deriving Inhabited, Hashable, BEq
 
 /-- A statement, its parts by place (`Syntax.Stmt`). -/

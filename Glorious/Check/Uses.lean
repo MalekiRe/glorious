@@ -626,7 +626,7 @@ partial def runList (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String ×
 
 partial def runExpr (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String × AVal)) (e : ExprId) : A Alts :=
   match b.expr e with
-  | .int _ | .mark _ => pure [(.unknown, 0)]
+  | .int _ | .mark _ | .type _ => pure [(.unknown, 0)]
   | .name q x => do
     tick
     -- Naming the binding is not yet a use; calling it, taking it apart, or

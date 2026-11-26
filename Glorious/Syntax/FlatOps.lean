@@ -98,6 +98,7 @@ partial def hashExpr (b : Body) (e : ExprId) : UInt64 :=
   | .refField id u x path star => mixHash 14 (hash (id, u, x, path, star))
   | .fieldOf id x n => mixHash 15 (mixHash (hash (id, n)) (b.hashExpr x))
   | .mark m => mixHash 16 (hash m)
+  | .type t => mixHash 17 (hash t)
 
 /-- A callable written with these clauses. -/
 partial def hashClosure (b : Body) (id : Nat) (cs : Array ClauseId) : UInt64 :=
@@ -568,7 +569,7 @@ where
       Except String FRewrite := do
     let mut made : Std.HashMap ExprId Expr := {}
     for ty in places do
-      made := made.insert ty (← f (TypeExpr.ofExpr (treeExpr b ty))).asExpr
+      made := made.insert ty (.type (← f (b.typeAt ty)))
     pure { onExpr := fun _ _ e => (made[e]?).map fun t => flatExpr t }
 
 /-- An expression with each type written in it changed (`mapTypes`). -/
@@ -770,7 +771,7 @@ def Body.valueLike (b : Body) (e : ExprId) : Bool :=
   | .call _ f args =>
     match b.mark? f, args.toList with
     | some mark, [_, ty] =>
-      mark != .ascribe || (match TypeExpr.ofExpr (treeExpr b ty) with
+      mark != .ascribe || (match b.typeAt ty with
         | .ref _ _ _ => false
         | _ => true)
     | _, _ => true
