@@ -1409,7 +1409,8 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
       | (.typeAlias name aps body) => do
         pure ((.typeAlias name aps (← resolveType ctx (genericParams ps) body)))
       | item => pure item
-    pure [.impl ps (.of tr') head' args context methods]
+    let written ← tr.written.mapM (resolveType ctx (genericParams ps))
+    pure [.impl ps (.at tr' tr.nth written) head' args context methods]
   | item => resolveItem ctx item
 
 /-- The modules of a program, each with its items: `root` is the first, and a

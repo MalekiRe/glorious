@@ -130,14 +130,6 @@ partial def takesReference : List Item → List (String × Bool)
   | _ :: rest => takesReference rest
 
 
-/-- The arguments an implementation gives its trait, as written
-(`traitArgName`), in order. -/
-def givenTraitArgs (ms : List Item) : List TypeExpr :=
-  let named := ms.filterMap fun
-    | .typeAlias name _ body => some (name, body)
-    | _ => none
-  (List.range named.length).filterMap fun i => named.lookup (traitArgName i)
-
 /-- The names a type mentions, not through a reference or a callable (each
 of which holds the other where it is). -/
 partial def heldNames : TypeExpr → List String
@@ -779,6 +771,7 @@ partial def expandAliases (items : List Item) (memo : FrontMemo := {}) : Except 
       pure ((.trait name (← methods.mapM fun (m, ps, r) => do
         pure (m, ← ps.mapM ty, ← r.mapM ty))))
     | .impl ps tr head args context methods => do
+      let tr := TraitKey.at tr.base tr.nth (← tr.written.mapM ty)
       let methods ← methods.mapM fun
         | (.typeAlias name aps body) => do pure ((.typeAlias name aps (← ty body)))
         | m => item m
@@ -1038,11 +1031,10 @@ def expandBlankets (items : List Item) : List Item := Id.run do
     | _ => none
   let heads := builtinHeads declared
   -- (The arguments an implementation gives its trait, as written.)
-  let givenArgs := fun (ms : List Item) => (givenTraitArgs (ms.map Item.declared)).map (·.spell)
   -- (Which trait each implementation is of, at which arguments, for which
   -- head.)
   let implOf : Item → Option (String × String × List String) := fun
-    | .impl _ tr head _ _ ms => some (tr.base, head, givenArgs ms)
+    | .impl _ tr head _ _ _ => some (tr.base, head, tr.written.map (·.spell))
     | _ => none
   let mut known : Std.HashSet (String × String × List String) := .ofList (rest.filterMap implOf)
   -- (Which traits each head has some implementation of.)
@@ -1070,7 +1062,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
     let mut more := false
     for ((ps, tr, t, ctx, ms), b) in blankets.zipIdx do
       let asked := ctx.filterMap fun (p, c) => if p == t then some c else none
-      let bodies := givenTraitArgs (ms.map Item.declared)
+      let bodies := tr.written
       for (h, hps) in heads do
         let fresh := hps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%b{j}" else s!"%b{j}"
         let self := selfTypeOf h (fresh.map (TypeExpr.name · []))
@@ -1108,7 +1100,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
             .fn m fps (annots.map (·.map (substTypeExpr [(t, self)]))) (ret.map (substTypeExpr [(t, self)]))
               (named.body ((shiftRewrite shift).body b))
           | item => item
-        out := out.push (.impl (fresh ++ ps.filter (· != t)) tr h fresh ctx'
+        out := out.push (.impl (fresh ++ ps.filter (· != t)) (tr.mapWritten (substTypeExpr [(t, self)])) h fresh ctx'
           (ms' ++ subjects ++ [(.typeAlias (blanketName t) [] self)]))
         known := known.insert (tr.base, h, mine)
         has := has.insert (tr.base, h)
@@ -1146,11 +1138,7 @@ def traitArgDefaults (items : List Item) : List Item := Id.run do
     | .pub parent i => .pub parent (go i)
     | .module name (some inner) => .module name (some (inner.map go))
     | .impl ps tr head args context methods =>
-      let given := (List.range 64).filterMap fun i => methods.findSome? fun
-        | .typeAlias n _ body => if n == traitArgName i then some body else none
-        | _ => none
-      let filled := fill tr.base (selfOf head args) given
-      let more := (filled.drop given.length).zipIdx.map fun (t, j) => Item.typeAlias (traitArgName (given.length + j)) [] t
+      let filled := fill tr.base (selfOf head args) tr.written
       -- (What it asks of its type parameters, `where T: Add`, the same.)
       let asked := context.zipIdx.flatMap fun ((subject, ctr), k) =>
         let cgiven := (List.range 64).filterMap fun i => methods.findSome? fun
@@ -1158,7 +1146,7 @@ def traitArgDefaults (items : List Item) : List Item := Id.run do
           | _ => none
         let cfilled := fill ctr (.name subject []) cgiven
         (cfilled.drop cgiven.length).zipIdx.map fun (t, j) => Item.typeAlias (ctxArgName k (cgiven.length + j)) [] t
-      .impl ps tr head args context (methods ++ more ++ asked)
+      .impl ps (.at tr.base tr.nth filled) head args context (methods ++ asked)
     | item => item
   pure (items.map go)
 
@@ -1185,7 +1173,7 @@ def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
   let (_, out, memo) := Trace.timed "fill: defaults" fun _ => items.zipIdx.foldl (init := (({} : Std.HashMap (String × String × List String) Nat), #[], memo))
     fun (seen, out, memo) (item, index) => match item with
     | .impl ps tr head args context methods =>
-      let targs := givenTraitArgs (methods.map Item.declared)
+      let targs := tr.written
       let given := targs.map (·.spell)
       let before := seen.getD (tr.base, head, given) 0
       let key := mixHash (hash "defaults") (hash (defaultKeys.getD tr.base 0, index, before, item))

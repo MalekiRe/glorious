@@ -642,19 +642,11 @@ def declareImplIn (params : List String) (tr : Syntax.TraitKey) (head : String) 
   let pvars := pmap.filterMap fun
     | (p, .var id) => some (p, id)
     | _ => none
-  let mut targs : List Ty := []
-  for i in List.range arityOfTrait do
-    match methods.findSome? fun
-        | .typeAlias n _ body => if n == Syntax.traitArgName i then some body else none
-        | _ => none with
-    | some body =>
-      let t ← zonk (← resolveType pmap false body)
-      targs := targs ++ [t]
-    | none => throw s!"{what}: `{base}` takes {arityOfTrait} type arguments"
-  if (methods.any fun
-      | .typeAlias n _ _ => n == Syntax.traitArgName arityOfTrait
-      | _ => false) then
+  unless tr.written.length == arityOfTrait do
     throw s!"{what}: `{base}` takes {arityOfTrait} type arguments"
+  let mut targs : List Ty := []
+  for body in tr.written do
+    targs := targs ++ [← zonk (← resolveType pmap false body)]
   -- An implementation that gives its trait arguments made of its own
   -- type parameters is for the type at all of them: it is the only one
   -- of the trait for the type.

@@ -531,10 +531,17 @@ structure TraitKey where
   base : String
   /-- Which of the implementations written alike for one type, from 0. -/
   nth : Nat := 0
-  /-- The arguments it is at, as written (a type not known yet is the name
-  of its variable, `?3`). -/
+  /-- The arguments it is at, as they tell one key from another
+  (`TypeExpr.keyed`; a type not known yet is the name of its variable,
+  `?3`). -/
   args : List TypeExpr := []
-  deriving BEq, Hashable, Inhabited
+  /-- The same as written, lifetimes and all: what an implementation gives
+  its trait (not part of what the key is). -/
+  written : List TypeExpr := []
+  deriving Inhabited
+
+instance : BEq TraitKey := ⟨fun a b => a.base == b.base && a.nth == b.nth && a.args == b.args⟩
+instance : Hashable TraitKey := ⟨fun k => hash (k.base, k.nth, k.args)⟩
 
 /-- A type as it tells one key from another: what it is written as, without
 the lifetimes of its references and what its callables perform (what
@@ -549,7 +556,11 @@ def TraitKey.of (base : String) : TraitKey := { base }
 
 /-- The trait at arguments, the `nth` implementation written alike. -/
 def TraitKey.at (base : String) (nth : Nat) (args : List TypeExpr) : TraitKey :=
-  { base, nth, args := args.map TypeExpr.keyed }
+  { base, nth, args := args.map TypeExpr.keyed, written := args }
+
+/-- The same trait at arguments written anew, each by `f`. -/
+def TraitKey.mapWritten (k : TraitKey) (f : TypeExpr → TypeExpr) : TraitKey :=
+  .at k.base k.nth (k.written.map f)
 
 /-- Is it the trait itself, at no arguments? -/
 def TraitKey.plain (k : TraitKey) : Bool := k.nth == 0 && k.args.isEmpty
@@ -603,9 +614,6 @@ def selfTypeOf (head : String) (args : List TypeExpr) : TypeExpr :=
   else if head == "(&)" then .ref false (args.headD (.tuple [])) none
   else .name head args
 
-/-- The name under which an implementation keeps the `i`-th argument it gives
-its trait, among what it declares. -/
-def traitArgName (i : Nat) : String := s!"%traitArg{i}"
 
 
 

@@ -133,6 +133,8 @@ private partial def parseItem : P Item := do
     -- (All that is written between the brackets, lifetimes too: what `Self`
     -- is where the functions are the type's own.)
     let mut selfArgs : Array TypeExpr := #[]
+    -- (The trait's own arguments, `From<Int>`: its key's.)
+    let mut trArgs : Array TypeExpr := #[]
     if tr != "Use" && (← isOp "<") then
       advance
       repeat
@@ -146,11 +148,11 @@ private partial def parseItem : P Item := do
           else
             let arg ← parseType
             selfArgs := selfArgs.push arg
-            given := given.push (.typeAlias (traitArgName given.size) [] arg)
+            trArgs := trArgs.push arg
         | _ =>
           let arg ← parseType
           selfArgs := selfArgs.push arg
-          given := given.push (.typeAlias (traitArgName given.size) [] arg)
+          trArgs := trArgs.push arg
         if !(← acceptPunct ",") then break
       expectOp ">"
     if tr == "Use" && (← isOp "<") then
@@ -427,7 +429,7 @@ private partial def parseItem : P Item := do
         Item.fn name ps (annots.map (·.map fix)) (ret.map fix)
           ((Flat.selfRewrite head (some (tr, Expr.type (.tuple [self])))).body (calledBody body))
       | other => other
-    pure (.impl params (.of tr) head args context.toList written)
+    pure (.impl params (.at tr 0 (trArgs.toList.map (substTypeExpr callable))) head args context.toList written)
   | .ident "coerce" =>
     advance
     let name ← match ← peek with
