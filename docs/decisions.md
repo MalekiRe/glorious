@@ -8542,3 +8542,16 @@ again (the `letMut` decision stays only for a parameter, and for a value a
 field of which is read, `eat(p.a)`, where the flag would be of the whole).
 A callable stored in a declaration that took such a value, `Job { run: {
 eat(n) } }`, holds it and destroys it with itself: accepted, as Rust's.
+
+## Threads: what one shares, checked
+
+Looked at for Rust's `Send` and `Sync`: in safe code, what a thread of the
+system's (`spawn_os`) or of a scope (`Scope::spawn`) runs borrows nothing
+(`F: 'static`), so a variable of the spawner it would change, or touch, is
+refused ("`F: 'static` says it borrows nothing"); what threads share is
+given them as a handle to a heap cell (`Mutex`, `Shared`, `AtomicInt`,
+channels: `share`), whose value is taken out of the cell while it is used,
+which another thread waits for. No type lets two threads reach one value
+otherwise, so no `Send`/`Sync` is asked: a type that would (a handle to
+memory changed in place, without the cell's taking) is the place to add
+them. `Scope::spawn_joined` borrows, and is waited for before it returns.
