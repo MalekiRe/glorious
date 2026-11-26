@@ -1033,7 +1033,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     let traitsBy := Elab.firstOf s.traits
     let arityBy : Std.HashMap String Nat := s.methods.fold (fun m n sig => m.insert n sig.params.length) {}
     let implEs := (s.impls.toList.map fun im =>
-      let names := traitsBy.getD (Syntax.traitBase im.trait) []
+      let names := traitsBy.getD (im.base) []
       (⟨im.dictFn, im.context.length + im.extra.length, names.map fun m =>
         (Syntax.implFnName im.trait im.head m,
           if im.trait == Syntax.destroyTrait then 1

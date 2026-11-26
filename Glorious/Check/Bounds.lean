@@ -167,7 +167,7 @@ partial def toDictEShared (impls : Array ImplDecl) (marker : String → Bool) (d
       -- (Of a trait with no functions, every implementation is the same
       -- value, `()`: one, `Syntax.markerDict`, whatever its conditions are
       -- met by, which are not looked at.)
-      if (impls[i]?.map fun im => marker (Syntax.traitBase im.trait)).getD false then
+      if (impls[i]?.map fun im => marker (im.base)).getD false then
         pure (Elab.DictE.impl Syntax.markerDict [])
       else
       let fn := (impls[i]?.map (·.dictFn)).getD ""
@@ -531,10 +531,10 @@ implementations for that type's head. (One whose name says the trait's
 arguments, `Get<Value>`, and that does not have them apart, is found by its
 name.) -/
 def rekey (b : Bound) : M Bound := do
-  let several ← severalFor (Syntax.traitBase b.trait) ((← headFor b.trait (← find b.ty)).map (·.1))
+  let several ← severalFor (b.base) ((← headFor b.trait (← find b.ty)).map (·.1))
   if (← get).patterned && several && !b.trait.any (· == '#')
-      && (!b.args.isEmpty || b.trait == Syntax.traitBase b.trait) then
-    pure { b with trait := ← implKey (Syntax.traitBase b.trait) b.ty b.args }
+      && (!b.args.isEmpty || b.trait == b.base) then
+    pure { b with trait := ← implKey (b.base) b.ty b.args }
   else pure b
 
 /-- One function of a group given its type, once the group's bounds are
@@ -754,7 +754,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
     | some (im, _) =>
       -- (As it is now: another of its functions may have found more that
       -- it assumes.)
-      let im := ((← implsOfHead (Syntax.traitBase im.trait) im.head).find? (·.dictFn == im.dictFn)).getD im
+      let im := ((← implsOfHead (im.base) im.head).find? (·.dictFn == im.dictFn)).getD im
       -- An implementation says what it assumes.
       let plain ← im.context.mapM fun (tr, j) => do
         let t := Ty.con s!"'{(im.params[j]?).getD ""}@{d.name}" []
@@ -982,7 +982,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if (← needsDestroying [] ty) || !(freeTys ty).isEmpty || hasParam ty then
         let id := 2000000000 + (← get).dropAsked
         modify fun s => { s with dropAsked := s.dropAsked + 1, dropSites := s.dropSites.push (site, id) }
-        pending := pending.push ⟨Syntax.destroyTrait, ty, id, 0, site.owner, pos, []⟩
+        pending := pending.push ⟨Syntax.destroyTrait, Syntax.destroyTrait, ty, id, 0, site.owner, pos, []⟩
   -- What is gone through to reach each borrowed field, for the elaborator.
   let sites := (← get).fieldSites
   modify fun s => { s with fieldSites := #[] }
@@ -1069,7 +1069,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             | .con h args => pure (some (h, args))
             | _ => pure none
           if let some (h, args) := found then
-            let mine ← implsOfHead (Syntax.traitBase b.trait) h
+            let mine ← implsOfHead (b.base) h
             if let [im] := mine then
               let at_ ← implAt im args
               for (given, want) in im.targs.zip wanted do
@@ -1077,7 +1077,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       for b in pending do
         let (self, _) ← subjectOf b.trait b.ty
         if let .var v ← find self then
-          let mine ← implsOfBase (Syntax.traitBase b.trait)
+          let mine ← implsOfBase (b.base)
           let (first, others) := mine.partition fun im => im.pvars.any (·.1 == Syntax.fallbackMark)
           if first.isEmpty then continue
           -- (The other traits asked of the same type.)
@@ -1086,8 +1086,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             let (theirs, _) ← subjectOf other.trait other.ty
             if let .var w ← find theirs then
               if w == v && other.trait != Syntax.destroyTrait
-                  && Syntax.traitBase other.trait != Syntax.traitBase b.trait then
-                asked := Syntax.traitBase other.trait :: asked
+                  && other.base != b.base then
+                asked := other.base :: asked
           let byBase := (← get).implsByBase
           let impls := (← get).impls
           let fitsAll := fun (head : String) => asked.all fun tr =>
@@ -1109,8 +1109,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if let some (h, args) := named then
         -- (Where the type has several implementations of the trait, the one
         -- chosen makes the arguments fit when it is chosen.)
-        let several ← severalFor (Syntax.traitBase b.trait) (some h)
-        for im in ← implsOfHead (Syntax.traitBase b.trait) h do
+        let several ← severalFor (b.base) (some h)
+        for im in ← implsOfHead (b.base) h do
           if im.trait == b.trait && !several then
             -- (The implementation's own type parameters are this type's
             -- arguments here, not what another use of it made them.)
@@ -1289,7 +1289,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let b ← if b.args.isEmpty || givens.any (·.1 == b.trait) then pure b else do
       match ← keyOf b.ty with
       | some k =>
-        let again ← traitKey (Syntax.traitBase b.trait) b.args
+        let again ← traitKey (b.base) b.args
         pure (if givens.contains (again, k) then { b with trait := again } else b)
       | none => pure b
     let b ← timedM "bounds: rekey" (rekey b)
@@ -1307,7 +1307,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if compound.isEmpty then return none
       let spelled ← spellTy b.ty
       pure (compound.find? fun (owner, key, ty, _) =>
-        owner == b.owner && Syntax.traitBase key == Syntax.traitBase b.trait && ty == spelled)
+        owner == b.owner && Syntax.traitBase key == b.base && ty == spelled)
     let solve := fun (trait : String) (ty : Ty) (sty : Traits.STy) => do
       -- (As deep as a condition's conditions go: a list of sixteen, each
       -- apart from those after it, goes some hundreds deep.)

@@ -815,12 +815,10 @@ def declareImplIn (params : List String) (tr head : String) (args : List String)
         throw s!"`impl {Syntax.traitShown tr} for {bareName head}`: some type fits this and another implementation of `{Syntax.traitShown other.trait}` for `{bareName head}` both, and neither asks more of it than the other: say which is for those, with an implementation for just them"
   modify fun s =>
     { s with
-      implsByBase := s.implsByBase.insert (Syntax.traitBase tr)
-        ((s.implsByBase.getD (Syntax.traitBase tr) #[]).push s.impls.size)
-      implsByHead := s.implsByHead.insert (Syntax.traitBase tr, head)
-        ((s.implsByHead.getD (Syntax.traitBase tr, head) #[]).push s.impls.size)
+      implsByBase := s.implsByBase.insert base ((s.implsByBase.getD base #[]).push s.impls.size)
+      implsByHead := s.implsByHead.insert (base, head) ((s.implsByHead.getD (base, head) #[]).push s.impls.size)
       impls := s.impls.push
-        { trait := tr, head, params := args, context := ctx, methods,
+        { trait := tr, base, head, params := args, context := ctx, methods,
           dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra,
           gatParams, extraEqual }
       kimpls := s.kimpls.push ⟨tr, head, arity, ctx⟩ }
@@ -898,12 +896,12 @@ def declareTraits (items : List Item) : M Unit := do
         let ctx := own ++ (drops.getD []).filter (!own.contains ·)
         modify fun s =>
           { s with
-            implsByBase := s.implsByBase.insert (Syntax.traitBase Syntax.destroyTrait)
-              ((s.implsByBase.getD (Syntax.traitBase Syntax.destroyTrait) #[]).push s.impls.size)
-            implsByHead := s.implsByHead.insert (Syntax.traitBase Syntax.destroyTrait, head)
-              ((s.implsByHead.getD (Syntax.traitBase Syntax.destroyTrait, head) #[]).push s.impls.size)
+            implsByBase := s.implsByBase.insert Syntax.destroyTrait
+              ((s.implsByBase.getD Syntax.destroyTrait #[]).push s.impls.size)
+            implsByHead := s.implsByHead.insert (Syntax.destroyTrait, head)
+              ((s.implsByHead.getD (Syntax.destroyTrait, head) #[]).push s.impls.size)
             impls := s.impls.push
-              ⟨Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
+              ⟨Syntax.destroyTrait, Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
                 Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, [], [], []⟩
             kimpls := s.kimpls.push ⟨Syntax.destroyTrait, head, arity, ctx⟩ }
   -- What `Traits.coherent` asks of the implementations.

@@ -319,7 +319,11 @@ structure MethodSig where
   uses : List (String × Nat × Option Nat) := []
 
 structure ImplDecl where
+  /-- Its name: its trait at the arguments it gives it, numbered where two
+  are written alike for one type, `Get#1<T>` (`Syntax.traitAt`). -/
   trait : String
+  /-- The trait's own name, `Get`. -/
+  base : String
   head : String
   params : List String
   /-- The conditions: each a trait and which of the head's arguments must have it. -/
@@ -363,7 +367,11 @@ structure ImplDecl where
 /-- A trait needed of a type at a call: of the type a trait's function is used
 at, or of a type parameter of the function called. -/
 structure Bound where
+  /-- The implementation's name it is of, once known (`Get<T>#1`), or the
+  trait's own. -/
   trait : String
+  /-- The trait's own name, `Get`. -/
+  base : String
   ty : Ty
   call : Nat
   slot : Nat
