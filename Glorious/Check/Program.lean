@@ -79,6 +79,21 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
                          ret, body, impl := some (im, sig), bounds := uses }]
   pure out
 
+/-- Each `let` of the group that is a place (`St.placedLets`) written `let
+mut` for the elaborator, as a variable the checker decided: what is
+checked already, not checked again. -/
+def placeLets (decls : List FnDecl) : M Unit := do
+  let ps := (← get).placedLets
+  if ps.isEmpty then return
+  let mine := ps.toList.filter fun p => decls.any (·.name == p.1)
+  if mine.isEmpty then return
+  let ds := mine.map fun (owner, l, c, x) => Elab.Decision.letMut owner l c x
+  modify fun s =>
+    { s with decided := s.decided ++ ds
+             runFns := decls.foldl (fun m d =>
+               let b := ds.foldl (fun b dec => Elab.decideBody dec d.name d.annots b) ((m[d.name]?).getD d.body)
+               m.insert d.name b) s.runFns }
+
 /-- Check a group, deciding where it is found what can be known only once
 types are (`Elab.Decision`): the group is checked again with it, from where
 it began, and it is kept for the program to be written with. What is said if
@@ -87,7 +102,7 @@ unused (`first`). -/
 partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Option String := none) :
     M Unit := do
   let before ← get
-  tryCatchThe Elab.Said (checkGroup decls) fun e => do
+  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls) fun e => do
     let isLetMut := match e.decision with
       | some (.letMut ..) => true
       | _ => false

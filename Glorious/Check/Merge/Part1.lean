@@ -18,6 +18,8 @@ delta_part StDelta1 diffPart1 applyPart1 fitsPart1 clearPart1 restorePart1 [
   pendingCopies : ArrD (String × FnDecl),
   useDecls : MapD String (Bool × Bool),
   movedCells : ListD Nat,
+  placedVals : ListD Nat,
+  placedLets : ArrD (String × Nat × Nat × String),
   flagged : ListD String,
   givenSites : ListD (String × Elab.DropSite × Ty × String),
   givenEdges : Array Nat,

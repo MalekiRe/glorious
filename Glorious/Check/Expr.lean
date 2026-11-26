@@ -179,7 +179,11 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
   match n with
   | .name q x => do
     match ← resolveName scope q x with
-    | .local (.val t _) => lend scope x t
+    | .local (.val t id) => do
+      -- (Of one borrowed before: a use of the place, `placeVal`.)
+      if (← get).placedVals.contains id then use scope (.var id x .move)
+      modify fun s => { s with valReads := s.valReads.insert id }
+      lend scope x t
     | .local (.cell t brand) => do
       -- What a variable that is never changed holds can be given away:
       -- that is counted as a use of the value, as a name's is.
@@ -455,7 +459,7 @@ partial def inferExprRef (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := 
       pure (.ref (if uniq then .uniq else .shared) t cap)
     -- (A name that holds a `&mut` reference is borrowed through: `a[i] = v`
     -- of an `a: &mut [T]` writes what `a` is to, as `(*a)[i] = v` does.)
-    | some (.val t _) => do
+    | some (.val t id) => do
       match ← find t with
       | Ty.ref how _ _ =>
         if uniq then
@@ -463,7 +467,20 @@ partial def inferExprRef (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := 
             let named ← pushE (.name none x)
             return ← inferExpr scope amb (← pushE (.reborrow true named))
         throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
-      | _ => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
+      | _ =>
+        if uniq then throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
+        -- A value a name holds is a place: borrowed, it is one from where
+        -- it is first borrowed, its reads after uses of it (`placeVal`).
+        -- (One whose value was given away before: borrowed, it would be
+        -- read after, as only what is copied can be.)
+        if (← get).valReads.contains id then
+          mustDup t s!"`{x}` is borrowed after its value is given away"
+        placeVal id x t
+        use scope (.var id x .share)
+        let cap ← freshCap
+        captures cap (.brand id)
+        captures cap (.loan (← freshLoan (some id) false none))
+        pure (.ref .shared t cap)
     | some _ => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
   | .reborrow uniq e => do
@@ -1941,6 +1958,16 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
   let result ← inferStmts (binds ++ scope) amb rest want
   modify fun s => { s with dropLive := outerLive }
   checkUses (← get).body here scope binds rest
+  -- A name borrowed (`placeVal`) is a place till its block ends: nothing
+  -- borrowed of it may be left after, and the elaborator keeps it as a
+  -- variable (`St.placedLets`).
+  if let .var x := pat then
+    for (_, bd) in binds do
+      if let .val _ bid := bd then
+        if (← get).placedVals.contains bid then
+          checkEscape bid s!"`{x}` could be used after its block has ended"
+            (("something that uses it is the block's result", result) :: scopeRoots scope) amb
+          modify fun s => { s with placedLets := s.placedLets.push (s.owner, at_.1, at_.2, x) }
   pure result
 
 /-- `let mut x = value` and the statements after it (`inferStmts`). -/
@@ -2319,17 +2346,24 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     { s with later := free, temps := [], anon := [] }
   -- What the callable captures from the scope it is written in.
   let cap ← freshCap
+  -- (A value it only borrows, `&x` of one not a reference: as a place.)
+  let borrowsOnly := fun (x : String) => clauses.all fun c =>
+    let u := b.nameUseClause false x c
+    !u.valued && !u.valuedInside
   captureAll scope cap (b.fvClauses clauses) (fun x => clauses.any (assignsClause b x))
     (fun x => clauses.any fun c =>
       let u := b.nameUseClause false x c
       u.valued || u.valuedInside)
+    (fun x => match scope.lookup x with
+      | some (.val _ _) => borrowsOnly x
+      | _ => false)
   -- A value it captures is the callable's: if the callable is let go without
   -- being called, it destroys the value. The elaborator asks how, by the
   -- callable as written and the name.
   let written := b.hashClosure id clauses
   for x in free do
     let held := match scope.lookup x with
-      | some (.val tx _) => some tx
+      | some (.val tx _) => if borrowsOnly x then none else some tx
       -- (A callable kept by `let`: the value is the one callable.)
       | some (.poly p) => some p.ty
       | _ => none

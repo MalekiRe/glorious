@@ -571,6 +571,16 @@ structure St where
   value is given away where they are: reading one is a use of the value, as
   of a name's, and not a copy. -/
   movedCells : List Nat := []
+  /-- The names that hold a value and are borrowed, by their bindings'
+  brands (`placeVal`): each a place from where it is first borrowed, put
+  among `cells`, given away where it is used. -/
+  placedVals : List Nat := []
+  /-- Each `let x` that is a place (`placedVals`), by its function and where
+  it is: written `let mut x` for the elaborator. -/
+  placedLets : Array (String × Nat × Nat × String) := #[]
+  /-- The names holding values read so far in the group, by their bindings'
+  brands: one borrowed after is borrowed after its value is given away. -/
+  valReads : Std.HashSet Nat := {}
   /-- Where such variables are, as the count of uses knows a binding: one of
   them may hold a value with `Drop` that some paths use and others do not,
   since its cleanup asks whether it was. -/

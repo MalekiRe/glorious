@@ -70,6 +70,13 @@ def pushAnon (e : Flat.ExprId) (t : Ty) : M Unit := do
   | .ref _ _ => pure ()
   | _ => modify fun s => { s with anon := t :: s.anon }
 
+/-- A name that holds a value, borrowed: a place from here on, among the
+cells, whose reads give its value away (`St.placedVals`). -/
+def placeVal (id : Nat) (x : String) (t : Ty) : M Unit := do
+  unless (← get).placedVals.contains id do
+    modify fun s =>
+      { s with placedVals := id :: s.placedVals, cells := s.cells.push (id, x, t) }
+
 /-- Something that may not come back is about to run: the values still waiting
 are let go if it does not. -/
 def abandons (waiting : List Ty) (what : String) (call : Nat := 0) : M Unit := do
@@ -754,12 +761,19 @@ def noteFieldReads (path : List (String × Option Nat)) (numbered : List Nat) (t
 /-- Record that `cap` captures the named bindings: a value by its type, a label
 or a mutable variable by the brand of its scope as well. -/
 def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : String → Bool)
-    (gives : String → Bool := fun _ => false) : M Unit := do
+    (gives : String → Bool := fun _ => false) (borrows : String → Bool := fun _ => false) : M Unit := do
   -- Capturing a mutable variable holds the variable, not what is in it; and
   -- the callable reads or assigns the variable when it runs.
   for name in names.eraseDups do
     match scope.lookup name with
-    | some (.val t id) => captures cap (.ty t) (some (name, id))
+    | some (.val t id) =>
+      -- (A value the callable only borrows: the place, as a variable's,
+      -- `placeVal`.)
+      if borrows name then
+        placeVal id name t
+        captures cap (.brand id)
+        captures cap (.touch id false)
+      else captures cap (.ty t) (some (name, id))
     | some (.cell t brand) =>
       captures cap (.brand brand)
       captures cap (.touch brand (assigns name))

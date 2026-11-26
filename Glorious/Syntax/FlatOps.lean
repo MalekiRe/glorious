@@ -885,7 +885,8 @@ def promoteRewrite : FRewrite where
         | fuel + 1, .located line col inner =>
           (← here inner fuel).mapM fun s => pushStmt (.located line col s)
         | _, .let_ (.var x) e =>
-          if b.borrowedOnly x rest || (b.valueLike e && b.fieldBorrowedOnly x rest) then
+          let u := b.nameUseStmts false x rest
+          if (b.borrowedOnly x rest && (!u.shared || u.indexed || u.fielded || (x.splitOn "%").length > 1)) || (b.valueLike e && b.fieldBorrowedOnly x rest) then
             pure [← pushStmt (.letMut x (← go.ex e))]
           else pure [← pushStmt (.let_ (.var x) (← go.ex e))]
         | _, .let_ pat e =>
