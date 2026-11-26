@@ -443,12 +443,21 @@ Left of locals as places, with why:
 
 The two left of "Then", looked at and left:
 
-- **Ids for types and names** (interned, compared and hashed as numbers).
-  Measured on covey/fleet's edit check (1.0 s): hashing strings is under
-  1% of its time and comparing types about 1%; what costs is bound solving
-  (0.5 s of `main`'s check) and loans (0.18 s), which read types as they
-  are, not names. A rewrite of every type and name in the checker for a
-  few percent: not now.
+- **Ids for types and names.** Done where a name was a spelling the code
+  took apart: the compiler's marks of calls, of patterns and of types
+  written among expressions are nodes of their own (`Syntax.Mark`,
+  `Expr.mark`, `Expr.type`, `Pattern.marked`), and bounds and
+  implementations keep their trait's own name (`Bound.base`,
+  `ImplDecl.base`) instead of reading it back out of `Get#1<T>`. Left as
+  spellings, with why: a trait at its arguments (`From<Int>`) and a
+  condition (`'%condition:owner:key:type`) are names that outlive a group
+  (function signatures, dictionaries in Core, what the cache keeps), and
+  the type pool's numbers (`St.tyIds`) are a group's own, reset after it
+  (`internTy`, already the key of the bound memos within a group). Numbers
+  for them would have to be the same in every run: hashes of the
+  spelling, which say less than the spelling and save nothing.
+  Not fewer lines: about the same (28,286 against 28,244); fewer string
+  tests (the marks' 150 sites, `traitBase` in the checker 30 of 52).
 - **Bodies as jobs across units.** A cold check runs ecs (0.93 s) and
   fleet (1.37 s) one after the other and every other unit under 25 ms; an
   edit takes the library from what is kept. Side by side across units
