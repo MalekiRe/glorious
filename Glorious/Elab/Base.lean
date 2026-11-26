@@ -849,6 +849,9 @@ structure Builder where
   it, because a block that runs in another's place took them from what the
   other captured: each such activation and the local there, nearest first. -/
   origins : List (Atom × List (Nat × Atom)) := []
+  /-- The type the checker found of what some of its locals hold, by the
+  local's place (`elabExpr`). -/
+  tys : Array (Nat × Syntax.TypeExpr) := #[]
 
 /-- What elaborating one top-level function read that is not its own body:
 kept with what it made (`ElabKept`), and read again before that is taken. -/
@@ -862,6 +865,11 @@ inductive ElabRead where
 
 structure St where
   fns : Array Core.Fn
+  /-- For each function, for each of its clauses, the type the checker found
+  of what its locals hold, by the local's place (`Builder.tys`). -/
+  fnTys : Std.HashMap Nat (List (Array (Nat × Syntax.TypeExpr))) := {}
+  /-- The same of each body made, by its hash, until its function is made. -/
+  finishedTys : Std.HashMap UInt64 (Array (Nat × Syntax.TypeExpr)) := {}
   /-- A description of each function, for diagnostics. -/
   names : Array String
   /-- The top-level function being elaborated. -/
@@ -971,7 +979,12 @@ def terminate (t : Core.Tm) : M Unit :=
 
 def finish (result : Atom) : M Core.Tm := do
   let s ← get
-  pure (s.b.ops.foldr (fun op k => op k) (s.b.done.getD (.ret result)))
+  let tm := s.b.ops.foldr (fun op k => op k) (s.b.done.getD (.ret result))
+  -- (The types its locals were found of, for the function the body is made
+  -- a clause of: `addFn`.)
+  unless s.b.tys.isEmpty do
+    set { s with finishedTys := s.finishedTys.insert (hash tm) s.b.tys }
+  pure tm
 
 /-- Build a computation whose locals start at `depth`, then restore the outer one. -/
 def withBuilder {α : Type} (depth : Nat) (k : M α) : M α := do
@@ -1083,7 +1096,9 @@ where
 
 def addFn (f : Core.Fn) (name : String) : M Nat := do
   modifyGet fun s =>
-    (s.fns.size, { s with fns := s.fns.push f, names := s.names.push name, fnSites := s.fnSites.push s.curSite })
+    let tys := f.clauses.map fun c => (s.finishedTys[hash c.body]?).getD #[]
+    (s.fns.size, { s with fns := s.fns.push f, names := s.names.push name, fnSites := s.fnSites.push s.curSite,
+                          fnTys := s.fnTys.insert s.fns.size tys })
 
 /-- Elaborate as part of the place `site`, which is a scope of its own: what
 functions are made are that place's. -/

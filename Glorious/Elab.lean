@@ -230,6 +230,18 @@ def namedBorrows (scope : Scope) (value : Flat.ExprId) (make : Flat.ExprId → F
 mutual
 
 partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Atom := do
+  let level := (← get).b.depth
+  let a ← elabExprAt scope tailPos e0
+  -- (The local that holds what the expression gives, made here: of the type
+  -- the checker found of it, `Blocks.nodeTys`.)
+  if let .var i := a then
+    if i ≥ level then
+      let s ← get
+      if let some t := ((← read).blocks.bind fun bl => bl.nodeTys[(s.owner, s.body.idOf e0)]?) then
+        set { s with b := { s.b with tys := s.b.tys.push (i, t) } }
+  pure a
+
+partial def elabExprAt (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Atom := do
   let b := (← get).body
   match b.expr e0 with
   | .int n =>
@@ -1260,6 +1272,10 @@ structure Output where
   /-- What elaborating each top-level function made, where `kept` was given:
   for the next compile (`ElabKept`). -/
   made : ElabMemo := {}
+  /-- For each function made here, for each clause, the type the checker
+  found of what its locals hold, by the local's place: what Core's types are
+  to be written from (docs/redesign.md, step 2). -/
+  fnTys : Std.HashMap Nat (List (Array (Nat × Syntax.TypeExpr))) := {}
 
 /-! ## Traits
 
@@ -2053,7 +2069,8 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
         let coreClauses ← b.roots.toList.mapM fun c =>
           let ⟨pats, body⟩ := b.clause c
           mkClause [] pats (fun sc => elabStmts sc true body.toList)
-        modify fun s => { s with fns := s.fns.set! idx ⟨coreClauses⟩ }
+        modify fun s => { s with fns := s.fns.set! idx ⟨coreClauses⟩
+                                 fnTys := s.fnTys.insert idx (coreClauses.map fun c => (s.finishedTys[hash c.body]?).getD #[]) }
         if memo.isSome then
           let s ← get
           let parts : Option _ := do
@@ -2084,6 +2101,6 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
     pure out
   pure ⟨⟨st.fns, .let_ (.closure mainIdx []) (.tail (.var 0) []), st.drops.reverse, fns.toArray.map (·.1), []⟩, names, st.names,
     opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign, st.under, st.twoWays,
-    st.siteOwners, st.fnSites, made⟩
+    st.siteOwners, st.fnSites, made, st.fnTys⟩
 
 end Glorious.Elab

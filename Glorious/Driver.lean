@@ -11,6 +11,7 @@ public import Glorious.Elab.Lower
 public import Glorious.Comptime
 public import Glorious.Check
 public import Glorious.Infer
+public import Glorious.Shadow
 public import Glorious.Lower.Typed
 public import Glorious.Prelude
 public import Glorious.Std
@@ -1023,6 +1024,14 @@ def compileSource (src : String) (check : Bool := true)
         | .ok (types, made) => (some types, made)
         -- (`GLORIOUS_TRACE`: why there are none.)
         | .error e => if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => (none, made) else (none, made)
+    -- (`GLORIOUS_TRACE=types`: the elaborator's types beside the
+    -- certificate's, `Shadow`.)
+    if Trace.typesTraced then
+      if let some c := types then
+        let n := Shadow.compare out c
+        let said := "\n".intercalate (s!"shadow: {n.lets} lets, {n.typed} with the checker's type, {n.same} of the same shape"
+          :: n.differ.map ("shadow: " ++ ·))
+        dbgTrace said fun _ => pure ()
     pure { compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made with
       types := Thunk.pure types }
   -- A borrow given a name, or written as an argument of a call of a function,
