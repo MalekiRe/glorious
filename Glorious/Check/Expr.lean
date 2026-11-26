@@ -417,7 +417,7 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
     unifyAt s!"the result of the scope `@{l}`" t found
     checkEscape brand (jumpsAfter l) (("it is the result of the scope", t) :: scopeRoots scope) amb
     pure t
-  | .ref .. | .reborrow .. | .deref _ => inferExprRef scope amb n
+  | .ref .. | .reborrow .. | .deref _ => inferExprRef scope amb e0 n
 
 /-- A name, a label or a tuple (`inferExpr`). -/
 partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
@@ -767,7 +767,7 @@ partial def inferExprCall (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :=
   | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
 
 /-- A borrow, a borrow again or what a reference points to (`inferExpr`). -/
-partial def inferExprRef (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
+partial def inferExprRef (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Flat.FExpr) : M Ty := do
   match n with
   | .ref uniq x =>
     match scope.lookup x with
@@ -783,8 +783,17 @@ partial def inferExprRef (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := 
       if uniq then
         if let Ty.ref how _ _ ← find t then
           if let .con "&mut" [] ← find how then
-            let named ← pushE (.name none x)
-            return ← inferExpr scope amb (← pushE (.reborrow true named))
+            -- (Written so where it is, `&mut *x`, for the elaborator too:
+            -- borrowed elsewhere, `x` may be a variable there, whose `&mut`
+            -- would be of the variable, `Elab.Decision.reborrowHere`.)
+            let node := (← get).body.idOf e0
+            match Elab.reborrowNode node x (← get).body with
+            | some b' =>
+              modify fun s => { s with body := b', decided := s.decided ++ [.reborrowHere s.owner node x] }
+              return ← inferExprAt scope amb e0
+            | none =>
+              let named ← pushE (.name none x)
+              return ← inferExpr scope amb (← pushE (.reborrow true named))
         throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
       do
         -- A value a name holds is a place: borrowed, it is one from where

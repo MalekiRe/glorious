@@ -87,7 +87,7 @@ def placeLets (decls : List FnDecl) (from_ : Nat) : M Unit := do
   -- (What was written where it was found, `Elab.Decision.receiverHere`, in
   -- the bodies later checks follow.)
   let here := (s.decided.drop from_).filter fun
-    | .receiverHere .. | .derefHere .. | .derefAssignHere .. | .derefRefHere .. | .compareHere .. | .refPatsHere .. | .etaHere .. | .restHere .. | .receiverTemp .. | .receiverField .. | .receiverCopy .. => true
+    | .receiverHere .. | .derefHere .. | .derefAssignHere .. | .derefRefHere .. | .compareHere .. | .refPatsHere .. | .etaHere .. | .restHere .. | .receiverTemp .. | .receiverField .. | .receiverCopy .. | .reborrowHere .. => true
     | _ => false
   unless here.isEmpty do
     modify fun s =>

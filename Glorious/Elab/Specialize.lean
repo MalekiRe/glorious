@@ -611,6 +611,7 @@ def decideBody (d : Decision) (name : String) (b : Flat.Body) : Flat.Body :=
   | .derefAssignHere id borrow => (derefAssignNode id borrow b).getD b
   | .derefRefHere id uniq borrow => (derefRefNode id uniq borrow b).getD b
   | .compareHere call refs => (compareNode call refs b).getD b
+  | .reborrowHere owner node x => if name == owner then (reborrowNode node x b).getD b else b
   | .etaHere owner node x arity id => if name == owner then (etaNode node x arity id b).getD b else b
   | .refPatsHere id clauses => (refPatsNode id clauses b).getD b
   | .eta .. | .refPats .. | .receiver .. => b
@@ -646,6 +647,7 @@ def Decided.of (b : Blocks) : Decided := Id.run do
       | .restHere id _ => { d with rests := d.rests.insert id }
       | .letMut owner _ _ _ | .etaHere owner _ _ _ _ => { d with owners := d.owners.insert owner }
       | .refPatsHere id _ => { d with closures := d.closures.insert id }
+      | .reborrowHere owner _ _ => { d with owners := d.owners.insert owner }
       | .receiverHere call _ _ | .receiverTemp call _ _ _ | .receiverField call _ _ _ | .receiverCopy call
       | .compareHere call _ => { d with calls := d.calls.insert call }
       | .derefHere id _ | .derefAssignHere id _ | .derefRefHere id _ _ => { d with fields := d.fields.insert id }

@@ -888,10 +888,8 @@ def promoteRewrite : FRewrite where
           let u := b.nameUseStmts false x rest
           -- (A value the front end names to borrow it, `borrowed%1`, is
           -- one it keeps where a reference can point: it names it after
-          -- the checker reads the body, so nothing can say it is one. One
-          -- indexed, `x[i]`, is too: a name that may hold a reference is
-          -- indexed whole where it is no variable, `elementRead`.)
-          if (b.borrowedOnly x rest && (!u.shared || u.indexed || (x.splitOn "%").length > 1)) || (b.valueLike e && b.fieldBorrowedOnly x rest) then
+          -- the checker reads the body, so nothing can say it is one.)
+          if (b.borrowedOnly x rest && (!u.shared || (x.splitOn "%").length > 1)) || (b.valueLike e && b.fieldBorrowedOnly x rest) then
             pure [← pushStmt (.letMut x (← go.ex e))]
           else pure [← pushStmt (.let_ (.var x) (← go.ex e))]
         | _, .let_ pat e =>

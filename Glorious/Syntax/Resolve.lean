@@ -366,14 +366,14 @@ def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : Expr
       return some (← pushExpr (.labelScope "%block" #[first, ← pushStmt (.expr read)]))
   let base ← match placeOf b known a 64, throughRefOf b known a 64 with
     | none, none =>
-      -- (A name that holds a reference, `list: &Vec<T>`: through it; one
-      -- that holds a value, borrowed where it is, as Rust's `x[i]` is
-      -- `*x.index(i)`. One that may hold either is given whole, to `index`.)
+      -- (A name that holds a reference, `list: &Vec<T>`: through it; any
+      -- other the clause binds, borrowed where it is, as Rust's `x[i]` is
+      -- `*x.index(i)`: a reference held is indexed through.)
       match b.expr a with
       | .name none x =>
         match known.lookup x with
         | some 3 => pure (some a)
-        | some 1 | some 2 => some <$> pushExpr (.ref false x)
+        | some _ => some <$> pushExpr (.ref false x)
         | _ => pure none
       | _ =>
         -- (A field of a name bound by a pattern, or to what a call gives,

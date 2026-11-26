@@ -261,6 +261,9 @@ inductive Decision where
   (`compareNode`): `eq(&a, &b)`, an operand that is a name holding a
   reference given as it is (`refs`). -/
   | compareHere (call : Nat) (refs : List Bool)
+  /-- In `owner`, `&mut x` of a name holding a `&mut`, at the node `node`
+  (its identity), written `&mut *x` where it is (`reborrowNode`). -/
+  | reborrowHere (owner : String) (node : Nat) (x : String)
   /-- In `owner`, the function `x` named as a value at the node `node` (its
   identity, `Flat.Body.idOf`), written where it is as a block that calls
   it, the block numbered `id` (`etaNode`). -/
@@ -268,6 +271,18 @@ inductive Decision where
   /-- The callable `id`'s clauses the checker's, `&Pattern` (`refPats`),
   written where it is (`refPatsNode`), not read again. -/
   | refPatsHere (id : Nat) (clauses : List Clause)
+
+/-- `&mut x` of a name that holds a `&mut`, at the node whose identity is
+`node`, written as the borrow again through it that it is, `&mut *x`, as
+the checker reads it and the elaborator writes it
+(`Decision.reborrowHere`): where `x` is made a variable (borrowed
+elsewhere), `&mut x` would be of the variable. -/
+def reborrowNode (node : Nat) (x : String) (b : Flat.Body) : Option Flat.Body := do
+  let e ← (List.range b.exprs.size).reverse.find? fun i => b.idOf i == node && match b.exprs[i]! with
+    | .ref true y => y == x
+    | _ => false
+  let (n, b) := b.add (.name none x)
+  pure { b with exprs := b.exprs.set! e (.reborrow true n) }
 
 /-- Is `g` the function that reads an element where it is, `element_at`
 or `place_at` (`Syntax.elementRead`), which gives a reference to it? -/
