@@ -379,15 +379,19 @@ run.) Both are what is still in the way.
 
 Receivers that are chains of calls (`App::new().relation(..).relation(..)`,
 covey/fleet's `main`) stay decisions. Written in place, each link read
-the chain below it again (1.75 s from 1.13 for fleet's check). Keeping
-each call's reading (its type and where the records stood after it) to
-take instead of reading it again did not help: the same link was decided
-again and again (over a hundred times for the innermost), never finding
-its own decision recorded. What it looks like, not yet shown: the chain
-is read inside a speculative reading that puts the state back whole when
-it is done, taking back what was written in place. A decision found in a
-speculative reading has to outlive it, as one that checks the group again
-does.
+the chain below it again (1.75 s from 1.13 for fleet's check). Measured
+since: the innermost link of fleet's chain is read 1458 times in one
+check of `main`, the outermost twice. Speculative readings (the receiver's
+type found on a copy, `dotAltFor`, and the other ways a call is tried)
+read each link's receiver again and put the state back after, taking back
+what was written in place, so each level reads the one below about three
+times over. Keeping what was written in place across those (the body and
+what was decided), and each call's type to take instead of reading it
+again, left it at 1.7 s: the readings themselves are what costs. Decided
+as before, the first link found ends the reading, and the group is read
+again with it written; that is cheaper here. In place wants speculative
+readings that keep what they find (Rust's probing is of types alone, and
+commits nothing it must take back).
 
 
 ## Expected size
