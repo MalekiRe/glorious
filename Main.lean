@@ -243,28 +243,31 @@ def keep (act : IO Unit) : IO Unit := do
   let t ← IO.asTask act
   keeping.modify (·.push t)
 
-/-- Entries by key, kept as `keptShards` files `name.i` by `shardOf`: each
-written on a thread of its own, only where an entry not `kept` falls to it,
-pointing into what was read; the first `most` of each. -/
-def saveShards {α : Type} (dir : System.FilePath) (name key : String) (entries : List (UInt64 × α))
-    (kept : UInt64 → Bool) (most : Nat := 1 <<< 30) : IO Unit := do
-  for i in [0:keptShards] do
-    let mine := entries.filter (shardOf ·.1 == i)
-    if mine.any (!kept ·.1) then
-      keep <| Trace.timedIO s!"save: {name}" (Store.save (dir / s!"{name}.{i}") key (mine.take most) (chain := 64))
+/-- A stage's results by key (`Memos`), as `saveStage` kept them in `dir`:
+none where `fresh` (`GLORIOUS_FRESH`) is set. -/
+def loadStage {κ α : Type} [BEq κ] [Hashable κ] (fresh : Bool) (dir : System.FilePath) (name : String) :
+    IO (Std.HashMap κ α) := do
+  if fresh then return {}
+  Trace.timedIO s!"load: {name}" do
+    let mut all : Std.HashMap κ α := {}
+    for i in [0:keptShards] do
+      if let some part ← Store.load (α := List (κ × α)) (dir / s!"{name}.{i}") name then
+        all := part.foldl (fun m (k, v) => m.insert k v) all
+    pure all
 
-/-- What `saveShards` kept, all of it. -/
-def loadShards {α : Type} (dir : System.FilePath) (name key : String) : IO (List (UInt64 × α)) := do
-  let mut all : List (UInt64 × α) := []
+/-- A stage's results by key kept as `keptShards` files `name.i`, each
+result in the one its key falls to (`shardOf`): a file written again, on a
+thread of its own and pointing into what was read, only where a result
+made falls to it that is not the one `kept` (`same`). With `older`, as many
+of those kept that this compile did not make, after its own: for an edit
+taken back. -/
+def saveStage {κ α : Type} [BEq κ] [Hashable κ] (dir : System.FilePath) (name : String)
+    (made kept : Std.HashMap κ α) (same : α → α → Bool := fun _ _ => true) (older : Nat := 0) : IO Unit := do
   for i in [0:keptShards] do
-    if let some part ← Store.load (α := List (UInt64 × α)) (dir / s!"{name}.{i}") key then
-      all := part ++ all
-  pure all
-
-/-- Keep `v` as `dir/name`, on a thread of its own, pointing into what was
-read. -/
-def saveKept {α : Type} (dir : System.FilePath) (name : String) (v : α) : IO Unit :=
-  keep <| Trace.timedIO s!"save: {name}" (Store.save (dir / name) name v (chain := 64))
+    let mine := made.toList.filter fun (k, _) => shardOf (hash k) == i
+    if mine.any fun (k, v) => !((kept[k]?).any (same v)) then
+      let old := (kept.toList.filter fun (k, _) => shardOf (hash k) == i && !made.contains k).take older
+      keep <| Trace.timedIO s!"save: {name}" (Store.save (dir / s!"{name}.{i}") name (mine ++ old) (chain := 64))
 
 /-- What `file` keeps, if this compiler wrote it from `key` and `fresh`
 (`GLORIOUS_FRESH`) is not set; `none_` otherwise. -/
@@ -290,33 +293,18 @@ def compileFile (path : String) (checkKept : Check.Kept := [])
   -- (The prelude as any earlier process of this compiler parsed it.)
   let preludeKept ← if fresh then pure none else
     Store.load (α := List Syntax.Item × Syntax.Fixities) (library / "prelude") "prelude"
-  -- (Modules' items as an earlier compile parsed them, and their texts.)
-  let parsedKept : Parsed := .ofList (← keptIn fresh (dir / "parsed") "parsed" [])
-  let texts : Texts := .ofList (← keptIn fresh (dir / "texts") "texts" [])
-  -- (What each of the program's own groups added, as the last compile of it
-  -- checked them: all in one kept file, read as one region, each group a
-  -- place in it.)
-  let groupsKeptList : List (UInt64 × Check.KeptGroup) ← if fresh then pure [] else
-    Trace.timedIO "load: groups" (loadShards dir "groups.kept" "groups")
-  let groupsKept : Check.Deltas := groupsKeptList.foldl (fun m (k, d) => m.insertIfNew k (Thunk.pure (some d))) {}
-  -- (And each module's items as resolution made them.)
-  let unitsKept : Syntax.Modules.UnitsKept := .ofList (← keptIn fresh (dir / "resolved") "resolved" [])
-  -- (And what the front end's passes made of each item.)
-  let frontKept : Std.HashMap UInt64 (List Syntax.Item) ← if fresh then pure {} else
-    pure (Std.HashMap.ofList (← Trace.timedIO "load: front" (loadShards (α := List Syntax.Item) dir "front" "front")))
-  -- (And each function as lowered, and as elaborated; and each group of the
-  -- program's own text's items, as parsed.)
-  let lowerKept : Elab.LowerMemo ← keptIn fresh (dir / "lower") "lower" {}
-  let typedKept : Lower.TypedMemo ← keptIn fresh (dir / "typed") "typed" {}
-  let elabKept : Elab.ElabMemo ← keptIn fresh (dir / "elab") "elab" {}
-  let itemsKept : Syntax.ItemsKept ← keptIn fresh (dir / "items") "items" {}
+  -- (Each stage's results as the last compiles of the program made them.)
+  let memos : Memos :=
+    { texts := ← loadStage fresh dir "texts", parsed := ← loadStage fresh dir "parsed"
+      items := ← loadStage fresh dir "items", units := ← loadStage fresh dir "resolved"
+      front := ← loadStage fresh dir "front", groups := ← loadStage fresh dir "groups"
+      lower := ← loadStage fresh dir "lower", elaborated := ← loadStage fresh dir "elab"
+      typed := ← loadStage fresh dir "typed" }
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
-    compileSource text true files (few := true) checkKept firsts parsedKept preludeKept texts
-      (groupsKept := some groupsKept) (unitsKept := some unitsKept) (frontKept := some frontKept)
-      (itemsKept := some itemsKept) (elabKept := some elabKept) (lowerKept := some lowerKept)
-      (typedKept := some typedKept) (reachOnly := reachOnly))
+    compileSource text true files (few := true) checkKept firsts preludeKept (reachOnly := reachOnly)
+      (memos := some memos))
   -- (Of a compile of what `main` reaches alone, nothing is kept: the one
   -- after it, of everything, keeps what it makes.)
   if let .ok c := result then unless reachOnly do keep <| Trace.timedIO "save what is kept" do
@@ -325,12 +313,6 @@ def compileFile (path : String) (checkKept : Check.Kept := [])
     -- The states before it are kept with the library, for any program.)
     if preludeKept.isNone then
       if let .ok parsed := readPrelude.get then Store.save (library / "prelude") "prelude" parsed
-    -- (Saved again only where something was parsed anew.)
-    unless c.parsedMade.all (parsedKept.contains ·.1) do Trace.timedIO "save: parsed" (Store.save (dir / "parsed") "parsed" c.parsedMade)
-    unless c.textsMade.all (texts.contains ·.1) do Trace.timedIO "save: texts" (Store.save (dir / "texts") "texts" c.textsMade (chain := 64))
-    -- (Saved again only where something was made anew, pointing into what
-    -- was read.)
-    -- (The large ones each on a thread of its own, beside the others.)
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
     -- (The library's modules, and the program's modules that are files, as
@@ -340,33 +322,19 @@ def compileFile (path : String) (checkKept : Check.Kept := [])
     unless c.libraryKept.isEmpty || newKeys.all (fun k => libraryKept.any (·.1 == k)) do
       Store.save (library / "units") "units"
         ((c.libraryKept ++ libraryKept.filter fun (k, _) => !newKeys.contains k).take 96)
-    -- (Saved again only where something was made anew; pointing into what
-    -- was read, up to 64 files, then all written again.)
-    saveShards dir "front" "front" c.frontMade.toList (frontKept.contains ·)
-    let changed := fun {κ α : Type} [BEq κ] [Hashable κ] (made kept : Std.HashMap κ α) (key : α → UInt64) =>
-      made.size != kept.size || made.fold (fun b n k => b || ((kept[n]?).map key) != some (key k)) false
-    if changed c.lowerMade lowerKept (·.key) then saveKept dir "lower" c.lowerMade
-    -- (Each key is of what was lowered: one made that was not kept is new.)
-    if c.typedMade.size != typedKept.size || c.typedMade.fold (fun b k _ => b || !typedKept.contains k) false then
-      saveKept dir "typed" c.typedMade
-    if changed c.elabMade elabKept (·.key) then saveKept dir "elab" c.elabMade
-    if changed c.itemsMade itemsKept (·.2.1) then saveKept dir "items" c.itemsMade
-    -- (Not where the only unit made anew is the one the program's `main` is
-    -- in: the text being edited, resolved again the next time it changes,
-    -- which is each time; the others' are what a next compile finds.)
-    let isMain := fun (items : List Syntax.Item) => items.any fun
-      | .fn "main" .. => true
-      | _ => false
-    let anew := c.unitsMade.filter fun (k, _) => !unitsKept.contains k
-    unless anew.isEmpty || anew.all (fun (_, items, _) => isMain items) do
-      saveKept dir "resolved" c.unitsMade
-    -- (Saved again only where a group was checked anew, pointing into what
-    -- was read. Those of earlier versions of the program are kept, for an
-    -- edit taken back: up to 4096, this compile's first.)
-    let made : Std.HashSet UInt64 := c.groupsMade.foldl (fun s (k, _) => s.insert k) {}
-    let older := groupsKeptList.filter fun (k, _) => !made.contains k
-    saveShards dir "groups.kept" "groups" (c.groupsMade.toList ++ older) (groupsKept.contains ·)
-      (most := 4096 / keptShards)
+    -- (Each stage's results, where something was made anew. The groups of
+    -- earlier versions of the program are kept too, for an edit taken back:
+    -- up to 4096.)
+    let made := c.made
+    saveStage dir "texts" made.texts memos.texts
+    saveStage dir "parsed" made.parsed memos.parsed
+    saveStage dir "items" made.items memos.items (·.2.1 == ·.2.1)
+    saveStage dir "resolved" made.units memos.units
+    saveStage dir "front" made.front memos.front
+    saveStage dir "groups" made.groups memos.groups (older := 4096 / keptShards)
+    saveStage dir "lower" made.lower memos.lower (·.key == ·.key)
+    saveStage dir "elab" made.elaborated memos.elaborated (·.key == ·.key)
+    saveStage dir "typed" made.typed memos.typed
     -- (The builds of other programs, the oldest written first, taken away
     -- past `GLORIOUS_CACHE_MB`, 4096 where it is not said.)
     let cap := (((← IO.getEnv "GLORIOUS_CACHE_MB").bind String.toNat?).getD 4096) * (1 <<< 20)

@@ -549,3 +549,30 @@ With the certificate the search for borrows that can be scopes of their own
 went (`certifyWith`, places, the `certify` command): every borrow is the
 reference it borrows (`lends` is `0`), which changes nothing a program does.
 
+
+## Step 5, as done: one record of each stage's results
+
+What a compile of a program takes from the last one and makes for the next is
+one record (`Driver.Memos`): each stage's results by a key that stays the same
+for as long as what the result is made from does (texts and modules' items by
+their text, groups of the program's text by place and text, units by what
+resolution reads, front-end results and checker groups by their inputs'
+hashes, functions as lowered and elaborated by name with the key of what they
+were made from). `compileSource` takes it whole (`memos`) and gives it back
+(`Compiled.made`); the nine separate parameters and fields, and their
+separate ways of being kept (`saveKept`, `keptIn`, `saveShards`,
+`loadShards`, the checks of what changed, the rule for the unit of `main`),
+are gone. On disk each stage is kept one way (`Main.saveStage`,
+`loadStage`): eight files, each result in the one its key falls to, a file
+written again only where a result made falls to it that is not the one kept;
+the checker's groups keep those of earlier versions of the program too, for
+an edit taken back. Measured on a copy of covey/fleet: 7.9 s cold, 2.0 s
+after adding a function (check 1.0 s).
+
+What is kept for any program (the prelude parsed, the prelude and library as
+checked, the library's units) is in the library's directory, as before.
+
+Left of section 7: a job's result is kept by the hash of what it read, not
+by ids with a list of what it depends on; an edit finds the jobs to do again
+by their keys changing, which comes to the same where the keys hash all a
+job reads.

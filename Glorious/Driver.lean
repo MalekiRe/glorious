@@ -41,6 +41,38 @@ abbrev Texts := Std.HashMap UInt64 TextRead
 
 def textKey (path : List String) (text : String) : UInt64 := mixHash (hash text) (hash path)
 
+/-- Modules' items as an earlier compile parsed them, under what each was
+parsed from (`parseKey`). -/
+abbrev Parsed := Std.HashMap UInt64 (List Syntax.Item)
+
+/-- Each stage's results by a key that stays the same from one compile of a
+program to the next, for as long as what the result is made from does: what
+a compile takes from the one before (`compileSource`'s `memos`), and makes
+for the next (`Compiled.made`). -/
+structure Memos where
+  /-- Each text as read (`Texts`). -/
+  texts : Texts := {}
+  /-- Each module's items, as parsed (`Parsed`). -/
+  parsed : Parsed := {}
+  /-- Each group of the program's own text's items, as parsed
+  (`Syntax.ItemsKept`). -/
+  items : Syntax.ItemsKept := {}
+  /-- Each module's items, as name resolution made them
+  (`Syntax.Modules.UnitsKept`). -/
+  units : Syntax.Modules.UnitsKept := {}
+  /-- What the front end's passes made of each item (`Syntax.Flat.FrontMemo`). -/
+  front : Std.HashMap UInt64 (List Syntax.Item) := {}
+  /-- What each of the program's own groups added, as checked
+  (`Check.checkGroupKept`). -/
+  groups : Std.HashMap UInt64 Check.KeptGroup := {}
+  /-- Each function as lowered (`Elab.LowerKept`), by name. -/
+  lower : Elab.LowerMemo := {}
+  /-- What elaborating each top-level function made (`Elab.ElabKept`), by
+  name. -/
+  elaborated : Elab.ElabMemo := {}
+  /-- Each function as lowered by its types (`Lower.TypedMemo`). -/
+  typed : Lower.TypedMemo := {}
+
 structure Compiled where
   /-- What the machines run: `checked` lowered by its types (`Lower.program`),
   where it can be; otherwise `checked` itself. -/
@@ -64,30 +96,9 @@ structure Compiled where
   /-- What the checker kept of the library's modules, for any program that
   begins with them. -/
   libraryKept : Check.Kept := []
-  /-- What each of the program's own groups added, where `groupsKept` was
-  given: for the next compile of the program (`Check.checkGroupKept`). -/
-  groupsMade : Array (UInt64 × Check.KeptGroup) := #[]
-  /-- Each module's items as name resolution made them, where `unitsKept`
-  was given: for the next compile (`Syntax.Modules.UnitsKept`). -/
-  unitsMade : List (UInt64 × List Syntax.Item × Syntax.Modules.UnitMade) := []
-  /-- What the front end's passes made of each item, where `frontKept` was
-  given: for the next compile (`Syntax.Flat.FrontMemo`). -/
-  frontMade : Array (UInt64 × List Syntax.Item) := #[]
-  /-- Each module's items as this compile parsed them or took them, under
-  what they were parsed from: kept for the next. -/
-  parsedMade : List (UInt64 × List Syntax.Item) := []
-  /-- Each text as this compile read it or took it (`Texts`), for the next. -/
-  textsMade : List (UInt64 × TextRead) := []
-  /-- Each group of the program's own text's items, where `itemsKept` was
-  given: for the next compile (`Syntax.ItemsKept`). -/
-  itemsMade : Syntax.ItemsKept := {}
-  /-- What elaborating each top-level function made, where `elabKept` was
-  given: for the next compile (`Elab.ElabKept`). -/
-  elabMade : Elab.ElabMemo := {}
-  /-- What lowering each function made: for the next compile (`Elab.LowerKept`). -/
-  lowerMade : Elab.LowerMemo := {}
-  /-- What lowering each function by its types made (`Lower.TypedMemo`). -/
-  typedMade : Lower.TypedMemo := {}
+  /-- Each stage's results, where `memos` was given: for the next compile of
+  the program. -/
+  made : Memos := {}
 
 /-- What of a program's modules a unit's check reads besides its own items:
 the coercions that apply in it, the dot calls among its calls the resolver
@@ -411,10 +422,6 @@ def readText (fix : Syntax.Fixities) (kept : Texts) (path : List String) (text :
   let _ ← Syntax.declaredSyntax fix text toks
   pure (key, ⟨← Syntax.textSyntax path text toks⟩)
 
-/-- Modules' items as an earlier compile parsed them, under what each was
-parsed from (`parseKey`). -/
-abbrev Parsed := Std.HashMap UInt64 (List Syntax.Item)
-
 /-- What a module's items are parsed from: its text, where its callables are
 numbered from, the constructors with named fields, its operators, its path,
 and whether arrays have lengths. (The prelude's operators are this
@@ -657,7 +664,7 @@ def Compiled.lower (kept : Option Lower.TypedMemo) (c : Compiled) : Compiled :=
   let c := { c with core := c.core.internStatics }
   match Trace.timed "lower by types" fun _ => if unlowered then none else c.types.get.bind (Lower.program · c.core kept) with
   | some (core, copies, typedMade) =>
-    { c with core, checked := c.core, lowered := true, typedMade
+    { c with core, checked := c.core, lowered := true, made := { c.made with typed := typedMade }
              fnNames := c.fnNames ++ (copies.map fun fn => (c.fnNames[fn]?).getD "").toArray }
   | none => { c with checked := c.core }
 
@@ -669,32 +676,29 @@ def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (checkKept : Check.Kept := [])
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
-    (parsedKept : Parsed := {})
-    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
-    (lenient : Bool := false) (groupsKept : Option Check.Deltas := none) (reachOnly : Bool := false)
-    (unitsKept : Option Syntax.Modules.UnitsKept := none)
-    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Item)) := none)
-    (itemsKept : Option Syntax.ItemsKept := none) (elabKept : Option Elab.ElabMemo := none)
-    (lowerKept : Option Elab.LowerMemo := none) (typedKept : Option Lower.TypedMemo := none) :
-    Except String Compiled := Compiled.lower typedKept <$> do
+    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none)
+    (lenient : Bool := false) (reachOnly : Bool := false) (memos : Option Memos := none) :
+    Except String Compiled := Compiled.lower (memos.map (·.typed)) <$> do
+  let m := memos.getD {}
+  let texts := m.texts
   -- (Each text lexed, once: each that an earlier compile read as it is,
   -- `texts`, not.)
   let lexed ← Trace.timed "lex" fun _ =>
     ((([], src) :: files).filter fun (path, text) => !texts.contains (textKey path text)).mapM fun (path, text) => do
       pure (path, ← Syntax.lex text)
   let (prelude, items, parsedMade, textsMade, itemsMade) ← Trace.timed "parse" fun _ =>
-    parseProgram src files check few lexed parsedKept preludeKept texts itemsKept
+    parseProgram src files check few lexed m.parsed preludeKept texts (memos.map (·.items))
   -- Every name is given its meaning: the modules become one list of items,
   -- each module a unit, after those it uses.
   -- (Resolved, and all that follows, from flat bodies.)
   -- (Each item as an earlier compile made it, where what it was made from is
   -- the same: `Syntax.Flat.FrontMemo`.)
-  let front : Syntax.Flat.FrontMemo := { kept := frontKept.getD {}, keep := frontKept.isSome }
+  let front : Syntax.Flat.FrontMemo := { kept := m.front, keep := memos.isSome }
   let (flatPrelude, flatItems, front) := Trace.timed "flat bodies" fun _ =>
     let (p, front) := Syntax.Flat.promoteItems (prelude) front
     let (i, front) := Syntax.Flat.promoteItems (items) front
     (p, i, front)
-  let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve flatPrelude flatItems unitsKept
+  let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve flatPrelude flatItems (memos.map (·.units))
   let (firstItems, unitItems) := unitsOfFlat resolved.items resolved.info.unitUses
   let resolved := { resolved with items :=
     firstItems ++ unitItems.flatMap (fun (k, is) => (Syntax.Item.fieldNames Syntax.unitMark [k] []) :: is) }
@@ -784,7 +788,7 @@ def compileSource (src : String) (check : Bool := true)
       Check.checkUnitsKept { first with lenient, reachOnly } (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
         (library := if (units.map List.length).sum == (all.drop count).length then library else 0)
         (deps := if (units.map List.length).sum == (all.drop count).length then unitDeps else [])
-        (groupsKept := groupsKept)
+        (groupsKept := memos.map fun (m : Memos) => m.groups.fold (fun (d : Check.Deltas) k g => d.insert k (Thunk.pure (some g))) {})
     -- (A program that declares a name the prelude has: the prelude checked
     -- with it, as the first unit, and nothing taken as the program's own.)
     | true, true, .ok (count, _) =>
@@ -834,7 +838,7 @@ def compileSource (src : String) (check : Bool := true)
   let (all, lowered) ← Trace.timed "lower what main reaches" fun _ => do
     match lowering with
     | some L =>
-      let st ← L.reach { L.start with kept := lowerKept.getD {} } roots
+      let st ← L.reach { L.start with kept := m.lower } roots
       -- (And the coercions applied in what they reach.)
       let coerced : List String := L.blocks.coercions.fold (fun acc _ fn => if st.seen.contains fn then fn :: acc else acc) []
       pure (Elab.reachable (roots ++ coerced.eraseDups) (L.items st), some st)
@@ -878,13 +882,15 @@ def compileSource (src : String) (check : Bool := true)
   let compiled := fun (out : Elab.Output) (types : Option Lower.Types) =>
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
        opNames := out.opNames, types := Thunk.pure types, checkKept := checkMade
-       firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade, frontMade := front.made,
-       parsedMade, textsMade, itemsMade, elabMade := out.made
-       lowerMade := match lowered with
-         | some st => st.keptMade
-         | none => {} } : Compiled)
+       firstMade, libraryKept := libraryMade
+       made := { texts := .ofList textsMade, parsed := .ofList parsedMade, items := itemsMade
+                 units := .ofList resolved.unitsMade, front := .ofList front.made.toList
+                 groups := .ofList groupsMade.toList, elaborated := out.made
+                 lower := match lowered with
+                   | some st => st.keptMade
+                   | none => {} } } : Compiled)
   let build := fun (blocks : Option Elab.Blocks) => do
-    let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks (kept := elabKept) with
+    let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks (kept := memos.map Memos.elaborated) with
       | .ok out => do aside.get; pure out
       | .error e => do aside.get; throw e
     -- Core's types, for the lowering (`Typer`). Where they are not found,
