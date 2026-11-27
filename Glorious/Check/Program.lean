@@ -80,17 +80,7 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
 /-- Each `let` of the group that is a place (`St.placedLets`) written `let
 mut` for the elaborator, as a variable the checker decided: what is
 checked already, not checked again. -/
-def placeLets (decls : List FnDecl) (from_ : Nat) : M Unit := do
-  let s ← get
-  -- (What was written where it was found, `Elab.Decision.receiverHere`, in
-  -- the bodies later checks follow.)
-  let here := (s.decided.drop from_).filter fun
-    | .receiverHere .. | .derefHere .. | .derefAssignHere .. | .derefRefHere .. | .compareHere .. | .refPatsHere .. | .etaHere .. | .restHere .. | .receiverTemp .. | .receiverField .. | .receiverCopy .. | .reborrowHere .. => true
-    | _ => false
-  unless here.isEmpty do
-    modify fun s =>
-      { s with runFns := decls.foldl (fun m d =>
-          m.insert d.name (here.foldl (fun b dec => Elab.decideBody dec d.name b) ((m[d.name]?).getD d.body))) s.runFns }
+def placeLets (decls : List FnDecl) : M Unit := do
   let s ← get
   let lets := s.placedLets.toList.filter fun p => decls.any (·.name == p.1)
   -- (A name a clause binds: kept in a variable where the clause starts,
@@ -110,10 +100,9 @@ def placeLets (decls : List FnDecl) (from_ : Nat) : M Unit := do
 it is found (`Elab.Decision`), and written in the bodies later checks
 follow (`placeLets`). Nothing is checked again. -/
 def checkWritten (decls : List FnDecl) : M Unit := do
-  let from_ := (← get).decided.length
   -- (Refused, said from the state the group began from: what it had
   -- recorded is not another's to meet.)
-  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls from_) fun e => throwThe Elab.Said e
+  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls) fun e => throwThe Elab.Said e
 
 /-- `x`, or its refusal: what it did kept, the state not put
 back (which would hold it twice, and copy what it changes). -/
