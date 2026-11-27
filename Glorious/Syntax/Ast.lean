@@ -381,12 +381,6 @@ def knownTrait : String := "%prelude::Known"
 the one a type nothing decides is taken to have: `#[fallback] impl ..`. -/
 def fallbackMark : String := "%fallback"
 
-/-- The name `..` has in a tuple pattern until how many parts it stands for
-is known: with the identity of the pattern's `(`. -/
-def tupleRestName (id : Nat) : String := s!"%tuplerest:{id}"
-
-def tupleRestOf (name : String) : Option Nat :=
-  if name.startsWith "%tuplerest:" then (name.drop 11).toString.toNat? else none
 
 /-- The type under which a type left to implementations is asked at types,
 `F::Of<Int>`: the type it is asked of, and then those. -/

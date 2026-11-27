@@ -2804,7 +2804,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
     -- beyond those written. Said to whoever is reading the program, which
     -- is then read with them written.
     if let some id := ps.findSome? fun
-        | .var x => Syntax.tupleRestOf x
+        | .marked .rest [.int id] => some id.toNat
         | _ => none then
       match ← find t with
       | .tuple parts =>

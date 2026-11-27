@@ -391,7 +391,7 @@ def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : F
 /-- A pattern with `..` of the tuple pattern `id` written as `count` `_`. -/
 partial def restPat (id count : Nat) : Pattern → Pattern
   | .tuple ps => .tuple (ps.flatMap fun
-      | .var x => if Syntax.tupleRestOf x == some id then List.replicate count Pattern.wild else [.var x]
+      | p@(.marked .rest [.int i]) => if i.toNat == id then List.replicate count Pattern.wild else [p]
       | p => [restPat id count p])
   | .ctor c q ps => .ctor c q (ps.map (restPat id count))
   | p => p

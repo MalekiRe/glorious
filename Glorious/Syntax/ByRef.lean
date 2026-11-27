@@ -45,6 +45,8 @@ through constructors by constructor and number. -/
 partial def shapeOf (rn : RefNames m) (way : List String) : Pattern → m (Pattern × List (String × List String))
   | .wild => pure (.wild, [])
   | .int n => pure (.int n, [])
+  -- (`..` of a tuple: the parts it stands for, found once types are.)
+  | p@(.marked .rest [.int _]) => pure (p, [])
   | .var x => do
     -- A constructor or a constant is a test; a new name names this part.
     if (← rn.kind x) != 0 then pure (.var x, []) else pure (.wild, [(x, way)])
@@ -72,7 +74,7 @@ a constructor, that constructor. None if it asks for a number, which has to be
 read to be compared. -/
 partial def shapeTests (rn : RefNames m) (path : List Nat) :
     Pattern → m (Option (List (List Nat × Expr)))
-  | .wild => pure (some [])
+  | .wild | .marked .rest [.int _] => pure (some [])
   | .int _ | .marked _ _ => pure none
   | .var x => do
     match ← rn.kind x with

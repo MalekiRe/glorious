@@ -19,6 +19,9 @@ inductive NPat where
 
 partial def normPat : Pattern → M NPat
   | .wild => pure .any
+  -- (`..` of a tuple before how many parts it stands for is written: as the
+  -- parts it stands for, which a clause's tuple is covered by alike.)
+  | .marked .rest [.int _] => pure .any
   | .marked m _ => throw s!"`{m.shown}` in a pattern where it cannot be; this is a compiler defect"
   | .int n => pure (.int n)
   | .tuple ps => do

@@ -869,6 +869,8 @@ partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
     pure (.ctor name' qual' (args.map (·.1)), args.flatMap (·.2))
   | .marked (.byRef _) _ =>
     throw "a pattern that binds by reference, `&mut Pattern`, is written as a parameter of a clause"
+  -- (`..` of a tuple: the parts it stands for, found once types are.)
+  | p@(.marked .rest [.int _]) => pure (p, [])
   | .marked m _ => throw s!"`{m.shown}` in a pattern where it cannot be; this is a compiler defect"
 
 

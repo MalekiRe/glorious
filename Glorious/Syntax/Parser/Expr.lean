@@ -120,7 +120,7 @@ partial def parsePatternRest : P Pattern := do
     if rests.length > 1 then failAt "a tuple pattern has one `..`"
     if rests.length == 1 then
       return .tuple (args.map fun p => match p with
-        | .marked .rest [] => .var (tupleRestName opened)
+        | .marked .rest [] => .marked .rest [.int opened]
         | p => p)
     match args with
     | [p] => if ← closedAfterComma then pure (.tuple [p]) else pure p
