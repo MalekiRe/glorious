@@ -228,98 +228,6 @@ def putPart : Value → List PathStep → Value → Option Value
   | .label _, _ :: _, _ => none
   | .ref _ _ _, _ :: _, _ => none
 
-/-%proof (commented out while the machines become bytes)
-/-- A step with a constructor in mind fits that one. -/
-theorem _root_.Glorious.PathStep.fits_some {tag i built : Nat} :
-    (PathStep.mk (some tag) i).fits built = true ↔ tag = built := by
-  simp [PathStep.fits]
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-/-- What it is for a step and then more to lead somewhere. -/
-theorem part_cons {v : Value} {s : PathStep} {path : List PathStep} {w : Value}
-    (h : v.part (s :: path) = some w) :
-    ∃ tag fields x, v = .data tag fields ∧ s.fits tag = true ∧ fields[s.field]? = some x ∧
-      x.part path = some w := by
-  cases v with
-  | data tag fields =>
-    simp only [part] at h
-    cases hfit : s.fits tag with
-    | false => simp [hfit] at h
-    | true =>
-      cases hx : fields[s.field]? with
-      | none => simp [hfit, hx] at h
-      | some x =>
-        simp only [hfit, hx] at h
-        exact ⟨tag, fields, x, rfl, hfit, hx, h⟩
-  | int _ | clo _ _ | cont _ | label _ | ref _ _ _ => simp [part] at h
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-theorem part_data {tag : Nat} {fields : List Value} {s : PathStep} {x : Value} (path : List PathStep)
-    (hfit : s.fits tag = true) (hx : fields[s.field]? = some x) :
-    (Value.data tag fields).part (s :: path) = x.part path := by
-  simp [part, hfit, hx]
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-theorem putPart_data {tag : Nat} {fields : List Value} {s : PathStep} {x : Value} (path : List PathStep)
-    (w : Value) (hfit : s.fits tag = true) (hx : fields[s.field]? = some x) :
-    (Value.data tag fields).putPart (s :: path) w
-      = (x.putPart path w).map fun x' => .data tag (fields.set s.field x') := by
-  simp only [putPart, hfit, hx]
-  cases x.putPart path w <;> rfl
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-/-- What it is for a part a step and then more leads to, to have been replaced. -/
-theorem putPart_cons {v : Value} {s : PathStep} {path : List PathStep} {w v' : Value}
-    (h : v.putPart (s :: path) w = some v') :
-    ∃ tag fields x x', v = .data tag fields ∧ s.fits tag = true ∧ fields[s.field]? = some x ∧
-      x.putPart path w = some x' ∧ v' = .data tag (fields.set s.field x') := by
-  cases v with
-  | data tag fields =>
-    cases hfit : s.fits tag with
-    | false => simp [putPart, hfit] at h
-    | true =>
-      cases hx : fields[s.field]? with
-      | none => simp [putPart, hfit, hx] at h
-      | some x =>
-        rw [putPart_data path w hfit hx] at h
-        cases hx' : x.putPart path w with
-        | none => simp [hx'] at h
-        | some x' =>
-          simp only [hx', Option.map_some, Option.some.injEq] at h
-          exact ⟨tag, fields, x, x', rfl, hfit, hx, hx', h.symm⟩
-  | int _ | clo _ _ | cont _ | label _ | ref _ _ _ => simp [putPart] at h
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-/-- A part that is there can be replaced. -/
-theorem putPart_of_part : ∀ {path : List PathStep} {v old : Value} (w : Value),
-    v.part path = some old → ∃ v', v.putPart path w = some v'
-  | [], _, _, w, _ => ⟨w, by simp [putPart]⟩
-  | s :: path, v, _, w, h => by
-    obtain ⟨tag, fields, x, rfl, hfit, hx, hp⟩ := part_cons h
-    obtain ⟨x', hx'⟩ := putPart_of_part (path := path) w hp
-    exact ⟨_, by rw [putPart_data path w hfit hx, hx']; rfl⟩
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-/-- A part that is not there cannot be. -/
-theorem putPart_none_of_part : ∀ {path : List PathStep} {v : Value} (w : Value),
-    v.part path = none → v.putPart path w = none
-  | [], _, _, h => by simp [part] at h
-  | s :: path, v, w, h => by
-    cases hp : v.putPart (s :: path) w with
-    | none => rfl
-    | some v' =>
-      obtain ⟨tag, fields, x, x', rfl, hfit, hx, hx', _⟩ := putPart_cons hp
-      rw [part_data path hfit hx] at h
-      rw [putPart_none_of_part (path := path) w h] at hx'
-      cases hx'
-%proof-/
-
 /-- Is this value built by constructor `tag` with exactly `arity` fields? -/
 def isCtor (v : Value) (tag arity : Nat) : Bool :=
   match v with
@@ -444,17 +352,6 @@ def evalAtoms (ρ : Env) : List Atom → Option (List Value)
     match a.eval ρ, evalAtoms ρ as with
     | some v, some vs => some (v :: vs)
     | _, _ => none
-
-/-%proof (commented out while the machines become bytes)
-/-- Of atoms that evaluate, the first gives the first value. -/
-theorem evalAtoms_head {ρ : Env} {a : Atom} {as : List Atom} {v : Value} {vs : List Value}
-    (h : evalAtoms ρ (a :: as) = some (v :: vs)) : a.eval ρ = some v := by
-  simp only [evalAtoms] at h
-  split at h
-  · cases h
-    assumption
-  · cases h
-%proof-/
 
 def Rhs.eval (ρ : Env) : Rhs → Option Value
   | .atom a | .place a => a.eval ρ

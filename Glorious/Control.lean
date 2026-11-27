@@ -148,31 +148,6 @@ def evalCont (ρ : Env) (a : Atom) : Option (Option Nat) :=
   | some (.label _) => some none
   | _ => none
 
-/-%proof (commented out while the machines become bytes)
-theorem dropOf_inv {drops : List (Nat × Nat)} {ρ : Env} {a : Atom} {d : Nat} {captures : List Value}
-    (h : dropOf drops ρ a = some (d, captures)) :
-    ∃ fn, a.eval ρ = some (.clo fn captures) ∧ drops.lookup fn = some d := by
-  unfold dropOf at h
-  split at h
-  · rename_i fn caps hv
-    cases hl : drops.lookup fn with
-    | none => simp [hl] at h
-    | some d' =>
-      simp only [hl, Option.map_some, Option.some.injEq, Prod.mk.injEq] at h
-      obtain ⟨rfl, rfl⟩ := h
-      exact ⟨fn, hv, hl⟩
-  · cases h
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-/-- A closure that `drops` says how to destroy is a function, for `cancel`. -/
-theorem evalCont_of_dropOf {drops : List (Nat × Nat)} {ρ : Env} {a : Atom} {x : Nat × List Value}
-    (h : dropOf drops ρ a = some x) : evalCont ρ a = some none := by
-  unfold dropOf at h
-  unfold evalCont
-  split at h <;> simp_all
-%proof-/
-
 /-- The frames above and below the scope of label `id`, if that scope is on the stack. -/
 def findLabel {φ : Type} (asLabel : φ → Option Nat) (id : Nat) :
     List φ → Option (List φ × List φ)

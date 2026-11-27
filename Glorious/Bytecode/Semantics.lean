@@ -296,16 +296,4 @@ def stepIO (p : Program) (c : Config) : Step Config Result :=
 
 def initIO (p : Program) (input : List Int) : Config := ⟨init p, { input := input, output := [], names := p.names }⟩
 
-def Halts (p : Program) (input : List Int) (r : Result) : Prop :=
-  Machine.Halts (stepIO p) (initIO p input) r
-
-def GoesWrong (p : Program) (input : List Int) : Prop :=
-  Machine.GoesWrong (stepIO p) (initIO p input)
-
-def Diverges (p : Program) (input : List Int) : Prop :=
-  Machine.Diverges (stepIO p) (initIO p input)
-
-def Emits (p : Program) (input : List Int) (out : List Value) : Prop :=
-  ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ c.world.output = out
-
 end Glorious.Bytecode

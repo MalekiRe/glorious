@@ -124,49 +124,10 @@ def findImpl (tr : κ) (head : String) (n : Nat) : List (Impl κ) → Option (Na
     if I.trait == tr && I.head == head && I.arity == n then some (0, I)
     else (findImpl tr head n rest).map fun x => (x.1 + 1, x.2)
 
-/-%proof (commented out while the machines become bytes)
-theorem findImpl_sound {tr head : String} {n : Nat} : ∀ {impls : List Impl} {i : Nat} {I : Impl},
-    findImpl tr head n impls = some (i, I) →
-    impls[i]? = some I ∧ I.trait = tr ∧ I.head = head ∧ I.arity = n
-  | [], _, _, h => by simp [findImpl] at h
-  | J :: rest, i, I, h => by
-    simp only [findImpl] at h
-    split at h
-    · rename_i hJ
-      cases h
-      exact ⟨rfl, hJ⟩
-    · cases hr : findImpl tr head n rest with
-      | none => simp [hr] at h
-      | some x =>
-        obtain ⟨i', I'⟩ := x
-        simp [hr] at h
-        obtain ⟨rfl, rfl⟩ := h
-        obtain ⟨h1, h2⟩ := findImpl_sound hr
-        exact ⟨by simpa using h1, h2⟩
-%proof-/
-
 /-- Where an assumption is among those a function makes. -/
 def findGiven (tr : κ) (v : Nat) : Givens κ → Option Nat
   | [] => none
   | g :: rest => if g == (tr, v) then some 0 else (findGiven tr v rest).map (· + 1)
-
-/-%proof (commented out while the machines become bytes)
-theorem findGiven_sound {tr : String} {v : Nat} : ∀ {givens : Givens} {k : Nat},
-    findGiven tr v givens = some k → givens[k]? = some (tr, v)
-  | [], _, h => by simp [findGiven] at h
-  | g :: rest, k, h => by
-    simp only [findGiven] at h
-    split at h
-    · rename_i hg
-      cases h
-      simp [hg]
-    · cases hr : findGiven tr v rest with
-      | none => simp [hr] at h
-      | some k' =>
-        simp [hr] at h
-        subst h
-        simpa using findGiven_sound hr
-%proof-/
 
 /-- Meet each condition of an implementation, given how to meet a bound. -/
 def collect (f : κ → STy → Option Dict) (args : List STy) :
@@ -202,81 +163,6 @@ def solveBy (find : κ → String → Nat → Option (Nat × Impl κ)) (givens :
 /-- `solveBy`, the implementations looked for in order. -/
 def solve (impls : List (Impl κ)) (givens : Givens κ) : Nat → κ → STy → Option Dict :=
   solveBy (fun tr head n => findImpl tr head n impls) givens
-
-/-%proof (commented out while the machines become bytes)
-theorem collect_sound {impls : List Impl} {givens : Givens} {f : String → STy → Option Dict}
-    (hf : ∀ tr τ d, f tr τ = some d → Entails impls givens tr τ d) {args : List STy} :
-    ∀ {ctx : List (String × Nat)} {ds : List Dict}, collect f args ctx = some ds →
-      EntailsAll impls givens ctx args ds
-  | [], _, h => by
-    simp only [collect, Option.some.injEq] at h
-    subst h
-    exact .nil
-  | (tr, j) :: ctx, ds, h => by
-    simp only [collect] at h
-    split at h
-    · cases h
-    · rename_i τ hτ
-      split at h
-      · rename_i d ds' hd hds
-        cases h
-        exact .cons hτ (hf tr τ d hd) (collect_sound hf hds)
-      · cases h
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-/-- **What is found is evidence**, whatever finds implementations, so long as
-what it finds is the implementation at that place, for that trait, head and
-arity. -/
-theorem solveBy_sound {impls : List Impl} {givens : Givens}
-    {find : String → String → Nat → Option (Nat × Impl)}
-    (hf : ∀ {tr head : String} {n i : Nat} {I : Impl}, find tr head n = some (i, I) →
-      impls[i]? = some I ∧ I.trait = tr ∧ I.head = head ∧ I.arity = n) :
-    ∀ (fuel : Nat) {tr : String} {τ : STy} {d : Dict},
-      solveBy find givens fuel tr τ = some d → Entails impls givens tr τ d
-  | 0, _, _, _, h => by simp [solveBy] at h
-  | fuel + 1, tr, .var v, d, h => by
-    simp only [solveBy] at h
-    cases hk : findGiven tr v givens with
-    | none => simp [hk] at h
-    | some k =>
-      simp [hk] at h
-      subst h
-      exact .given (findGiven_sound hk)
-  | fuel + 1, tr, .con head args, d, h => by
-    simp only [solveBy] at h
-    split at h
-    · rename_i i I hfind
-      obtain ⟨hi, htr, hhead, harity⟩ := hf hfind
-      cases hc : collect (solveBy find givens fuel) args I.context with
-      | none => simp [hc] at h
-      | some ds =>
-        simp [hc] at h
-        subst h
-        exact .impl hi htr hhead harity
-          (collect_sound (fun _ _ _ hd => solveBy_sound hf fuel hd) hc)
-    · split at h
-      · cases h
-      · rename_i head' args' hview
-        split at h
-        · cases h
-        · rename_i i I hfind
-          obtain ⟨hi, htr, hhead, harity⟩ := hf hfind
-          cases hc : collect (solveBy find givens fuel) args' I.context with
-          | none => simp [hc] at h
-          | some ds =>
-            simp [hc] at h
-            subst h
-            exact .cons hi htr harity (by rw [hhead]; exact hview)
-              (collect_sound (fun _ _ _ hd => solveBy_sound hf fuel hd) hc)
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-/-- **What is found is evidence.** -/
-theorem solve_sound {impls : List Impl} {givens : Givens} (fuel : Nat) {tr : String}
-    {τ : STy} {d : Dict} (h : solve impls givens fuel tr τ = some d) : Entails impls givens tr τ d :=
-  solveBy_sound (fun h => findImpl_sound h) fuel h
-%proof-/
 
 /-! ## Found by key
 
@@ -322,95 +208,6 @@ def solveIx (ix : ImplIndex κ) (givens : Givens κ) : Nat → κ → STy → Op
 
 /-! ## At most one way -/
 
-/-- No two implementations are for the same trait and the same head. -/
-def NoOverlap (impls : List (Impl κ)) : Prop :=
-  ∀ (i j : Nat) (I J : Impl κ), impls[i]? = some I → impls[j]? = some J → I.trait = J.trait →
-    I.head = J.head → I.arity = J.arity → i = j
-
-/-- No trait has an implementation for a tuple of one or more beside one
-for its first and the rest: a tuple is met by one or the other. -/
-def NoConsOverlap (impls : List (Impl κ)) : Prop :=
-  ∀ (i j : Nat) (I J : Impl κ), impls[i]? = some I → impls[j]? = some J → I.trait = J.trait →
-    0 < I.arity →
-    (J.head = consHead ∧ I.head = tupleHead I.arity ∨ J.head = fnHead ∧ I.head = fnArityHead (I.arity - 1)) → False
-
-/-- Nothing is assumed twice. -/
-def Distinct (givens : Givens κ) : Prop :=
-  ∀ (k l : Nat) (x : κ × Nat), givens[k]? = some x → givens[l]? = some x → k = l
-
-/-%proof (commented out while the machines become bytes)
-/-- A type seen as an implementation for every length sees it has a head of
-a tuple or a function of so many. -/
-theorem head_of_view {head head' : String} {args args' : List STy}
-    (h : consView head args = some (head', args')) :
-    0 < args.length ∧ (head' = consHead ∧ head = tupleHead args.length
-      ∨ head' = fnHead ∧ head = fnArityHead (args.length - 1)) := by
-  cases args with
-  | nil => simp [consView] at h
-  | cons a rest =>
-    simp only [consView] at h
-    split at h
-    · rename_i heq
-      simp only [Option.some.injEq, Prod.mk.injEq] at h
-      exact ⟨by simp, .inl ⟨h.1.symm, by simpa using heq⟩⟩
-    · split at h
-      · rename_i _ heq
-        simp only [Option.some.injEq, Prod.mk.injEq] at h
-        exact ⟨by simp, .inr ⟨h.1.symm, by simpa using heq⟩⟩
-      · cases h
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-mutual
-
-/-- **A bound is met in at most one way.** -/
-theorem coherent {impls : List Impl} {givens : Givens} (hn : NoOverlap impls)
-    (hc : NoConsOverlap impls) (hg : Distinct givens) : ∀ {tr : String} {τ : STy} {d d' : Dict},
-    Entails impls givens tr τ d → Entails impls givens tr τ d' → d = d'
-  | _, _, _, _, .given h, h' => by
-    cases h' with
-    | given h2 => rw [hg _ _ _ h h2]
-  | _, _, _, _, .impl hi ht hh ha hall, h' => by
-    cases h' with
-    | impl hj ht' hh' ha' hall' =>
-      have e := hn _ _ _ _ hi hj (ht.trans ht'.symm) (hh.trans hh'.symm) (ha.trans ha'.symm)
-      subst e
-      rw [hi] at hj; cases hj
-      rw [coherentAll hn hc hg hall hall']
-    | cons hj ht' _ hview _ =>
-      obtain ⟨hl, hv⟩ := head_of_view hview
-      exact (hc _ _ _ _ hi hj (ht.trans ht'.symm) (by rw [ha]; exact hl)
-        (by rw [hh, ha]; exact hv)).elim
-  | _, _, _, _, .cons hi ht ha hview hall, h' => by
-    cases h' with
-    | impl hj ht' hh' ha' _ =>
-      obtain ⟨hl, hv⟩ := head_of_view hview
-      exact (hc _ _ _ _ hj hi (ht'.trans ht.symm) (by rw [ha']; exact hl)
-        (by rw [hh', ha']; exact hv)).elim
-    | cons hj ht' ha' hview' hall' =>
-      rw [hview] at hview'
-      simp only [Option.some.injEq, Prod.mk.injEq] at hview'
-      obtain ⟨hh, rfl⟩ := hview'
-      have e := hn _ _ _ _ hi hj (ht.trans ht'.symm) hh (ha.trans ha'.symm)
-      subst e
-      rw [hi] at hj; cases hj
-      rw [coherentAll hn hc hg hall hall']
-
-theorem coherentAll {impls : List Impl} {givens : Givens} (hn : NoOverlap impls)
-    (hc : NoConsOverlap impls) (hg : Distinct givens) : ∀ {ctx : List (String × Nat)} {args : List STy} {ds ds' : List Dict},
-    EntailsAll impls givens ctx args ds → EntailsAll impls givens ctx args ds' → ds = ds'
-  | _, _, _, _, .nil, h' => by
-    cases h'
-    rfl
-  | _, _, _, _, .cons hτ hd hrest, h' => by
-    cases h' with
-    | cons hτ' hd' hrest' =>
-      rw [hτ] at hτ'
-      cases hτ'
-      rw [coherent hn hc hg hd hd', coherentAll hn hc hg hrest hrest']
-
-end
-%proof-/
 /-! ## Checking the conditions -/
 
 /-- Is no implementation for the same trait and head as a later one? -/
@@ -419,41 +216,6 @@ def noOverlap : List (Impl κ) → Bool
   | I :: rest =>
     rest.all (fun J => !(I.trait == J.trait && I.head == J.head && I.arity == J.arity))
       && noOverlap rest
-
-/-%proof (commented out while the machines become bytes)
-theorem noOverlap_sound : ∀ {impls : List Impl}, noOverlap impls = true → NoOverlap impls
-  | [], _ => fun i _ _ _ hi => by simp at hi
-  | I₀ :: rest, h => by
-    simp only [noOverlap, Bool.and_eq_true, List.all_eq_true, Bool.not_eq_true',
-      Bool.and_eq_false_iff, beq_eq_false_iff_ne, ne_eq] at h
-    obtain ⟨hhead, hrest⟩ := h
-    have ih := noOverlap_sound hrest
-    have hne : ∀ J, J ∈ rest → I₀.trait = J.trait → I₀.head = J.head → I₀.arity = J.arity →
-        False := by
-      intro J hJ h1 h2 h3
-      rcases hhead J hJ with (h | h) | h
-      · exact h h1
-      · exact h h2
-      · exact h h3
-    intro i j I J hi hj ht hh ha
-    cases i with
-    | zero =>
-      cases j with
-      | zero => rfl
-      | succ j =>
-        simp at hi
-        subst hi
-        exact (hne J (List.mem_of_getElem? (by simpa using hj)) ht hh ha).elim
-    | succ i =>
-      cases j with
-      | zero =>
-        simp at hj
-        subst hj
-        exact (hne I (List.mem_of_getElem? (by simpa using hi)) ht.symm hh.symm ha.symm).elim
-      | succ j =>
-        have := ih i j I J (by simpa using hi) (by simpa using hj) ht hh ha
-        rw [this]
-%proof-/
 
 /-- An implementation for a tuple of one or more, or a function, that one
 for every length (`J`) would be for too? -/
@@ -488,64 +250,9 @@ def noConsOverlapFast (impls : List (Impl κ)) : Bool :=
     !(0 < I.arity && (cons.contains I.trait && I.head == tupleHead I.arity
       || fns.contains I.trait && I.head == fnArityHead (I.arity - 1)))
 
-/-%proof (commented out while the machines become bytes)
-theorem noConsOverlap_sound {impls : List Impl} (h : noConsOverlap impls = true) : NoConsOverlap impls := by
-  intro i j I J hi hj ht hl hv
-  simp only [noConsOverlap, List.all_eq_true] at h
-  have hI' := h J (List.mem_of_getElem? hj) I (List.mem_of_getElem? hi)
-  have hc : overlapsView I J = true := by
-    unfold overlapsView
-    rw [decide_eq_true ht, decide_eq_true hl]
-    rcases hv with ⟨h1, h2⟩ | ⟨h1, h2⟩
-    · rw [decide_eq_true h1, decide_eq_true h2]; rfl
-    · rw [decide_eq_true h1, decide_eq_true h2]; simp
-  rw [hc] at hI'
-  cases hI'
-%proof-/
-
 /-- Is nothing assumed twice? -/
 def distinct : Givens κ → Bool
   | [] => true
   | g :: rest => !rest.contains g && distinct rest
-
-/-%proof (commented out while the machines become bytes)
-theorem distinct_sound : ∀ {givens : Givens}, distinct givens = true → Distinct givens
-  | [], _ => fun k _ _ hk => by simp at hk
-  | g :: rest, h => by
-    simp only [distinct, Bool.and_eq_true, Bool.not_eq_true', List.contains_eq_mem,
-      decide_eq_false_iff_not] at h
-    obtain ⟨hg, hrest⟩ := h
-    have ih := distinct_sound hrest
-    intro k l x hk hl
-    cases k with
-    | zero =>
-      cases l with
-      | zero => rfl
-      | succ l =>
-        simp at hk
-        subst hk
-        exact absurd (List.mem_of_getElem? (by simpa using hl)) hg
-    | succ k =>
-      cases l with
-      | zero =>
-        simp at hl
-        subst hl
-        exact absurd (List.mem_of_getElem? (by simpa using hk)) hg
-      | succ l =>
-        have := ih k l x (by simpa using hk) (by simpa using hl)
-        rw [this]
-%proof-/
-
-/-%proof (commented out while the machines become bytes)
-/--
-**What the checker uses.** Where the implementations and the assumptions pass
-the two checks, what `solve` finds is evidence that the bound is met, and any
-evidence that it is met is that same evidence.
--/
-theorem solve_unique {impls : List Impl} {givens : Givens} (hn : noOverlap impls = true)
-    (hc : noConsOverlap impls = true) (hg : distinct givens = true) {fuel : Nat} {tr : String} {τ : STy} {d d' : Dict}
-    (h : solve impls givens fuel tr τ = some d) (h' : Entails impls givens tr τ d') : d' = d :=
-  coherent (noOverlap_sound hn) (noConsOverlap_sound hc) (distinct_sound hg) h' (solve_sound fuel h)
-%proof-/
 
 end Glorious.Traits

@@ -170,13 +170,6 @@ partial def capsOf : Ty → List Nat
   | .con _ args | .tuple args => args.flatMap capsOf
   | .var _ | .rigid _ => []
 
-/-- The lifetimes of the references a type is made of, outermost first. -/
-partial def refCapsOf : Ty → List Nat
-  | .ref _ t c => c :: refCapsOf t
-  | .con _ args => args.flatMap refCapsOf
-  | .tuple args => args.flatMap refCapsOf
-  | _ => []
-
 /-- The `k`-th lifetime of a type, as `schemeShape` writes it: with no digit,
 which it numbers anew. -/
 def lifeAt (k : Nat) : String := "life" ++ String.ofList (List.replicate (k + 1) '\'')

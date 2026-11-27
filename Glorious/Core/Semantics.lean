@@ -77,7 +77,6 @@ inductive Frame where
   delivers is discarded and the exit continues towards its target. -/
   | exit (target : Target) (after : After)
 
-
 def Frame.asHandler : Frame → Option (Nat × Handler)
   | .handler id h => some (id, h)
   | .call _ _ | .label _ | .guard _ _ | .cell _ | .lend _ _ _ | .yield _ | .exit _ _ => none
@@ -349,21 +348,5 @@ def stepIO (p : Program) (c : Config) : Step Config Result :=
 
 /-- The program about to start, with `input` waiting to be read. -/
 def initIO (p : Program) (input : List Int) : Config := ⟨init p, { input := input, output := [], names := p.names }⟩
-
-/-- Given `input`, the program finishes with result `r`. -/
-def Halts (p : Program) (input : List Int) (r : Result) : Prop :=
-  Machine.Halts (stepIO p) (initIO p input) r
-
-/-- Given `input`, the program reaches a state the semantics gives no meaning to. -/
-def GoesWrong (p : Program) (input : List Int) : Prop :=
-  Machine.GoesWrong (stepIO p) (initIO p input)
-
-/-- Given `input`, the program runs forever. -/
-def Diverges (p : Program) (input : List Int) : Prop :=
-  Machine.Diverges (stepIO p) (initIO p input)
-
-/-- Given `input`, at some point while running the program has written exactly `out`. -/
-def Emits (p : Program) (input : List Int) (out : List Value) : Prop :=
-  ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ c.world.output = out
 
 end Glorious.Core

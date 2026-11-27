@@ -423,7 +423,6 @@ structure FRewriteM (m : Type → Type) where
   /-- Each pattern: a clause's and a `let`'s. -/
   onPat : Pattern → Pattern := id
 
-abbrev FGo := FGoM Id
 abbrev FRewrite := FRewriteM Id
 
 section
