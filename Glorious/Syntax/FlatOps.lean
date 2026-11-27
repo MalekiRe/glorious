@@ -784,10 +784,6 @@ def Body.borrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=
   -- (One whose elements alone are read, `x[i]`, is borrowed for each.)
   !x.startsWith "%" && (u.shared || (u.indexed && !u.valued && !u.valuedInside)) && !u.changed
 
-def Body.fieldBorrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=
-  let u := b.nameUseStmts false x after
-  !x.startsWith "%" && u.fielded && !u.changed
-
 /-- `let mut x = x` for each name, where the body starts. -/
 def heldStmts (held : List String) (body : List StmtId) : Build (List StmtId) := do
   let b ← get
@@ -802,25 +798,24 @@ def heldStmts (held : List String) (body : List StmtId) : Build (List StmtId) :=
     | some (line, col) => pushStmt (.located line col v)
     | none => pure v
 
-/-- The names a clause binds that are only borrowed in it, or (of `values`)
-only borrowed by field, each kept in a variable of the same name where the
-clause starts (`Syntax.promoteHeld`). -/
-def promoteHeld (values : List String) (c : ClauseId) (slicesMut : List String := []) : Build ClauseId := do
+/-- The `&mut [T]`s among `slicesMut` a clause binds that it writes through,
+`xs[i] = v`, and does not give away, each kept in a variable of the same
+name where the clause starts, as Rust's is written through without `mut`
+(`Syntax.promoteHeld`). (A name only borrowed is a place where it is
+borrowed, the checker's `placeVal`.) -/
+def promoteHeld (c : ClauseId) (slicesMut : List String) : Build ClauseId := do
   let b ← get
   let ⟨pats, body⟩ := b.clause c
   let body := body.toList
-  -- (A `&mut [T]` written through, `xs[i] = v`, and not given away: as
-  -- Rust's is written through without `mut`.)
-  let writtenThrough := fun (x : String) =>
+  let held := ((pats.flatMap patternNames).eraseDups).filter fun x =>
     let u := b.nameUseStmts false x body
     slicesMut.contains x && u.changed && !u.valued && !u.valuedInside && !u.rebound
-  let held := ((pats.flatMap patternNames).eraseDups).filter fun x =>
-    b.borrowedOnly x body || (values.contains x && b.fieldBorrowedOnly x body) || writtenThrough x
   if held.isEmpty then return c
   pushClause ⟨pats, ((← heldStmts held body) ++ body).toArray⟩
 
-/-- A value that is given a name and then borrowed with `&` kept where a
-reference can point (`Syntax.promoteRewrite`). -/
+/-- A value the front end names to borrow it, or that the names an `is`
+binds for the block after it, kept where a reference can point
+(`Syntax.promoteRewrite`). -/
 def promoteRewrite : FRewrite where
   onExpr go b e :=
     match b.expr e with
@@ -866,10 +861,6 @@ def promoteRewrite : FRewrite where
         | _ => pure a
       pushExpr (.call id (← go.ex f) args))
     | _ => none
-  onClause go b c := some (do
-    let ⟨pats, body⟩ := b.clause c
-    let made ← pushClause ⟨pats, (← go.stmts body.toList).toArray⟩
-    promoteHeld [] made)
   onStmts go _ ss :=
     match ss with
     | [] => none
@@ -888,20 +879,14 @@ def promoteRewrite : FRewrite where
           if b.borrowedOnly x rest && (x.splitOn "%").length > 1 then
             pure [← pushStmt (.letMut x (← go.ex e))]
           else pure [← pushStmt (.let_ (.var x) (← go.ex e))]
-        | _, .let_ pat e =>
-          let held := (patternNames pat).eraseDups.filter (b.borrowedOnly · rest)
-          let first ← pushStmt (.let_ pat (← go.ex e))
-          let more ← held.mapM fun x => do pushStmt (.letMut x (← pushExpr (.name none x)))
-          pure (first :: more)
         | _, _ => pure [← go.st s]
       pure ((← here s 64) ++ rest))
 
-/-- A clause made so, with `values` as its parameters whose written types
-are not references' (`Syntax.promoteClause`). -/
-def promoteClause (values : List String) (c : ClauseId) (slicesMut : List String := []) : Build ClauseId := do
+/-- A clause made so (`Syntax.promoteClause`). -/
+def promoteClause (c : ClauseId) (slicesMut : List String) : Build ClauseId := do
   let ⟨pats, body⟩ := (← get).clause c
   let body ← promoteRewrite.stmtList body.toList
-  promoteHeld values (← pushClause ⟨pats, body.toArray⟩) slicesMut
+  promoteHeld (← pushClause ⟨pats, body.toArray⟩) slicesMut
 
 /-- The parameters of a clause written with `annots` that are values (written
 with a type that is no reference's) and those that are references. -/
@@ -924,13 +909,13 @@ so (`promoteClause`). (One written with a reference's type, `list: &[T]`:
 `&list[0]` is the element through that reference, not through one to it.) -/
 def promoteFnClause (annots : List (Option TypeExpr)) (c : ClauseId) : Build ClauseId := do
   let pats := ((← get).clause c).pats
-  let (values, refs) := paramsOf pats annots
+  let (_, refs) := paramsOf pats annots
   let c ← if refs.isEmpty then pure c else (throughParamsRewrite refs).clause c
   let slicesMut := (pats.zip annots).filterMap fun
     | (.var x, some (.ref true (.name n _) _)) => if n == sliceMark then some x else none
     | (.var x, some (.name n _)) => if n.endsWith "SliceMut" then some x else none
     | _ => none
-  promoteClause values (← nameBorrowsClause c) slicesMut
+  promoteClause (← nameBorrowsClause c) slicesMut
 
 /-- Each name a pattern binds with `mut` a variable of the same name where
 what the pattern is of starts: `Some(mut n) => n = n + 1` as `Some(n) => let

@@ -400,6 +400,22 @@ So the flag is the destroying pass's to write, from the table, before the
 elaborator: written there, the `let mut` rewrite goes; written in the
 elaborator, it is a second place that has to know.
 
+Landed after: the front end no longer makes a variable of a `let`, a
+parameter or a name a pattern binds for being borrowed, indexed or
+borrowed by field (`promote` keeps the names it makes up itself, those an
+`is` binds for the block after it, and a `&mut [T]` written through). Each
+is a place where it is first borrowed (`placeVal`), and what that asked:
+- What was read of a name before it was borrowed is kept with the arms it
+  was read in (`St.valReads`, `St.armPath`): a read in one clause, or one
+  branch of an `if` with an `else`, is not before a borrow in another.
+  A field read is a read of the field, not of the whole (`fieldRead`).
+- A clause's statements leave the place they were at to the clause (what
+  the compiler writes at no place in the next clause, as patterns by
+  reference do, is said at the `match`, not at the last arm's statement).
+- A clause's name that is a place and is only borrowed is destroyed where
+  the clause ends (`placedParams`, as a `let`'s is), the names of a clause
+  kept in the order the patterns bind them, so destroyed last first.
+
 Receivers that are chains of calls (`App::new().relation(..).relation(..)`,
 covey/fleet's `main`) stay decisions. Written in place, each link read
 the chain below it again (1.75 s from 1.13 for fleet's check). Measured

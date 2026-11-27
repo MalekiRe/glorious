@@ -194,7 +194,7 @@ surroundings held; and what the elaborator is told by the call
 takes the first. Asked again of the same call, one kept would be met
 twice, once with what the first reading had. -/
 structure Marks where
-  valReads : Std.HashMap Nat (List Ty)
+  valReads : Std.HashMap Nat (List (Ty × List (Nat × Nat)))
   temps : List (Ty × Nat)
   later : List String
   anon : List Ty
@@ -244,6 +244,28 @@ def Marks.undo (m : Marks) (s : St) : St :=
            packs := s.packs.shrink m.packs, derefReads := s.derefReads.shrink m.derefReads,
            fieldReads := s.fieldReads.shrink m.fieldReads, given := s.given.shrink m.given,
            coercions := s.coercions.shrink m.coercions, methodCalls := s.methodCalls.shrink m.methodCalls }
+
+/-- Can what was read in the arms `read` and what is in the arms `now` both
+run? Not where they are in two of a set of which one runs. -/
+def bothRun (read now : List (Nat × Nat)) : Bool :=
+  match read, now with
+  | (g, i) :: read, (h, j) :: now => if g == h then i == j && bothRun read now else true
+  | _, _ => true
+
+/-- `x`, with the brand `id`, borrowed now: what was read of it before where
+the borrow can follow has to be copied. -/
+def readBefore (id : Nat) (x : String) : M Unit := do
+  let s ← get
+  for (t, at_) in s.valReads.getD id [] do
+    if bothRun at_ s.armPath then
+      mustDup t s!"`{x}` is borrowed after its value is given away"
+
+/-- `run` in the arm `arm` of a set of which one runs (`St.armPath`). -/
+def inArm {α : Type} (arm : Nat × Nat) (run : M α) : M α := do
+  let outer := (← get).armPath
+  modify fun s => { s with armPath := s.armPath ++ [arm] }
+  tryCatchThe Elab.Said (do let r ← run; modify fun s => { s with armPath := outer }; pure r)
+    fun e => do modify fun s => { s with armPath := outer }; throwThe Elab.Said e
 
 /-- Whether the comparison `call` is of what is not copied, or of what is not
 known yet, as found once it is read: compared by reference, written where
@@ -388,6 +410,14 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
   | .label _ | .tuple _ => inferExprNamed scope amb n
   | .refField .. | .fieldOf .. | .proj .. => inferExprField scope amb e0 n
   | .call id f args =>
+    -- (`if(c) { a } else { b }`, `else(if(c, a), b)`: `a` and `b` are two
+    -- arms of which one runs, `St.armPath`.)
+    if let #[i, other] := args then
+      let b := (← get).body
+      if let (some (_, "else"), .call _ g #[_, first]) := (b.name? f, b.expr i) then
+        if (b.name? g).map (·.2) == some "if" then
+          if let (.closure a _, .closure o _) := (b.expr first, b.expr other) then
+            modify fun s => { s with altArms := (s.altArms.insert (s.owner, a) (id, 0)).insert (s.owner, o) (id, 1) }
     -- (A comparison of two names of a type that is not copied: read again
     -- where it is by reference, `compareHere`.)
     if args.size == 2 && (((← get).body.name? f).bind fun (_, op) => compareOps.lookup op).isSome then
@@ -428,7 +458,7 @@ partial def fieldRead (scope : Scope) (e : Flat.ExprId) (read : M Ty) : M Ty := 
   let some (.val _ id) := scope.lookup x | return ← read
   let before := (← get).valReads[id]?
   let t ← read
-  modify fun s => { s with valReads := s.valReads.insert id (t :: before.getD []) }
+  modify fun s => { s with valReads := s.valReads.insert id ((t, s.armPath) :: before.getD []) }
   pure t
 
 /-- A name, a label or a tuple (`inferExpr`). -/
@@ -439,7 +469,7 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
     | .local (.val t id) => do
       -- (Of one borrowed before: a use of the place, `placeVal`.)
       if (← get).placedVals.contains id then use scope (.var id x .move)
-      modify fun s => { s with valReads := s.valReads.insert id (t :: s.valReads.getD id []) }
+      modify fun s => { s with valReads := s.valReads.insert id ((t, s.armPath) :: s.valReads.getD id []) }
       lend scope x t
     | .local (.cell t brand) => do
       -- What a variable that is never changed holds can be given away:
@@ -544,8 +574,7 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
         -- (A field of a value a name holds, borrowed: of the place,
         -- `placeVal`, as of a variable.)
         if !uniq && !star && !x.startsWith "%" then
-          for read in (← get).valReads.getD bid [] do
-            mustDup read s!"`{x}` is borrowed after its value is given away"
+          readBefore bid x
           placeVal bid x t
           let (field, numbered, chosen, through) ← fieldAtThrough t path
           use scope (.var bid x .share numbered)
@@ -811,8 +840,7 @@ partial def inferExprRef (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Fla
         -- it is first borrowed, its reads after uses of it (`placeVal`).
         -- (One whose value was given away before: borrowed, it would be
         -- read after, as only what is copied can be.)
-        for read in (← get).valReads.getD id [] do
-          mustDup read s!"`{x}` is borrowed after its value is given away"
+        readBefore id x
         placeVal id x t
         use scope (.var id x .share)
         let cap ← freshCap
@@ -2563,9 +2591,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
     for x in (b.fvExpr [] e).eraseDups do
       if let some (.val _ id) := scope.lookup x then
         let u := b.nameUseExpr false x e
-        if !u.valued && !u.valuedInside then
-          for read in (← get).valReads.getD id [] do
-            mustDup read s!"`{x}` is borrowed after its value is given away"
+        if !u.valued && !u.valuedInside then readBefore id x
     pure result
 
 /-- Check a pattern against a type; the names it binds. -/
@@ -2713,6 +2739,21 @@ partial def inferPats (ps : List Pattern) (ts : List Ty) : M Scope := do
     out := (← inferPat p t) ++ out
   pure out
 
+/-- The names a clause's patterns bind (`binds`) that are places
+(`placeVal`): each kept in a variable where the clause's statements start
+(`Elab.heldFirst`), which destroys what it holds where the clause ends if
+the body only borrows it and reads its parts, as a `let`'s does. -/
+partial def placedParams (binds : Scope) (body : List Flat.StmtId) : M Unit := do
+  let b := (← get).body
+  let some (.located l c _) := body.head?.map b.stmt | return
+  for (x, bd) in binds do
+    if let .val tx bid := bd then
+      if (← get).placedVals.contains bid then
+        let u := b.nameUseStmts false x body
+        unless u.valued || u.valuedInside || u.looked do
+          modify fun s =>
+            { s with dropCands := s.dropCands.push (⟨s.owner, l, c, x, false⟩, tx, s.pos) }
+
 /-- The type of a callable given by clauses. Parameter and result annotations
 are checked if present; the clauses must cover every argument. -/
 partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Option Ty)
@@ -2806,9 +2847,19 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
         throw s!"`{x}` is bound twice by the patterns of one clause"
       let here := (← get).pos
       let at_ := if b.wrapsResult body then site j else none
+      -- (In an arm: the branch of an `if` it is, or the clause.)
+      let arm := match (← get).altArms[((← get).owner, id)]? with
+        | some (g, k) => (2 * g + 1, k)
+        | none => (2 * id, j)
+      -- (Where the clause's statements are is theirs: what follows it is
+      -- where the callable is, as is what the compiler wrote at no place in
+      -- the next clause.)
+      let place := ((← get).pos, (← get).at_)
       let failure ← tryCatchThe Elab.Said
           (do
-            let _ ← inferStmts (binds ++ scope) row body (some (result, at_))
+            let _ ← inArm arm (inferStmts (binds ++ scope) row body (some (result, at_)))
+            modify fun s => { s with pos := place.1, at_ := place.2 }
+            placedParams binds body
             pure none) fun e =>
           if e.result then pure (some e.msg)
           else throwThe Elab.Said e
@@ -2917,6 +2968,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
       unifyAt "the result of a completion clause" result
         (← inferStmts (binds ++ scope) amb body)
       checkUses (← get).body here scope binds body
+      placedParams binds body
     let check : Pending := ⟨(← get).pos, "the completion clauses of this handler do", [subjectTy],
       completions.toList.map fun (p, _) => [p]⟩
     modify fun st => { st with pending := st.pending.push check }
@@ -2947,6 +2999,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
       let here := (← get).pos
       unifyAt s!"the result of the arm for `{x}`" result (← inferStmts (binds ++ scope) amb body)
       checkUses (← get).body here scope binds body
+      placedParams binds body
       if ← ps.allM irrefutable then covered := x :: covered
     | some o =>
       if ps.length == payload.length + 1 then
@@ -2971,6 +3024,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
         unifyAt s!"the result of the arm for `{x}`" result
           (← inferStmts (binds ++ scope) amb body)
         checkUses (← get).body here scope binds body
+        placedParams binds body
         if ← (ps.take payload.length).allM irrefutable then covered := x :: covered
       else if ps.length == payload.length then
         let binds ← clauseGiven body (inferPats ps payload)
@@ -2982,6 +3036,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
         unifyAt s!"the value the arm for `{x}` resumes with" o
           (← withLater ["%resumed"] (inferStmts (binds ++ resumption :: scope) amb body))
         checkUses (← get).body here scope binds body
+        placedParams binds body
         if borrowed then
           checkEscape lent s!"what the operation `{x}` was given borrows from its performer and could be used after the arm" (scopeRoots scope) amb
         if ← ps.allM irrefutable then covered := x :: covered

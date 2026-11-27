@@ -544,18 +544,40 @@ def splitFieldItems (all items : List Syntax.Item) : List Syntax.Item :=
 
 
 /-- A clause whose patterns bind `x` that starts by keeping it in a variable,
-written at the place of its first statement (`letMutRewriteF`). -/
+written at the place of its first statement (`letMutRewriteF`); a `let x`
+the compiler wrote at no place, as of a pattern by reference
+(`Flat.byReference`), `let mut x`. -/
 def heldFirst (x : String) : Flat.FRewrite where
+  onStmts go b ss :=
+    match ss with
+    | s :: rest =>
+      match b.stmt s with
+      | .let_ (.var y) value =>
+        if y != x then none else
+        some (do pure ((← Flat.pushStmt (.letMut y (← go.ex value))) :: (← go.stmts rest)))
+      | _ => none
+    | [] => none
   onClause go b c :=
     let ⟨pats, body⟩ := b.clause c
-    if !(pats.flatMap patVars).contains x then none else some (do
+    let vars := pats.flatMap patVars
+    if !vars.contains x then none else some (do
       let body ← go.stmts body.toList
       match body with
-      | first :: rest =>
+      | first :: _ =>
         match (← get).stmt first with
         | .located l c _ =>
           let held ← Flat.pushStmt (.letMut x (← Flat.pushExpr (.name none x)))
-          Flat.pushClause ⟨pats, ((← Flat.pushStmt (.located l c held)) :: first :: rest).toArray⟩
+          let held ← Flat.pushStmt (.located l c held)
+          -- (After those kept so already of names bound before it, so that
+          -- they are destroyed in the order Rust's are, the last first.)
+          let b ← get
+          let before := fun (s : Flat.StmtId) => match b.stmt s with
+            | .located _ _ i => match b.stmt i with
+              | .letMut y _ => vars.idxOf y < vars.idxOf x
+              | _ => false
+            | _ => false
+          let (kept, rest) := body.span before
+          Flat.pushClause ⟨pats, (kept ++ held :: rest).toArray⟩
         | _ => Flat.pushClause ⟨pats, body.toArray⟩
       | [] => Flat.pushClause ⟨pats, #[]⟩)
 
@@ -565,7 +587,8 @@ destroys it. The checker says which `let`: the `let x` at `line:col` written
 `let mut x`; a name a pattern binds kept in a variable straight after, or
 where a clause of the statement there that binds it starts. At place `0:0`,
 a clause that takes `x` as a parameter (or a name its patterns bind) starts
-by keeping it in a variable, written at the place of its first statement. -/
+by keeping it in a variable, written at the place of its first statement,
+and a `let x` the compiler wrote at no place is `let mut x` (`heldFirst`). -/
 def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
   onStmts go b ss :=
     match ss with
@@ -591,6 +614,8 @@ def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
         -- (A name a clause in the statement binds, `A(name, n) => ..` of a
         -- `match`: kept in a variable where the clause starts.)
         | _ => some (do pure ((← (heldFirst x).st s) :: (← go.stmts rest)))
+      | .let_ (.var y) _ =>
+        if line != 0 || col != 0 || y != x then none else (heldFirst x).onStmts go b ss
       | _ => none
     | [] => none
   onClause go b c :=

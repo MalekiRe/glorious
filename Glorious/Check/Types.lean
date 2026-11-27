@@ -619,9 +619,16 @@ structure St where
   placedNames : Array (String × String × Nat) := #[]
   /-- The names holding values read so far in the group, by their bindings'
   brands, with what of each was read (the whole, or a field read out of
-  it): one borrowed after is borrowed after that is given away, which only
-  what is copied can be. -/
-  valReads : Std.HashMap Nat (List Ty) := {}
+  it) and where (`armPath`): one borrowed after, where both can run, is
+  borrowed after that is given away, which only what is copied can be. -/
+  valReads : Std.HashMap Nat (List (Ty × List (Nat × Nat))) := {}
+  /-- The arms what is read now is in, outermost first: each of a set of
+  which one runs, and which of them (a clause of a callable, `2 * id`, or
+  a branch of `if(c) { .. } else { .. }`, `2 * call + 1`, `altArms`). -/
+  armPath : List (Nat × Nat) := []
+  /-- The callables that are the branches of an `if` with an `else`, by
+  their function and identity: of which set, and which. -/
+  altArms : Std.HashMap (String × Nat) (Nat × Nat) := {}
   /-- A dot call's receiver's own function, as found by reading the
   receiver on a copy (`dotAltFor`), by the receiver's node: found once in
   a body. Each link of a chain of calls read the chain below it so, and

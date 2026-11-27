@@ -626,7 +626,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
     (dbgTrace s!"group: {", ".intercalate (decls.map (·.name))}" fun _ => (pure () : M Unit))
   let loansAt := (← get).loans.size
   let cellsAt := (← get).cells.size
-  modify fun s => { s with valReads := {}, altFound := {} }
+  modify fun s => { s with valReads := {}, altFound := {}, altArms := {} }
   let mut group : List (String × Ty) := []
   for d in decls do
     group := (d.name, ← freshTy) :: group
