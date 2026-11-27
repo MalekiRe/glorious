@@ -269,6 +269,16 @@ What reading the next steps closely showed (measured on covey/fleet):
   `dictExpr` where it is not known), used only by what nothing reaches,
   which is elaborated for what the elaborator alone finds. Not worth its
   risk before the checker finds those itself; left.
+  Landed since: no implementation is a value when the program runs. The
+  destroyers, their parts and the effects' copies of a function are copied
+  for the implementations they are given as any function is; what `main`
+  does not reach is elaborated only where it is given none; and so the
+  values (`implDictItem`, a destroyer's value, `unrefBody`, `dictExprOf`)
+  and the program made again with them where the copies would not end are
+  gone, that refused as Rust refuses it. What is left of the form is the
+  copier's input within one step of the lowering (`%dict k` parameters and
+  arguments, erased by `specCopy` before anything else reads the function),
+  as read above: the one-pass version saves those lines and no more.
 - **Sema writing the certificate** (step 7): the certificate gives each
   function, closure and handler regions, loans and capabilities in Core's
   terms (`Typing.SigEntry`, `Hint`); the checker's lifetimes and captures
