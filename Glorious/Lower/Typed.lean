@@ -93,7 +93,7 @@ structure Uses where
 
 /-- Whether a computation uses a function `p` says. -/
 def _root_.Glorious.Core.Tm.anyFn (p : Nat → Bool) : Tm → Bool
-  | .let_ (.closure fn _) b | .let_ (.rebind _ fn) b => p fn || b.anyFn p
+  | .let_ (.closure fn _) b => p fn || b.anyFn p
   | .handle ret ops _ _ b => p ret || ops.any (p ·.2) || b.anyFn p
   | .handleTail ret ops _ _ => p ret || ops.any (p ·.2)
   | .let_ _ b | .call _ _ b | .perform _ _ b | .label _ b | .guard _ _ b | .cancel _ b
@@ -162,8 +162,6 @@ partial def lowerTm (C : Types) (ε : Row) : Env → Tm → List Hint → LT Tm
         let Cs ← need (asTy Γ captures) "a closure of what has no type"
         pure (.closure (← ask (.at fn Cs Ps (some ρ))) captures)
       -- (Made with what `a` was made with: its type says so.)
-      | .rebind a fn, .fn Ps ρ _ _ (some Cs) => do pure (.rebind a (← ask (.at fn Cs Ps (some ρ))))
-      | .rebind a fn, _ => do pure (.rebind a (← ask (.whole fn)))
       | _, _ => pure rhs
     pure (.let_ rhs (← lowerTm C ε (Γ.push σ) body hs))
   | _, .let_ _ _, _ => throw "a `let` without its type"

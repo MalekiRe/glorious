@@ -24,7 +24,6 @@ def showRhs : Rhs → String
   | .construct tag args => s!"#{tag}({showAtoms args})"
   | .place pl => s!"v{pl.var}.{pl.path}"
   | .closure fn caps => s!"fn{fn}[{showAtoms caps}]"
-  | .rebind a fn => s!"rebind({showAtom a}, fn{fn})"
 
 partial def showTm (n : Nat) : Core.Tm → String
   | .ret a => s!"ret {showAtom a}"

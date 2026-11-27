@@ -796,7 +796,8 @@ travels in the value `if` returns, not in a rule about the expression.
 
 How it is built, without the compiler knowing `if` or `else`:
 
-- **Core.** A callable's type may state its environment: the types of what the
+- **Core.** (Since gone: see "Blocks no longer share an environment at run
+  time", below.) A callable's type may state its environment: the types of what the
   function captured (`Ty.fn ... (env : Option (List Ty))`). The kernel has one
   more control-free computation, `rebind a fn`: the closure `a` is given up and
   `fn` gets what it captured. It is typed when `a`'s type states exactly the
@@ -8592,3 +8593,21 @@ asking for what Rust would have found at the call:
 - A receiver whose type is known only once the bounds are met, taken by
   reference: a copied one is given a copy of it, borrowed; another is
   refused, its type asked for where it is bound.
+
+## Blocks no longer share an environment at run time
+
+The rule of "Blocks that share an environment" stands for what the checker
+accepts: the two blocks of `if(c) { a } else { b }` may both use a value
+that can be used once. What the elaborator makes of it changed: each block
+captures for itself, and a block given one that was not run lets it go, as
+the elaborator already did wherever the typer could not state the sharing.
+`Rhs.rebind` is gone from Core, both machines and the bytecode (tag 5 is
+unused), and with it what found and kept the environments to share
+(`Blocks.links`, `layouts`, `envSizes`, `literalFns`, a builder's `uid` and
+`origins`) and the compile made again without sharing where the typer
+refused it (covey/fleet's: 9.9 s to 8.6 s).
+
+What is owned once stays owned once: a value both blocks name is the
+running block's, and the one let go was made by the checker not to own it
+(it was taken to share it); a value only the block let go names is its,
+destroyed with it. The suite runs the same with and without the sharing.

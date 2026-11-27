@@ -440,11 +440,6 @@ impl Opt<'_> {
                 Instr::Op(Rhs::Construct(tag, fields)) => {
                     known.insert(h, Known::Ctor(*tag, fields.clone()));
                 }
-                Instr::Op(Rhs::Rebind(Atom::Var(i), g)) => {
-                    if let Some(Known::Clo(_, caps)) = known.get(i).cloned() {
-                        known.insert(h, Known::Clo(*g, caps));
-                    }
-                }
                 Instr::Op(Rhs::Atom(Atom::Var(i))) => {
                     if let Some(k) = known.get(i).cloned() {
                         known.insert(h, k);
@@ -628,14 +623,11 @@ impl Opt<'_> {
 /// Do not make what nothing reads: a closure, a copy, a value built. What
 /// made it gives an integer instead, so that the locals keep their numbers.
 fn sweep(code: &mut [Instr], start: usize) {
-    // (Rebinding what is not a closure goes wrong, and so is not nothing; a
-    // program that was checked never does it.)
     let pure = |i: &Instr| {
         matches!(
             i,
             Instr::Op(Rhs::Closure(..))
                 | Instr::Op(Rhs::Construct(..))
-                | Instr::Op(Rhs::Rebind(..))
                 | Instr::Op(Rhs::Atom(Atom::Var(_)))
         )
     };

@@ -134,7 +134,7 @@ inductive UHint where
   deriving Inhabited
 
 /-- A use of a function inside a computation being found: a closure of it
-made, or its environment taken over (`rebind`), or a handler's function. -/
+made, or a handler's function. -/
 structure Use where
   fn : Nat
   sig : Sig
@@ -203,9 +203,6 @@ structure Env where
   decls : Decls
   p : Program
   ncaps : Array Nat
-  /-- What a block given another's environment gives up for it: how many
-  arguments the other took (`Elab.Output.envSizes`). -/
-  givenUp : Std.HashMap Nat Nat
 
 
 /-- (`EStateM`, not `StateT` over `Except`: where a failure is caught, the
@@ -322,11 +319,6 @@ partial def addOps (r : Nat) (ops : Ops) : M Unit := do
     | none => modify fun s => { s with rows := s.rows.set! r (.ops (held ++ [(op, targs)])) }
 
 end
-
-/-- What a failure to type a program says where a block takes over the
-environment of a closure that is not the block it was made for: the program
-is then made with every block capturing for itself (`Driver`). -/
-def envMismatch : String := "environment"
 
 /-- Whether two types can be made one, without making them so: of the same
 shape wherever both are known, no variable made to hold itself. -/
@@ -578,13 +570,10 @@ def showEnvs : M Unit := do
     if ← unifiable env (.tuple caps) then
       try unify env (.tuple caps) catch _ => pure ()
     else
-      -- (Not where it would hold itself; but a closure whose environment is
-      -- not what it was made with is one a block was made with the
-      -- environment of, `Rhs.rebind`, that is not that block: the program
-      -- is to be made without blocks sharing environments.)
+      -- (Not where it would hold itself.)
       if let .var v ← find env then
         if ← occurs v (.tuple caps) then continue
-      throw s!"{envMismatch}: a closure made with ({", ".intercalate (← caps.mapM showU)}) where one with {← showU env} is taken"
+      throw s!"a closure made with ({", ".intercalate (← caps.mapM showU)}) where one with {← showU env} is taken"
 
 def use (fn : Nat) (sig : Sig) : M Unit := modify fun s => { s with uses := s.uses.push ⟨fn, sig⟩ }
 
@@ -660,13 +649,6 @@ def inferRhs (Γ : Array U) : Rhs → M U
   | .closure fn captures => do
     let sig ← refSig fn
     unifyList (← captures.mapM (atomTy Γ)) sig.caps
-    use fn sig
-    closureTy sig
-  -- (A block given another's environment: of the other's captures.)
-  | .rebind a fn => do
-    let sig ← refSig fn
-    let arity := ((← read).givenUp[fn]?).getD 0
-    unify (← atomTy Γ a) (.fn (← freshTys arity) (← freshTy) (← freshRow) (.tuple sig.caps) false)
     use fn sig
     closureTy sig
 
@@ -1006,7 +988,7 @@ partial def ofTy : Ty → M U
 
 /-- The functions each function refers to. -/
 partial def refsOf : Tm → List Nat
-  | .let_ (.closure f _) b | .let_ (.rebind _ f) b => f :: refsOf b
+  | .let_ (.closure f _) b => f :: refsOf b
   | .let_ _ b | .call _ _ b | .perform _ _ b | .label _ b | .guard _ _ b | .cancel _ b
   | .cell _ _ b | .cellL _ _ _ b | .lend _ _ _ _ _ b | .mem _ _ b | .host _ _ b => refsOf b
   | .handle ret ops _ _ b => ret :: ops.map (·.2) ++ refsOf b
@@ -1317,9 +1299,7 @@ def typesOf (items : List Item) (out : Elab.Output) : Except String Types := do
   let p := out.program
   let counts := (p.main :: p.fns.toList.flatMap (·.clauses.map (·.body))).flatMap capsOf
   let ncaps := counts.foldl (fun (acc : Array Nat) (f, n) => acc.setIfInBounds f n) (Array.replicate p.fns.size 0)
-  let ncaps := out.envSizes.foldl (fun acc (fn, n, _) => acc.setIfInBounds fn n) ncaps
-  let givenUp := out.envSizes.foldl (fun (m : Std.HashMap Nat Nat) (fn, _, arity, _) => m.insert fn arity) {}
-  let env : Env := { decls, p, ncaps, givenUp }
+  let env : Env := { decls, p, ncaps }
   let action : M Types := do
     -- (`main`: run with nothing, performing nothing.)
     modify fun s => { s with places := #[], coerces := #[], nevers := #[], shows := #[], uses := #[], hints := #[] }

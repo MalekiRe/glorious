@@ -1067,7 +1067,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         impls := implEs
         drops := s.dropSites.toList
         destroys := destroys.toList }
-    pure { given := .ofList s.given.toList, links := Elab.firstOf links
+    pure { given := .ofList s.given.toList
            coercions := Elab.firstOf s.coercions.toList, traits := traitInfo.index
            fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
            fieldReads := Elab.firstOf s.fieldReads.toList, packs := Elab.firstOf s.packs.toList

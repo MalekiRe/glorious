@@ -179,11 +179,6 @@ fn rhs(out: &mut Vec<u8>, r: &Rhs) {
             nat(out, *f as u64);
             atoms(out, xs);
         }
-        Rhs::Rebind(a, f) => {
-            out.push(5);
-            atom(out, a);
-            nat(out, *f as u64);
-        }
     }
 }
 

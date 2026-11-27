@@ -892,22 +892,11 @@ def compileSource (src : String) (check : Bool := true)
         if Trace.typesTraced then dbgTrace (Core.showCore out.fnNames out.program ++ "\n" ++ Typer.showSigs types) fun _ => .ok (some types)
         else .ok (some types)
       | .error e =>
-        -- (A block given the environment of what is not the block it was
-        -- made for: blocks are not to share environments, below.)
-        if e.startsWith Typer.envMismatch && (blocks.map fun (b : Elab.Blocks) => !b.links.isEmpty).getD false then .error e
         -- (`GLORIOUS_TRACE`: why there are none.)
-        else if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => .ok none
+        if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => .ok none
         else .ok none
     pure (compiled out (← types))
-  -- Blocks can share an environment only where a type can state it. Where one
-  -- cannot, as when what a block is given may also be a function that is not a
-  -- block, every block captures for itself, as it would without the sharing.
-  match build blocks with
-  | .ok c => pure c
-  | .error e =>
-    match blocks with
-    | some b => if b.links.isEmpty then throw e else build (some { b with links := {} })
-    | none => throw e
+  build blocks
 
 /-- The characters of a text, if the value is one: a text written out in a
 program that is not checked (`Syntax.textItem`), or a line written; whose

@@ -223,7 +223,6 @@ enum Rhs {
     Construct(u64, Vec<Atom>),
     Place(Place),
     Closure(usize, Vec<Atom>),
-    Rebind(Atom, usize),
 }
 
 #[derive(Clone, Debug)]
@@ -438,10 +437,6 @@ impl Reader<'_> {
                 let func = self.index()?;
                 Ok(Rhs::Closure(func, self.atoms()?))
             }
-            5 => {
-                let a = self.atom()?;
-                Ok(Rhs::Rebind(a, self.index()?))
-            }
             t => Err(format!("unknown computation tag {t}")),
         }
     }
@@ -613,7 +608,7 @@ impl Instr {
     /// The operands of an instruction that are values of locals.
     fn atoms_mut(&mut self) -> Vec<&mut Atom> {
         match self {
-            Instr::Op(Rhs::Atom(a)) | Instr::Op(Rhs::Rebind(a, _)) => vec![a],
+            Instr::Op(Rhs::Atom(a)) => vec![a],
             Instr::Op(Rhs::Prim(_, xs))
             | Instr::Op(Rhs::Construct(_, xs))
             | Instr::Op(Rhs::Closure(_, xs)) => xs.iter_mut().collect(),
@@ -1458,12 +1453,6 @@ impl Vm {
             Rhs::Closure(func, caps) => {
                 Ok(Value::Clo(Rc::new(Clo { func: *func, caps: self.atoms(caps)? })))
             }
-            Rhs::Rebind(a, func) => match self.atom(a)? {
-                Value::Clo(clo) => {
-                    Ok(Value::Clo(Rc::new(Clo { func: *func, caps: clo.caps.clone() })))
-                }
-                _ => Err(Stop::Wrong),
-            },
         }
     }
 

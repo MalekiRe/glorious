@@ -160,7 +160,6 @@ partial def Program.internStatics (p : Program) : Program := Id.run do
 /-- The functions a computation uses, each made `f` of itself. -/
 def Tm.mapFns (f : Nat → Nat) : Tm → Tm
   | .let_ (.closure fn cs) b => .let_ (.closure (f fn) cs) (b.mapFns f)
-  | .let_ (.rebind a fn) b => .let_ (.rebind a (f fn)) (b.mapFns f)
   | .let_ r b => .let_ r (b.mapFns f)
   | .handle back ops cs t b => .handle (f back) (ops.map fun (o, g) => (o, f g)) cs t (b.mapFns f)
   | .handleTail back ops cs t => .handleTail (f back) (ops.map fun (o, g) => (o, f g)) cs t
@@ -200,7 +199,6 @@ partial def Tm.fnRefs : Tm → List Nat
   | .let_ rhs body =>
     (match rhs with
       | .closure fn _ => [fn]
-      | .rebind _ fn => [fn]
       | _ => []) ++ body.fnRefs
   | .call _ _ body => body.fnRefs
   | .tail _ _ => []

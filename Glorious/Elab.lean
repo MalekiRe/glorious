@@ -11,8 +11,8 @@ the Core forms. This pass is not proved; Core is where meaning starts.
 
 Braces are always callables, and a clause takes exactly one argument. One
 rule is directed by types, which the checker supplies: a block written without
-parameters takes an argument if one is expected of it, and if that argument is
-a block that was not run, it runs in that block's environment (`elabGiven`).
+parameters takes an argument if one is expected of it, and lets it go
+(`elabGiven`).
 
 What the checker shares with this pass is in `Glorious/Elab/Base.lean`.
 -/
@@ -233,9 +233,9 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
       return ← elabExpr scope tailPos value
     -- A callable with what destroys what it captured if it is let go.
     | some .destroyed, #[c, d] =>
-      if let (.closure id clauses, .closure _ #[dc]) := (b.expr c, b.expr d) then
+      if let (.closure _ clauses, .closure _ #[dc]) := (b.expr c, b.expr d) then
         let ⟨dps, destroy⟩ := b.clause dc
-        if dps.isEmpty then return ← elabClosure scope clauses id destroy.toList
+        if dps.isEmpty then return ← elabClosure scope clauses destroy.toList
     | _, _ => pure ()
     elabCall scope false f args
   | .tailCall _ f args => do
@@ -243,7 +243,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
     if let some why := (← get).noTail then
       throw s!"`tail` cannot be used here: {why}"
     elabCall scope true f args
-  | .closure id clauses => elabClosure scope clauses id
+  | .closure _ clauses => elabClosure scope clauses
   | .handle subject arms => elabHandle scope tailPos subject arms
   | .mark m => throw s!"`{m.shown}` is the compiler's mark of a call, not a value"
   | .type _ => throw "a type written among expressions is no value"
@@ -286,7 +286,7 @@ partial def elabArgs (scope : Scope) (args : Array Flat.ExprId) (gives : Nat →
       let given ← match blocks with
         | some _ => givenAt id
         | none => pure (gives i)
-      if given then elabGiven scope id body.toList else elabExpr scope false a
+      if given then elabGiven scope body.toList else elabExpr scope false a
     | none => elabExpr scope false a
 
 partial def elabApply (scope : Scope) (isTail : Bool) (callee : Atom) (args : Array Flat.ExprId)
@@ -695,7 +695,7 @@ partial def mkClause (captures : List String) (pats : List Pattern) (body : Scop
   pure ⟨corePats.toList, tm⟩
 
 /-- A callable literal: a new closed function and a closure over its captures. -/
-partial def elabClosure (scope : Scope) (clauses : Array Flat.ClauseId) (id : Nat := 0)
+partial def elabClosure (scope : Scope) (clauses : Array Flat.ClauseId)
     (destroy : List Flat.StmtId := []) : M Atom := do
   let b := (← get).body
   let arities := clauses.toList.map fun c => (b.clause c).pats.length
@@ -717,11 +717,6 @@ partial def elabClosure (scope : Scope) (clauses : Array Flat.ClauseId) (id : Na
     let clause ← mkClause [] (captures.map Pattern.var) fun sc => elabStmts sc true destroy
     let d ← addFn ⟨[clause]⟩ s!"what destroys a callable in `{(← get).owner}`"
     modify fun s => { s with drops := (idx, d) :: s.drops }
-  unless id == 0 do
-    let origins := (← get).b.origins
-    let layout := captures.filterMap fun x => (scope.lookup x).map fun a =>
-      (x, a, ((origins.find? fun o => sameAtom o.1 a).map (·.2)).getD [])
-    modify fun s => { s with layouts := (id, s.b.uid, layout) :: s.layouts, literalFns := s.literalFns.insert id idx }
   -- Capturing a name is a use of it, like any other.
   let captured ← (captures.filterMap (fun x => scope.lookup x)).mapM useLocal
   bindLiteral idx captured
@@ -734,80 +729,9 @@ partial def bindLiteral (idx : Nat) (captured : List Atom) : M Atom := do
       { s with b := { s.b with literals := (i, idx, captured) :: s.b.literals, unused := i :: s.b.unused } }
   pure a
 
-/--
-A block that takes an argument it does not name. If the checker found the
-argument to be another block of this activation that was not run, this block
-runs in that one's environment: the names both mention are taken from what the
-other captured, instead of being captured a second time. So the two are two
-bodies over one environment, of which at most one runs, and a value that can be
-used once can be used by each. Otherwise the argument is dropped.
--/
-partial def elabGiven (scope : Scope) (id : Nat) (body : List Flat.StmtId) : M Atom := do
-  let s ← get
-  -- What the other block captured: each name with the local of this
-  -- activation it stood for, if it was captured here or taken, in an
-  -- activation inside this one, from what a block of this one captured.
-  let layout : List (String × Option Atom) ← do
-    match ← linkAt id with
-    | some owner =>
-      match ← layoutAt owner with
-      | some (uid, layout) =>
-        pure (layout.map fun (y, a, origins) =>
-          (y, if uid == s.b.uid then some a else (origins.find? (·.1 == s.b.uid)).map (·.2)))
-      | none => pure []
-    | none => pure []
-  -- A name is shared if it still stands for the local the other block captured.
-  let shared := fun (x : String) (a : Option Atom) =>
-    match a, scope.lookup x with
-    | some a, some b => sameAtom a b
-    | _, _ => false
-  let free := captureNames scope (s.body.fvStmts [] body)
-  let taken := free.filter fun x => layout.any fun (y, a) => x == y && shared y a
-  if taken.isEmpty then elabClosure scope #[← epushC ⟨[.wild], body.toArray⟩] id
-  else
-    let own := free.filter fun x => !taken.contains x
-    -- The body, as a function over the other block's environment: what this
-    -- block needs besides is passed to it.
-    let slots := (layout.zip (List.range layout.length)).map fun ((y, a), k) =>
-      if shared y a then y else s!"\x00{k}"
-    let names := own ++ slots
-    -- Inside it, a name taken from the other block still stands for the local
-    -- it stood for here, and for whatever that stood for further out.
-    let outer := s.b
-    let origins := (slots.zip (List.range slots.length)).filterMap fun (y, k) =>
-      match scope.lookup y with
-      | some a =>
-        if taken.contains y then
-          some (Atom.var (own.length + k),
-            (outer.uid, a) :: ((outer.origins.find? fun o => sameAtom o.1 a).map (·.2)).getD [])
-        else none
-      | none => none
-    let tm ← withBuilder names.length do
-      modify fun st => { st with b := { st.b with origins := origins } }
-      let r ← withNoTail none (elabStmts (indexed names 0) true body)
-      finish r
-    let code ← addFn ⟨[⟨own.map fun _ => .wild, tm⟩]⟩ s!"a block in `{s.owner}`"
-    -- The block given up took what it was given, if it was itself given
-    -- something it did not name.
-    let arity ← match ← linkAt id with
-      | some owner => do
-        let given ← givenAt owner
-        let packed := ((← packAt owner).map
-          (fun names => names != [Syntax.spreadMark] && names != [Syntax.nowMark])).getD false
-        pure (if given || packed then 1 else 0)
-      | none => pure 0
-    let other ← match ← linkAt id with
-      | some owner => pure (((← get).literalFns[owner]?).getD 0)
-      | none => pure 0
-    modify fun s => { s with envSizes := (code, layout.length, arity, other) :: s.envSizes }
-    -- The callable passed along: given the block that was not run, it runs the
-    -- body in that block's place.
-    let n := own.length
-    let run : Core.Tm :=
-      .let_ (.rebind (.var 0) code) (.tail (.var (n + 1)) ((List.range n).map fun k => .var (k + 1)))
-    let idx ← addFn ⟨[⟨[.wild], run⟩]⟩ s!"a block in `{s.owner}`"
-    let captured ← (own.filterMap (fun x => scope.lookup x)).mapM useLocal
-    bindLiteral idx captured
+/-- A block that takes an argument it does not name: the argument is let go. -/
+partial def elabGiven (scope : Scope) (body : List Flat.StmtId) : M Atom := do
+  elabClosure scope #[← epushC ⟨[.wild], body.toArray⟩]
 
 /--
 `handle subject { arms }`. The subject becomes a callable run under the handler.
@@ -924,10 +848,6 @@ structure Output where
   fnNames : Array String
   /-- Operation names by identity, for diagnostics. -/
   opNames : Array String
-  /-- Functions that are only ever given the environment of another, with how
-  many values that environment has, how many arguments the other took, and
-  the other's function (0 if not known). -/
-  envSizes : List (Nat × Nat × Nat × Nat)
   /-- What elaborating each top-level function made, where `kept` was given:
   for the next compile (`ElabKept`). -/
   made : ElabMemo := {}
@@ -1699,11 +1619,11 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
       let b := withSelfLabel name b
       -- (Where each part stood, not the state: held, its arrays would be
       -- copied by what is added to them.)
-      let (nFns, nNames, activations0, pos0, noTail0, layouts0, envSizes0, drops0) ← do
+      let (nFns, nNames, pos0, noTail0, drops0) ← do
         let s ← get
-        pure (s.fns.size, s.names.size, s.activations, s.pos, s.noTail, s.layouts, s.envSizes, s.drops)
+        pure (s.fns.size, s.names.size, s.pos, s.noTail, s.drops)
       let key := if memo.isNone then 0 else
-        mixHash (hash (name, b, declKey)) (hash (nFns, nNames, activations0, pos0, noTail0))
+        mixHash (hash (name, b, declKey)) (hash (nFns, nNames, pos0, noTail0))
       let taken ← match (memo.getD {})[name]? with
         | some k =>
           if k.key == key && key != 0 then do
@@ -1715,9 +1635,7 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
                 let s := { s with fns := #[], names := #[] }
                 { s with
                   fns := (fns.set! idx ⟨k.clauses⟩) ++ k.fns, names := names ++ k.names
-                  layouts := k.layouts ++ s.layouts, envSizes := k.envSizes ++ s.envSizes
-                  drops := k.drops ++ s.drops
-                  activations := s.activations + k.activations, pos := k.pos }
+                  drops := k.drops ++ s.drops, pos := k.pos }
               pure (some k)
             else pure none
           else pure none
@@ -1725,22 +1643,19 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
       match taken with
       | some k => made := made.insert name k
       | none =>
-        modify fun s => { s with owner := name, body := b, reads := #[], layoutsAt := s.layouts, splits := 0 }
+        modify fun s => { s with owner := name, body := b, reads := #[], splits := 0 }
         let coreClauses ← b.roots.toList.mapM fun c =>
           let ⟨pats, body⟩ := b.clause c
           mkClause [] pats (fun sc => elabStmts sc true body.toList)
         modify fun s => { s with fns := s.fns.set! idx ⟨coreClauses⟩ }
         if memo.isSome then
           let s ← get
-          let parts : Option _ := do
-            pure (← prefixTo s.layouts layouts0, ← prefixTo s.envSizes envSizes0, ← prefixTo s.drops drops0)
-          if let some (layouts, envSizes, drops) := parts then
+          if let some drops := prefixTo s.drops drops0 then
             if s.noTail == noTail0 then
               made := made.insert name
                 { key, reads := s.reads, clauses := coreClauses
                   fns := s.fns.extract nFns s.fns.size, names := s.names.extract nNames s.names.size
-                  layouts, envSizes, drops
-                  activations := s.activations - activations0, pos := s.pos }
+                  drops, pos := s.pos }
       idx := idx + 1
     pure made
   let fnNames := (fns.map fun (name, _) => s!"`{name}`").toArray
@@ -1755,6 +1670,6 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
       out := out.set! info.id name
     pure out
   pure ⟨⟨st.fns, .let_ (.closure mainIdx []) (.tail (.var 0) []), st.drops.reverse, fns.toArray.map (·.1), []⟩, names, st.names,
-    opNames, st.envSizes, made⟩
+    opNames, made⟩
 
 end Glorious.Elab

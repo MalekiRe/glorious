@@ -685,9 +685,6 @@ structure Blocks where
   /-- Blocks written without parameters where a callable taking one argument is
   expected: they take the argument without naming it. -/
   given : Std.HashSet Nat := {}
-  /-- Those of them whose argument is a block that was not run: each with the
-  identity of that block, whose environment it can take over. -/
-  links : Std.HashMap Nat Nat := {}
   /-- The coercions to apply, by the place each is applied at. -/
   coercions : Std.HashMap Site String := {}
   traits : TraitInfo := {}
@@ -825,21 +822,13 @@ structure Builder where
   literals : List (Nat × Nat × List Atom) := []
   /-- Those of them no name has referred to yet. -/
   unused : List Nat := []
-  /-- Which activation this is, among those elaborated so far. -/
-  uid : Nat := 0
-  /-- Locals of this activation that stand for a local of an activation around
-  it, because a block that runs in another's place took them from what the
-  other captured: each such activation and the local there, nearest first. -/
-  origins : List (Atom × List (Nat × Atom)) := []
 
 /-- What elaborating one top-level function read that is not its own body:
 kept with what it made (`ElabKept`), and read again before that is taken. -/
 inductive ElabRead where
   | given (id : Nat) (v : Bool)
-  | link (id : Nat) (v : Option Nat)
   | pack (id : Nat) (v : Option (List String))
   | fn (name : String) (v : Option Nat)
-  | layout (owner : Nat) (v : UInt64)
 
 structure St where
   fns : Array Core.Fn
@@ -851,18 +840,6 @@ structure St where
   /-- Why a `tail` call is not allowed at this point, if it is not: something
   still has to happen in this activation after the call returns. -/
   noTail : Option String
-  /-- How many activations have been started. -/
-  activations : Nat := 0
-  /-- What each callable literal captured, by its identity: the activation it
-  was built in, and each captured name with the local it stood for there. -/
-  layouts : List (Nat × Nat × List (String × Atom × List (Nat × Atom))) := []
-  /-- Functions that are only ever given the environment of another, with how
-  many values that environment has, how many arguments the other took, and
-  the other's function (`literalFns`; 0 if not known). -/
-  envSizes : List (Nat × Nat × Nat × Nat) := []
-  /-- The function of each callable literal this function made, by the
-  literal's identity. -/
-  literalFns : Std.HashMap Nat Nat := {}
   /-- Where the statement being elaborated starts. -/
   pos : Nat × Nat := (0, 0)
   /-- How many calls the top-level function being elaborated split at a
@@ -878,9 +855,6 @@ structure St where
   /-- What the top-level function being elaborated read that is not its own,
   in order (`ElabRead`). -/
   reads : Array ElabRead := #[]
-  /-- `layouts` as it was when the top-level function being elaborated began:
-  what is in front of it is the function's own. -/
-  layoutsAt : List (Nat × Nat × List (String × Atom × List (Nat × Atom))) := []
 
 /-- What elaborating a top-level function made, kept for the next compile: by
 the key of what it was elaborated from (its body, what the program declares,
@@ -892,10 +866,7 @@ structure ElabKept where
   clauses : List Core.Clause
   fns : Array Core.Fn
   names : Array String
-  layouts : List (Nat × Nat × List (String × Atom × List (Nat × Atom)))
-  envSizes : List (Nat × Nat × Nat × Nat)
   drops : List (Nat × Nat)
-  activations : Nat
   pos : Nat × Nat
 
 /-- Each top-level function's `ElabKept`, by its name. -/
@@ -933,8 +904,7 @@ def withBuilder {α : Type} (depth : Nat) (k : M α) : M α := do
   let outer := (← get).b
   modify fun s =>
     { s with
-      b := { ops := #[], depth := depth, done := none, uid := s.activations + 1 }
-      activations := s.activations + 1 }
+      b := { ops := #[], depth := depth, done := none } }
   let r ← k
   modify fun s => { s with b := outer }
   pure r
@@ -981,12 +951,6 @@ def givenAt (id : Nat) : M Bool := do
   noteRead (.given id v)
   pure v
 
-/-- The block that was not run whose environment block `id` takes, noted. -/
-def linkAt (id : Nat) : M (Option Nat) := do
-  let v := ((← read).blocks.getD {}).links[id]?
-  noteRead (.link id v)
-  pure v
-
 /-- The names block `id` has from an `is`, noted. -/
 def packAt (id : Nat) : M (Option (List String)) := do
   let v := ((← read).blocks.getD {}).packs[id]?
@@ -999,26 +963,11 @@ def fnAt (x : String) : M (Option Nat) := do
   noteRead (.fn x v)
   pure v
 
-/-- What the callable literal `owner` captured, noted where a function before
-this one made it (one this function made is its own). -/
-def layoutAt (owner : Nat) : M (Option (Nat × List (String × Atom × List (Nat × Atom)))) := do
-  let s ← get
-  let v := s.layouts.lookup owner
-  unless mine s.layoutsAt owner s.layouts do noteRead (.layout owner (hash v))
-  pure v
-where
-  mine (start : List (Nat × Nat × List (String × Atom × List (Nat × Atom)))) (owner : Nat) :
-      List (Nat × Nat × List (String × Atom × List (Nat × Atom))) → Bool
-    | [] => false
-    | l@((o, _) :: r) => if sameObj l start then false else if o == owner then true else mine start owner r
-
 /-- Is what `r` read still what it is? -/
 def readHolds : ElabRead → M Bool
   | .given id v => do pure (((← read).blocks.getD {}).given.contains id == v)
-  | .link id v => do pure (((← read).blocks.getD {}).links[id]? == v)
   | .pack id v => do pure (((← read).blocks.getD {}).packs[id]? == v)
   | .fn x v => do pure ((← read).fns[x]? == v)
-  | .layout owner v => do pure (hash ((← get).layouts.lookup owner) == v)
 
 /-- What `after` has in front of `before`, where it is `before` with more in
 front of it (the same object after them); none where it is not. -/
@@ -1052,11 +1001,6 @@ def lookupVar (scope : Scope) (x : String) : Option (Bool × String × Atom) :=
 /-- The scope keys a callable must capture for the names free in it. -/
 def captureNames (scope : Scope) (free : List String) : List String :=
   (free.filterMap fun x => (lookupVar scope x).map (·.2.1)).eraseDups
-
-def sameAtom : Atom → Atom → Bool
-  | .var i, .var j => i == j
-  | .int m, .int n => m == n
-  | _, _ => false
 
 /-! ## Free names -/
 
