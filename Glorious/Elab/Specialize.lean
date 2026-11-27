@@ -330,6 +330,54 @@ the compiler wrote at no place, as of a pattern by reference
 (`Flat.byReference`), `let mut x`, and so one at `at_` (a value the front
 end named for the statement there, in a block of the statement's own). -/
 def heldFirst (x : String) (at_ : Option (Nat × Nat) := none) : Flat.FRewrite where
+  -- (`if(e is Some(n)) { .. &n .. }`: the names an `is` among a call's
+  -- arguments binds are the blocks' given to the call, `Blocks.packs`: kept
+  -- in a variable where each starts, as a clause's are.)
+  onExpr go b e :=
+    if at_.isSome then none else
+    match b.expr e with
+    | .call id f args =>
+      -- (Where the `is` is read, the values it finds built under their
+      -- names, `Syntax.packName`.)
+      let rec packs (fuel : Nat) (a : Flat.ExprId) : Bool := match fuel with
+        | 0 => false
+        | fuel + 1 =>
+          (match b.expr a with
+            | .call _ g _ => ((b.bare? g).bind Syntax.packNames).any (·.contains x)
+            | _ => false) || (b.children a).any (packs fuel)
+      -- (The test, `(clauses)(e)`, the clauses building what the `is`
+      -- finds; or the block that is a `while`'s test, `{ e is Some(x) }`.)
+      let tests := fun (a : Flat.ExprId) => match b.expr a with
+        | .call _ g _ => match b.expr g with
+          | .closure .. => packs 64 g
+          | _ => false
+        | _ => false
+      let binds := fun (a : Flat.ExprId) => match b.expr a with
+        | .closure _ #[c] =>
+          let ⟨ps, body⟩ := b.clause c
+          if !ps.isEmpty then false else
+          let rec exprOf (s : Flat.StmtId) (fuel : Nat) : Option Flat.ExprId := match fuel, b.stmt s with
+            | _, .expr e => some e
+            | fuel + 1, .located _ _ inner => exprOf inner fuel
+            | _, _ => none
+          match body.toList with
+          | [s] => (exprOf s 8).any tests
+          | _ => false
+        | _ => tests a
+      if !args.any binds then none else some (do
+        let tested := args.map binds
+        let args ← args.mapM go.ex
+        let args ← args.zipIdx.mapM fun (a, i) => do
+          let b ← get
+          match b.expr a with
+          | .closure cid #[c] =>
+            let ⟨ps, body⟩ := b.clause c
+            if !ps.isEmpty || tested[i]?.getD false then pure a else
+            let made := ((← Flat.heldStmts [x] body.toList) ++ body.toList).toArray
+            Flat.pushExpr (.closure cid #[← Flat.pushClause ⟨[], made⟩])
+          | _ => pure a
+        Flat.pushExpr (.call id (← go.ex f) args))
+    | _ => none
   onStmts go b ss :=
     match ss with
     | s :: rest =>
@@ -412,6 +460,8 @@ def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
     | [] => none
   onClause go b c :=
     if line != 0 || col != 0 then none else (heldFirst x).onClause go b c
+  onExpr go b e :=
+    if line != 0 || col != 0 then none else (heldFirst x).onExpr go b e
 
 /-- A function's body with one thing the checker decided after it read the
 body written in: a variable it made a place (`letMut`), a receiver found to

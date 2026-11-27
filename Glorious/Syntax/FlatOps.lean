@@ -803,74 +803,10 @@ def promoteHeld (c : ClauseId) (slicesMut : List String) : Build ClauseId := do
   if held.isEmpty then return c
   pushClause ⟨pats, ((← heldStmts held body) ++ body).toArray⟩
 
-/-- A value the front end names to borrow it, or that the names an `is`
-binds for the block after it, kept where a reference can point
-(`Syntax.promoteRewrite`). -/
-def promoteRewrite : FRewrite where
-  onExpr go b e :=
-    match b.expr e with
-    | .call id f args => some (do
-      -- (`if(e is Some(n)) { .. &n .. }`: the names an `is` among the
-      -- arguments binds are the blocks' after it, and are kept where a
-      -- reference can point as a clause's are.)
-      let isOf := fun (a : ExprId) =>
-        match b.expr a with
-        | .call _ m #[_, cl] =>
-          if b.mark? m == some .is_ then
-            match b.expr cl with
-            | .closure _ #[c] =>
-              let ⟨ps, body⟩ := b.clause c
-              match ps with
-              | [pat] => if body.isEmpty then patternNames pat else []
-              | _ => []
-            | _ => []
-          else []
-        | _ => []
-      let isNames := fun (a : ExprId) =>
-        match b.expr a with
-        | .closure _ #[c] =>
-          let ⟨ps, body⟩ := b.clause c
-          if !ps.isEmpty then isOf a else
-          match body.toList with
-          | [s] => match b.stmt s with
-            | .expr e => isOf e
-            | _ => []
-          | _ => isOf a
-        | _ => isOf a
-      let named := args.toList.flatMap isNames
-      let args ← args.mapM go.ex
-      let args ← if named.isEmpty then pure args else args.mapM fun a => do
-        let b ← get
-        match b.expr a with
-        | .closure cid #[c] =>
-          let ⟨ps, body⟩ := b.clause c
-          if !ps.isEmpty then pure a else
-          let held := named.eraseDups.filter (b.borrowedOnly · body.toList)
-          let made := ((← heldStmts held body.toList) ++ body.toList).toArray
-          pushExpr (.closure cid #[← pushClause ⟨[], made⟩])
-        | _ => pure a
-      pushExpr (.call id (← go.ex f) args))
-    | _ => none
-  onStmts go _ ss :=
-    match ss with
-    | [] => none
-    | s :: rest => some (do
-      let rest ← go.stmts rest
-      let rec here (s : StmtId) (fuel : Nat) : Build (List StmtId) := do
-        let b ← get
-        match fuel, b.stmt s with
-        | 0, _ => pure [← go.st s]
-        | fuel + 1, .located line col inner =>
-          (← here inner fuel).mapM fun s => pushStmt (.located line col s)
-        | _, .let_ (.var x) e => pure [← pushStmt (.let_ (.var x) (← go.ex e))]
-        | _, _ => pure [← go.st s]
-      pure ((← here s 64) ++ rest))
-
 /-- A clause made so (`Syntax.promoteClause`). -/
 def promoteClause (c : ClauseId) (slicesMut : List String) : Build ClauseId := do
   let ⟨pats, body⟩ := (← get).clause c
-  let body ← promoteRewrite.stmtList body.toList
-  promoteHeld (← pushClause ⟨pats, body.toArray⟩) slicesMut
+  promoteHeld (← pushClause ⟨pats, body⟩) slicesMut
 
 /-- A clause of a function whose parameters are written with `annots`, made
 so (`promoteClause`). -/
