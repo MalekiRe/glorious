@@ -177,6 +177,11 @@ partial def nameUseExpr (b : Body) (noDefers : Bool) (x : String) (e : ExprId) :
   | .ref uniq y => if y != x then {} else if uniq then { changed := true } else { shared := true }
   | .refField _ uniq y _ _ => if y == x then { fielded := true, changed := uniq } else {}
   | .proj e _ | .fieldOf _ e _ => if b.placeRoot e == some x then { looked := true } else b.nameUseExpr noDefers x e
+  -- (A dot call's receiver, `x.f()`: borrowed, as the function's type will
+  -- most often say, `Check.receiverByType`.)
+  | .call _ m #[r] =>
+    if b.mark? m == some .receiver && b.bare? r == some x then { shared := true }
+    else b.foldDirect (fun u e => u.or (b.nameUseExpr noDefers x e)) {} e
   -- (`x[i]`, or `x.f[i]`: the element read where it is, through a borrow
   -- of `x`.)
   | .call _ f #[a, i] =>

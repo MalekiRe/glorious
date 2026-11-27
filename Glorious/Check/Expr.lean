@@ -1261,6 +1261,31 @@ partial def fieldThroughRef (scope : Scope) (e : Flat.ExprId) : M (Option (Strin
       pure ((← fieldThroughRef scope inner).map fun (x, path, _) => (x, path ++ [field], fid))
   | _ => pure none
 
+/-- A dot call's receiver `%receiver(x)` at `a`, given to a parameter of
+type `p`: `&x` (`&mut x`) where `p` is a reference and `x` holds no
+reference, `x` where `p` is known otherwise; left where `p` is not known
+yet, and read as `x` (`inferMarkedCall`). Written where it is, as Rust
+borrows a method's receiver by the method's type. -/
+partial def receiverByType (scope : Scope) (p : Ty) (a : Flat.ExprId) : M Unit := do
+  let b := (← get).body
+  let .call _ m #[r] := b.expr a | return
+  unless b.mark? m == some .receiver do return
+  let some x := b.bare? r | return
+  let held ← match scope.lookup x with
+    | some (.val t _) | some (.cell t _) => do pure (some (← find t))
+    | _ => pure none
+  let given : Option Flat.FExpr ← match ← find p, held with
+    | .var _, _ => pure none
+    | .ref .., some (.ref ..) => pure (some (.name none x))
+    | .ref how _ _, some _ => do
+      let uniq := match ← find how with
+        | .con "&mut" [] => true
+        | _ => false
+      pure (some (.ref uniq x))
+    | _, _ => pure (some (.name none x))
+  if let some n := given then
+    modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a n } }
+
 /-- Check arguments in the given order. Gives the first that does not fit. -/
 partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : List Ty)
     (args : Array Flat.ExprId) (call : Nat) (order : List Nat) : M (Option (Nat × String)) := do
@@ -1268,6 +1293,10 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
     match params[i]?, args[i]? with
     | some p, some a =>
       let site := if call == 0 then none else some (Elab.Site.arg call i)
+      -- (A dot call's receiver, a name: borrowed where the function takes a
+      -- reference and the name holds none, given as it is otherwise,
+      -- written where it is.)
+      receiverByType scope p a
       let b := (← get).body
       -- Clauses that match what a reference points to with patterns of a
       -- value: the program is read again with those patterns written
@@ -1921,6 +1950,9 @@ Type = value`: its type; none where it is not one (`inferCall`). -/
 partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Array Flat.ExprId) :
     M (Option Ty) := do
   let b := (← get).body
+  -- (A dot call's receiver the front end left as it is: what it is.)
+  if let (some .receiver, #[r]) := (b.mark? f, args) then
+    return some (← inferExpr scope amb r)
   -- `let x: Type = value`: the value is made that type.
   if let (some .move, #[operand]) := (b.mark? f, args) then
     -- `move x`: the value of `x`. That `x` is not used after is looked at
