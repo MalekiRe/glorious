@@ -8611,3 +8611,20 @@ What is owned once stays owned once: a value both blocks name is the
 running block's, and the one let go was made by the checker not to own it
 (it was taken to share it); a value only the block let go names is its,
 destroyed with it. The suite runs the same with and without the sharing.
+
+## No implementation is a value when the program runs
+
+Each function given implementations (a bound, or how a type parameter is
+destroyed) is copied for those it is given, from `main` on, as Rust and Zig
+copy a generic function for each use: destroyers (`%Destroy::%destroy@T`,
+its `%fields` and `%destroy from`) and a function's copies for its effects'
+instances (`name@<..>`) included. Nothing is left to pass an implementation
+as a value, so the functions that made one (`impl T for X`, `implDictItem`,
+and a destroyer's value) and what wrote one out (`unrefBody`) are gone, and
+with them the program made again with every implementation a value where
+the copies would not end. That is refused instead, as Rust refuses it: a
+function that calls itself with an implementation made from the one it was
+given (`f::<(T, T)>` in `f::<T>`) would need a copy for each, without end
+(more than `copyFuel` copies). No program of the suite did. What `main`
+does not reach is elaborated, for what the elaborator alone refuses, but
+not a function given implementations: checked, it is made where it is used.

@@ -70,11 +70,6 @@ abbrev LowerMemo := Std.HashMap String LowerKept
 /-- A program as it is lowered: what is lowered, and the copies asked. -/
 structure Lowered where
   copies : Copies
-  /-- Whether copies are made for known implementations: not once more would
-  be made than `copyFuel` (a function that calls itself with an
-  implementation made from the one it was given), and then the program is
-  lowered again without them. -/
-  spec : Bool := true
   /-- What it was asked to reach. -/
   roots : List String := []
   seen : Std.HashSet String := {}
@@ -200,7 +195,7 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
     -- the same, after the same copies.)
     let src := match st.copies.byName[x]? with
       | some (fn, ids, drop) => (L.srcKeys[fn]?).map fun h => hash (h, ids, drop, "copy")
-      | none => (L.srcKeys[x]?).map fun h => hash (h, st.spec)
+      | none => (L.srcKeys[x]?).map fun h => hash h
     let key := match src with
       | some h => mixHash h (mixHash L.globalKey st.chain)
       | none => 0
@@ -234,10 +229,8 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
       | none =>
         match (L.fns[x]?).bind (· ()) with
         | some item =>
-          if st.spec then
-            let (item, copies) := (specRoot tr item).run st.copies
-            (some item, copies, st.made)
-          else (some item, st.copies, st.made)
+          let (item, copies) := (specRoot tr item).run st.copies
+          (some item, copies, st.made)
         | none => (none, st.copies, st.made)
     if made > copyFuel then return none
     let pool := copies.byId.extract pool0 copies.byId.size
@@ -246,8 +239,7 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
     let madeHere := made - st.made
     st := { st with copies, made, chain }
     let lowered := match item with
-      -- (What is left of the implementations, as values: written out.)
-      | some (.fn name ps annots ret b) => some (Syntax.Item.fn name ps annots ret (unrefBody copies.byId b))
+      | some (.fn name ps annots ret b) => some (Syntax.Item.fn name ps annots ret b)
       | _ => none
     if key != 0 then
       st := { st with keptMade := st.keptMade.insert x { key, item := lowered, pool, asked, made := madeHere } }
@@ -256,14 +248,14 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
       todo := todo ++ (b.fvClauses b.roots).reverse.toArray ++ (coercedIn x b).toArray
   some st
 
-/-- Lowered on from `st`, through what `roots` reach. -/
-def Lowering.reach (L : Lowering) (st : Lowered) (roots : List String) : Lowered :=
+/-- Lowered on from `st`, through what `roots` reach. Refused where more
+copies would be made than `copyFuel`: a function that calls itself with an
+implementation made from the one it was given, as Rust refuses it (no
+implementation is a value when the program runs). -/
+def Lowering.reach (L : Lowering) (st : Lowered) (roots : List String) : Except String Lowered :=
   match L.reachWith st roots with
-  | some st => st
-  | none =>
-    -- (Every function as it is, given its implementations as values.)
-    let again := L.reachWith { L.start with spec := false } (st.roots ++ roots)
-    again.getD { L.start with spec := false }
+  | some st => .ok st
+  | none => .error s!"more than {copyFuel} copies of functions would be made for the implementations they are given: a function calls itself with an implementation made from the one it was given (`f::<(T, T)>` in `f::<T>`), which would need a copy for each, without end"
 
 /-- What is lowered, as a program: its constants worked out, and each
 function declared again where one is reached. -/

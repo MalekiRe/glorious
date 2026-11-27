@@ -88,12 +88,6 @@ partial def dictId (impls : Std.HashMap String ImplE) (e : Flat.ExprId) : SpecM 
     some <$> (internId f ids.toList : StateM Copies Nat)
   | _ => pure none
 
-/-- The implementation a number is, written out. -/
-partial def dictExprOf (byId : Array (String × List Nat)) (n : Nat) : Expr :=
-  match byId[n]? with
-  | some (f, ids) => .call 0 (.name none f) (ids.map (dictExprOf byId))
-  | none => .tuple []
-
 def askCopy (fn : String) (ids : List Nat) (drop : Bool) : StateM Copies String := do
   let key := (fn, ids, drop)
   if let some name := (← get).byKey[key]? then return name
@@ -201,12 +195,6 @@ partial def namesLabel (b : Flat.Body) (l : String) (e : Flat.ExprId) : Bool :=
   | _ => (b.children e).any (namesLabel b l)
 
 def stmtNamesLabel (b : Flat.Body) (l : String) (s : Flat.StmtId) : Bool := (b.stmtExprs s).any (namesLabel b l)
-
-/-- Each `%known#n` left in a body, written out as the implementation. -/
-def unrefBody (byId : Array (String × List Nat)) (b : Flat.Body) : Flat.Body :=
-  let r : Flat.FRewrite := { onExpr := fun _ b e =>
-    (b.bare? e >>= dictRefOfName?).map fun n => Flat.flatExpr (dictExprOf byId n) }
-  r.body b
 
 /-- A clause of a copy: the parameters for implementations dropped, or each
 taking `()`, and the body written out for the implementations. -/

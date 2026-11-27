@@ -926,17 +926,12 @@ def destroyers (tr : TraitInfo) : List Item :=
     let passed := dicts.map name
     let method := Syntax.implFnName Syntax.destroyTrait D.head Syntax.destroyFn
     let blank := List.replicate (D.given + 1) (none : Option TypeExpr)
-    -- As a value: the function, given the value.
-    let asValue := Item.fnOf (implDictName Syntax.destroyTrait D.head) [] (blank.drop 1) none
-      [.mk given [.expr (.tuple [.closure 0 [.mk [.var "%arg0"]
-        [.expr (.call dropCallId (name method) (passed ++ [name "%arg0"]))]]])]]
     -- A `[T; N]`: its elements one by one, from the last.
     if let (true, [(_, [some element])]) := (D.array, D.ctors) then
       let from_ := "%destroy from " ++ D.head
       let before := Expr.call dropCallId (name "int_sub") [name "%n", .int 1]
       let length := Expr.call dropCallId (name "fixed_len") [name "%value"]
-      [asValue,
-        Item.fnOf method [] blank none
+      [Item.fnOf method [] blank none
           [.mk (given ++ [.var "%value"])
             [.expr (.call dropCallId (name from_) (passed ++ [name "%value", length]))]],
         Item.fnOf from_ [] (blank ++ [none]) none
@@ -968,14 +963,13 @@ def destroyers (tr : TraitInfo) : List Item :=
           Expr.call dropCallId (.name none fn) (subs.map (dictExpr tr) ++ args)
         | none => fun args => Expr.call dropCallId (.proj ((dictExpr tr) d) 0) args
       let fields := s!"%fields {D.head}"
-      [asValue,
-        Item.fnOf method [] blank none
+      [Item.fnOf method [] blank none
           [.mk (given ++ [.var "%value"])
             ([.letMut "%held" (name "%value"), .expr (hook [.ref true "%held"])]
               ++ (if inner then [.expr (.call dropCallId (name fields) (passed ++ [name "%held"]))]
                   else [.expr unit]))]]
         ++ (if inner then [Item.fnOf fields [] blank none clauses] else [])
-    | none => [asValue, Item.fnOf method [] blank none clauses]
+    | none => [Item.fnOf method [] blank none clauses]
 
 mutual
 
@@ -1214,26 +1208,11 @@ def untraitFn (tr : TraitInfo) (name : String) (params : List String) (annots : 
   -- (Every node is made anew: what was there is reached by nothing.)
   Syntax.Item.fn name params ((List.replicate n none) ++ annots) ret (withDicts n { b with roots }).compact
 
-/-- The function that makes an implementation's value: given what its
-conditions are met by (`written` of them, if the checker says nothing), a
-closure for each of the trait's functions. -/
-def implDictItem (tr : TraitInfo) (trait head : String) (written : Nat) : Syntax.Item :=
-  let dictFn := implDictName trait head
-  -- (as many as the checker says: how each type parameter is destroyed
-  -- is among them, written or not)
-  let conditions := ((tr.implsAt[dictFn]?).map (·.conditions)).getD written
-  let dicts := (List.range conditions).map fun k => s!"%dict{k}"
-  let fns := ((tr.implsAt[dictFn]?).map (·.methods)).getD []
-  let closures := fns.map fun (fn, arity) =>
-    let argNames := (List.range arity).map fun k => s!"%arg{k}"
-    Expr.closure 0 [.mk (argNames.map Pattern.var)
-      [.expr (.call 0 (.name none fn) ((dicts ++ argNames).map (Expr.name none)))]]
-  Item.fnOf dictFn [] [] none [.mk (dicts.map Pattern.var) [.expr (.tuple closures)]]
-
 /-- What an item is without traits: the functions it is made into, each by
 its name and made only when asked (`fn`), or an item kept as it is (`item`).
-A trait is nothing; an implementation its functions and the function that
-makes its value. -/
+A trait is nothing; an implementation its functions. (An implementation is
+never a value when the program runs: each function is copied for those it
+is given, `specCopy`.) -/
 inductive Untraited where
   | fn (name : String) (make : Unit → Syntax.Item)
   | item (item : Syntax.Item)
@@ -1241,13 +1220,12 @@ inductive Untraited where
 /-- An item without traits (`Untraited`). -/
 def untraitItem (tr : TraitInfo) : Syntax.Item → List Untraited
   | (.trait _ _) => []
-  | .impl { params := params, trait := trait, head := head, context := context, methods := methods, .. } =>
-    let own := methods.filterMap fun
+  | .impl { params := params, trait := trait, head := head, methods := methods, .. } =>
+    methods.filterMap fun
       | .fn m _ annots ret b =>
         let name := implFnName trait.spelled head m
         some (Untraited.fn name fun _ => untraitFn tr name params annots ret b)
       | _ => none
-    own ++ [.fn (implDictName trait.spelled head) fun _ => implDictItem tr trait.spelled head context.length]
   | .fn name params annots ret b => [.fn name fun _ => untraitFn tr name params annots ret b]
   | item => [.item item]
 

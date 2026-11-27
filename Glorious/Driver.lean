@@ -831,14 +831,14 @@ def compileSource (src : String) (check : Bool := true)
   -- refuses, and then left out.
   -- (A coercion is reached with the function it is applied in.)
   let roots := ["main"]
-  let (all, lowered) := Trace.timed "lower what main reaches" fun _ =>
+  let (all, lowered) ← Trace.timed "lower what main reaches" fun _ => do
     match lowering with
     | some L =>
-      let st := L.reach { L.start with kept := lowerKept.getD {} } roots
+      let st ← L.reach { L.start with kept := lowerKept.getD {} } roots
       -- (And the coercions applied in what they reach.)
       let coerced : List String := L.blocks.coercions.fold (fun acc _ fn => if st.seen.contains fn then fn :: acc else acc) []
-      (Elab.reachable (roots ++ coerced.eraseDups) (L.items st), some st)
-    | none => (Elab.reachable roots all, none)
+      pure (Elab.reachable (roots ++ coerced.eraseDups) (L.items st), some st)
+    | none => pure (Elab.reachable roots all, none)
   -- (Only they and what they reach: what `main` reaches is elaborated below.
   -- Taken from the first of them, as a program is from `main`; beside what
   -- follows, on a thread of its own, and what it refuses said first.)
@@ -864,8 +864,8 @@ def compileSource (src : String) (check : Bool := true)
     | _, _ => []
   let aside : Task (Except String Unit) := Task.spawn fun _ =>
     match missing.isEmpty, lowering, lowered with
-    | false, some L, some st =>
-      let st' := L.reach st missing
+    | false, some L, some st => do
+      let st' ← L.reach st missing
       let coerced : List String := L.blocks.coercions.fold (fun acc _ fn => if st'.seen.contains fn then fn :: acc else acc) []
       match Trace.timed "elaborate what main does not reach" fun _ =>
           elaborate (Elab.reachable (missing ++ coerced.eraseDups) (L.items st')) blocks
