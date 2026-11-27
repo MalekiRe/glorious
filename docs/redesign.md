@@ -389,6 +389,17 @@ of the `match` had recorded. (The commit that landed identities says the
 literals were then right; that was not seen: the program did not get to
 run.) Both are what is still in the way.
 
+Drop flags written by the elaborator where it meets a place, from the
+checker's table (`Decision.letMut` read by `elabStmts` and at each clause
+start, `decideBody` not writing it), tried after the certificate went:
+the values were then not destroyed where one path did not give them away.
+What sets and reads the flags is not the elaborator's reading of the
+statement but the pass before it that writes what destroys values
+(`Elab`'s block statements, `markMoves`), which finds them by `let mut`.
+So the flag is the destroying pass's to write, from the table, before the
+elaborator: written there, the `let mut` rewrite goes; written in the
+elaborator, it is a second place that has to know.
+
 Receivers that are chains of calls (`App::new().relation(..).relation(..)`,
 covey/fleet's `main`) stay decisions. Written in place, each link read
 the chain below it again (1.75 s from 1.13 for fleet's check). Measured
