@@ -485,25 +485,6 @@ def FrontMemo.take (m : FrontMemo) (key : UInt64) (make : Unit → List Item) : 
     | none => make ()
   (v, if m.keep then { m with made := m.made.push (key, v) } else m)
 
-/-- An item's functions with what they borrow in the text named first
-(`nameBorrowsClause`), as it is read, before its names are resolved. -/
-partial def nameBorrowsItem : Item → Item
-  | .fn name ps annots ret b =>
-    let (roots, b) := (b.roots.mapM nameBorrowsClause).run b
-    .fn name ps annots ret { b with roots }
-  | .pub parent item => .pub parent (nameBorrowsItem item)
-  | .module name (some inner) => .module name (some (inner.map nameBorrowsItem))
-  | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map nameBorrowsItem) }
-  | item => item
-
-/-- Every item made so (`nameBorrowsItem`), each as an earlier compile made
-it where it is the same. -/
-def nameBorrowsItems (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
-  let (out, memo) := items.foldl (fun ((acc : Array Item), m) item =>
-    let (made, m) := m.take (hash ("names", item)) fun _ => [nameBorrowsItem item]
-    (acc ++ made.toArray, m)) (#[], memo)
-  (out.toList, memo)
-
 /-- Every dotted call of a program with what it is called on marked for the
 checker, `receiverExpr`, and what is then borrowed named first
 (`nameBorrowsClause`): of each item from the item alone. -/
