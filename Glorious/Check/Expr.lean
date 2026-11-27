@@ -2307,8 +2307,11 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
             -- given as it is.)
             if let (some k, some 0, .ref _ v) := (mine, theirs, b.expr a) then
               let moved := (← get).movedCells
+              -- (A value named for the call, not a variable: the type's own
+              -- function is given it, as `wholeReceiver` says of a variable.)
               let held := match scope.lookup v with
                 | some (.cell _ brand) => moved.contains brand
+                | some (.val ..) => true
                 | _ => false
               if k != 0 && (!v.startsWith "borrowed%" || held) then
                 let given := Expr.name none v

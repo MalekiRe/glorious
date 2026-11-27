@@ -862,13 +862,7 @@ def promoteRewrite : FRewrite where
         | 0, _ => pure [← go.st s]
         | fuel + 1, .located line col inner =>
           (← here inner fuel).mapM fun s => pushStmt (.located line col s)
-        | _, .let_ (.var x) e =>
-          -- (A value the front end names to borrow it, `borrowed%1`, is
-          -- one it keeps where a reference can point: it names it after
-          -- the checker reads the body, so nothing can say it is one.)
-          if b.borrowedOnly x rest && (x.splitOn "%").length > 1 then
-            pure [← pushStmt (.letMut x (← go.ex e))]
-          else pure [← pushStmt (.let_ (.var x) (← go.ex e))]
+        | _, .let_ (.var x) e => pure [← pushStmt (.let_ (.var x) (← go.ex e))]
         | _, _ => pure [← go.st s]
       pure ((← here s 64) ++ rest))
 
