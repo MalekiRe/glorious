@@ -421,7 +421,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (e : ExprId) : Build 
         -- name of its own for the statement, a variable, for the checker
         -- to say how the call takes it, `Mark.held`.)
         let made : Bool := match b.expr receiver with
-          | .call _ g _ => (b.mark? g).isNone && (b.name? g).map (·.2) != some "element_at"
+          | .call _ g _ => (b.name? g).map (·.2) != some "element_at"
               && !((b.name? g).any fun (_, n) => taken.contains (opKey (lastSegment n)))
           | .name none x => (lastSegment x).front.isUpper
           | _ => false
