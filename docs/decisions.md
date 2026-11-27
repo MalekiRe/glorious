@@ -8628,3 +8628,10 @@ given (`f::<(T, T)>` in `f::<T>`) would need a copy for each, without end
 (more than `copyFuel` copies). No program of the suite did. What `main`
 does not reach is elaborated, for what the elaborator alone refuses, but
 not a function given implementations: checked, it is made where it is used.
+
+A function is written out for the implementations it is given in one pass
+(`Elab.untraitFn` with them, `resolveDict`): a call of a trait's function is
+a call of the implementation's, a call of a function given implementations
+one of its copy for them (named once its copies for effects are made,
+`callsCopied`). Nothing takes implementations as parameters any more, so
+the arguments are where the checker counted them.

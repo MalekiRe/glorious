@@ -10,8 +10,8 @@ public import Glorious.Elab.Specialize
 Once a program is checked it is lowered for the elaborator: its traits made
 values (`untraitFn`), its fields written out (`unfieldItem`), each function
 about an effect's instance written for each (`instancesOf`), a copy of each
-function for each known implementation it is called with (`specCopy`), and
-its constants worked out (`foldConstants`). Of a program with its library,
+function for each set of implementations it is given (`untraitFn` for them,
+`askCopy`), and its constants worked out (`foldConstants`). Of a program with its library,
 most of that is what nothing the program runs reaches: on `covey/states2`,
 3,190 of 18,403 functions.
 
@@ -37,11 +37,12 @@ structure Lowering where
   /-- The items that are not functions, lowered, in their order. -/
   others : Array Syntax.Item
   /-- Each function without traits, with its fields written out and for the
-  instances of its effects: made the first time it is asked, and once. -/
-  fns : Std.HashMap String (Unit → Option Syntax.Item)
+  instances of its effects: made for the implementations it is given, under
+  the name it is asked by, when it is asked. -/
+  fns : Std.HashMap String (Array Nat → String → StateM Copies (Option Syntax.Item))
   /-- The functions declared again after the first, which the elaborator
   refuses if one is reached. -/
-  twice : List (String × (Unit → Option Syntax.Item))
+  twice : List (String × (Array Nat → String → StateM Copies (Option Syntax.Item)))
   /-- What each constant names. -/
   aliasUses : Std.HashMap String (List String)
   /-- What each function is lowered from: the item it is written in, and its
@@ -113,10 +114,9 @@ def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Exc
   let inst ← instancesOf b written
   let info := fieldInfo b
   let mut others : Array Syntax.Item := #[]
-  let mut fns : Std.HashMap String (Unit → Option Syntax.Item) := {}
-  let mut twice : List (String × (Unit → Option Syntax.Item)) := []
+  let mut fns : Std.HashMap String (Array Nat → String → StateM Copies (Option Syntax.Item)) := {}
+  let mut twice : List (String × (Array Nat → String → StateM Copies (Option Syntax.Item))) := []
   let mut aliasUses : Std.HashMap String (List String) := {}
-  let mut instBounded : Array (String × Nat) := #[]
   -- (Each function by the item it is written in; an implementation's by the
   -- implementation and its name.)
   let mut srcKeys : Std.HashMap String UInt64 := {}
@@ -142,22 +142,20 @@ def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Exc
         others := others.push o
         if let .alias n ab e := o then aliasUses := aliasUses.insert n (ab.fvExpr [] e)
     | .fn name make =>
-      -- (A function and every copy made of it for effects, made together.)
-      let outs : Thunk (List Syntax.Item) := Thunk.mk fun _ => inst.fn (unfieldItem info (make ()))
-      -- (Each copy given implementations as the function is: copied for
-      -- those it is given, as it is.)
-      if let some k := tr.boundedAt[name]? then
-        for n in inst.names name do
-          unless n == name do instBounded := instBounded.push (n, k)
+      -- (A function and every copy made of it for effects, made together,
+      -- for the implementations it is given; its calls of copies named
+      -- after, of what each calls as the copy for effects calls it.)
       for n in inst.names name do
-        let get := fun (_ : Unit) => outs.get.find? fun
-          | .fn m .. => m == n
-          | _ => false
+        let get := fun (env : Array Nat) (as : String) => (do
+          modify fun c => { c with calls := #[] }
+          let item ← make env
+          let calls := (← get).calls.foldl (fun m (c, ids) => m.insert c ids) ({} : Std.HashMap Nat (List Nat))
+          modify fun c => { c with calls := #[] }
+          match (inst.fn (unfieldItem info item)).find? fun | .fn m .. => m == n | _ => false with
+          | some it => some <$> (renamed as <$> callsCopied calls it)
+          | none => pure none : StateM Copies (Option Syntax.Item))
         if fns.contains n then twice := (n, get) :: twice else fns := fns.insert n get
-  let blocks := untraitBlocks b
-  let blocks := { blocks with traits := { blocks.traits with
-    boundedAt := instBounded.foldl (fun m (n, k) => m.insertIfNew n k) blocks.traits.boundedAt } }
-  pure { blocks, others, fns, twice, aliasUses, srcKeys, globalKey }
+  pure { blocks := b, others, fns, twice, aliasUses, srcKeys, globalKey }
 
 /-- Where lowering starts: no copy asked, the implementations numbered as the
 checker numbered them. -/
@@ -167,7 +165,6 @@ def Lowering.start (L : Lowering) : Lowered :=
 /-- Lowered on from `st`, through what `roots` reach; none if more copies
 would be made than `copyFuel`. -/
 def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Option Lowered := Id.run do
-  let tr := L.blocks.traits
   -- (The coercions applied in a function are reached with it: by the calls
   -- and callables they are applied at, and by its results.)
   let (byCall, byClosure, byFn) := L.blocks.coercions.fold
@@ -220,17 +217,17 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
     -- a function as it is, with the calls in it sent to copies if it is
     -- given no implementation.
     let (item, copies, made) := match st.copies.byName[x]? with
-      | some (fn, ids, drop) =>
-        match (L.fns[fn]?).bind (· ()) with
-        | some item =>
-          let (item, copies) := (specCopy tr x ids drop item).run st.copies
+      | some (fn, ids, _) =>
+        match L.fns[fn]? with
+        | some make =>
+          let (item, copies) := (make ids.toArray x).run st.copies
           (item, copies, st.made + 1)
         | none => (none, st.copies, st.made)
       | none =>
-        match (L.fns[x]?).bind (· ()) with
-        | some item =>
-          let (item, copies) := (specRoot tr item).run st.copies
-          (some item, copies, st.made)
+        match L.fns[x]? with
+        | some make =>
+          let (item, copies) := (make #[] x).run st.copies
+          (item, copies, st.made)
         | none => (none, st.copies, st.made)
     if made > copyFuel then return none
     let pool := copies.byId.extract pool0 copies.byId.size
@@ -260,7 +257,7 @@ def Lowering.reach (L : Lowering) (st : Lowered) (roots : List String) : Except 
 /-- What is lowered, as a program: its constants worked out, and each
 function declared again where one is reached. -/
 def Lowering.items (L : Lowering) (st : Lowered) : List Syntax.Item :=
-  let again := L.twice.filterMap fun (n, get) => if st.seen.contains n then get () else none
+  let again := L.twice.filterMap fun (n, get) => if st.seen.contains n then ((get #[] n).run' st.copies) else none
   let items := foldConstants (L.others.toList ++ st.done.toList ++ again)
   if Glorious.Trace.groupsTraced then
     dbgTrace s!"lowered: {st.done.size} functions, {st.made} copies, {st.copies.byId.size} implementation values" fun _ => items

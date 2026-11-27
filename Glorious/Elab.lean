@@ -854,122 +854,154 @@ structure Output where
 
 /-! ## Traits
 
-A trait bound is met by a value: a tuple of the implementation's functions. A
-function that needs a bound of one of its type parameters takes that value as
-an argument, before its own; a call of it passes the value; a call of one of a
-trait's functions takes the function out of the value. The checker said, for
-each call, which value. After this rewriting a program has no traits. -/
+A function given implementations, of the bounds of its type parameters or of
+how they are destroyed, is written out for each set of them it is given,
+from `main` on (as Rust and Zig copy a generic function for each use): no
+implementation is a value when the program runs. `UntraitM` writes a
+function for the implementations its bounds are (`env`, by their numbers in
+the pool of those known, `Copies`): a call of a trait's function is a call
+of the implementation's, and a call of a function given implementations a
+call of its copy for them (`askCopy`), each asked as it is written. -/
 
-/-- An implementation as a value: its number where it has one
-(`TraitInfo.knownOf`), and otherwise written out. -/
-private partial def dictExpr (tr : TraitInfo) (d : DictE) : Expr :=
-  match tr.knownOf[addrOf d]? with
-  | some n => .name none s!"%known#{n}"
-  | none => match d with
-    | .param k => .name none s!"%dict{k}"
-    | .impl fn subs => .call 0 (.name none fn) (subs.map (dictExpr tr))
+/-- A body being written out for the implementations its function is given,
+with the copies asked. -/
+abbrev UntraitM := StateT Flat.Body (StateM Copies)
 
-/-- The function an implementation gives for the trait's function `idx`, and
-the evidence its conditions need, if the evidence is an implementation and not
-something the enclosing function was given. -/
-def staticMethod (tr : TraitInfo) (d : DictE) (idx : Nat) : Option (String × List DictE) :=
+instance : MonadLift Flat.Build UntraitM where
+  monadLift x := fun b => pure (x.run b)
+
+/-- An implementation's number, of those the function written out is given
+(`env`) or known (`TraitInfo.knownOf`); none where it is given none. -/
+partial def resolveDict (tr : TraitInfo) (env : Array Nat) (d : DictE) : StateM Copies (Option Nat) := do
+  if let some n := tr.knownOf[addrOf d]? then return some n
   match d with
-  | .impl dictFn subs =>
-    match tr.implsAt[dictFn]? with
-    | some im => (im.methods[idx]?).map fun (fn, _) => (fn, subs)
-    | none => none
-  | .param _ => none
+  | .param k => pure env[k]?
+  | .impl fn subs =>
+    let mut ids : Array Nat := #[]
+    for s in subs do
+      let some n ← resolveDict tr env s | return none
+      ids := ids.push n
+    some <$> internId fn ids.toList
+
+/-- The call `call` of a function given the implementations `ids`: of its
+copy for them, once it is known which function it is of
+(`Copies.calls`). -/
+def copyAt (call : Nat) (ids : List Nat) : StateM Copies Unit :=
+  unless ids.isEmpty do modify fun c => { c with calls := c.calls.push (call, ids) }
+
+/-- The function an implementation gives for the trait's function `idx`, at
+what its conditions are met by: called by name, or (at the call `call`, or
+asked now where none) its copy for those. -/
+def methodOf (tr : TraitInfo) (env : Array Nat) (d : DictE) (idx : Nat) (call : Option Nat := none) :
+    StateM Copies (Option String) := do
+  let some n ← resolveDict tr env d | return none
+  let some (dictFn, subs) := (← get).byId[n]? | return none
+  let some (fn, _) := (tr.implsAt[dictFn]?).bind (·.methods[idx]?) | return none
+  if subs.isEmpty then return some fn
+  match call with
+  | some c => copyAt c subs; pure (some fn)
+  | none => some <$> askCopy fn subs true
+
+/-- The function `g` at the call `call`, given the implementations `ds`:
+itself, or its copy for them (`copyAt`). -/
+def copyFor (tr : TraitInfo) (env : Array Nat) (call : Nat) (g : String) (ds : List DictE) : StateM Copies String := do
+  let mut ids : Array Nat := #[]
+  for d in ds do
+    let some n ← resolveDict tr env d | return g
+    ids := ids.push n
+  -- (A list of values spread, `Prelude`'s `spread_split`, `spread_cons`
+  -- and `spread_snoc`: written out for its length, known from how the list
+  -- has `Spread`: one implementation for each of its parts.)
+  if let some kind := spreadKind g then
+    for i in ids do
+      if let some n := spreadLength (← get).byId i 4096 then return s!"%spread_{kind}#{n}"
+  copyAt call ids.toList
+  pure g
 
 /-- Is there a `tail` call in statements, at any depth? -/
 def tailsStmts (b : Flat.Body) (body : List Flat.StmtId) : Bool :=
   body.any (b.anyStmt fun | .tailCall .. => true | _ => false)
 
 /-- The call that destroys a value, given how its type is destroyed: the
-type's function by name where the type is known, and else the function the
-enclosing one was given. -/
-private def destroyCall (tr : TraitInfo) (d : DictE) (value : Expr) : Expr :=
-  match staticMethod tr d 0 with
-  | some (fn, subs) =>
+type's function, for how its parameters are destroyed. -/
+def destroyCall (tr : TraitInfo) (env : Array Nat) (d : DictE) (value : Expr) : StateM Copies Expr := do
+  match ← methodOf tr env d 0 with
+  | some fn =>
     -- (A callable is given up where it is.)
     if fn == Syntax.implFnName Syntax.destroyTrait Syntax.callableHead Syntax.destroyFn then
-      .call dropCallId (.name none "cancel") [value]
-    else .call dropCallId (.name none fn) (subs.map (dictExpr tr) ++ [value])
-  | none => .call dropCallId (.proj ((dictExpr tr) d) 0) [value]
+      pure (.call dropCallId (.name none "cancel") [value])
+    else pure (.call dropCallId (.name none fn) [value])
+  | none => pure (.call dropCallId (.name none "%undestroyed") [value])
 
 /-- The call that destroys what `x` holds, if this is a place where that
 happens and its type has something to destroy. -/
-private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
+def dropHook (tr : TraitInfo) (env : Array Nat) (site : DropSite) : StateM Copies (Option Expr) := do
   match (tr.dropsAt[site]?).bind fun id => tr.dictsAt[id]? with
   | some [d] =>
     -- (A part of a name's value that nothing reads: that part.)
-    some (destroyCall tr d (match site.name with
+    some <$> destroyCall tr env d (match site.name with
       | .part x i => .proj (.name none x) i
-      | n => .name none n.var))
-  | _ => none
+      | n => .name none n.var)
+  | _ => pure none
 
 /-- The cleanups of the parts of a name's value that are never read, where
 the name is bound at a place. -/
-private def partHooks (tr : TraitInfo) (owner : String) (pos : Nat × Nat) (x : String) : List Expr :=
-  ((tr.partsAt[(owner, pos.1, pos.2, x)]?).getD #[]).toList.filterMap (dropHook tr)
+def partHooks (tr : TraitInfo) (env : Array Nat) (owner : String) (pos : Nat × Nat) (x : String) :
+    StateM Copies (List Expr) :=
+  ((tr.partsAt[(owner, pos.1, pos.2, x)]?).getD #[]).toList.filterMapM (dropHook tr env)
 
-/-- The functions that destroy values, for each type: the one that does it,
-given how each of the type's parameters is destroyed and then the value, and
-the one that makes it a value to hand to a function generic in the type. The
-type's own `Drop` runs first, if it has one, and then each field that has
-something to destroy, the last declared first. -/
-def destroyers (tr : TraitInfo) : List Item :=
-  tr.destroys.flatMap fun D =>
-    let unit := Expr.tuple []
-    let name := fun (x : String) => Expr.name none x
-    let dicts := (List.range D.given).map fun k => s!"%dict{k}"
-    let given := dicts.map Pattern.var
-    let passed := dicts.map name
-    let method := Syntax.implFnName Syntax.destroyTrait D.head Syntax.destroyFn
-    let blank := List.replicate (D.given + 1) (none : Option TypeExpr)
-    -- A `[T; N]`: its elements one by one, from the last.
-    if let (true, [(_, [some element])]) := (D.array, D.ctors) then
-      let from_ := "%destroy from " ++ D.head
-      let before := Expr.call dropCallId (name "int_sub") [name "%n", .int 1]
-      let length := Expr.call dropCallId (name "fixed_len") [name "%value"]
-      [Item.fnOf method [] blank none
-          [.mk (given ++ [.var "%value"])
-            [.expr (.call dropCallId (name from_) (passed ++ [name "%value", length]))]],
-        Item.fnOf from_ [] (blank ++ [none]) none
-          [.mk (given ++ [.wild, .int 0]) [.expr unit],
-            .mk (given ++ [.var "%value", .var "%n"])
-              [.expr (destroyCall tr element (.call dropCallId (name "fixed_get") [name "%value", before])),
-                .expr (.tailCall dropCallId (name from_) (passed ++ [name "%value", before]))]]]
-    else
-    let clauses := D.ctors.map fun (ctor, parts) =>
-      let names := (List.range parts.length).map fun k => s!"%part{k}"
-      let pats := (names.zip parts).map fun (x, part) =>
-        if part.isSome then Pattern.var x else Pattern.wild
-      let calls := ((names.zip parts).reverse.filterMap fun (x, part) =>
-        part.map fun d => Stmt.expr (destroyCall tr d (name x)))
-      Clause.mk (given ++ [if ctor.isEmpty then .tuple pats else .ctor ctor none pats])
-        (calls ++ [.expr unit])
-    -- A type with nothing inside it to look at: nothing to do.
-    let clauses := if clauses.isEmpty then [Clause.mk (given ++ [.wild]) [.expr unit]] else clauses
-    -- A callable is destroyed by giving it up: a closure of a function that
-    -- says how it is destroyed then destroys what it captured.
-    let clauses := if D.head == Syntax.callableHead then
-        [Clause.mk (given ++ [.var "%value"]) [.expr (.call 0 (name "cancel") [name "%value"])]]
-      else clauses
-    let inner := D.ctors.any fun (_, parts) => parts.any (·.isSome)
-    match D.hook with
-    | some d =>
-      let hook := match staticMethod tr d 0 with
-        | some (fn, subs) => fun (args : List Expr) =>
-          Expr.call dropCallId (.name none fn) (subs.map (dictExpr tr) ++ args)
-        | none => fun args => Expr.call dropCallId (.proj ((dictExpr tr) d) 0) args
-      let fields := s!"%fields {D.head}"
-      [Item.fnOf method [] blank none
-          [.mk (given ++ [.var "%value"])
-            ([.letMut "%held" (name "%value"), .expr (hook [.ref true "%held"])]
-              ++ (if inner then [.expr (.call dropCallId (name fields) (passed ++ [name "%held"]))]
-                  else [.expr unit]))]]
-        ++ (if inner then [Item.fnOf fields [] blank none clauses] else [])
-    | none => [Item.fnOf method [] blank none clauses]
+/-- The functions that destroy values of one type `D`, for how its parameters
+are destroyed (`env`): the one that does it, given the value, and the ones
+it calls of its own, each called for the same (`askCopy`), as `names` says
+each is called. The type's own `Drop` runs first, if it has one, and then
+each field that has something to destroy, the last declared first. -/
+def destroyersOf (tr : TraitInfo) (D : Destroy) (env : Array Nat) (names : String → String) :
+    StateM Copies (List Item) := do
+  let unit := Expr.tuple []
+  let name := fun (x : String) => Expr.name none x
+  let method := Syntax.implFnName Syntax.destroyTrait D.head Syntax.destroyFn
+  let blank := [(none : Option TypeExpr)]
+  -- A `[T; N]`: its elements one by one, from the last.
+  if let (true, [(_, [some element])]) := (D.array, D.ctors) then
+    let from_ := "%destroy from " ++ D.head
+    let before := Expr.call dropCallId (name "int_sub") [name "%n", .int 1]
+    let length := Expr.call dropCallId (name "fixed_len") [name "%value"]
+    let one ← destroyCall tr env element (.call dropCallId (name "fixed_get") [name "%value", before])
+    return [Item.fnOf (names method) [] blank none
+        [.mk [.var "%value"] [.expr (.call dropCallId (name (names from_)) [name "%value", length])]],
+      Item.fnOf (names from_) [] (blank ++ [none]) none
+        [.mk [.wild, .int 0] [.expr unit],
+          .mk [.var "%value", .var "%n"]
+            [.expr one, .expr (.tailCall dropCallId (name (names from_)) [name "%value", before])]]]
+  let mut clauses : List Clause := []
+  for (ctor, parts) in D.ctors do
+    let names' := (List.range parts.length).map fun k => s!"%part{k}"
+    let pats := (names'.zip parts).map fun (x, part) =>
+      if part.isSome then Pattern.var x else Pattern.wild
+    let mut calls : List Stmt := []
+    for (x, part) in (names'.zip parts).reverse do
+      if let some d := part then calls := calls ++ [.expr (← destroyCall tr env d (name x))]
+    clauses := clauses ++ [Clause.mk [if ctor.isEmpty then .tuple pats else .ctor ctor none pats] (calls ++ [.expr unit])]
+  -- A type with nothing inside it to look at: nothing to do.
+  if clauses.isEmpty then clauses := [Clause.mk [.wild] [.expr unit]]
+  -- A callable is destroyed by giving it up: a closure of a function that
+  -- says how it is destroyed then destroys what it captured.
+  if D.head == Syntax.callableHead then
+    clauses := [Clause.mk [.var "%value"] [.expr (.call 0 (name "cancel") [name "%value"])]]
+  let inner := D.ctors.any fun (_, parts) => parts.any (·.isSome)
+  match D.hook with
+  | some d =>
+    let hook ← match ← methodOf tr env d 0 with
+      | some fn => pure fn
+      | none => pure "%undestroyed"
+    let fields := "%fields " ++ D.head
+    pure ([Item.fnOf (names method) [] blank none
+        [.mk [.var "%value"]
+          ([.letMut "%held" (name "%value"), .expr (.call dropCallId (name hook) [.ref true "%held"])]
+            ++ (if inner then [.expr (.call dropCallId (name (names fields)) [name "%held"])]
+                else [.expr unit]))]]
+      ++ (if inner then [Item.fnOf (names fields) [] blank none clauses] else []))
+  | none => pure [Item.fnOf (names method) [] blank none clauses]
 
 mutual
 
@@ -1025,17 +1057,17 @@ def markMoves (x : String) (taken : Nat → Bool) : Flat.FRewrite where
 open Flat in
 mutual
 
-private partial def untraitExpr (tr : TraitInfo) (owner : String) (e : ExprId) : Build ExprId := do
+private partial def untraitExpr (tr : TraitInfo) (env : Array Nat) (owner : String) (e : ExprId) : UntraitM ExprId := do
   let b ← get
   match b.expr e with
-  | .call id f args => untraitCall tr owner id f args false
-  | .tailCall id f args => untraitCall tr owner id f args true
+  | .call id f args => untraitCall tr env owner id f args false
+  | .tailCall id f args => untraitCall tr env owner id f args true
   | .closure id clauses => do
     -- What the callable captures is destroyed if it is let go uncalled.
     let written := b.hashClosure id clauses
-    let hooks := (b.fvClauses clauses).eraseDups.filterMap fun x =>
-      dropHook tr (captureDropSite owner written x)
-    let c ← pushExpr (.closure id (← clauses.mapM (untraitClause tr owner)))
+    let hooks ← (b.fvClauses clauses).eraseDups.filterMapM fun x =>
+      (dropHook tr env (captureDropSite owner written x) : StateM Copies _)
+    let c ← pushExpr (.closure id (← clauses.mapM (untraitClause tr env owner)))
     if hooks.isEmpty then pure c
     else
       let mut stmts : Array StmtId := #[]
@@ -1045,31 +1077,32 @@ private partial def untraitExpr (tr : TraitInfo) (owner : String) (e : ExprId) :
       let destroyer ← pushExpr (.closure 0 #[← pushClause ⟨[], stmts⟩])
       pushExpr (.call 0 (← pushExpr (.mark .destroyed)) #[c, destroyer])
   | n => do
-    let n' ← n.mapIds (untraitExpr tr owner) (untraitClause tr owner)
-      fun body => do pure (← untraitStmts tr owner (0, 0) body.toList).toArray
+    let n' ← n.mapIds (untraitExpr tr env owner) (untraitClause tr env owner)
+      fun body => do pure (← untraitStmts tr env owner (0, 0) body.toList).toArray
     if n' == n then pure e else pushExpr n'
 
-private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f : ExprId)
-    (args : Array ExprId) (isTail : Bool) : Build ExprId := do
-  let args ← args.mapM (untraitExpr tr owner)
+private partial def untraitCall (tr : TraitInfo) (env : Array Nat) (owner : String) (id : Nat) (f : ExprId)
+    (args : Array ExprId) (isTail : Bool) : UntraitM ExprId := do
+  let args ← args.mapM (untraitExpr tr env owner)
   let mk := fun (f : ExprId) (args : Array ExprId) =>
-    pushExpr (if isTail then .tailCall id f args else .call id f args)
-  let dicts := fun (ds : List DictE) => ds.toArray.mapM fun d => flatExpr (dictExpr tr d)
+    (pushExpr (if isTail then .tailCall id f args else .call id f args) : UntraitM ExprId)
   match tr.dictsAt[id]?, tr.methodsAt[id]? with
   | some [d], some idx =>
-    -- Where the implementation is known, its function is called by name,
-    -- given what the implementation's conditions need: a call like any other,
-    -- so that a borrow passed to it can be a scope.
-    match staticMethod tr d idx with
-    | some (fn, subs) => mk (← pushExpr (.name none fn)) ((← dicts subs) ++ args)
-    | none => mk (← pushExpr (.proj (← flatExpr (dictExpr tr d)) idx)) args
+    -- A trait's function: the implementation's, called by name, for what the
+    -- implementation's conditions are met by.
+    match ← (methodOf tr env d idx (some id) : StateM Copies _) with
+    | some fn => mk (← pushExpr (.name none fn)) args
+    | none => mk (← pushExpr (.name none "%unresolved")) args
   -- (A machine operation is given no implementation: it is no function.)
   | some ds, none =>
-    if ((← get).bare? f).any isIntrinsic then mk f args
-    else mk (← untraitExpr tr owner f) ((← dicts ds) ++ args)
-  | _, _ => mk (← untraitExpr tr owner f) args
+    match (← get).bare? f with
+    | some g =>
+      if isIntrinsic g then mk f args
+      else mk (← pushExpr (.name none (← (copyFor tr env id g ds : StateM Copies _)))) args
+    | none => mk (← untraitExpr tr env owner f) args
+  | _, _ => mk (← untraitExpr tr env owner f) args
 
-private partial def untraitClause (tr : TraitInfo) (owner : String) (c : ClauseId) : Build ClauseId := do
+private partial def untraitClause (tr : TraitInfo) (env : Array Nat) (owner : String) (c : ClauseId) : UntraitM ClauseId := do
   let b ← get
   let ⟨pats, body⟩ := b.clause c
   let body := body.toList
@@ -1079,7 +1112,8 @@ private partial def untraitClause (tr : TraitInfo) (owner : String) (c : ClauseI
   -- `tail`, nothing can be done after: what it does not use is destroyed
   -- before it starts, which is the cleanup a `tail` call has before it.
   let first := b.clausePlace body
-  let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, .name (wildName k), false⟩).isSome) wildName pats 0
+  let named := tr.dropsAt
+  let (pats, _) := nameWilds (fun k => named.contains ⟨owner, first.1, first.2, .name (wildName k), false⟩) wildName pats 0
   let early := tailsStmts b body
   -- (A name the clause straight away makes a variable of the same name,
   -- to be borrowed, is the variable's to destroy: the place and the name
@@ -1091,35 +1125,38 @@ private partial def untraitClause (tr : TraitInfo) (owner : String) (c : ClauseI
       match b.stmt (b.unlocated s) with
       | .letMut y _ => some y
       | _ => none
-  let hooks := ((pats.flatMap patVars).filter (!variables.contains ·)).flatMap fun x =>
-    (dropHook tr ⟨owner, first.1, first.2, .name x, false⟩).toList ++ partHooks tr owner first x
-  let hooks ← hooks.mapM fun h => do
+  let mut found : List Expr := []
+  for x in (pats.flatMap patVars).filter (!variables.contains ·) do
+    found := found ++ (← (dropHook tr env ⟨owner, first.1, first.2, .name x, false⟩ : StateM Copies _)).toList
+      ++ (← (partHooks tr env owner first x : StateM Copies _))
+  let hooks ← found.mapM fun h => do
     let e ← flatExpr h
     pushStmt (if early then .expr e else .defer e)
-  let rest ← untraitStmts tr owner (0, 0) body
+  let rest ← untraitStmts tr env owner (0, 0) body
   pushClause ⟨pats, (hooks ++ rest).toArray⟩
 
 /-- The statements of a block. A variable whose value is to be destroyed is
 followed by a cleanup that does it when the block is left; an assignment to one
 destroys what it held, once the new value is computed. -/
-private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat × Nat) :
-    List StmtId → Build (List StmtId)
+private partial def untraitStmts (tr : TraitInfo) (env : Array Nat) (owner : String) (pos : Nat × Nat) :
+    List StmtId → UntraitM (List StmtId)
   | [] => pure []
   | s :: rest => do
     let b ← get
     let hookS := fun (h : Expr) (now : Bool) => (do
       let e ← flatExpr h
       pushStmt (if now then .expr e else .defer e) : Build StmtId)
+    let hook := fun (site : DropSite) => (dropHook tr env site : StateM Copies _)
     match b.stmt s with
     | .located line col inner =>
-      match ← untraitStmts tr owner (line, col) (inner :: rest) with
+      match ← untraitStmts tr env owner (line, col) (inner :: rest) with
       | first :: more => pure ((← pushStmt (.located line col first)) :: more)
       | [] => pure []
     | .letMut x value =>
-      let value ← untraitExpr tr owner value
-      let rest ← untraitStmts tr owner pos rest
-      match dropHook tr ⟨owner, pos.1, pos.2, .name x, false⟩ with
-      | some hook => pure ((← pushStmt (.letMut x value)) :: (← hookS hook false) :: rest)
+      let value ← untraitExpr tr env owner value
+      let rest ← untraitStmts tr env owner pos rest
+      match ← hook ⟨owner, pos.1, pos.2, .name x, false⟩ with
+      | some h => pure ((← pushStmt (.letMut x value)) :: (← hookS h false) :: rest)
       | none =>
         -- A variable that gives its value away where it is used: what it
         -- holds is destroyed when its block is left only if it was not. A
@@ -1128,41 +1165,47 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
             fun id => tr.dictsAt[id]? with
         | some [d] =>
           let flag := Syntax.movedFlag x
+          let destroy ← (destroyCall tr env d (.name none x) : StateM Copies _)
           let unless_moved := Expr.call 0 (.closure 0
-            [.mk [.int 0] [.expr (destroyCall tr d (.name none x))],
+            [.mk [.int 0] [.expr destroy],
              .mk [.wild] [.expr (.tuple [])]]) [.name none flag]
           let taken := fun (node : Nat) => tr.dropsAt.contains (takenSite owner node x)
-          let marked ← rest.mapM (markMoves x taken).st
+          let marked ← rest.mapM fun s => ((markMoves x taken).st s : Build StmtId)
           pure ((← pushStmt (.letMut x value)) :: (← pushStmt (.letMut flag (← pushExpr (.int 0))))
             :: (← hookS unless_moved false) :: marked)
         | _ => pure ((← pushStmt (.letMut x value)) :: rest)
     | .let_ pat value =>
-      let value ← untraitExpr tr owner value
-      let rest ← untraitStmts tr owner pos rest
-      let (pat, hooks) := match pat with
-        | .var x => (pat, (dropHook tr ⟨owner, pos.1, pos.2, .name x, false⟩).toList ++ partHooks tr owner pos x)
-        | _ =>
+      let value ← untraitExpr tr env owner value
+      let rest ← untraitStmts tr env owner pos rest
+      let (pat, hooks) ← match pat with
+        | .var x => do
+          pure (pat, (← hook ⟨owner, pos.1, pos.2, .name x, false⟩).toList
+            ++ (← (partHooks tr env owner pos x : StateM Copies _)))
+        | _ => do
           -- What the pattern takes under a name nothing uses, or under `_`
           -- (given a name for it), is destroyed likewise.
           let site := fun (x : String) => (⟨owner, pos.1, pos.2, .letBound x, false⟩ : DropSite)
-          let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome)
+          let (pats, _) := nameWilds (fun k => tr.dropsAt.contains (site (letWildName pos.1 pos.2 k)))
             (letWildName pos.1 pos.2) [pat] 0
           let pat := (pats.head?).getD pat
-          (pat, (patVars pat).flatMap fun x => (dropHook tr (site x)).toList ++ partHooks tr owner pos x)
+          let mut hooks : List Expr := []
+          for x in patVars pat do
+            hooks := hooks ++ (← hook (site x)).toList ++ (← (partHooks tr env owner pos x : StateM Copies _))
+          pure (pat, hooks)
       -- (Before a `tail` call there is no later: see the clause's own.)
       let now := tailsStmts (← get) rest
       let hooks ← hooks.mapM fun h => hookS h now
       pure ((← pushStmt (.let_ pat value)) :: hooks ++ rest)
     | .assign target value =>
-      let value ← untraitExpr tr owner value
-      let target ← untraitExpr tr owner target
-      let rest ← untraitStmts tr owner pos rest
+      let value ← untraitExpr tr env owner value
+      let target ← untraitExpr tr env owner target
+      let rest ← untraitStmts tr env owner pos rest
       let b ← get
       match b.expr target with
       | .name none x =>
-        match dropHook tr ⟨owner, pos.1, pos.2, .name x, true⟩ with
-        | some hook =>
-          pure ((← pushStmt (.let_ (.var "%assigned") value)) :: (← hookS hook true)
+        match ← hook ⟨owner, pos.1, pos.2, .name x, true⟩ with
+        | some h =>
+          pure ((← pushStmt (.let_ (.var "%assigned") value)) :: (← hookS h true)
             :: (← pushStmt (.assign target (← pushExpr (.name none "%assigned")))) :: rest)
         | none => pure ((← pushStmt (.assign target value)) :: rest)
       | .deref place =>
@@ -1172,49 +1215,84 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
         | some [d] =>
           let first ← pushStmt (.let_ (.var "%assigned") value)
           let second ← pushStmt (.let_ (.var "%place") place)
-          let destroy ← hookS (destroyCall tr d (.deref (.name none "%place"))) true
+          let destroy ← hookS (← (destroyCall tr env d (.deref (.name none "%place")) : StateM Copies _)) true
           let placeRef ← pushExpr (.deref (← pushExpr (.name none "%place")))
           let last ← pushStmt (.assign placeRef (← pushExpr (.name none "%assigned")))
           pure (first :: second :: destroy :: last :: rest)
         | _ => pure ((← pushStmt (.assign target value)) :: rest)
       | _ => pure ((← pushStmt (.assign target value)) :: rest)
     | .expr e =>
-      let e ← untraitExpr tr owner e
-      let rest ← untraitStmts tr owner pos rest
+      let e ← untraitExpr tr env owner e
+      let rest ← untraitStmts tr env owner pos rest
       -- A value nothing takes, of a type to destroy, is destroyed there.
-      match (if rest.isEmpty then none else dropHook tr ⟨owner, pos.1, pos.2, .name stmtValue, false⟩) with
-      | some hook => pure ((← pushStmt (.let_ (.var stmtValue) e)) :: (← hookS hook true) :: rest)
+      match ← (if rest.isEmpty then pure none else hook ⟨owner, pos.1, pos.2, .name stmtValue, false⟩) with
+      | some h => pure ((← pushStmt (.let_ (.var stmtValue) e)) :: (← hookS h true) :: rest)
       | none => pure ((← pushStmt (.expr e)) :: rest)
     | .defer e =>
-      let e ← untraitExpr tr owner e
-      pure ((← pushStmt (.defer e)) :: (← untraitStmts tr owner pos rest))
+      let e ← untraitExpr tr env owner e
+      pure ((← pushStmt (.defer e)) :: (← untraitStmts tr env owner pos rest))
 
 end
 
-/-- A body that is given `n` bounds: each clause takes them first. -/
-private def withDicts (n : Nat) (b : Flat.Body) : Flat.Body := Id.run do
-  if n == 0 then return b
-  let (roots, b) := (b.roots.mapM fun c => (do
-    let ⟨pats, body⟩ := (← get).clause c
-    Flat.pushClause ⟨(List.range n).map (fun k => Pattern.var s!"%dict{k}") ++ pats, body⟩ : Flat.Build Flat.ClauseId)).run b
-  pure { b with roots }
+/-- Does an expression name the label `l`? -/
+partial def namesLabel (b : Flat.Body) (l : String) (e : Flat.ExprId) : Bool :=
+  match b.expr e with
+  | .label x => x == l
+  | .labelScope x body => x != l && body.any fun s => (b.stmtExprs s).any (namesLabel b l)
+  | _ => (b.children e).any (namesLabel b l)
 
-/-- A function without traits: given the bounds it needs first, and each
-call of a trait's function a call of a value. -/
-def untraitFn (tr : TraitInfo) (name : String) (params : List String) (annots : List (Option TypeExpr))
-    (ret : Option TypeExpr) (b : Flat.Body) : Syntax.Item :=
-  let n := (tr.boundedAt[name]?).getD 0
-  let (roots, b) := (b.roots.mapM (untraitClause tr name)).run b
+/-- A function written out for the implementations it is given (`env`):
+without traits, each call of a trait's function a call of the
+implementation's, each call of a function given implementations one of its
+copy. -/
+def untraitFn (tr : TraitInfo) (env : Array Nat) (name : String) (params : List String)
+    (annots : List (Option TypeExpr)) (ret : Option TypeExpr) (b : Flat.Body) : StateM Copies Syntax.Item := do
+  let ((roots, b) : Array Flat.ClauseId × Flat.Body) ← (b.roots.mapM (untraitClause tr env name)).run b
   -- (Every node is made anew: what was there is reached by nothing.)
-  Syntax.Item.fn name params ((List.replicate n none) ++ annots) ret (withDicts n { b with roots }).compact
+  pure (Syntax.Item.fn name params annots ret { b with roots }.compact)
+
+/-- A function's calls of copies (`Copies.calls`) written as calls of them,
+of the function each calls as it is now named (a copy for an effect's
+instance, `name@<..>`, where it is one). -/
+def callsCopied (calls : Std.HashMap Nat (List Nat)) : Syntax.Item → StateM Copies Syntax.Item
+  | .fn name ps annots ret b => do
+    if calls.isEmpty then return .fn name ps annots ret b
+    let mut b := b
+    for i in [0:b.exprs.size] do
+      match b.exprs[i]! with
+      | .call c f args | .tailCall c f args =>
+        if let some ids := calls[c]? then
+          if let some g := b.bare? f then
+            let copy ← askCopy g ids true
+            let (fe, b') := b.add (.name none copy)
+            b := { b' with exprs := b'.exprs.set! i (match b'.exprs[i]! with
+              | .tailCall .. => .tailCall c fe args
+              | _ => .call c fe args) }
+      | _ => pure ()
+    pure (.fn name ps annots ret b)
+  | item => pure item
+
+/-- A function under the name of a copy of it, `as`: a body that leaves by
+the function's label, `@find(..)`, given that label, as the copy's name is
+another. -/
+def renamed (as : String) : Syntax.Item → Syntax.Item
+  | .fn name ps annots ret b =>
+    if as == name then .fn name ps annots ret b else
+    let (roots, b) := (b.roots.mapM fun c => (do
+      let ⟨pats, body⟩ := (← get).clause c
+      let b ← get
+      if !body.any (fun s => (b.stmtExprs s).any (namesLabel b name)) then return c
+      let scope ← Flat.pushExpr (.labelScope name body)
+      Flat.pushClause ⟨pats, #[← Flat.pushStmt (.expr scope)]⟩ : Flat.Build Flat.ClauseId)).run b
+    .fn as ps annots ret { b with roots }
+  | item => item
 
 /-- What an item is without traits: the functions it is made into, each by
-its name and made only when asked (`fn`), or an item kept as it is (`item`).
-A trait is nothing; an implementation its functions. (An implementation is
-never a value when the program runs: each function is copied for those it
-is given, `specCopy`.) -/
+its name and made only when asked, for the implementations it is given
+(`fn`), or an item kept as it is (`item`). A trait is nothing; an
+implementation its functions. -/
 inductive Untraited where
-  | fn (name : String) (make : Unit → Syntax.Item)
+  | fn (name : String) (make : Array Nat → StateM Copies Syntax.Item)
   | item (item : Syntax.Item)
 
 /-- An item without traits (`Untraited`). -/
@@ -1224,36 +1302,30 @@ def untraitItem (tr : TraitInfo) : Syntax.Item → List Untraited
     methods.filterMap fun
       | .fn m _ annots ret b =>
         let name := implFnName trait.spelled head m
-        some (Untraited.fn name fun _ => untraitFn tr name params annots ret b)
+        some (Untraited.fn name fun env => untraitFn tr env name params annots ret b)
       | _ => none
-  | .fn name params annots ret b => [.fn name fun _ => untraitFn tr name params annots ret b]
+  | .fn name params annots ret b => [.fn name fun env => untraitFn tr env name params annots ret b]
   | item => [.item item]
 
 /-- The functions a program without traits has besides its items': each
-destroyer, and the value a marker trait is met by. -/
+destroyer, made for how the type's parameters are destroyed. -/
 def untraitExtra (tr : TraitInfo) : List Untraited :=
-  ((destroyers tr) ++ [Item.fnOf Syntax.markerDict [] [] none [.mk [] [.expr (.tuple [])]]]).map fun item =>
-    match item with
-    | .fn name .. => .fn name fun _ => item
-    | _ => .item item
-
-/-- What the checker said of a program, with the places of arguments moved to
-where they are once its traits are values. -/
-def untraitBlocks (blocks : Blocks) : Blocks :=
-  let tr := blocks.traits
-  let coercions := blocks.coercions.fold (init := {}) fun (m : Std.HashMap Site String) site fn =>
-    let site := match site with
-      | .arg call index =>
-        match tr.dictsAt[call]?, tr.methodsAt[call]? with
-        | some ds, none => Site.arg call (index + ds.length)
-        | some [d], some idx =>
-          match staticMethod tr d idx with
-          | some (_, subs) => Site.arg call (index + subs.length)
-          | none => site
-        | _, _ => site
-      | _ => site
-    m.insert site fn
-  { blocks with coercions := coercions }
+  tr.destroys.flatMap fun D =>
+    let method := Syntax.implFnName Syntax.destroyTrait D.head Syntax.destroyFn
+    let own := [method, "%destroy from " ++ D.head, "%fields " ++ D.head]
+    own.map fun n => .fn n fun env => do
+      -- (The others it calls, each for the same, as the copier names them.)
+      let mut names : Std.HashMap String String := {}
+      for o in own do
+        let called ← if env.isEmpty then pure o else askCopy o env.toList true
+        names := names.insert o called
+      let items ← destroyersOf tr D env (fun o => names.getD o o)
+      -- (Under its own name, as any function is made: named as the copy it
+      -- is asked by after, `renamed`.)
+      let mine := names.getD n n
+      pure (match items.find? fun | .fn m .. => m == mine | _ => false with
+        | some (.fn _ ps annots ret b) => .fn n ps annots ret b
+        | _ => Item.fnOf n [] [] none [])
 
 /-! ## Lifetimes
 

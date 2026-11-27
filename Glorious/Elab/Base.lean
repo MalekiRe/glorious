@@ -167,11 +167,10 @@ structure TraitInfo where
   /-- The implementations with nothing left to be known, numbered once for
   the program: each its function and its parts' numbers (`knownPool`), and
   back (`knownIds`); and the number of each such dictionary object the
-  checker gave (`knownOf`, by the object). A body given one has its number
-  (`%known#n`) and not the implementation written out, so what follows walks
-  a name where it would walk the implementation, of a size that grows with
-  how deep the types are; the specializer starts from these numbers and
-  writes out what is left of them. -/
+  checker gave (`knownOf`, by the object): a function is written out for
+  each set of them it is given (`Elab.untraitFn`), its calls of copies
+  found by these numbers, and not by the implementations, of a size that
+  grows with how deep the types are. -/
   knownPool : Array (String × List Nat) := #[]
   knownIds : Std.HashMap (String × List Nat) Nat := {}
   knownOf : Std.HashMap USize Nat := {}
@@ -868,7 +867,6 @@ structure Builder where
 kept with what it made (`ElabKept`), and read again before that is taken. -/
 inductive ElabRead where
   | given (id : Nat) (v : Bool)
-  | pack (id : Nat) (v : Option (List String))
   | fn (name : String) (v : Option Nat)
 
 structure St where
@@ -992,12 +990,6 @@ def givenAt (id : Nat) : M Bool := do
   noteRead (.given id v)
   pure v
 
-/-- The names block `id` has from an `is`, noted. -/
-def packAt (id : Nat) : M (Option (List String)) := do
-  let v := ((← read).blocks.getD {}).packs[id]?
-  noteRead (.pack id v)
-  pure v
-
 /-- The number of the top-level function `x`, noted. -/
 def fnAt (x : String) : M (Option Nat) := do
   let v := (← read).fns[x]?
@@ -1007,7 +999,6 @@ def fnAt (x : String) : M (Option Nat) := do
 /-- Is what `r` read still what it is? -/
 def readHolds : ElabRead → M Bool
   | .given id v => do pure (((← read).blocks.getD {}).given.contains id == v)
-  | .pack id v => do pure (((← read).blocks.getD {}).packs[id]? == v)
   | .fn x v => do pure ((← read).fns[x]? == v)
 
 /-- What `after` has in front of `before`, where it is `before` with more in
@@ -1354,5 +1345,62 @@ partial def irrefutable : Pattern → M Bool
   | .int _ | .ctor _ _ _ | .marked _ _ => pure false
   | .tuple ps => ps.allM irrefutable
   | .var x => isBinder x
+
+/-- The copies asked for: each by its name, with the function it is of, the
+implementations it is for, and whether their places are dropped. An
+implementation with nothing left to be known is a number here (`pool`: its
+function and its parts' numbers; `byId` back): so a copy is found, and a
+body written out, without implementations looked at again and again. -/
+structure Copies where
+  pool : Std.HashMap (String × List Nat) Nat := {}
+  byId : Array (String × List Nat) := #[]
+  byKey : Std.HashMap (String × List Nat × Bool) String := {}
+  /-- Each copy by its name: the function it is of, the implementations it
+  is for, and whether their places are dropped. -/
+  byName : Std.HashMap String (String × List Nat × Bool) := {}
+  /-- What `askCopy` added, in order (`LowerKept`). -/
+  asked : Array ((String × List Nat × Bool) × String) := #[]
+  /-- The calls of the function being written out that are of a copy, by
+  their numbers, each with the implementations it is for: named once the
+  function's copies for effects are made (`callsCopied`), which name the
+  function called first. -/
+  calls : Array (Nat × List Nat) := #[]
+
+def internId (f : String) (ids : List Nat) : StateM Copies Nat := do
+  match (← get).pool[(f, ids)]? with
+  | some n => pure n
+  | none =>
+    let n := (← get).byId.size
+    modify fun c => { c with pool := c.pool.insert (f, ids) n, byId := c.byId.push (f, ids) }
+    pure n
+
+def askCopy (fn : String) (ids : List Nat) (drop : Bool) : StateM Copies String := do
+  let key := (fn, ids, drop)
+  if let some name := (← get).byKey[key]? then return name
+  let name := s!"{fn}⟨{",".intercalate (ids.map toString)}⟩{if drop then "'" else ""}"
+  modify fun c => { c with byKey := c.byKey.insert key name, byName := c.byName.insert name key
+                           asked := c.asked.push (key, name) }
+  pure name
+
+/-- Which of the prelude's spreads `g` is. -/
+def spreadKind (g : String) : Option String :=
+  if g == "spread_split" || g == "spread_split_as" then some "split"
+  else if g == "spread_cons" || g == "spread_cons_as" then some "cons"
+  else if g == "spread_snoc" || g == "spread_snoc_as" then some "snoc"
+  else if g == "spread_call" || g == "spread_call_as" then some "call"
+  else none
+
+/-- How long a list is, by the implementation of `Spread` it has: one for
+`()`, or one for its first and rest given the rest's. -/
+def spreadLength (byId : Array (String × List Nat)) (i : Nat) : Nat → Option Nat
+  | 0 => none
+  | fuel + 1 =>
+    match byId[i]? with
+    | some (f, []) => if f.startsWith (implDictName "Spread" "") then some 0 else none
+    -- (The rest's `Spread` first; after it, how what is held is destroyed,
+    -- where the program asks that of the parts too.)
+    | some (f, j :: _) =>
+      if f.startsWith (implDictName "Spread" "") then (spreadLength byId j fuel).map (· + 1) else none
+    | _ => none
 
 end Glorious.Elab
