@@ -1556,8 +1556,9 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
               | [line, col] => (line, col)
               | _ => (0, 0)
             -- (Not one whose part is given away, `eat(p.a)`: the flag is of
-            -- the whole.)
-            if !b.exprs.any (fun n => match n with | .fieldOf _ e _ => b.bare? e == some x | _ => false) then
+            -- the whole. One that is a place already gives none away.)
+            let placed := (← get).placedNames.any fun (o, y, _) => o == owner && y == x
+            if placed || !b.exprs.any (fun n => match n with | .fieldOf _ e _ => b.bare? e == some x | _ => false) then
               if ← flagPlace owner line col x t pos b body then continue
             throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used" }
       continue

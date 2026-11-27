@@ -194,7 +194,7 @@ surroundings held; and what the elaborator is told by the call
 takes the first. Asked again of the same call, one kept would be met
 twice, once with what the first reading had. -/
 structure Marks where
-  valReads : Std.HashSet Nat
+  valReads : Std.HashMap Nat (List Ty)
   temps : List (Ty × Nat)
   later : List String
   anon : List Ty
@@ -421,6 +421,16 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
     pure t
   | .ref .. | .reborrow .. | .deref _ => inferExprRef scope amb e0 n
 
+/-- A field read of `e` (`read`): where `e` is a name holding a value, what
+of it is read is the field, not the whole (`St.valReads`). -/
+partial def fieldRead (scope : Scope) (e : Flat.ExprId) (read : M Ty) : M Ty := do
+  let some x := (← get).body.bare? e | return ← read
+  let some (.val _ id) := scope.lookup x | return ← read
+  let before := (← get).valReads[id]?
+  let t ← read
+  modify fun s => { s with valReads := s.valReads.insert id (t :: before.getD []) }
+  pure t
+
 /-- A name, a label or a tuple (`inferExpr`). -/
 partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
   match n with
@@ -429,7 +439,7 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
     | .local (.val t id) => do
       -- (Of one borrowed before: a use of the place, `placeVal`.)
       if (← get).placedVals.contains id then use scope (.var id x .move)
-      modify fun s => { s with valReads := s.valReads.insert id }
+      modify fun s => { s with valReads := s.valReads.insert id (t :: s.valReads.getD id []) }
       lend scope x t
     | .local (.cell t brand) => do
       -- What a variable that is never changed holds can be given away:
@@ -534,8 +544,8 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
         -- (A field of a value a name holds, borrowed: of the place,
         -- `placeVal`, as of a variable.)
         if !uniq && !star && !x.startsWith "%" then
-          if (← get).valReads.contains bid then
-            mustDup t s!"`{x}` is borrowed after its value is given away"
+          for read in (← get).valReads.getD bid [] do
+            mustDup read s!"`{x}` is borrowed after its value is given away"
           placeVal bid x t
           let (field, numbered, chosen, through) ← fieldAtThrough t path
           use scope (.var bid x .share numbered)
@@ -555,7 +565,7 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
         throw "what a field is borrowed of here is a value that nothing holds, not a reference: give it a `let mut` first"
       throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
     | none => throw s!"unknown name `{x}`"
-  | .fieldOf id e name => do
+  | .fieldOf id e name => fieldRead scope e do
     if let some x := (← get).body.bare? e then
       if ← derefHere scope id x name then return ← inferExprAt scope amb e0
       derefAt scope x name
@@ -631,7 +641,7 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
       let t ← freshTy
       modify fun s => { s with namedReads := s.namedReads.push (subject, name, t, id, s.pos) }
       pure t
-  | .proj e idx => do
+  | .proj e idx => fieldRead scope e do
     if let some field ← inferFieldOfPlace scope e0 then return field
     let subject ← inferExpr scope amb e
     -- (Of which name it is a part, where it is one of a name's.)
@@ -801,8 +811,8 @@ partial def inferExprRef (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Fla
         -- it is first borrowed, its reads after uses of it (`placeVal`).
         -- (One whose value was given away before: borrowed, it would be
         -- read after, as only what is copied can be.)
-        if (← get).valReads.contains id then
-          mustDup t s!"`{x}` is borrowed after its value is given away"
+        for read in (← get).valReads.getD id [] do
+          mustDup read s!"`{x}` is borrowed after its value is given away"
         placeVal id x t
         use scope (.var id x .share)
         let cap ← freshCap
@@ -2551,10 +2561,11 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
     let result ← withLater (b.fvExpr [] e) (inferStmts scope amb rest want)
     -- (A name it borrows whose value the rest gives away: borrowed after.)
     for x in (b.fvExpr [] e).eraseDups do
-      if let some (.val t id) := scope.lookup x then
+      if let some (.val _ id) := scope.lookup x then
         let u := b.nameUseExpr false x e
-        if !u.valued && !u.valuedInside && (← get).valReads.contains id then
-          mustDup t s!"`{x}` is borrowed after its value is given away"
+        if !u.valued && !u.valuedInside then
+          for read in (← get).valReads.getD id [] do
+            mustDup read s!"`{x}` is borrowed after its value is given away"
     pure result
 
 /-- Check a pattern against a type; the names it binds. -/

@@ -618,8 +618,10 @@ structure St where
   where the clause starts. -/
   placedNames : Array (String × String × Nat) := #[]
   /-- The names holding values read so far in the group, by their bindings'
-  brands: one borrowed after is borrowed after its value is given away. -/
-  valReads : Std.HashSet Nat := {}
+  brands, with what of each was read (the whole, or a field read out of
+  it): one borrowed after is borrowed after that is given away, which only
+  what is copied can be. -/
+  valReads : Std.HashMap Nat (List Ty) := {}
   /-- A dot call's receiver's own function, as found by reading the
   receiver on a copy (`dotAltFor`), by the receiver's node: found once in
   a body. Each link of a chain of calls read the chain below it so, and

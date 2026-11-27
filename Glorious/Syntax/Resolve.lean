@@ -384,8 +384,10 @@ def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : Expr
           else pure none
         | none => pure none
     | some (x, [], _), _ => some <$> pushExpr (.ref false x)
+    -- (A field of a variable or of a value a name holds: borrowed where it
+    -- is, the value a place from there.)
     | some (x, path, fid), _ =>
-      if fid == 0 || known.lookup x != some 1 then pure none
+      if fid == 0 then pure none
       else some <$> pushExpr (.refField fid false x path false)
     | none, some (x, path, fid) => some <$> pushExpr (.refField fid false x path true)
   match base with

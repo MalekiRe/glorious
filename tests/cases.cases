@@ -13279,7 +13279,7 @@ fn eat(c: C) -> Int { c.n }
 fn first(xs: &Vec<Int>) -> &Int { &(*xs)[0] }
 fn main() -> Int { let c = C { n: 1, xs: Vec::from_array([4, 5]) }; let r = first(&c.xs); let n = eat(c); *r + n }
 #### expect
-error: 5:91: in `main`: `c.xs` is given away while `r` holds a reference to it
+error: 5:91: in `main`: `c` is given away while `r` holds a reference to it
 #### case
 #### A parameter with a `drop` that the function only borrows is destroyed when the function is done, once.
 use std::vec::{Vec};
