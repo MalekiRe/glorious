@@ -87,6 +87,12 @@ structure DropSite where
   assign : Bool
   deriving BEq, Hashable
 
+/-- The site under which the checker says that the part of `x` read at the
+node `node` (its identity, `Flat.Body.ids`) has something to destroy: where
+it is taken, `x` is given away (`Syntax.takenSite`). -/
+def takenSite (owner : String) (node : Nat) (x : String) : DropSite :=
+  ⟨owner, 0, node, Syntax.takenSite x, false⟩
+
 /-- The site under which the checker says how what `x` holds is destroyed when
 the callable written as `written` (its hash), which captured it, is let go. -/
 def captureDropSite (owner : String) (written : UInt64) (x : String) : DropSite :=

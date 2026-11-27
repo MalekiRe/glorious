@@ -12742,14 +12742,18 @@ drop b
 drop a
 3
 #### case
+#### A part with a `drop` taken on one path: the value's flag is set where it is taken, and the whole destroyed where it was not.
 struct T { name: &'static str }
 impl Drop for T { fn drop(t: &mut T) { say(String::from("drop ") + t.name) } }
 struct P { a: T, n: Int }
 fn eat(t: T) -> Int { 1 }
 fn f(c: Bool) -> Int { let p = P { a: T { name: "a" }, n: 3 }; if(c) { eat(p.a) } else { p.n } }
-fn main() -> Int { f(true) }
+fn main() -> Int { let x = f(true); say("--"); x + f(false) }
 #### expect
-error: 5:24: in `f`: `p` is used on one path and not on another, and a `T` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut p`), which is destroyed where it was not used
+drop a
+--
+drop a
+4
 #### case
 struct P { a: Int, s: &'static str }
 fn main() -> Int { let p = P { a: 2, s: "hi" }; say(p.s); say(p.s); p.a + p.a }

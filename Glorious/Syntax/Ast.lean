@@ -1105,6 +1105,11 @@ def movedFlag (x : String) : String := s!"%moved:{x}"
 def derefTwice : Nat := 1152921504606846976
 def givenSite (x : String) : String := s!"%given:{x}"
 
+/-- Where a part of `x` with something to destroy is taken, `x.f` at the
+node whose identity is said with it (`Elab.takenSite`): the flag that
+says `x` was given away is set there too. -/
+def takenSite (x : String) : String := s!"%taken:{x}"
+
 /-- The place of a field read by name before the type it is read from was
 known: found from the name once the type is. -/
 def partUnknown : Nat := 1000000000

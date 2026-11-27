@@ -39,11 +39,16 @@ def namedVal (scope : Scope) (e : Flat.ExprId) : M (Option (Nat × String)) := d
 /-- A field of `subject`, written `e`, read: where `e` is a variable, the
 part read is noted (by number `idx`, or by `name` until its type says);
 otherwise, if `known`, what is not taken is let go, and if not, the whole. -/
-def readPart (scope : Scope) (e : Flat.ExprId) (subject : Ty) (idx : Nat) (name : String) (known : Bool) :
-    M Unit := do
+def readPart (scope : Scope) (e : Flat.ExprId) (subject : Ty) (idx : Nat) (name : String) (known : Bool)
+    (part : Ty) (node : Flat.ExprId) : M Unit := do
   let why := "taking one field of a value lets go of the rest"
   match ← namedVal scope e with
-  | some (bid, x) => modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, name, s.pos) }
+  | some (bid, x) =>
+    -- (Where the part has something to destroy, taking it gives the name's
+    -- value away: its flag is set there, `Elab.takenSite`.)
+    modify fun s =>
+      { s with partReads := s.partReads.push (bid, x, subject, idx, name, s.pos)
+               dropCands := s.dropCands.push (Elab.takenSite s.owner (s.body.idOf node) x, part, s.pos) }
   | none =>
     unless known do return ← mustDrop subject why
     -- A value that is in no variable and has a `drop` of its own to
@@ -638,11 +643,11 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
       modify fun s => { s with fieldReads := s.fieldReads.push (id, n) }
       match ← fieldType subject n with
       | some t =>
-        readPart scope e subject n name true
+        readPart scope e subject n name true t e0
         return t
       | none =>
-        readPart scope e subject n name false
         let t ← freshTy
+        readPart scope e subject n name false t e0
         modify fun s => { s with projections := s.projections.push (subject, n, t, s.pos, id) }
         return t
     let unknown := match ← find subject with
@@ -660,14 +665,14 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
       modify fun s => { s with fieldReads := s.fieldReads.push (id, idx) }
       -- The fields not taken are what is let go. Of a name, that is seen
       -- once every part read of it is known: one name may give several.
-      readPart scope e subject idx name true
+      readPart scope e subject idx name true t e0
       pure t
     | none =>
       -- Not known yet: settled once the rest of the function is inferred.
       -- (Of a name, the part read is noted, by its name until the type
       -- says which it is.)
-      readPart scope e subject Syntax.partUnknown name false
       let t ← freshTy
+      readPart scope e subject Syntax.partUnknown name false t e0
       modify fun s => { s with namedReads := s.namedReads.push (subject, name, t, id, s.pos) }
       pure t
   | .proj e idx => fieldRead scope e do
@@ -678,14 +683,14 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
     modify fun s => { s with aparts := s.aparts.push (subject, s.pos, named.map (·.1)) }
     match ← fieldType subject idx with
     | some t =>
-      readPart scope e subject idx (toString idx) true
+      readPart scope e subject idx (toString idx) true t e0
       pure t
     | none => do
       -- Not known yet: settle it once the rest of the function is inferred.
       -- (Of a name, the part read is noted as it is where the type is
       -- known: what the name's value is left with is seen once it is.)
-      readPart scope e subject idx (toString idx) false
       let t ← freshTy
+      readPart scope e subject idx (toString idx) false t e0
       modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos, 0) }
       pure t
   | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
@@ -2339,10 +2344,15 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
             let site : Elab.DropSite := ⟨(← get).owner, at_.1, at_.2, Syntax.letSite x, false⟩
             modify fun s => { s with dropCands := s.dropCands.push (site, tx, pos) }
       pure binds
-  if let .var _ := pat then
+  if let .var x := pat then
     for (_, bd) in binds do
       if let .val _ bid := bd then
         modify fun s => { s with bindSites := (bid, at_.1, at_.2) :: s.bindSites }
+    -- (Its dot calls the function of its type's own borrows it for are not
+    -- uses that give it away, as a variable's are, `dotBorrows`: it is a
+    -- place where they are made.)
+    let borrows ← dotBorrows b x t rest
+    modify fun s => { s with dotRefs := s.dotRefs ++ (borrows.map fun (a, uniq) => (a, uniq, x)).toArray }
   let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
   modify fun s => { s with pending := s.pending.push check }
   let here := (← get).pos
@@ -2791,13 +2801,19 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     { s with later := free, temps := [], anon := [] }
   -- What the callable captures from the scope it is written in.
   let cap ← freshCap
-  -- (A value it only borrows, `&x` of one not a reference: as a place.)
+  -- (A value it only borrows, `&x` of one not a reference: as a place.
+  -- Its dot calls its type's own function borrows it for are borrows,
+  -- `dotBorrows`.)
+  let seen := (← get).dotRefs.foldl (fun (bb : Flat.Body) (a, uniq, x) =>
+    match bb.exprs[a]? with
+    | some (.name none y) => if y == x then { bb with exprs := bb.exprs.set! a (.ref uniq x) } else bb
+    | _ => bb) b
   let borrowsOnly := fun (x : String) => clauses.all fun c =>
-    let u := b.nameUseClause false x c
+    let u := seen.nameUseClause false x c
     !u.valued && !u.valuedInside && !u.looked
   captureAll scope cap (b.fvClauses clauses) (fun x => clauses.any (assignsClause b x))
     (fun x => clauses.any fun c =>
-      let u := b.nameUseClause false x c
+      let u := seen.nameUseClause false x c
       u.valued || u.valuedInside)
     (fun x => match scope.lookup x with
       | some (.val _ _) => borrowsOnly x

@@ -1092,15 +1092,25 @@ partial def nameWild (named : Nat → Bool) : Pattern → Nat → Pattern × Nat
 end
 
 /-- Every use of a variable's value marked: the flag is set, and then the
-value read. -/
-def markMoves (x : String) : Flat.FRewrite where
+value read. So is each read of a part of it with something to destroy
+(`takenSite`, `taken`), which takes it out and lets go of the rest. -/
+def markMoves (x : String) (taken : Nat → Bool) : Flat.FRewrite where
   onExpr _ b e :=
     match b.expr e with
     | .name none y =>
       if y == x then some (Flat.flatExpr (.labelScope "%block"
         [.assign (.name none (Syntax.movedFlag x)) (.int 1), .expr (.name none x)]))
       else none
-    | .proj e' _ | .fieldOf _ e' _ => if b.placeRoot e' == some x then some (pure e) else none
+    | .proj e' _ | .fieldOf _ e' _ =>
+      if b.placeRoot e' != some x then none
+      -- (`x.a.b`: the part read of `x` is `x.a`.)
+      else if b.bare? e' != some x then none
+      else if !taken (b.idOf e) then some (pure e)
+      else some (do
+        let flag ← Flat.pushExpr (.name none (Syntax.movedFlag x))
+        let set ← Flat.pushStmt (.assign flag (← Flat.pushExpr (.int 1)))
+        let read ← Flat.pushStmt (.expr e)
+        Flat.pushExpr (.labelScope "%block" #[set, read]))
     | _ => none
   onStmt go b s :=
     match b.stmt s with
@@ -1216,7 +1226,8 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
           let unless_moved := Expr.call 0 (.closure 0
             [.mk [.int 0] [.expr (destroyCall tr d (.name none x))],
              .mk [.wild] [.expr (.tuple [])]]) [.name none flag]
-          let marked ← rest.mapM (markMoves x).st
+          let taken := fun (node : Nat) => tr.dropsAt.contains (takenSite owner node x)
+          let marked ← rest.mapM (markMoves x taken).st
           pure ((← pushStmt (.letMut x value)) :: (← pushStmt (.letMut flag (← pushExpr (.int 0))))
             :: (← hookS unless_moved false) :: marked)
         | _ => pure ((← pushStmt (.letMut x value)) :: rest)

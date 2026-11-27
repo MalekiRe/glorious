@@ -19,7 +19,7 @@ delta_part StDelta4 diffPart4 applyPart4 fitsPart4 clearPart4 restorePart4 [
   assumedLinks : ArrD (Nat × Nat × Ty × String),
   abandoned : ArrD (Nat × Ty × String),
   sure : Array Nat,
-  lowerChecks : ArrD (String × String × Ty × List String × Flat.Body × List Flat.StmtId),
+  lowerChecks : ArrD (String × String × Ty × Ty × List String × Flat.Body × List Flat.StmtId),
   refusals : ArrD String]
 
 end Glorious.Check

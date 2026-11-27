@@ -1243,7 +1243,7 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
             modify fun st => { st with pos := pos }
         if s.anyMust && !x.startsWith "%" then
           modify fun st =>
-            { st with lowerChecks := st.lowerChecks.push (pos, x, ft, names.filter (· != x), ob, only) }
+            { st with lowerChecks := st.lowerChecks.push (pos, x, ft, subject, names.filter (· != x), ob, only) }
   else if !copiedParts then
     -- Used as a whole too: each part read lets go of the rest of it.
     for (subject, idx, _, at_) in mine do
@@ -1278,7 +1278,7 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
     -- stands for nothing the program wrote.
     if s.anyMust && !x.startsWith "%" then
       modify fun st =>
-        { st with lowerChecks := st.lowerChecks.push (pos, x, t, names.filter (· != x), code, body) }
+        { st with lowerChecks := st.lowerChecks.push (pos, x, t, t, names.filter (· != x), code, body) }
 
 /-- Record, for each binding used more than once in `body`, that its type must
 allow that. `outer` is the scope the bindings are added to. A binding whose
@@ -1447,7 +1447,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   -- the others are then let go is no loss. Whoever gives them is asked that
   -- each holds what has to be used.
   let certain := (s.envGroups.toList.filter (·.2.2.1)).flatMap fun g => g.2.1.map (·.1)
-  for (pos, x, t, names, b, body) in s.lowerChecks do
+  for (pos, x, t, whole, names, b, body) in s.lowerChecks do
     -- A variable that gives its value away: if some path does not use the
     -- value, the variable is given a cleanup that destroys it there.
     if let some (site, held, at_) := s.givenSites.lookup pos then
@@ -1518,8 +1518,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
           let (line, col) := match place with
             | [line, col] => (line, col)
             | _ => (0, 0)
-          if !b.exprs.any (fun n => match n with | .fieldOf _ e _ => b.bare? e == some x | _ => false) then
-            if ← flagPlace s.owner line col x t pos b body then continue
+          if ← flagPlace s.owner line col x whole pos b body then continue
           throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and its type may have a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used" }
     unless (free && !heldDrop) || (← tyMustUse roots [] t).isSome do
       -- A value with a `drop` to run that is used on one path and not on
@@ -1555,11 +1554,9 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
             let (line, col) := match place with
               | [line, col] => (line, col)
               | _ => (0, 0)
-            -- (Not one whose part is given away, `eat(p.a)`: the flag is of
-            -- the whole. One that is a place already gives none away.)
-            let placed := (← get).placedNames.any fun (o, y, _) => o == owner && y == x
-            if placed || !b.exprs.any (fun n => match n with | .fieldOf _ e _ => b.bare? e == some x | _ => false) then
-              if ← flagPlace owner line col x t pos b body then continue
+            -- (One whose part with something to destroy is taken, `eat(p.a)`,
+            -- has its flag set there too, `Elab.takenSite`.)
+            if ← flagPlace owner line col x whole pos b body then continue
             throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used" }
       continue
     -- (A value whose type has nothing to destroy, its type parameters each

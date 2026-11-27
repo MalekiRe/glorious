@@ -588,22 +588,6 @@ partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (Strin
         let kind := match pat with
           | .var _ => if elementRef || givesRef then 3 else if b.valueLike value then 2 else 0
           | _ => 0
-        -- (A value a dot call is made on, where the function of the name in
-        -- scope takes it whole, `v.len()` with the prelude's `len`: kept in
-        -- a variable, which the type's own function, if it borrows, borrows
-        -- (`Check.dotBorrows`), as Rust's method calls do.)
-        let dotted : Bool := match pat with
-          | .var x => kind != 3 && rest.any fun st => b.anyStmt (fun n => match n with
-              | .call _ f args =>
-                match b.name? f, args[0]?.map b.expr with
-                | some (_, name), some (.call _ rm #[recv]) =>
-                  b.mark? rm == some .receiver && b.bare? recv == some x && !taken.contains name
-                | _, _ => false
-              | _ => false) st
-          | _ => false
-        if dotted then
-          if let .var x := pat then
-            return (← pushStmt (.letMut x (← receiverExpr taken known value)), (x, 1) :: known)
         pure (← pushStmt (.let_ pat (← receiverExpr taken known value)), (patternNames pat).map (·, kind) ++ known)
       | _, .letMut x value => pure (← pushStmt (.letMut x (← receiverExpr taken known value)), (x, 1) :: known)
       | _, .expr e => pure (← pushStmt (.expr (← receiverExpr taken known e)), known)

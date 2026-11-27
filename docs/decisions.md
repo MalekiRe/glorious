@@ -8552,6 +8552,17 @@ field of which is read, `eat(p.a)`, where the flag would be of the whole).
 A callable stored in a declaration that took such a value, `Job { run: {
 eat(n) } }`, holds it and destroys it with itself: accepted, as Rust's.
 
+A value a part of which, with a `drop` to run, one path takes and another
+does not (`if(c) { eat(p.a) } else { p.n }`), is accepted, as Rust's is:
+taking the part gives the whole away (what is left of it has nothing to
+destroy, which taking a part already asks), so the whole's flag is set
+where the part is taken (`Elab.takenSite`: the checker says which reads of
+a part have something to destroy), not where a copied part is read, and
+the whole is destroyed where its block ends if the flag is not set. It was
+refused, asking for `let mut p`. Rust keeps a flag for each field moved
+out; one for the whole is enough here, since the rest is let go where a
+part is taken.
+
 ## Threads: what one shares, checked
 
 Looked at for Rust's `Send` and `Sync`: in safe code, what a thread of the

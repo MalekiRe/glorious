@@ -802,9 +802,10 @@ structure St where
   performs nothing and can jump to no label. -/
   sure : Std.HashSet Nat := {}
   /-- Bindings whose use on every path is still to be looked at, once the
-  types of the function they are in are known: where, the name, its type, the
-  other names in scope, and the code the name is in scope of. -/
-  lowerChecks : Array (String × String × Ty × List String × Flat.Body × List Flat.StmtId) := #[]
+  types of the function they are in are known: where, the name, its type (of
+  the part looked at, where it is a part's), the whole's type, the other
+  names in scope, and the code the name is in scope of. -/
+  lowerChecks : Array (String × String × Ty × Ty × List String × Flat.Body × List Flat.StmtId) := #[]
 
   /-- What the count of uses reads of what is declared, kept as it is
   declared and found in one look: the bodies of functions, the names of

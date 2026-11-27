@@ -467,6 +467,14 @@ Left of locals as places, with why:
   borrowed for writing).
 - The front end's own temporaries (`borrowed%N`) stay variables it makes:
   it names them in the body the checker reads, and again after.
+- A value a dot call is made on, where the function of the name in scope
+  takes it whole and its type's own borrows it (`v.len()` with the
+  prelude's `len`), is a place too (done: `dotBorrows` for a `let`, and a
+  callable's captures read those calls as borrows; the front end's
+  `dotted` is gone). That needed a value a part of which is taken (`let i
+  = c.items`) after a call that may not come back to be flagged as a
+  whole is: the flag is set where a part with something to destroy is
+  taken (`Elab.takenSite`), not where a copied one is read.
 
 The two left of "Then", looked at and left:
 
