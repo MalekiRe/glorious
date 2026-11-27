@@ -772,22 +772,6 @@ def throughParamsRewrite (refs : List String) : FRewrite where
       pushExpr (.call id (← go.ex f) args))
     | _ => none
 
-/-- May what an expression gives be a value and not a reference, by how it is
-written (`Syntax.valueLike`)? -/
-def Body.valueLike (b : Body) (e : ExprId) : Bool :=
-  match b.expr e with
-  | .tuple args => !args.isEmpty
-  | .int _ => true
-  | .name _ x => (lastSegment x).front.isUpper
-  | .call _ f args =>
-    match b.mark? f, args.toList with
-    | some mark, [_, ty] =>
-      mark != .ascribe || (match b.typeAt ty with
-        | .ref _ _ _ => false
-        | _ => true)
-    | _, _ => true
-  | _ => false
-
 /-- Is a name bound here one that what follows borrows with `&` and never
 changes (`Syntax.borrowedOnly`)? -/
 def Body.borrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=

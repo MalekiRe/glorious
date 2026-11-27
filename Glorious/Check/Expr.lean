@@ -1276,6 +1276,54 @@ partial def fieldThroughRef (scope : Scope) (e : Flat.ExprId) : M (Option (Strin
       pure ((← fieldThroughRef scope inner).map fun (x, path, _) => (x, path ++ [field], fid))
   | _ => pure none
 
+/-- The receiver at `a`, `%receiver(*element_at(r, i))`, an element read where
+it is, of a dot call of `fx`: the element's reference where `fx` takes a
+reference (`element_at(r, i)`, `place_at(i, &mut ..)` for writing), the
+element as it is read otherwise. -/
+partial def writeElementReceiver (a : Flat.ExprId) (fx : String) : M Unit := do
+  let b := (← get).body
+  let .call _ _ #[r] := b.expr a | return
+  let .deref inner := b.expr r | return
+  let .call cid _ #[base, i] := b.expr inner | return
+  let given : Flat.FExpr ← match (← receiverKinds fx fx).1 with
+    | some 1 => pure (b.expr inner)
+    | some 2 =>
+      let base' : Flat.FExpr := match b.expr base with
+        | .ref _ x => .ref true x
+        | .refField fid _ x path star => .refField fid true x path star
+        | n => n
+      let (be, b') := b.add base'
+      let (pe, b') := b'.add (.name none "place_at")
+      modify fun s => { s with body := b' }
+      pure (.call cid pe #[i, be])
+    | _ => pure (b.expr r)
+  modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a given } }
+
+/-- An element read's place, `element_at(&x, i)` or `place_at(i, &mut x)`, of
+a name that holds a reference: through it, `element_at(x, i)`, as Rust's
+`x[i]` is of what `x` points to (and `&x.f` where `x` holds one, through
+it). -/
+partial def elementBase (scope : Scope) (f : Flat.ExprId) (args : Array Flat.ExprId) : M Unit := do
+  let b := (← get).body
+  let some (_, g) := b.name? f | return
+  let at_ ← match Syntax.lastSegment g with
+    | "element_at" => pure 0
+    | "place_at" => pure 1
+    | _ => return
+  let some base := args[at_]? | return
+  let holdsRef := fun (x : String) => (do
+    match scope.lookup x with
+    | some (.val t _) | some (.cell t _) => do pure (match ← find t with | .ref .. => true | _ => false)
+    | _ => pure false : M Bool)
+  match b.expr base with
+  | .ref _ x =>
+    if ← holdsRef x then
+      modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! base (.name none x) } }
+  | .refField fid uniq x path false =>
+    if ← holdsRef x then
+      modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! base (.refField fid uniq x path true) } }
+  | _ => pure ()
+
 /-- A path of fields from a name, `x.f.g`: the name, the path, and the
 outermost field's identity. -/
 partial def fieldRoot (b : Flat.Body) (e : Flat.ExprId) : Option (String × List String × Nat) :=
@@ -1347,6 +1395,33 @@ partial def variableReceivers (x : String) (rest : List Flat.StmtId) : M Unit :=
       here ++ (b.children e).flatMap (fields fuel)
   for (a, fx) in rest.flatMap fun s => (b.stmtExprs s).toList.flatMap (fields 256) do
     writeFieldReceiver a fx false
+  -- (And an element of it, `v[i].push(..)`: its place, for writing.)
+  let rooted := fun (base : Flat.ExprId) => match b.expr base with
+    | .ref _ y => y == x
+    | .refField _ _ y _ _ => y == x
+    | _ => false
+  let rec elements (fuel : Nat) (e : Flat.ExprId) : List (Flat.ExprId × String) :=
+    match fuel with
+    | 0 => []
+    | fuel + 1 =>
+      let here := match b.expr e with
+        | .call _ f args | .tailCall _ f args =>
+          match b.bare? f, args[0]? with
+          | some fx, some a =>
+            match b.expr a with
+            | .call _ m #[r] =>
+              match b.mark? m == some .receiver, b.expr r with
+              | true, .deref inner =>
+                match b.expr inner with
+                | .call _ _ #[base, _] => if rooted base then [(a, fx)] else []
+                | _ => []
+              | _, _ => []
+            | _ => []
+          | _, _ => []
+        | _ => []
+      here ++ (b.children e).flatMap (elements fuel)
+  for (a, fx) in rest.flatMap fun s => (b.stmtExprs s).toList.flatMap (elements 256) do
+    writeElementReceiver a fx
 
 /-- A dot call `f(%receiver(x), ..)` of a function in scope `f`: the
 receiver borrowed as `f` takes it (`receiverKinds`), given as it is where
@@ -1361,6 +1436,8 @@ partial def receiverByName (scope : Scope) (f : Flat.ExprId) (args : Array Flat.
   unless b.mark? m == some .receiver do return
   let some fx := b.bare? f | return
   let some x := b.bare? r | do
+    -- (An element read where it is, `v[i].len()`.)
+    if let .deref _ := b.expr r then return ← writeElementReceiver a fx
     -- (A field of a name, `p.items.len()`: borrowed where it is, through
     -- the reference the name holds where it holds one.)
     let some (x, _, _) := fieldRoot b r | return
@@ -2313,6 +2390,7 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
 partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Array Flat.ExprId)
     (call : Nat := 0) : M Ty := do
   if let some t ← inferMarkedCall scope amb f args then return t
+  elementBase scope f args
   receiverByName scope f args
   let b := (← get).body
   if let some t ← inferDotAltCall scope amb f args call then return t

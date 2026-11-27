@@ -308,31 +308,9 @@ partial def selfAssocs (self : TypeExpr) (tr : String) (targs : List TypeExpr) :
 
 namespace Flat
 
-/-- The name a path of fields starts at, and the path, where the name is
-known to hold a value (`receiverExpr`'s `known`). -/
-partial def placeOf (b : Body) (known : List (String × Nat)) (e : ExprId) : Nat → Option (String × List String × Nat)
-  | 0 => none
-  | fuel + 1 =>
-    match b.expr e with
-    | .name none x => if (known.lookup x).any (fun k => k != 0 && k != 3) then some (x, [], 0) else none
-    | .fieldOf fid e field => (placeOf b known e fuel).map fun (x, path, _) => (x, path ++ [field], fid)
-    | .proj e n => (placeOf b known e fuel).map fun (x, path, fid) => (x, path ++ [toString n], fid)
-    | _ => none
-
-/-- A field of what a reference a name holds points to, `p.items`. -/
-partial def throughRefOf (b : Body) (known : List (String × Nat)) (e : ExprId) : Nat → Option (String × List String × Nat)
-  | 0 => none
-  | fuel + 1 =>
-    match b.expr e with
-    | .fieldOf fid inner field =>
-      match b.bare? inner with
-      | some x => if known.lookup x == some 3 then some (x, [field], fid) else none
-      | none => (throughRefOf b known inner fuel).map fun (x, path, _) => (x, path ++ [field], fid)
-    | _ => none
-
 /-- `a[i]` of a place that is not copied for it: what reads the element
 where it is, `*element_at(&a, i)`; none where `a` is not such a place. -/
-def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : ExprId) : Build (Option ExprId) := do
+def elementRead (b : Body) (id : Nat) (a i : ExprId) : Build (Option ExprId) := do
   -- (`a[i][j]`: the element of the element, where it is.)
   let isElement : ExprId → Bool := fun e => match b.expr e with
     | .call _ g _ => (b.name? g).map (·.2) == some "element_at"
@@ -359,60 +337,43 @@ def elementRead (b : Body) (known : List (String × Nat)) (id : Nat) (a i : Expr
       let base ← pushExpr (.refField fid false held path true)
       let read ← pushExpr (.deref (← pushExpr (.call id (← pushExpr (.name none "element_at")) #[base, i])))
       return some (← pushExpr (.labelScope "%block" #[first, ← pushStmt (.expr read)]))
-  let base ← match placeOf b known a 64, throughRefOf b known a 64 with
-    | none, none =>
-      -- (A name that holds a reference, `list: &Vec<T>`: through it; any
-      -- other the clause binds, borrowed where it is, as Rust's `x[i]` is
-      -- `*x.index(i)`: a reference held is indexed through.)
-      match b.expr a with
-      | .name none x =>
-        match known.lookup x with
-        | some 3 => pure (some a)
-        | some _ => some <$> pushExpr (.ref false x)
-        | _ => pure none
-      | _ =>
-        -- (A field of a name bound by a pattern, or to what a call gives,
-        -- which may be a reference: borrowed as `&x.f` is, through it if it
-        -- is one.)
-        let rec chain (e : ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
-          match fuel, b.expr e with
-          | fuel + 1, .fieldOf fid inner field =>
-            match b.expr inner with
-            | .name none x => some (x, [field], fid)
-            | _ => (chain inner fuel).map fun (x, path, _) => (x, path ++ [field], fid)
-          | _, _ => none
-        match chain a 64 with
-        | some (x, path, fid) =>
-          if fid != 0 && known.lookup x == some 0 then some <$> pushExpr (.refField fid false x path false)
-          else pure none
-        | none => pure none
-    | some (x, [], _), _ => some <$> pushExpr (.ref false x)
-    -- (A field of a variable or of a value a name holds: borrowed where it
-    -- is, the value a place from there.)
-    | some (x, path, fid), _ =>
-      if fid == 0 then pure none
-      else some <$> pushExpr (.refField fid false x path false)
-    | none, some (x, path, fid) => some <$> pushExpr (.refField fid false x path true)
+  -- (A name, or a path of fields from one, borrowed where it is, as Rust's
+  -- `x[i]` is `*x.index(i)`: through the reference it holds where it holds
+  -- one, `Check.elementBase`.)
+  let rec chain (e : ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
+    match fuel, b.expr e with
+    | fuel + 1, .fieldOf fid inner field =>
+      match b.expr inner with
+      | .name none x => some (x, [field], fid)
+      | _ => (chain inner fuel).map fun (x, path, _) => (x, path ++ [field], fid)
+    | fuel + 1, .proj inner n =>
+      match b.expr inner with
+      | .name none x => some (x, [toString n], 0)
+      | _ => (chain inner fuel).map fun (x, path, fid) => (x, path ++ [toString n], fid)
+    | _, _ => none
+  let base ← match b.expr a, chain a 64 with
+    | .name none x, _ =>
+      if (lastSegment x).front.isUpper then pure none else some <$> pushExpr (.ref false x)
+    | _, some (x, path, fid) => if fid != 0 then some <$> pushExpr (.refField fid false x path false) else pure none
+    | _, none => pure none
   match base with
   | some r => some <$> pushExpr (.deref (← pushExpr (.call id (← pushExpr (.name none "element_at")) #[r, i])))
   | none => pure none
 
 mutual
 
-/-- `value.f(a)` where `f` takes a reference first and `value` is a variable,
-or a field of one: the variable is borrowed for the call. `known` are the
-names in scope that are known to hold a value and not a reference: `1` a
-mutable variable, `2` a name bound to what is plainly a value (see
-`valueLike`), or a parameter written with a type that is no reference's.
-Anything else is given as it is: a reference already, or a value `f` takes
-whole. -/
-
-partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String × Nat)) (e : ExprId) : Build ExprId := do
+/-- A dot call's receiver, `value.f(a)`, as the checker is to find how `f`
+takes it (`%receiver(value)`, `Check.receiverByName`): a name, a path of
+fields from one, an element read where it is, or a value made where it is
+called on, given a name for the statement (`Mark.held`). (A field of an
+element, and what an operation gives, borrowed here as `f` is declared to
+take it, `taken`.) And `a[i]`, read where it is (`elementRead`). -/
+partial def receiverExpr (taken : Std.HashMap String Bool) (e : ExprId) : Build ExprId := do
   let b ← get
   match b.expr e with
   | .call id f args =>
-    let f ← receiverExpr taken known f
-    let args ← args.mapM (receiverExpr taken known)
+    let f ← receiverExpr taken f
+    let args ← args.mapM (receiverExpr taken)
     let b ← get
     let plain := fun (_ : Unit) => pushExpr (.call id f args)
     match b.expr f, args.toList with
@@ -426,7 +387,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
       let a := match b.expr a with
         | .call _ rm #[r] => if b.mark? rm == some .receiver then r else a
         | _ => a
-      match ← elementRead b known id a i with
+      match ← elementRead b id a i with
       | some e => pure e
       | none => plain ()
     | .name q name, args0 =>
@@ -437,117 +398,74 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
         | .call _ rm #[r] => if b.mark? rm == some .receiver then some r else none
         | _ => none
       if args0.all (marked · |>.isNone) then return ← plain ()
-      let place := placeOf b known
-      let throughRef := throughRefOf b known
-      -- (`v[i].f()` where `f` takes a reference: the element, borrowed
-      -- where it is.)
-      let rec element (uniq : Bool) (fuel : Nat) (e : ExprId) : Build (Option ExprId) := do
-        match b.expr e with
-        -- (One `elementRead` made: the element's reference, for writing
-        -- through it where that is asked.)
-        | .deref inner =>
-          match b.expr inner with
-          | .call cid g #[r, i] =>
-            if (b.name? g).map (·.2) != some "element_at" then return none
-            if !uniq then return some inner
-            let r' ← match b.expr r with
-              | .ref _ x => pushExpr (.ref true x)
-              | .refField fid _ x path star => pushExpr (.refField fid true x path star)
-              | _ => return none
-            some <$> pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, r'])
-          | _ => pure none
-        | .call cid g #[a, i] =>
-          if (b.name? g).map (·.2) != some "index" then return none
-          let base ← match fuel, place a 64, throughRef a 64 with
-            | _, some (x, [], _), _ => some <$> pushExpr (.ref uniq x)
-            | _, some (x, path, fid), _ => if fid == 0 then pure none else some <$> pushExpr (.refField fid uniq x path false)
-            | _, none, some (x, path, fid) => some <$> pushExpr (.refField fid uniq x path true)
-            | fuel + 1, none, none =>
-              match b.bare? a with
-              | some x => if known.lookup x == some 3 then pure (some a) else pure none
-              | none => element uniq fuel a
-            | 0, _, _ => pure none
-          match base with
-          | some bs =>
-            if uniq then some <$> pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, bs])
-            else some <$> pushExpr (.call cid (← pushExpr (.name none "element_at")) #[bs, i])
-          | none => pure none
-        | _ => pure none
+      -- (A path of fields from a name, `p.items`.)
+      let rec fieldOfName (e : ExprId) (fuel : Nat) : Bool :=
+        match fuel, b.expr e with
+        | fuel + 1, .fieldOf fid inner _ => fid != 0 && ((b.bare? inner).isSome || fieldOfName inner fuel)
+        | _, _ => false
+      let isElement := fun (e : ExprId) => match b.expr e with
+        | .deref inner => match b.expr inner with
+          | .call _ g _ => (b.name? g).map (·.2) == some "element_at"
+          | _ => false
+        | _ => false
       let givenOf := fun (k : Nat) (receiver : ExprId) => (do
-        let borrowed := fun (uniq : Bool) => (do
-          pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark (if uniq then .borrowMut else .borrow))) #[receiver]) : Build ExprId)
-          -- (A name that is no variable: borrowed where the call is read, as
-          -- the function in scope takes it, `Check.receiverByName`.)
-          if let some x := b.bare? receiver then
-            if !(lastSegment x).front.isUpper then
-              return ← pushExpr (.call 0 (← pushExpr (.mark .receiver)) #[receiver])
-          -- (A field of a name likewise, `Check.writeFieldReceiver`.)
-          let fieldOfName := match place receiver 64, throughRef receiver 64 with
-            | some (_, _ :: _, fid), _ => fid != 0
-            | _, some (_, _, fid) => fid != 0
-            | _, _ => false
-          if fieldOfName then return ← pushExpr (.call 0 (← pushExpr (.mark .receiver)) #[receiver])
-          -- (A value made where it is called on, `half(4).is_ok()`, or a
-          -- constructor without fields or a constant, `D.greet()`: given a
-          -- name of its own for the statement, a variable, for the checker
-          -- to say how the call takes it, `Mark.held`.)
-          let made : Bool := match b.expr receiver with
-            | .call _ g _ => (b.mark? g).isNone && (b.name? g).map (·.2) != some "element_at"
-                && !((b.name? g).any fun (_, n) => taken.contains (opKey (lastSegment n)))
-            | .name none x => (lastSegment x).front.isUpper
-            | _ => false
-          if made then
-            let held ← pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark .held)) #[receiver])
-            return ← pushExpr (.call 0 (← pushExpr (.mark .receiver)) #[held])
-          match taken[name]?, place receiver 64, throughRef receiver 64 with
-            | some uniq, some (x, [], _), _ => pushExpr (.ref uniq x)
-            | some uniq, some (x, path, fid), _ => if fid == 0 then pure receiver else pushExpr (.refField fid uniq x path false)
-            | some uniq, none, some (x, path, fid) => pushExpr (.refField fid uniq x path true)
-            | some uniq, none, none =>
-              match ← element uniq 8 receiver with
-              | some e => pure e
-              | none =>
-                -- (A field of an element, `v[0].i.to_string()`: borrowed
-                -- through the element's reference, named first.)
-                let rec ofElement (e : ExprId) (fuel : Nat) : Option (ExprId × List String) :=
-                  match fuel, b.expr e with
-                  | 0, _ => none
-                  | fuel + 1, .fieldOf _ inner field =>
-                    let r := match b.expr inner with
-                      | .deref r => r
-                      | _ => inner
-                    match b.expr r with
-                    | .call _ g _ => if (b.name? g).map (·.2) == some "element_at" then some (r, [field]) else none
-                    | _ => (ofElement inner fuel).map fun (r, path) => (r, path ++ [field])
-                  | _, _ => none
-                if let some (r, path) := ofElement receiver 16 then
-                  -- (For writing, the element's place: `place_at`.)
-                  let r ← if !uniq then pure (some r) else match b.expr r with
-                    | .call cid _ #[a, i] =>
-                      match b.expr a with
-                      | .ref _ x => do pure (some (← pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, ← pushExpr (.ref true x)])))
-                      | .refField fid _ x path star => do
-                        pure (some (← pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, ← pushExpr (.refField fid true x path star)])))
-                      | _ => pure none
-                    | _ => pure none
-                  if let some r := r then
-                    let steps ← pushExpr (.tuple (← path.toArray.mapM fun s => pushExpr (.name none s)))
-                    let through ← pushExpr (.call (id + 600000 + k) (← pushExpr (.mark .through))
-                      #[r, steps, ← pushExpr (.int (if uniq then 1 else 0))])
-                    return through
-                -- (A value made where it is called on, `half(4).is_ok()`:
-                -- given a name first, and borrowed.)
-                match b.expr receiver with
-                -- (Not what a function written to give a reference gives.)
-                | .call _ g _ =>
-                  match b.expr g with
-                  | .name _ gn => if taken.contains (givesKey gn) then pure receiver else borrowed uniq
-                  | _ => borrowed uniq
-                -- (A constructor without fields or a constant, `D.greet()`.)
-                | .name none x =>
-                  if (lastSegment x).front.isUpper then borrowed uniq else pure receiver
-                | _ => pure receiver
-            | _, _, _ => pure receiver : Build ExprId)
+        let mark := fun (r : ExprId) => (do pushExpr (.call 0 (← pushExpr (.mark .receiver)) #[r]) : Build ExprId)
+        -- (A name, a path of fields from one, or an element read where it
+        -- is, `v[i]`: borrowed where the call is read, as the function in
+        -- scope takes it, `Check.receiverByName`.)
+        if let some x := b.bare? receiver then
+          if !(lastSegment x).front.isUpper then return ← mark receiver
+        if fieldOfName receiver 64 || isElement receiver then return ← mark receiver
+        -- (A value made where it is called on, `half(4).is_ok()`, or a
+        -- constructor without fields or a constant, `D.greet()`: given a
+        -- name of its own for the statement, a variable, for the checker
+        -- to say how the call takes it, `Mark.held`.)
+        let made : Bool := match b.expr receiver with
+          | .call _ g _ => (b.mark? g).isNone && (b.name? g).map (·.2) != some "element_at"
+              && !((b.name? g).any fun (_, n) => taken.contains (opKey (lastSegment n)))
+          | .name none x => (lastSegment x).front.isUpper
+          | _ => false
+        if made then
+          return ← mark (← pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark .held)) #[receiver]))
+        match taken[name]? with
+        | some uniq =>
+          -- (A field of an element, `v[0].i.to_string()`: borrowed
+          -- through the element's reference, named first.)
+          let rec ofElement (e : ExprId) (fuel : Nat) : Option (ExprId × List String) :=
+            match fuel, b.expr e with
+            | 0, _ => none
+            | fuel + 1, .fieldOf _ inner field =>
+              let r := match b.expr inner with
+                | .deref r => r
+                | _ => inner
+              match b.expr r with
+              | .call _ g _ => if (b.name? g).map (·.2) == some "element_at" then some (r, [field]) else none
+              | _ => (ofElement inner fuel).map fun (r, path) => (r, path ++ [field])
+            | _, _ => none
+          if let some (r, path) := ofElement receiver 16 then
+            -- (For writing, the element's place: `place_at`.)
+            let r ← if !uniq then pure (some r) else match b.expr r with
+              | .call cid _ #[a, i] =>
+                match b.expr a with
+                | .ref _ x => do pure (some (← pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, ← pushExpr (.ref true x)])))
+                | .refField fid _ x path star => do
+                  pure (some (← pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, ← pushExpr (.refField fid true x path star)])))
+                | _ => pure none
+              | _ => pure none
+            if let some r := r then
+              let steps ← pushExpr (.tuple (← path.toArray.mapM fun s => pushExpr (.name none s)))
+              return ← pushExpr (.call (id + 600000 + k) (← pushExpr (.mark .through))
+                #[r, steps, ← pushExpr (.int (if uniq then 1 else 0))])
+          -- (What an operation gives, borrowed: given a name first. Not what
+          -- a function written to give a reference gives.)
+          match b.expr receiver with
+          | .call _ g _ =>
+            match b.expr g with
+            | .name _ gn => if taken.contains (givesKey gn) then pure receiver else
+                pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark (if uniq then .borrowMut else .borrow))) #[receiver])
+            | _ => pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark (if uniq then .borrowMut else .borrow))) #[receiver])
+          | _ => pure receiver
+        | none => pure receiver : Build ExprId)
       let given ← args0.toArray.zipIdx.mapM fun (a, k) => match marked a with
         | some r => givenOf k r
         | none => pure a
@@ -556,7 +474,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
   -- (`a[i].f`: the field read through the element's reference, the rest of
   -- the element not copied.)
   | .fieldOf fid inner field => do
-    let inner' ← receiverExpr taken known inner
+    let inner' ← receiverExpr taken inner
     let b ← get
     match b.expr inner' with
     | .deref r =>
@@ -568,71 +486,37 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
       | _ => if inner' == inner then pure e else pushExpr (.fieldOf fid inner' field)
     | _ => if inner' == inner then pure e else pushExpr (.fieldOf fid inner' field)
   | n => do
-    let n' ← n.mapIds (receiverExpr taken known) (receiverClause taken known [])
-      fun body => do pure (← receiverStmts taken known body.toList).toArray
+    let n' ← n.mapIds (receiverExpr taken) (receiverClause taken)
+      fun body => do pure (← receiverStmts taken body.toList).toArray
     if n' == n then pure e else pushExpr n'
 
-/-- (`values`: the parameters written with types that are no reference's.) -/
-partial def receiverClause (taken : Std.HashMap String Bool) (known : List (String × Nat))
-    (values : List String) (c : ClauseId) : Build ClauseId := do
+partial def receiverClause (taken : Std.HashMap String Bool) (c : ClauseId) : Build ClauseId := do
   let ⟨pats, body⟩ := (← get).clause c
-  let named := (pats.flatMap patternNames).map fun x =>
-    (x, if values.contains x then 2 else if known.lookup x == some 3 then 3 else 0)
-  pushClause ⟨pats, (← receiverStmts taken (named ++ known) body.toList).toArray⟩
+  pushClause ⟨pats, (← receiverStmts taken body.toList).toArray⟩
 
-partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (String × Nat)) :
-    List StmtId → Build (List StmtId)
+partial def receiverStmts (taken : Std.HashMap String Bool) : List StmtId → Build (List StmtId)
   | [] => pure []
   | s :: rest => do
-    let rec here (s : StmtId) (fuel : Nat) : Build (StmtId × List (String × Nat)) := do
+    let rec here (s : StmtId) (fuel : Nat) : Build StmtId := do
       let b ← get
       match fuel, b.stmt s with
-      | 0, _ => pure (s, known)
-      | _, .let_ pat value =>
-        -- (`let s = &v[i]`: an element borrowed, a reference.)
-        let elementRef : Bool := match b.expr value with
-          | .call _ f _ => match (b.name? f).map (·.2) with
-            | some g => g == "element_at" || g == "place_at"
-            | none => false
-          | .ref _ _ => true
-          | .refField .. => true
-          | _ => false
-        -- (`let c = column(w)` of a function written to give a reference.)
-        -- (`<S as Get<T>>::column(w)` too; and `let r: &T = ..`.)
-        let givesRef : Bool := match b.expr value with
-          | .call _ f args =>
-            if b.mark? f == some .ascribe then
-              match args[1]?.map b.expr with
-              | some (.type (.ref ..)) => true
-              | _ => false
-            else if b.mark? f == some .inst then
-              match args[0]?.map b.expr with
-              | some (.call _ g _) => ((b.name? g).map fun (_, n) => taken.contains (givesKey n)).getD false
-              | _ => false
-            else ((b.name? f).map fun (_, g) => taken.contains (givesKey g)).getD false
-          | _ => false
-        let kind := match pat with
-          | .var _ => if elementRef || givesRef then 3 else if b.valueLike value then 2 else 0
-          | _ => 0
-        pure (← pushStmt (.let_ pat (← receiverExpr taken known value)), (patternNames pat).map (·, kind) ++ known)
-      | _, .letMut x value => pure (← pushStmt (.letMut x (← receiverExpr taken known value)), (x, 1) :: known)
-      | _, .expr e => pure (← pushStmt (.expr (← receiverExpr taken known e)), known)
-      | _, .defer e => pure (← pushStmt (.defer (← receiverExpr taken known e)), known)
+      | 0, _ => pure s
+      | _, .let_ pat value => pushStmt (.let_ pat (← receiverExpr taken value))
+      | _, .letMut x value => pushStmt (.letMut x (← receiverExpr taken value))
+      | _, .expr e => pushStmt (.expr (← receiverExpr taken e))
+      | _, .defer e => pushStmt (.defer (← receiverExpr taken e))
       | _, .assign target value =>
         -- (`a[i] = v` is written where it is: what is below it is looked at.)
         let t ← match b.expr target with
           | .call id f #[a, i] =>
             if (b.name? f).map (·.2) == some "index" then do
-              pushExpr (.call id f #[← receiverExpr taken known a, ← receiverExpr taken known i])
-            else receiverExpr taken known target
-          | _ => receiverExpr taken known target
-        let v ← receiverExpr taken known value
-        pure (← pushStmt (.assign t v), known)
-      | fuel + 1, .located line col inner =>
-        let (inner, known) ← here inner fuel
-        pure (← pushStmt (.located line col inner), known)
-    let (s, known) ← here s 64
-    pure (s :: (← receiverStmts taken known rest))
+              pushExpr (.call id f #[← receiverExpr taken a, ← receiverExpr taken i])
+            else receiverExpr taken target
+          | _ => receiverExpr taken target
+        let v ← receiverExpr taken value
+        pushStmt (.assign t v)
+      | fuel + 1, .located line col inner => pushStmt (.located line col (← here inner fuel))
+    pure ((← here s 64) :: (← receiverStmts taken rest))
 
 end
 
@@ -712,18 +596,15 @@ partial def borrowReceivers (items : List Item) (memo : FrontMemo := {}) : List 
     | .fn name ps annots ret b =>
       let (roots, b) := (b.roots.mapM fun c => (do
         let b ← get
-        let ⟨pats, body⟩ := b.clause c
-        -- (Those written with a reference's type: a field of what one points
-        -- to is borrowed through it.)
-        let (values, refs) := paramsOf pats annots
+        let ⟨_, body⟩ := b.clause c
         let borrows := b.borrowsReceiver taken body
-        let c' ← nameBorrowsClause (← receiverClause taken (refs.map (·, 3)) values c)
+        let c' ← nameBorrowsClause (← receiverClause taken c)
         if promote && borrows then promoteFnClause annots c' else pure c' : Build ClauseId)).run b
       .fn name ps annots ret { b with roots }
     | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map (go promote)) }
     | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map (go false)) params assocs
     | .alias name b value =>
-      let (value, b) := (receiverExpr taken [] value).run b
+      let (value, b) := (receiverExpr taken value).run b
       .alias name b value
     | item => item
   -- (Each item made from it and what dotted calls borrow.)
