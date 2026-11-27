@@ -121,6 +121,7 @@ def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Exc
   let mut fns : Std.HashMap String (Unit → Option Syntax.Item) := {}
   let mut twice : List (String × (Unit → Option Syntax.Item)) := []
   let mut aliasUses : Std.HashMap String (List String) := {}
+  let mut instBounded : Array (String × Nat) := #[]
   -- (Each function by the item it is written in; an implementation's by the
   -- implementation and its name.)
   let mut srcKeys : Std.HashMap String UInt64 := {}
@@ -148,12 +149,20 @@ def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Exc
     | .fn name make =>
       -- (A function and every copy made of it for effects, made together.)
       let outs : Thunk (List Syntax.Item) := Thunk.mk fun _ => inst.fn (unfieldItem info (make ()))
+      -- (Each copy given implementations as the function is: copied for
+      -- those it is given, as it is.)
+      if let some k := tr.boundedAt[name]? then
+        for n in inst.names name do
+          unless n == name do instBounded := instBounded.push (n, k)
       for n in inst.names name do
         let get := fun (_ : Unit) => outs.get.find? fun
           | .fn m .. => m == n
           | _ => false
         if fns.contains n then twice := (n, get) :: twice else fns := fns.insert n get
-  pure { blocks := untraitBlocks b, others, fns, twice, aliasUses, srcKeys, globalKey }
+  let blocks := untraitBlocks b
+  let blocks := { blocks with traits := { blocks.traits with
+    boundedAt := instBounded.foldl (fun m (n, k) => m.insertIfNew n k) blocks.traits.boundedAt } }
+  pure { blocks, others, fns, twice, aliasUses, srcKeys, globalKey }
 
 /-- Where lowering starts: no copy asked, the implementations numbered as the
 checker numbered them. -/

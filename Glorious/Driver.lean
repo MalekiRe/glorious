@@ -856,8 +856,11 @@ def compileSource (src : String) (check : Bool := true)
         | Syntax.Item.fn name _ _ _ _ => s.insert name
         | _ => s
       -- (Those still there once traits are lowered: one made into copies is
-      -- elaborated as each copy is.)
+      -- elaborated as each copy is. Not one given implementations, which is
+      -- made only as copies for those it is given: checked, it is made where
+      -- it is used.)
       own.filter fun f => !reached.contains f && L.fns.contains f
+        && (L.blocks.traits.boundedAt[f]?).getD 0 == 0
     | _, _ => []
   let aside : Task (Except String Unit) := Task.spawn fun _ =>
     match missing.isEmpty, lowering, lowered with
