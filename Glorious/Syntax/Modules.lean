@@ -1345,7 +1345,8 @@ def resolveFnF (ctx : Ctx) (global : String) (generics : List String) (name : St
   let ret ← ret.mapM (resolveType ctx generics)
   let run := (do
     let roots ← Flat.byReference (refNamesOfF ctx) (← nestedRefsF body.roots)
-    roots.mapM (resolveClauseF ctx []) : RF (Array Flat.ClauseId))
+    let roots ← roots.mapM (resolveClauseF ctx [])
+    roots.mapM fun c => modifyGet fun b => (Flat.desugarClause c).run b : RF (Array Flat.ClauseId))
   match (run.run body).run (← get) with
   | .ok ((roots, body), st) =>
     set st
@@ -1362,6 +1363,7 @@ partial def resolveItemF (ctx : Ctx) : Syntax.Item → R (List Syntax.Item)
     pure [← resolveFnF ctx (ownName ctx .value name) [] name ps annots ret b]
   | .alias name b value => do
     let (value, b) ← (resolveExprF ctx [] value).run b
+    let (value, b) := (Flat.receiverExpr value).run b
     pure [.alias (ownName ctx .value name) b value]
   | .traitInfo name supers defaults params assocs => do
     let supers ← supers.mapM fun s => (·.1) <$> resolveNamed ctx .trait [] s

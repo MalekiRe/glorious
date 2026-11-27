@@ -587,8 +587,10 @@ function's declared first parameter, `takesReference`, or its result,
 borrowed) is the checker's, by types: `elementBase`, `receiverByName`,
 `writeFieldReceiver`, `writeElementReceiver`, `elementPlaceFor`,
 `variableReceivers`, `placeVal` with `heldFirst` in the elaborator.
-`promote` is gone. What is left of the others is desugaring, each item's
-from the item alone: a dot call's receiver marked for the checker
+`promote` is gone, and so is every separate front pass after the parser:
+what is left of the others is desugaring done where name resolution writes
+a function's body (`Modules.resolveFnF`, `Flat.desugarClause`), each body
+from itself alone: a dot call's receiver marked for the checker
 (`%receiver`), a value made where it is called on named for the statement
 (`Mark.held`), `a[i]` read where it is (`*element_at(&a, i)`), and what is
 borrowed named first (`nameBorrows`, and the parser's `hoist` of a field
