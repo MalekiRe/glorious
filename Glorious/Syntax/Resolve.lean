@@ -93,28 +93,6 @@ partial def expandNamed (aliases : Std.HashMap String (List String × TypeExpr))
 
 end
 
-/-- How `givesReference`'s functions are kept among `takesReference`'s. -/
-def givesKey (name : String) : String := "%gives:" ++ name
-
-/-- The functions written to give a reference: a dot call on what one gives
-is given it as it is, not borrowed again. -/
-partial def givesReference : List Item → List String
-  | [] => []
-  | .pub _ item :: rest => givesReference (item :: rest)
-  | .module _ (some body) :: rest => givesReference body ++ givesReference rest
-  | .fn name _ _ (some r) _ :: rest =>
-    let gives := match r with
-      | .ref .. => true
-      | .performs (.ref ..) _ => true
-      | _ => false
-    if gives then name :: givesReference rest else givesReference rest
-  | .impl { methods := methods, .. } :: rest => givesReference methods ++ givesReference rest
-  | .trait _ methods :: rest =>
-    methods.filterMap (fun md => match md.ret with
-      | some (.ref ..) | some (.performs (.ref ..) _) => some md.name
-      | _ => none) ++ givesReference rest
-  | _ :: rest => givesReference rest
-
 /-- The functions written to take a reference first, each with whether it is
 `&mut`: a function by its first parameter's type, a trait's function by the
 first type it lists. -/
@@ -452,15 +430,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (e : ExprId) : Build 
               let steps ← pushExpr (.tuple (← path.toArray.mapM fun s => pushExpr (.name none s)))
               return ← pushExpr (.call (id + 600000 + k) (← pushExpr (.mark .through))
                 #[r, steps, ← pushExpr (.int (if uniq then 1 else 0))])
-          -- (What an operation gives, borrowed: given a name first. Not what
-          -- a function written to give a reference gives.)
-          match b.expr receiver with
-          | .call _ g _ =>
-            match b.expr g with
-            | .name _ gn => if taken.contains (givesKey gn) then pure receiver else
-                pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark (if uniq then .borrowMut else .borrow))) #[receiver])
-            | _ => pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark (if uniq then .borrowMut else .borrow))) #[receiver])
-          | _ => pure receiver
+          pure receiver
         | none => pure receiver : Build ExprId)
       let given ← args0.toArray.zipIdx.mapM fun (a, k) => match marked a with
         | some r => givenOf k r
@@ -562,7 +532,7 @@ see `receiverExpr`; and what is then borrowed named first
 partial def borrowReceivers (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
   let decls := items.map Item.declared
   let taken : Std.HashMap String Bool :=
-    (takesReference decls ++ (givesReference decls).map (givesKey ·, false)).foldl (fun m (k, v) => m.insertIfNew k v) {}
+    (takesReference decls).foldl (fun m (k, v) => m.insertIfNew k v) {}
   let rec go : Item → Item
     | .pub parent item => .pub parent (go item)
     | .module name (some body) => .module name (some (body.map go))
