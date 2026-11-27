@@ -236,11 +236,14 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
 def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
 
 /-- Something the checker finds of how a program is to be read only once it
-knows types, written where it is found and read on: kept (`St.decided`)
-for the elaborator to write alike (`decideBody`), by the node it is of.
-No body is read again for one. (`eta`, `refPats` and `receiver` are what
-the checker says to itself where it finds one, for whoever reads the
-call or the name to write it there: never kept.) -/
+knows types, written where it is found and read on: kept (`St.decided`),
+so that a node is decided once. The elaborator elaborates the bodies the
+checker read (`Blocks.bodies`), with these in them; what is decided once a
+body is read, a variable made a place (`letMut`) or a receiver found to be
+copied (`receiverCopy`), is written in after (`decideBody`). No body is
+read again for one. (`eta`, `refPats` and `receiver` are what the checker
+says to itself where it finds one, for whoever reads the call or the name
+to write it there: never kept.) -/
 inductive Decision where
   /-- `..` in the tuple pattern `id` stands for `count` parts, written where
   it is (`restNode`). -/
@@ -710,6 +713,10 @@ structure Blocks where
   /-- Blocks written without parameters where a callable taking one argument is
   expected: they take the argument without naming it. -/
   given : Std.HashSet Nat := {}
+  /-- Each function's body as the checker read it, with what it wrote where
+  it found it (`Decision`), by the name it is checked by: what is
+  elaborated in place of the body as written. -/
+  bodies : Std.HashMap String Flat.Body := {}
   /-- The coercions to apply, by the place each is applied at. -/
   coercions : Std.HashMap Site String := {}
   traits : TraitInfo := {}
@@ -740,9 +747,6 @@ structure Blocks where
   /-- Arguments given as other than written (`Check.argsChosen`), by the call
   and the place. -/
   argsChosen : Std.HashMap (Nat × Nat) Expr := {}
-  /-- What the checker decided of how the program is written, where it found
-  it, in the order decided: written into the program once it is checked. -/
-  decided : List Decision := []
 
 structure Globals where
   ctors : Std.HashMap String CtorInfo := {}

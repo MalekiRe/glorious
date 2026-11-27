@@ -400,6 +400,16 @@ So the flag is the destroying pass's to write, from the table, before the
 elaborator: written there, the `let mut` rewrite goes; written in the
 elaborator, it is a second place that has to know.
 
+Landed after: the elaborator elaborates the bodies the checker read
+(`Blocks.bodies`, from `St.decidedFns`), with what the checker wrote where
+it found it; nothing is written in again from the decisions (`decideBody`
+keeps the two decided after a body is read: a variable made a place,
+`letMut`, and a receiver found to be copied once the bounds were met,
+`receiverCopy`), and the count of uses follows the same bodies
+(`St.runFns`). `Decided` and the elaborator's copy of the decisions are
+gone. The checker still rewrites a node and reads it again where a borrow
+is found only once a type is known; that is what the slices below are of.
+
 Landed after: the front end no longer makes a variable of a `let`, a
 parameter or a name a pattern binds for being borrowed, indexed or
 borrowed by field (`promote` keeps the names it makes up itself, those an

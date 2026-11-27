@@ -817,6 +817,10 @@ structure St where
   /-- The bodies of a unit's functions as written, which the count of uses
   follows until one is checked and its body is in `runFns`. -/
   declFns : Std.HashMap String Flat.Body := {}
+  /-- Each function's body as the checker read it, with what it wrote where
+  it found it, and the variables it made places: what the elaborator
+  elaborates (`Elab.Blocks.bodies`). -/
+  decidedFns : Std.HashMap String Flat.Body := {}
   runCtors : Std.HashSet String := {}
   runAliases : Std.HashMap String Expr := {}
   runOps : Std.HashMap String Bool := {}

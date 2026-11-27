@@ -80,7 +80,18 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
 /-- Each `let` of the group that is a place (`St.placedLets`) written `let
 mut` for the elaborator, as a variable the checker decided: what is
 checked already, not checked again. -/
-def placeLets (decls : List FnDecl) : M Unit := do
+def placeLets (decls : List FnDecl) (from_ : Nat) : M Unit := do
+  -- (A receiver found to be copied only once the bounds were met, after the
+  -- body was read, `checkLateReceivers`: written in now.)
+  let late := ((← get).decided.drop from_).filter fun
+    | .receiverCopy .. => true
+    | _ => false
+  unless late.isEmpty do
+    let write := fun (m : Std.HashMap String Flat.Body) => decls.foldl (fun m d =>
+      match m[d.name]? with
+      | some b => m.insert d.name (late.foldl (fun b dec => Elab.decideBody dec d.name b) b)
+      | none => m) m
+    modify fun s => { s with runFns := write s.runFns, decidedFns := write s.decidedFns }
   let s ← get
   let lets := s.placedLets.toList.filter fun p => decls.any (·.name == p.1)
   -- (A name a clause binds: kept in a variable where the clause starts,
@@ -90,11 +101,16 @@ def placeLets (decls : List FnDecl) : M Unit := do
   let mine := lets ++ params.eraseDups
   if mine.isEmpty then return
   let ds := mine.map fun (owner, l, c, x) => Elab.Decision.letMut owner l c x
+  let place := fun (m : Std.HashMap String Flat.Body) => decls.foldl (fun m d =>
+    match m[d.name]? with
+    | some b => m.insert d.name (ds.foldl (fun b dec => Elab.decideBody dec d.name b) b)
+    | none => m) m
   modify fun s =>
     { s with decided := s.decided ++ ds
              runFns := decls.foldl (fun m d =>
                let b := ds.foldl (fun b dec => Elab.decideBody dec d.name b) ((m[d.name]?).getD d.body)
-               m.insert d.name b) s.runFns }
+               m.insert d.name b) s.runFns
+             decidedFns := place s.decidedFns }
 
 /-- Check a group: what can be known only once types are is written where
 it is found (`Elab.Decision`), and written in the bodies later checks
@@ -102,7 +118,8 @@ follow (`placeLets`). Nothing is checked again. -/
 def checkWritten (decls : List FnDecl) : M Unit := do
   -- (Refused, said from the state the group began from: what it had
   -- recorded is not another's to meet.)
-  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls) fun e => throwThe Elab.Said e
+  let from_ := (← get).decided.length
+  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls from_) fun e => throwThe Elab.Said e
 
 /-- `x`, or its refusal: what it did kept, the state not put
 back (which would hold it twice, and copy what it changes). -/
@@ -1056,14 +1073,13 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         impls := implEs
         drops := s.dropSites.toList
         destroys := destroys.toList }
-    pure { given := .ofList s.given.toList
+    pure { given := .ofList s.given.toList, bodies := s.decidedFns
            coercions := Elab.firstOf s.coercions.toList, traits := traitInfo.index
            fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
            fieldReads := Elab.firstOf s.fieldReads.toList, packs := Elab.firstOf s.packs.toList
            derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes
            dotChosen := Elab.firstOf s.dotChosen, argsChosen := Elab.firstOf s.argsChosen
-           scalarLits := s.scalarLits.foldl (fun m (f, e, t) => m.insert (f, e) t) {}
-           decided := s.decided }).run st
+           scalarLits := s.scalarLits.foldl (fun m (f, e, t) => m.insert (f, e) t) {} }).run st
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a

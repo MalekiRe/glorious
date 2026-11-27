@@ -621,26 +621,16 @@ def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
   onClause go b c :=
     if line != 0 || col != 0 then none else (heldFirst x).onClause go b c
 
-/-- A function's body with one thing the checker wrote where it found it
-written in alike: `name` is the name the function is checked by. (What
-the checker only says to itself, to be written where it is, `receiver`,
-`refPats` and `eta`, is never kept.) -/
+/-- A function's body with one thing the checker decided after it read the
+body written in: a variable it made a place (`letMut`), a receiver found to
+be copied once the bounds were met (`receiverCopy`). What it decided while
+reading a body it wrote there itself (`Blocks.bodies`). `name` is the name
+the function is checked by. -/
 def decideBody (d : Decision) (name : String) (b : Flat.Body) : Flat.Body :=
   match d with
-  | .restHere id count => (restNode id count b).getD b
   | .letMut owner line col x => if name == owner then (letMutRewriteF line col x).body b else b
-  | .receiverHere call fn borrow => (receiverNode call fn borrow b).getD b
-  | .receiverTemp call fn uniq root => (receiverTempNode call fn uniq root b).getD b
-  | .receiverField call fn uniq star => (receiverFieldNode call fn uniq star b).getD b
   | .receiverCopy call => (receiverCopyNode call b).getD b
-  | .derefHere id borrow => (derefNode id borrow b).getD b
-  | .derefAssignHere id borrow => (derefAssignNode id borrow b).getD b
-  | .derefRefHere id uniq borrow => (derefRefNode id uniq borrow b).getD b
-  | .compareHere call refs => (compareNode call refs b).getD b
-  | .reborrowHere owner node x => if name == owner then (reborrowNode node x b).getD b else b
-  | .etaHere owner node x arity id => if name == owner then (etaNode node x arity id b).getD b else b
-  | .refPatsHere id clauses => (refPatsNode id clauses b).getD b
-  | .eta .. | .refPats .. | .receiver .. => b
+  | _ => b
 
 /-- Every function of an item with what the checker decided written in, each
 under the name it is checked by. -/
@@ -656,58 +646,20 @@ partial def Item.decide (f : String → List (Option TypeExpr) → Flat.Body →
   | .pub parent item => .pub parent (Item.decide f item)
   | item => item
 
-/-- What the checker decided is of: the identities of the calls, callables,
-fields and tuple patterns it decided something of, and the functions it
-decided something in. -/
-structure Decided where
-  calls : Std.HashSet Nat := {}
-  closures : Std.HashSet Nat := {}
-  fields : Std.HashSet Nat := {}
-  rests : Std.HashSet Nat := {}
-  owners : Std.HashSet String := {}
+/-- The calls the checker chose the function or an argument of
+(`chosenRewrite`). -/
+def chosenCalls (b : Blocks) : Std.HashSet Nat :=
+  b.argsChosen.fold (fun s (call, _) _ => s.insert call) (b.dotChosen.fold (fun s call _ => s.insert call) {})
 
-def Decided.of (b : Blocks) : Decided := Id.run do
-  let mut d : Decided := {}
-  for decision in b.decided do
-    d := match decision with
-      | .restHere id _ => { d with rests := d.rests.insert id }
-      | .letMut owner _ _ _ | .etaHere owner _ _ _ _ => { d with owners := d.owners.insert owner }
-      | .refPatsHere id _ => { d with closures := d.closures.insert id }
-      | .reborrowHere owner _ _ => { d with owners := d.owners.insert owner }
-      | .receiverHere call _ _ | .receiverTemp call _ _ _ | .receiverField call _ _ _ | .receiverCopy call
-      | .compareHere call _ => { d with calls := d.calls.insert call }
-      | .derefHere id _ | .derefAssignHere id _ | .derefRefHere id _ _ => { d with fields := d.fields.insert id }
-      | .eta .. | .refPats .. | .receiver .. => d
-  for (call, _) in b.dotChosen do d := { d with calls := d.calls.insert call }
-  for ((call, _), _) in b.argsChosen do d := { d with calls := d.calls.insert call }
-  pure d
-
-partial def Decided.pat (d : Decided) : Pattern → Bool
-  | .var x => (tupleRestOf x).any d.rests.contains
-  | .ctor _ _ ps | .tuple ps => ps.any d.pat
-  | _ => false
-
-/-- Does a body have something in it the checker decided of? Its nodes are
-looked at where they are kept, each kind in its array. -/
-def Decided.body (d : Decided) (b : Flat.Body) : Bool :=
-  b.exprs.any (fun
-    | .call i _ _ | .tailCall i _ _ => d.calls.contains i
-    | .closure i _ => d.closures.contains i
-    | .fieldOf i _ _ | .refField i _ _ _ _ => d.fields.contains i
-    | _ => false)
-  || (!d.rests.isEmpty && (b.clauses.any (·.pats.any d.pat)
-    || b.stmts.any fun | .let_ p _ => d.pat p | _ => false))
-
-/-- Does an item have something in it the checker decided of? -/
-partial def Decided.item (d : Decided) : Syntax.Item → Bool
-  | .fn name _ _ _ b => d.owners.contains name || d.body b
-  | .impl { trait := tr, head := head, methods := methods, .. } => methods.any fun
-    | .fn m _ _ _ b => d.owners.contains (implFnName tr.spelled head m) || d.body b
-    | item => d.item item
-  | .traitInfo _ _ defaults _ _ => defaults.any d.item
-  | .module _ (some body) => body.any d.item
-  | .pub _ item => d.item item
-  | .alias _ b _ => d.body b
+/-- Does an item have a call in it of `calls`? -/
+partial def hasCall (calls : Std.HashSet Nat) : Syntax.Item → Bool
+  | .fn _ _ _ _ b | .alias _ b _ => b.exprs.any fun
+    | .call i _ _ | .tailCall i _ _ => calls.contains i
+    | _ => false
+  | .impl { methods := methods, .. } => methods.any (hasCall calls)
+  | .traitInfo _ _ defaults _ _ => defaults.any (hasCall calls)
+  | .module _ (some body) => body.any (hasCall calls)
+  | .pub _ item => hasCall calls item
   | _ => false
 
 /-- The function of each dot call the checker chose by the value's type,
@@ -762,28 +714,16 @@ def scalarLiterals (b : Blocks) (items : List Syntax.Item) : List Syntax.Item :=
           Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none s!"{t}_of")) #[lit]) }
     rw.body body) item
 
-/-- A program with what the checker decided of it written in: `Decision`s
-first (`decideBody`), then the dot calls and arguments it chose, where they
-are (`chosenRewrite`). Only the items it
-decided something in are written again: what is decided of an item changes
-that item alone. -/
-def decidedProgram (b : Blocks) (items : List Syntax.Item) : List Syntax.Item := Id.run do
-  let d := Decided.of b
-  if d.calls.isEmpty && d.closures.isEmpty && d.fields.isEmpty && d.rests.isEmpty && d.owners.isEmpty then
-    return scalarLiterals b items
-  -- (What the `Decision`s are of, alone.)
-  let decisions := Decided.of { b with dotChosen := {}, argsChosen := {} }
-  let chosen := !b.dotChosen.isEmpty || !b.argsChosen.isEmpty
-  let rw := chosenRewrite b
-  -- (The literals the checker found of a type, after the decisions: it
-  -- found them in the body read again with those, `x` of a body made
-  -- of more than was written.)
-  let items := items.map fun item =>
-    if !d.item item || !decisions.item item then item else
-    b.decided.foldl (fun item dec => Item.decide (fun name _ b => decideBody dec name b) item) item
+/-- A program as the checker read it: each function's body the checker's
+(`Blocks.bodies`), with what it found written where it found it; then the
+literals it found of a type (`scalarLiterals`), and the dot calls and
+arguments it chose, where they are (`chosenRewrite`). -/
+def decidedProgram (b : Blocks) (items : List Syntax.Item) : List Syntax.Item :=
+  let items := items.map (Item.decide fun name _ body => (b.bodies[name]?).getD body)
   let items := scalarLiterals b items
-  items.map fun item =>
-    if !d.item item then item else
-    if chosen then item.mapBodies rw.body else item
+  let calls := chosenCalls b
+  if calls.isEmpty then items else
+  let rw := chosenRewrite b
+  items.map fun item => if hasCall calls item then item.mapBodies rw.body else item
 
 end Glorious.Elab

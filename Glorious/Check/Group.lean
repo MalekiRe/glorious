@@ -541,7 +541,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
         let t ← inferCallable [] annots ret (some d.name) d.body.roots s!"the clauses of `{d.name}` do"
         -- (The body as read, with what was written where it was found: what
         -- the count of uses follows, `placeLets`.)
-        modify fun s => { s with runFns := s.runFns.insert d.name s.body }
+        modify fun s => { s with runFns := s.runFns.insert d.name s.body, decidedFns := s.decidedFns.insert d.name s.body }
         pure t) : M Ty).run s : M Ty)
   if let some effects := declared then
     let (effects, rest) ← resolveRow rigid false effects
