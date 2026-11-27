@@ -1288,12 +1288,6 @@ def checkUses (code : Flat.Body) (pos : String) (outer : Scope) (binds : Scope) 
   -- Report at the statement the bindings belong to, not the last one checked.
   modify fun st => { st with pos := pos }
   let s ← get
-  -- (A dot call's receiver borrowed for the type's own function is a borrow
-  -- of the variable, not a use of it: `dotBorrows`.)
-  let code := s.dotRefs.foldl (fun (bb : Flat.Body) (a, uniq, x) =>
-    match bb.exprs[a]? with
-    | some (.name none y) => if y == x then { bb with exprs := bb.exprs.set! a (.ref uniq x) } else bb
-    | _ => bb) code
   -- What only computes: the machine's own operations and what builds a value.
   let ctx : ACtx :=
     { fns := s.runFns, declFns := s.declFns, ctors := s.runCtors, aliases := s.runAliases, ops := s.runOps,

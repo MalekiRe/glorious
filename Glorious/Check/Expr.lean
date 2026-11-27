@@ -1255,6 +1255,11 @@ partial def dotBorrows (b : Flat.Body) (x : String) (t : Ty) (rest : List Flat.S
     | (some 0, some k) => pure (if k != 0 then some (a, k == 2) else none)
     | _ => pure none
 
+/-- Each of `dotBorrows`' receivers borrowed where it is, `&x`. -/
+partial def writeDotBorrows (x : String) (borrows : List (Flat.ExprId × Bool)) : M Unit :=
+  modify fun s => { s with body := borrows.foldl (fun (bb : Flat.Body) (a, uniq) =>
+    { bb with exprs := bb.exprs.set! a (.ref uniq x) }) s.body }
+
 /-- `x.f.g` where `x` holds a reference: the name, the path of fields, and the
 identity of the last read. -/
 partial def fieldThroughRef (scope : Scope) (e : Flat.ExprId) : M (Option (String × List String × Nat)) := do
@@ -2582,9 +2587,8 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
         modify fun s => { s with bindSites := (bid, at_.1, at_.2) :: s.bindSites }
     -- (Its dot calls the function of its type's own borrows it for are not
     -- uses that give it away, as a variable's are, `dotBorrows`: it is a
-    -- place where they are made.)
-    let borrows ← dotBorrows b x t rest
-    modify fun s => { s with dotRefs := s.dotRefs ++ (borrows.map fun (a, uniq) => (a, uniq, x)).toArray }
+    -- place where they are made, borrowed there.)
+    writeDotBorrows x (← dotBorrows b x t rest)
   let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
   modify fun s => { s with pending := s.pending.push check }
   let here := (← get).pos
@@ -2643,11 +2647,9 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
   -- takes it whole: given to that one, `wholeReceiver`.)
   -- (Its dot calls the function of its type's own borrows it for are not
   -- uses that give it away, `dotBorrows`.)
-  let borrows ← dotBorrows b x t rest
-  modify fun s => { s with dotRefs := s.dotRefs ++ (borrows.map fun (a, uniq) => (a, uniq, x)).toArray }
-  let seen := borrows.foldl (fun (bb : Flat.Body) (a, uniq) =>
-    { bb with exprs := bb.exprs.set! a (.ref uniq x) }) b
-  let given := seen.givenAway x rest || (← wholeReceiver b x t rest)
+  writeDotBorrows x (← dotBorrows b x t rest)
+  let b := (← get).body
+  let given := b.givenAway x rest || (← wholeReceiver b x t rest)
   modify fun s =>
     { s with
       cells := s.cells.push (brand, x, t)
@@ -3034,13 +3036,8 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     { s with later := free, temps := [], anon := [] }
   -- What the callable captures from the scope it is written in.
   let cap ← freshCap
-  -- (A value it only borrows, `&x` of one not a reference: as a place.
-  -- Its dot calls its type's own function borrows it for are borrows,
-  -- `dotBorrows`.)
-  let seen := (← get).dotRefs.foldl (fun (bb : Flat.Body) (a, uniq, x) =>
-    match bb.exprs[a]? with
-    | some (.name none y) => if y == x then { bb with exprs := bb.exprs.set! a (.ref uniq x) } else bb
-    | _ => bb) b
+  -- (A value it only borrows, `&x` of one not a reference: as a place.)
+  let seen := b
   let borrowsOnly := fun (x : String) => clauses.all fun c =>
     let u := seen.nameUseClause false x c
     !u.valued && !u.valuedInside && !u.looked
