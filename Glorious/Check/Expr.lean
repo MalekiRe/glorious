@@ -61,12 +61,23 @@ def readPart (scope : Scope) (e : Flat.ExprId) (subject : Ty) (idx : Nat) (name 
         modify fun s => { s with leftBehind := s.leftBehind.push (r, s.pos ++ why) }
     | none => mustDrop subject why
 
-/-- Is `x` a value made where a dot call is made on it (`borrowed%call`),
-whose type has a function of its own of the name that takes it whole, where
-the function the resolver took borrows it? -/
-def wholeReceiver (x : String) (t : Ty) : M Bool := do
+/-- Is `x` a value made where a dot call is made on it (`borrowed%..`, the
+call the first of `rest` to take it first), whose type has a function of
+its own of the name that takes it whole, where the function the resolver
+took borrows it? -/
+def wholeReceiver (b : Flat.Body) (x : String) (t : Ty) (rest : List Flat.StmtId) : M Bool := do
   unless x.startsWith "borrowed%" do return false
-  let some call := (x.splitOn "borrowed%").getLast? |>.bind String.toNat? | return false
+  let takes := fun (e : Flat.ExprId) => match b.expr e with
+    | .call call _ args | .tailCall call _ args =>
+      match args[0]?.map b.expr with
+      | some (.ref _ y) | some (.name none y) => if y == x then some call else none
+      | _ => none
+    | _ => none
+  let rec find? (fuel : Nat) (e : Flat.ExprId) : Option Nat :=
+    match fuel with
+    | 0 => none
+    | fuel + 1 => (takes e).orElse fun _ => (b.children e).findSome? (find? fuel)
+  let some call := rest.findSome? fun s => (b.stmtExprs s).toList.findSome? (find? 256) | return false
   let some alts := dotAltsOf (← get).modules call | return false
   let some (h, _) := (← find t).head | return false
   let some alt := alts.find? (·.startsWith (h ++ "::")) | return false
@@ -2554,7 +2565,7 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
   modify fun s => { s with dotRefs := s.dotRefs ++ (borrows.map fun (a, uniq) => (a, uniq, x)).toArray }
   let seen := borrows.foldl (fun (bb : Flat.Body) (a, uniq) =>
     { bb with exprs := bb.exprs.set! a (.ref uniq x) }) b
-  let given := seen.givenAway x rest || (← wholeReceiver x t)
+  let given := seen.givenAway x rest || (← wholeReceiver b x t rest)
   modify fun s =>
     { s with
       cells := s.cells.push (brand, x, t)

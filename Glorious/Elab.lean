@@ -977,32 +977,26 @@ def destroyers (tr : TraitInfo) : List Item :=
         ++ (if inner then [Item.fnOf fields [] blank none clauses] else [])
     | none => [asValue, Item.fnOf method [] blank none clauses]
 
-/-- The names given to the `_` of a `let`'s pattern, as that statement's. -/
-partial def letWilds (pos : Nat × Nat) : Pattern → Pattern
-  | .var x => if x.startsWith "%wild" then .var s!"{x}@{pos.1}:{pos.2}" else .var x
-  | .tuple ps => .tuple (ps.map (letWilds pos))
-  | .ctor c q ps => .ctor c q (ps.map (letWilds pos))
-  | p => p
-
 mutual
 
-/-- Patterns with each `_` whose number `named` picks written as a name: the
-`_` are numbered in the order they are read, from `k`. Gives the number after
-the last. -/
-partial def nameWilds (named : Nat → Bool) : List Pattern → Nat → List Pattern × Nat
+/-- Patterns with each `_` whose number `named` picks written as a name,
+`name k` (`wildName`, or `letWildName` in a `let`'s pattern): the `_` are
+numbered in the order they are read, from `k`. Gives the number after the
+last. -/
+partial def nameWilds (named : Nat → Bool) (name : Nat → String) : List Pattern → Nat → List Pattern × Nat
   | [], k => ([], k)
   | p :: rest, k =>
-    let (p, k) := nameWild named p k
-    let (rest, k) := nameWilds named rest k
+    let (p, k) := nameWild named name p k
+    let (rest, k) := nameWilds named name rest k
     (p :: rest, k)
 
-partial def nameWild (named : Nat → Bool) : Pattern → Nat → Pattern × Nat
-  | .wild, k => (if named k then .var (wildName k) else .wild, k + 1)
+partial def nameWild (named : Nat → Bool) (name : Nat → String) : Pattern → Nat → Pattern × Nat
+  | .wild, k => (if named k then .var (name k) else .wild, k + 1)
   | .tuple ps, k =>
-    let (ps, k) := nameWilds named ps k
+    let (ps, k) := nameWilds named name ps k
     (.tuple ps, k)
   | .ctor c q ps, k =>
-    let (ps, k) := nameWilds named ps k
+    let (ps, k) := nameWilds named name ps k
     (.ctor c q ps, k)
   | p, k => (p, k)
 
@@ -1091,7 +1085,7 @@ private partial def untraitClause (tr : TraitInfo) (owner : String) (c : ClauseI
   -- `tail`, nothing can be done after: what it does not use is destroyed
   -- before it starts, which is the cleanup a `tail` call has before it.
   let first := b.clausePlace body
-  let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, .name (wildName k), false⟩).isSome) pats 0
+  let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, .name (wildName k), false⟩).isSome) wildName pats 0
   let early := tailsStmts b body
   -- (A name the clause straight away makes a variable of the same name,
   -- to be borrowed, is the variable's to destroy: the place and the name
@@ -1157,8 +1151,9 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
           -- What the pattern takes under a name nothing uses, or under `_`
           -- (given a name for it), is destroyed likewise.
           let site := fun (x : String) => (⟨owner, pos.1, pos.2, .letBound x, false⟩ : DropSite)
-          let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome) [pat] 0
-          let pat := letWilds pos ((pats.head?).getD pat)
+          let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome)
+            (letWildName pos.1 pos.2) [pat] 0
+          let pat := (pats.head?).getD pat
           (pat, (patVars pat).flatMap fun x => (dropHook tr (site x)).toList ++ partHooks tr owner pos x)
       -- (Before a `tail` call there is no later: see the clause's own.)
       let now := tailsStmts (← get) rest
