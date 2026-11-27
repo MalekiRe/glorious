@@ -211,6 +211,9 @@ partial def numberDict (d : DictE) : StateM Numbering (Option Nat) := do
 def firstOf {κ ν : Type} [BEq κ] [Hashable κ] (l : List (κ × ν)) : Std.HashMap κ ν :=
   l.foldl (fun m (k, v) => if m.contains k then m else m.insert k v) {}
 
+/-- The function that makes an implementation a value. -/
+def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
+
 /-- What the elaborator looks up of a program's traits, by what it looks it
 up by. -/
 def TraitInfo.index (t : TraitInfo) : TraitInfo :=
@@ -222,8 +225,19 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
     knownOf := numbered.byObject.fold (init := {}) fun m k (_, r) => match r with
       | some n => m.insert k n
       | none => m
-    dictsAt := firstOf t.dicts, methodsAt := firstOf t.methods, boundedAt := firstOf t.bounded
-    implsAt := firstOf (t.impls.map fun im => (im.dictFn, im)), dropsAt := firstOf t.drops
+    dictsAt := firstOf t.dicts, methodsAt := firstOf t.methods
+    -- (And each destroyer, given how its parts are destroyed: copied for
+    -- those as any function for the implementations it is given.)
+    boundedAt := firstOf (t.bounded ++ t.destroys.flatMap fun D =>
+      if D.given == 0 then [] else
+      [(Syntax.implFnName Syntax.destroyTrait D.head Syntax.destroyFn, D.given),
+       ("%destroy from " ++ D.head, D.given), ("%fields " ++ D.head, D.given)])
+    -- (And each destroyer's value: an implementation known as any other.)
+    implsAt := firstOf ((t.impls.map fun im => (im.dictFn, im)) ++ t.destroys.map fun D =>
+      let dictFn := implDictName Syntax.destroyTrait D.head
+      (dictFn, ({ dictFn, conditions := D.given,
+                  methods := [(Syntax.implFnName Syntax.destroyTrait D.head Syntax.destroyFn, 1)] } : ImplE)))
+    dropsAt := firstOf t.drops
     partsAt := t.drops.foldl (fun m (site, _) =>
       match site.name, site.assign with
       | .part x _, false =>
@@ -232,8 +246,6 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
           | none => some #[site]
       | _, _ => m) {} }
 
-/-- The function that makes an implementation a value. -/
-def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
 
 /-- Something the checker finds of how a program is to be read only once it
 knows types, written where it is found and read on: kept (`St.decided`),
