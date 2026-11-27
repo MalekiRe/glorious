@@ -1032,6 +1032,25 @@ def markMoves (x : String) (taken : Nat → Bool) : Flat.FRewrite where
     | .assign target e => some (do Flat.pushStmt (.assign target (← go.ex e)))
     | _ => none
 
+/-- Where the checker says a name's value is given away on some path and not
+on another (`SiteName.given`, at `pos`): `rest` with a flag of its own
+before it, set wherever the value is used (`markMoves`), and what destroys
+the value where its block is left if the flag is not set, as Rust's drop
+flags do. None where it is not so. -/
+def flagged (tr : TraitInfo) (env : Array Nat) (owner : String) (pos : Nat × Nat) (x : String)
+    (rest : List Flat.StmtId) : UntraitM (Option (List Flat.StmtId)) := do
+  let some [d] := (tr.dropsAt[(⟨owner, pos.1, pos.2, .given x, false⟩ : DropSite)]?).bind
+      fun id => tr.dictsAt[id]? | return none
+  let flag := Syntax.movedFlag x
+  let destroy ← (destroyCall tr env d (.name none x) : StateM Copies _)
+  let unless_moved := Expr.call 0 (.closure 0
+    [.mk [.int 0] [.expr destroy],
+     .mk [.wild] [.expr (.tuple [])]]) [.name none flag]
+  let taken := fun (node : Nat) => tr.dropsAt.contains (takenSite owner node x)
+  let marked ← rest.mapM fun s => ((markMoves x taken).st s : Flat.Build Flat.StmtId)
+  let hook ← Flat.pushStmt (.defer (← Flat.flatExpr unless_moved))
+  pure (some ((← Flat.pushStmt (.letMut flag (← Flat.pushExpr (.int 0)))) :: hook :: marked))
+
 open Flat in
 mutual
 
@@ -1110,7 +1129,11 @@ private partial def untraitClause (tr : TraitInfo) (env : Array Nat) (owner : St
   let hooks ← found.mapM fun h => do
     let e ← flatExpr h
     pushStmt (if early then .expr e else .defer e)
-  let rest ← untraitStmts tr env owner (0, 0) body
+  let mut rest ← untraitStmts tr env owner (0, 0) body
+  -- (A name the clause binds that one path gives away and another does
+  -- not: its flag where the clause starts.)
+  for x in (pats.flatMap patVars).reverse do
+    if let some flagged ← flagged tr env owner first x rest then rest := flagged
   pushClause ⟨pats, (hooks ++ rest).toArray⟩
 
 /-- The statements of a block. A variable whose value is to be destroyed is
@@ -1139,22 +1162,21 @@ private partial def untraitStmts (tr : TraitInfo) (env : Array Nat) (owner : Str
         -- A variable that gives its value away where it is used: what it
         -- holds is destroyed when its block is left only if it was not. A
         -- flag says, set wherever the value is used.
-        match (tr.dropsAt[(⟨owner, pos.1, pos.2, .given x, false⟩ : DropSite)]?).bind
-            fun id => tr.dictsAt[id]? with
-        | some [d] =>
-          let flag := Syntax.movedFlag x
-          let destroy ← (destroyCall tr env d (.name none x) : StateM Copies _)
-          let unless_moved := Expr.call 0 (.closure 0
-            [.mk [.int 0] [.expr destroy],
-             .mk [.wild] [.expr (.tuple [])]]) [.name none flag]
-          let taken := fun (node : Nat) => tr.dropsAt.contains (takenSite owner node x)
-          let marked ← rest.mapM fun s => ((markMoves x taken).st s : Build StmtId)
-          pure ((← pushStmt (.letMut x value)) :: (← pushStmt (.letMut flag (← pushExpr (.int 0))))
-            :: (← hookS unless_moved false) :: marked)
-        | _ => pure ((← pushStmt (.letMut x value)) :: rest)
+        match ← flagged tr env owner pos x rest with
+        | some flagged => pure ((← pushStmt (.letMut x value)) :: flagged)
+        | none => pure ((← pushStmt (.letMut x value)) :: rest)
     | .let_ pat value =>
       let value ← untraitExpr tr env owner value
       let rest ← untraitStmts tr env owner pos rest
+      -- (A value one path gives away and another does not: its flag, as a
+      -- variable's.)
+      let mut rest := rest
+      let mut flaggedAny := false
+      for x in (patVars pat).reverse do
+        if let some f ← flagged tr env owner pos x rest then
+          rest := f
+          flaggedAny := true
+      if flaggedAny then if let .var _ := pat then return (← pushStmt (.let_ pat value)) :: rest
       let (pat, hooks) ← match pat with
         | .var x => do
           pure (pat, (← hook ⟨owner, pos.1, pos.2, .name x, false⟩).toList

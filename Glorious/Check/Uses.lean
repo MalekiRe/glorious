@@ -1361,8 +1361,8 @@ def edgesOfSource (c : Nat) : M (List (Nat × Captured × Option (String × Nat)
 /-- A `let x` at `line:col` (or a parameter, at `0:0`) whose value one path
 gives away and another does not: kept in a variable with a flag, set where it is given away, that
 destroys it where its block ends if it is not (the elaborator's, from the
-drop site `SiteName.given`), as Rust's drop flags do. What was checked holds of
-it as written: it is not read again (`placeLets` writes it `let mut`). -/
+drop site `SiteName.given`, `Elab.flagged`), as Rust's drop flags do: it
+stays the value it was checked as. -/
 def flagPlace (owner : String) (line col : Nat) (x : String) (t : Ty) (pos : String)
     (b : Flat.Body) (body : List Flat.StmtId) : M Bool := do
   -- (A parameter, at no place: its variable starts where the clause's first
@@ -1374,8 +1374,7 @@ def flagPlace (owner : String) (line col : Nat) (x : String) (t : Ty) (pos : Str
   let some (l, c) := at_ | return false
   modify fun st =>
     { st with dropCands := st.dropCands.push (⟨owner, l, c, .given x, false⟩, t, pos)
-              flagged := pos :: st.flagged
-              placedLets := st.placedLets.push (owner, line, col, x) }
+              flagged := pos :: st.flagged }
   pure true
 /-- With the types of a function known: note which of its calls certainly come
 back, and look at each binding that may have to be used. `fnTy` is the
