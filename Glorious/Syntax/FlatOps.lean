@@ -751,27 +751,6 @@ def renameInBody (pairs : List (String × String)) (b : Body) : Body :=
     pushClause ⟨cl.pats, body.toArray⟩ : Build ClauseId)).run b
   { b with roots }
 
-/-- `&list[i]` of a parameter `list` written with a reference's type
-(`Syntax.throughParamsRewrite`). -/
-def throughParamsRewrite (refs : List String) : FRewrite where
-  onExpr go b e :=
-    match b.expr e with
-    | .call id f args => some (do
-      let args ← args.mapM go.ex
-      let b ← get
-      let args ← match (b.name? f).map (·.2), args.toList with
-        | some "element_at", [r, i] =>
-          match b.expr r with
-          | .ref false x => if refs.contains x then pure #[← pushExpr (.name none x), i] else pure args
-          | _ => pure args
-        | some "place_at", [i, r] =>
-          match b.expr r with
-          | .ref true x => if refs.contains x then pure #[i, ← pushExpr (.name none x)] else pure args
-          | _ => pure args
-        | _, _ => pure args
-      pushExpr (.call id (← go.ex f) args))
-    | _ => none
-
 /-- Is a name bound here one that what follows borrows with `&` and never
 changes (`Syntax.borrowedOnly`)? -/
 def Body.borrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=
@@ -883,29 +862,10 @@ def promoteClause (c : ClauseId) (slicesMut : List String) : Build ClauseId := d
   let body ← promoteRewrite.stmtList body.toList
   promoteHeld (← pushClause ⟨pats, body.toArray⟩) slicesMut
 
-/-- The parameters of a clause written with `annots` that are values (written
-with a type that is no reference's) and those that are references. -/
-def paramsOf (pats : List Pattern) (annots : List (Option TypeExpr)) : List String × List String :=
-  -- (A slice, `&[T]`, is a value: the prelude's `SliceRef`, an address and
-  -- a length; `xs[i] = v` of an `xs: &mut [T]` borrows it to write.)
-  let isRef := fun (t : TypeExpr) => match t with
-    | .ref _ (.name n _) _ => n != sliceMark
-    | .ref _ _ _ => true
-    | _ => false
-  ((pats.zip annots).filterMap fun
-    | (.var x, some t) => if isRef t then none else some x
-    | _ => none,
-   (pats.zip annots).filterMap fun
-    | (.var x, some t) => if isRef t then some x else none
-    | _ => none)
-
 /-- A clause of a function whose parameters are written with `annots`, made
-so (`promoteClause`). (One written with a reference's type, `list: &[T]`:
-`&list[0]` is the element through that reference, not through one to it.) -/
+so (`promoteClause`). -/
 def promoteFnClause (annots : List (Option TypeExpr)) (c : ClauseId) : Build ClauseId := do
   let pats := ((← get).clause c).pats
-  let (_, refs) := paramsOf pats annots
-  let c ← if refs.isEmpty then pure c else (throughParamsRewrite refs).clause c
   let slicesMut := (pats.zip annots).filterMap fun
     | (.var x, some (.ref true (.name n _) _)) => if n == sliceMark then some x else none
     | (.var x, some (.name n _)) => if n.endsWith "SliceMut" then some x else none

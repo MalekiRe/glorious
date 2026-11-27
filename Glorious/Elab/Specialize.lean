@@ -333,15 +333,18 @@ def heldFirst (x : String) (at_ : Option (Nat × Nat) := none) : Flat.FRewrite w
   onStmts go b ss :=
     match ss with
     | s :: rest =>
-      let letOf := fun (s : Flat.StmtId) => match b.stmt s with
-        | .let_ (.var y) value => if y == x then some value else none
-        | _ => none
+      -- (Through the places a statement is located at, `located l c
+      -- (located l c (let ..))` of a name made where a statement is.)
+      let rec letOf (s : Flat.StmtId) (fuel : Nat) : Option Flat.ExprId := match fuel, b.stmt s with
+        | _, .let_ (.var y) value => if y == x then some value else none
+        | fuel + 1, .located _ _ inner => letOf inner fuel
+        | _, _ => none
       match b.stmt s with
       | .let_ (.var _) _ =>
-        (letOf s).map fun value => do pure ((← Flat.pushStmt (.letMut x (← go.ex value))) :: (← go.stmts rest))
+        (letOf s 8).map fun value => do pure ((← Flat.pushStmt (.letMut x (← go.ex value))) :: (← go.stmts rest))
       | .located l c inner =>
         if at_ != some (l, c) then none else
-        (letOf inner).map fun value => do
+        (letOf inner 8).map fun value => do
           let held ← Flat.pushStmt (.letMut x (← go.ex value))
           pure ((← Flat.pushStmt (.located l c held)) :: (← go.stmts rest))
       | _ => none
