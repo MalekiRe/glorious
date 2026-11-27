@@ -594,3 +594,34 @@ from the item alone: a dot call's receiver marked for the checker
 borrowed named first (`nameBorrows`, and the parser's `hoist` of a field
 borrowed through what an expression points to, which says where that is
 computed out of turn).
+
+## Step 7, ownership: what the analyses read
+
+The count of uses, the scopes and the borrows (`Uses`, `Scopes`, `Borrows`)
+read the checker's body as it is once a binding's statements are read: every
+borrow a node of its own (`&x`, `&x.f`, `&mut ..`, the element's place), a
+dot call's receiver as the call takes it (no `%receiver` mark is left in a
+body once read: none the body reaches, in the suite or covey/fleet), a comparison of what is not copied
+written by reference, the borrows the type's own functions make written
+where they are (`writeDotBorrows`; the copies of the body patched with them
+for each analysis, `St.dotRefs`, are gone). What each still works out
+itself, with why:
+
+- A field of a copied type read of a name, `x.f`, is no use of `x` (the
+  count reads it as a borrow, `looked`): a copy of a part, which Core has
+  no node for apart from a read.
+- Which of several callables runs is followed through the bodies of the
+  functions that take them (`pathUses`), as conditionals are functions
+  here (`if`, `else`, `match` arms are callables given to them): Rust's MIR
+  has the branches as its own control flow.
+- Before a binding's statements are read, whether it is given away or
+  only borrowed is read off them (`givenAway`, `variableReceivers`), as a
+  variable is a cell from where it is bound.
+
+They run on the checker's flat bodies, as each binding's statements are
+read, not on Core after the elaborator: their messages are of the text,
+and Core has no places of the text's names. What makes a body be read
+again in parts is four adjustments found once a type is (`compareHere`,
+1012 in the suite; `refPatsHere`, 800; `receiverHere`, 500; `etaHere`,
+66): each written where it is and the expression read on, what the first
+reading recorded taken back (`Marks`), never the function again.
