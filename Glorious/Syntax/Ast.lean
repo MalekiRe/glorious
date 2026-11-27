@@ -248,7 +248,6 @@ def inFunction (name : String) (msg : String) : String :=
 
 instance : Inhabited Clause := ⟨.mk [] []⟩
 
-
 /-- The values an `is` found, under the names it found them by: `%is:a,b` is
 the name of what builds them and of their type. A block that is given them
 without naming them has those names. -/
@@ -257,8 +256,6 @@ def packName (names : List String) : String := "%is:" ++ ",".intercalate names
 /-- The names of a pack, if this is the name of one. -/
 def packNames (name : String) : Option (List String) :=
   if name.startsWith "%is:" then some (((name.drop 4).toString.splitOn ",").filter (· != "")) else none
-
-
 
 /-- A step to a field of one of a type's several constructors, `Circle#0`:
 only where a value was just found to be made by that constructor. -/
@@ -269,10 +266,6 @@ def splitCtorStep (step : String) : Option (String × Nat) :=
   match step.splitOn "#" with
   | [ctor, i] => i.toNat?.map fun i => (ctor, i)
   | _ => none
-
-
-
-
 
 /-- The scalar types beside `Int`. A value of each is held as an integer: an
 integer type's own value, the code of a character, the bits of a floating
@@ -357,16 +350,10 @@ def unitMark : String := "%unit"
 program can write these names. -/
 def textEndName : String := "%end"
 
-
-
-
 /-- The comparisons, each with the function of `Eq` or `Ord` that compares
 what two references are to, as it does. -/
 def compareOps : List (String × String) :=
   [("==", "eq"), ("!=", "ne"), ("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")]
-
-
-
 
 /-- What a trait's `i`-th type parameter is where a use of the trait does not
 write it (`trait Add<R = Self>`), kept among what the trait gives
@@ -414,23 +401,6 @@ def projMark : String := "%proj"
 whichever implementation it is. -/
 def markerDict : String := "%marker"
 
-/-- The name under which a name bound by the pattern of a `let` is known
-where it is destroyed: the place is the statement's, which a clause's own
-names are known by too when the statement is its first. -/
-def letSite (x : String) : String := s!"%let:{x}"
-
-def letSiteOf (name : String) : Option String :=
-  if name.startsWith "%let:" then some (name.drop 5).toString else none
-
-/-- Where a callable written at a statement captures `x`: the site under which
-the checker says how what `x` holds is destroyed if the callable is let go
-without being called. -/
-def captureSite (x : String) : String := s!"%capture:{x}"
-
-def captureSiteOf (name : String) : Option String :=
-  if name.startsWith "%capture:" then some (name.drop 9).toString else none
-
-
 /-- The head under which callables are destroyed: by giving them up. -/
 def callableHead : String := "(callable)"
 
@@ -475,7 +445,6 @@ def lastSegment (name : String) : String :=
 
 /-- The function of an implementation: `method` of `trait` for `head`. -/
 def implFnName (trait head method : String) : String := s!"{trait}::{method}@{head}"
-
 
 /-- A written type with each type directly in it made by `f`. -/
 def TypeExpr.mapParts (f : TypeExpr → TypeExpr) : TypeExpr → TypeExpr
@@ -602,9 +571,6 @@ def selfTypeOf (head : String) (args : List TypeExpr) : TypeExpr :=
   else if head == "(&)" then .ref false (args.headD (.tuple [])) none
   else .name head args
 
-
-
-
 /-- The function that works out the constant `name` at compile time. -/
 def constFnName (name : String) : String := name ++ "$const"
 
@@ -676,19 +642,14 @@ def variadicKey (global : String) : String :=
 /-- What a parse of type parameters marks `..T` with, among the defaults. -/
 def variadicMark : String := "%variadic"
 
-
-
 /-- Said of a block, as `spreadMark` is: it is written where a value that is
 no callable is wanted, so it is run there and is its value. -/
 def nowMark : String := "%now"
-
 
 /-- Said of a block, where the names of what an `is` found are said: its
 clauses each take one tuple, and it is given where a callable of that many
 arguments is wanted, so each clause takes the arguments as its tuple's parts. -/
 def spreadMark : String := "%spread"
-
-
 
 /-- `<T as Trait>::Name`, the type or row the trait leaves to `T`'s
 implementation under that name, is the type `%assocOf<T, Trait, Name>`. -/
@@ -704,9 +665,6 @@ partial def aliasValue : Expr → Expr
 def aliasTyped : Expr → Bool
   | .call _ (.mark .ascribe) (_ :: _) => true
   | _ => false
-
-
-
 
 /-- In a written row, the row parameter that stands for the rest of it. -/
 def rowMark : String := "%row"
@@ -1082,18 +1040,11 @@ partial def exprToPat : Expr → Except String Pattern
     pure (.tuple (← args.mapM exprToPat))
   | _ => throw "this constant cannot be used as a pattern"
 
-/-- The name and the place such a name is of. -/
-def partOf (name : String) : Option (String × Nat) :=
-  match name.splitOn ".%" with
-  | [x, i] => i.toNat?.map (x, ·)
-  | _ => none
-
 /-- What a callable's uses are to the code it is written in. -/
 def NameUse.inside (u : NameUse) : NameUse :=
   -- (A name bound again in a callable is another name there: this one is
   -- still itself after it.)
   { u with valued := false, valuedInside := u.valued || u.valuedInside, rebound := false }
-
 
 /-- The variable that says whether what a variable held has been given away,
 and the name the variable's cleanup is known by where it is one that asks. -/
@@ -1103,20 +1054,10 @@ def movedFlag (x : String) : String := s!"%moved:{x}"
 (`derefReads`) where it is through two: a field of the element of a
 `Vec<&T>`, read through the element's reference, `names[0].0`. -/
 def derefTwice : Nat := 1152921504606846976
-def givenSite (x : String) : String := s!"%given:{x}"
-
-/-- Where a part of `x` with something to destroy is taken, `x.f` at the
-node whose identity is said with it (`Elab.takenSite`): the flag that
-says `x` was given away is set there too. -/
-def takenSite (x : String) : String := s!"%taken:{x}"
 
 /-- The place of a field read by name before the type it is read from was
 known: found from the name once the type is. -/
 def partUnknown : Nat := 1000000000
-
-/-- The name a part of a name's value is destroyed under, where the part is
-never read: the name and the part's place among the fields. -/
-def partName (x : String) (i : Nat) : String := s!"{x}.%{i}"
 
 /-- The names `mut name` binds in a pattern, and the pattern with each a
 plain name. -/

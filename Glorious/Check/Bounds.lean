@@ -964,7 +964,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- (What a callable captures is destroyed by it only where its type is
       -- known to need that: a function is not asked how to destroy what
       -- its callables capture of a type it is generic in.)
-      if (Syntax.captureSiteOf site.name).isSome then
+      if let .capture _ := site.name then
         -- (Or of a type the program's own function is generic in, not a
         -- reference or a callable: the function is then given how to
         -- destroy it, and the callable captures that.)
@@ -979,7 +979,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- giving one up is allowed only where what it performs could be.
       if let .fn _ _ effs _ _ ← find ty then
         if !effs.isEmpty && (← needsDestroying [] ty) then
-          let name := (Syntax.captureSiteOf site.name).getD ((Syntax.letSiteOf site.name).getD site.name)
+          let name := site.name.var
           throw (inFunction site.owner s!"{pos}`{name}` is let go here, and giving it up destroys what it holds (a `drop` runs, or the cleanups of the computation it suspended); but it performs operations, and it can be given up only where they could be performed, which is not where it is let go. Call it, or give it up before with `cancel({name})`")
       if (← needsDestroying [] ty) || !(freeTys ty).isEmpty || hasParam ty then
         let id := 2000000000 + (← get).dropAsked

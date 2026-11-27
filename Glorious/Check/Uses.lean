@@ -1181,14 +1181,14 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
               kept := true
               modify fun st => { st with
                 dropCands := st.dropCands.push
-                  (⟨st.owner, line, col, (if st.letBinds.contains bid then Syntax.letSite x else x), false⟩, t, pos)
+                  (⟨st.owner, line, col, (if st.letBinds.contains bid then .letBound x else .name x), false⟩, t, pos)
                 aparts := st.aparts.filter fun (_, _, whose) => whose != some bid }
       -- (Of a type not known yet, as a callable's parameter may be: asked
       -- again once the function it is in has been read.)
       if let .var _ ← find t then
         if let some (line, col) := s.bindSites.lookup bid then
           let site : Elab.DropSite :=
-            ⟨s.owner, line, col, (if s.letBinds.contains bid then Syntax.letSite x else x), false⟩
+            ⟨s.owner, line, col, (if s.letBinds.contains bid then .letBound x else .name x), false⟩
           let reads : List (Ty × Nat) := mine.map fun (subject, idx, _, _) => (subject, idx)
           modify fun st => { st with lateKeeps := st.lateKeeps.push (site, t, reads, pos) }
   if kept then return
@@ -1219,7 +1219,7 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
           match site with
           | some (line, col) =>
             modify fun st =>
-              { st with dropCands := st.dropCands.push (⟨st.owner, line, col, Syntax.partName x i, false⟩, ft, firstAt) }
+              { st with dropCands := st.dropCands.push (⟨st.owner, line, col, .part x i, false⟩, ft, firstAt) }
           | none =>
             modify fun st => { st with leftBehind := st.leftBehind.push (ft, firstAt ++ "taking one field of a value lets go of the rest") }
           modify fun st => { st with pos := pos }
@@ -1367,7 +1367,7 @@ def edgesOfSource (c : Nat) : M (List (Nat × Captured × Option (String × Nat)
 /-- A `let x` at `line:col` (or a parameter, at `0:0`) whose value one path
 gives away and another does not: kept in a variable with a flag, set where it is given away, that
 destroys it where its block ends if it is not (the elaborator's, from the
-drop site `givenSite`), as Rust's drop flags do. What was checked holds of
+drop site `SiteName.given`), as Rust's drop flags do. What was checked holds of
 it as written: it is not read again (`placeLets` writes it `let mut`). -/
 def flagPlace (owner : String) (line col : Nat) (x : String) (t : Ty) (pos : String)
     (b : Flat.Body) (body : List Flat.StmtId) : M Bool := do
@@ -1379,7 +1379,7 @@ def flagPlace (owner : String) (line col : Nat) (x : String) (t : Ty) (pos : Str
     | _ => none
   let some (l, c) := at_ | return false
   modify fun st =>
-    { st with dropCands := st.dropCands.push (⟨owner, l, c, Syntax.givenSite x, false⟩, t, pos)
+    { st with dropCands := st.dropCands.push (⟨owner, l, c, .given x, false⟩, t, pos)
               flagged := pos :: st.flagged
               placedLets := st.placedLets.push (owner, line, col, x) }
   pure true

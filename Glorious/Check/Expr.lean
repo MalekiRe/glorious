@@ -2278,7 +2278,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     -- holds something to destroy, it is given up there.
     unless (b.fvStmts [] rest).contains x do
       modify fun s =>
-        { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
+        { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, .name x, false⟩, t, pos) }
     -- A callable bound by `let` is a value, so it can be used at several types.
     -- Everything its surroundings already depend on stays fixed.
     let s ← get
@@ -2323,7 +2323,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     unless (b.fvStmts [] rest).contains x || (← resolveCtor x none).isSome
         || ((← get).aliases[x]?).isSome do
       modify fun s =>
-        { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
+        { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, .name x, false⟩, t, pos) }
   -- (A type left to an implementation is found now where it can be: what
   -- the pattern takes, and what is read of it after, is then of a type
   -- that is known, and what has a `drop` to run is seen to have one.)
@@ -2341,7 +2341,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
         if let .val tx bid := bd then
           modify fun s => { s with bindSites := (bid, at_.1, at_.2) :: s.bindSites, letBinds := bid :: s.letBinds }
           unless mentioned.contains x || x.startsWith "%" do
-            let site : Elab.DropSite := ⟨(← get).owner, at_.1, at_.2, Syntax.letSite x, false⟩
+            let site : Elab.DropSite := ⟨(← get).owner, at_.1, at_.2, .letBound x, false⟩
             modify fun s => { s with dropCands := s.dropCands.push (site, tx, pos) }
       pure binds
   if let .var x := pat then
@@ -2387,7 +2387,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
             { s with placedLets := s.placedLets.push (s.owner, at_.1, at_.2, x)
                      placedLetIds := bid :: s.placedLetIds
                      dropCands := if u.valued || u.valuedInside || u.looked then s.dropCands
-                       else s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, tx, pos) }
+                       else s.dropCands.push (⟨s.owner, at_.1, at_.2, .name x, false⟩, tx, pos) }
   pure result
 
 /-- `let mut x = value` and the statements after it (`inferStmts`). -/
@@ -2423,7 +2423,7 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
       -- where it has not: whether that is anywhere is seen once the
       -- uses are counted, and its cleanup is put in then.
       dropCands := if given then s.dropCands
-        else s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
+        else s.dropCands.push (⟨s.owner, at_.1, at_.2, .name x, false⟩, t, pos) }
   -- Nothing says the variable is empty when its block ends: what it holds
   -- then is let go. Unless the very next statement is a cleanup that takes
   -- it out, leaving something that holds nothing: that runs last of all
@@ -2441,7 +2441,7 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
     modify fun s =>
       { s with
         flagged := here :: s.flagged
-        givenSites := (here, ⟨s.owner, at_.1, at_.2, Syntax.givenSite x, false⟩, t, pos) :: s.givenSites }
+        givenSites := (here, ⟨s.owner, at_.1, at_.2, .given x, false⟩, t, pos) :: s.givenSites }
   -- (What it holds has a `drop` to run where the block ends: what that
   -- borrows is held till then.)
   let outerLive := (← get).dropLive
@@ -2468,7 +2468,7 @@ partial def inferAssignStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
           -- What the variable held is destroyed.
           modify fun s =>
             { s with dropCands :=
-                s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, x, true⟩, t, s.pos) }
+                s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, .name x, true⟩, t, s.pos) }
           mustDrop t s!"assigning to `{x}` lets go of what it holds (`replace` takes it out instead)"
           pure (t, UseKind.var brand x .write)
         | some _ => throw s!"`{x}` is not a mutable variable: write `let mut {x}` where it is bound to change it"
@@ -2482,7 +2482,7 @@ partial def inferAssignStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
         -- What was there is destroyed.
         modify fun s =>
           { s with dropCands :=
-              s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, Elab.derefSite, true⟩, inner, s.pos) }
+              s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, .deref, true⟩, inner, s.pos) }
         pure (inner, UseKind.through cap (placeName b e) true)
       | _ => throw "only a mutable variable or `*reference` can be assigned"
     let whole ← match b.expr value with
@@ -2579,7 +2579,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
       mustDrop t "the value of a statement is let go"
       -- If it is one to destroy, that happens here.
       modify fun s =>
-        { s with dropCands := s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, Elab.stmtValue, false⟩, t, s.pos) }
+        { s with dropCands := s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, .name Elab.stmtValue, false⟩, t, s.pos) }
       inferStmts scope amb rest want
   | .let_ pat value => inferLetStmt scope amb rest want pat value
   | .letMut x value => inferLetMutStmt scope amb rest want x value
@@ -2636,8 +2636,8 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
           wildCount := s.wildCount + 1
           dropCands := s.dropCands.push
             (⟨s.owner, place.1, place.2,
-              (if s.wildLet then Syntax.letSite (Elab.letWildName place.1 place.2 s.wildCount)
-               else Elab.wildName s.wildCount), false⟩, t, s.pos) }
+              (if s.wildLet then .letBound (Elab.letWildName place.1 place.2 s.wildCount)
+               else .name (Elab.wildName s.wildCount)), false⟩, t, s.pos) }
     pure []
   | .int n => do
     -- A whole number is of the type wanted of it, if that is one of whole
@@ -2740,7 +2740,7 @@ partial def clauseGiven (body : List Flat.StmtId) (patterns : M Scope) (spared :
       modify fun s => { s with bindSites := (bid, first.1, first.2) :: s.bindSites }
       unless mentioned.contains x || x.startsWith "%" || observed || spared.contains x do
         modify fun s =>
-          { s with dropCands := s.dropCands.push (⟨s.owner, first.1, first.2, x, false⟩, t, s.pos) }
+          { s with dropCands := s.dropCands.push (⟨s.owner, first.1, first.2, .name x, false⟩, t, s.pos) }
   pure binds
 
 partial def inferPats (ps : List Pattern) (ts : List Ty) : M Scope := do
@@ -2762,7 +2762,7 @@ partial def placedParams (binds : Scope) (body : List Flat.StmtId) : M Unit := d
         let u := b.nameUseStmts false x body
         unless u.valued || u.valuedInside || u.looked do
           modify fun s =>
-            { s with dropCands := s.dropCands.push (⟨s.owner, l, c, x, false⟩, tx, s.pos) }
+            { s with dropCands := s.dropCands.push (⟨s.owner, l, c, .name x, false⟩, tx, s.pos) }
 
 /-- The type of a callable given by clauses. Parameter and result annotations
 are checked if present; the clauses must cover every argument. -/

@@ -902,12 +902,9 @@ private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
   match (tr.dropsAt[site]?).bind fun id => tr.dictsAt[id]? with
   | some [d] =>
     -- (A part of a name's value that nothing reads: that part.)
-    some (destroyCall tr d (match Syntax.partOf site.name, Syntax.letSiteOf site.name,
-        Syntax.captureSiteOf site.name with
-      | some (x, i), _, _ => .proj (.name none x) i
-      | none, some x, _ => .name none x
-      | none, none, some x => .name none x
-      | none, none, none => .name none site.name))
+    some (destroyCall tr d (match site.name with
+      | .part x i => .proj (.name none x) i
+      | n => .name none n.var))
   | _ => none
 
 /-- The cleanups of the parts of a name's value that are never read, where
@@ -1013,7 +1010,7 @@ end
 
 /-- Every use of a variable's value marked: the flag is set, and then the
 value read. So is each read of a part of it with something to destroy
-(`takenSite`, `taken`), which takes it out and lets go of the rest. -/
+(`SiteName.taken`, `taken`), which takes it out and lets go of the rest. -/
 def markMoves (x : String) (taken : Nat → Bool) : Flat.FRewrite where
   onExpr _ b e :=
     match b.expr e with
@@ -1094,7 +1091,7 @@ private partial def untraitClause (tr : TraitInfo) (owner : String) (c : ClauseI
   -- `tail`, nothing can be done after: what it does not use is destroyed
   -- before it starts, which is the cleanup a `tail` call has before it.
   let first := b.clausePlace body
-  let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, wildName k, false⟩).isSome) pats 0
+  let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, .name (wildName k), false⟩).isSome) pats 0
   let early := tailsStmts b body
   -- (A name the clause straight away makes a variable of the same name,
   -- to be borrowed, is the variable's to destroy: the place and the name
@@ -1107,7 +1104,7 @@ private partial def untraitClause (tr : TraitInfo) (owner : String) (c : ClauseI
       | .letMut y _ => some y
       | _ => none
   let hooks := ((pats.flatMap patVars).filter (!variables.contains ·)).flatMap fun x =>
-    (dropHook tr ⟨owner, first.1, first.2, x, false⟩).toList ++ partHooks tr owner first x
+    (dropHook tr ⟨owner, first.1, first.2, .name x, false⟩).toList ++ partHooks tr owner first x
   let hooks ← hooks.mapM fun h => do
     let e ← flatExpr h
     pushStmt (if early then .expr e else .defer e)
@@ -1133,13 +1130,13 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
     | .letMut x value =>
       let value ← untraitExpr tr owner value
       let rest ← untraitStmts tr owner pos rest
-      match dropHook tr ⟨owner, pos.1, pos.2, x, false⟩ with
+      match dropHook tr ⟨owner, pos.1, pos.2, .name x, false⟩ with
       | some hook => pure ((← pushStmt (.letMut x value)) :: (← hookS hook false) :: rest)
       | none =>
         -- A variable that gives its value away where it is used: what it
         -- holds is destroyed when its block is left only if it was not. A
         -- flag says, set wherever the value is used.
-        match (tr.dropsAt[(⟨owner, pos.1, pos.2, Syntax.givenSite x, false⟩ : DropSite)]?).bind
+        match (tr.dropsAt[(⟨owner, pos.1, pos.2, .given x, false⟩ : DropSite)]?).bind
             fun id => tr.dictsAt[id]? with
         | some [d] =>
           let flag := Syntax.movedFlag x
@@ -1155,11 +1152,11 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
       let value ← untraitExpr tr owner value
       let rest ← untraitStmts tr owner pos rest
       let (pat, hooks) := match pat with
-        | .var x => (pat, (dropHook tr ⟨owner, pos.1, pos.2, x, false⟩).toList ++ partHooks tr owner pos x)
+        | .var x => (pat, (dropHook tr ⟨owner, pos.1, pos.2, .name x, false⟩).toList ++ partHooks tr owner pos x)
         | _ =>
           -- What the pattern takes under a name nothing uses, or under `_`
           -- (given a name for it), is destroyed likewise.
-          let site := fun (x : String) => (⟨owner, pos.1, pos.2, Syntax.letSite x, false⟩ : DropSite)
+          let site := fun (x : String) => (⟨owner, pos.1, pos.2, .letBound x, false⟩ : DropSite)
           let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome) [pat] 0
           let pat := letWilds pos ((pats.head?).getD pat)
           (pat, (patVars pat).flatMap fun x => (dropHook tr (site x)).toList ++ partHooks tr owner pos x)
@@ -1174,7 +1171,7 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
       let b ← get
       match b.expr target with
       | .name none x =>
-        match dropHook tr ⟨owner, pos.1, pos.2, x, true⟩ with
+        match dropHook tr ⟨owner, pos.1, pos.2, .name x, true⟩ with
         | some hook =>
           pure ((← pushStmt (.let_ (.var "%assigned") value)) :: (← hookS hook true)
             :: (← pushStmt (.assign target (← pushExpr (.name none "%assigned")))) :: rest)
@@ -1182,7 +1179,7 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
       | .deref place =>
         -- What was there where the reference points is destroyed, once the new
         -- value is made and the place found.
-        match (tr.dropsAt[(⟨owner, pos.1, pos.2, derefSite, true⟩ : DropSite)]?).bind fun id => tr.dictsAt[id]? with
+        match (tr.dropsAt[(⟨owner, pos.1, pos.2, .deref, true⟩ : DropSite)]?).bind fun id => tr.dictsAt[id]? with
         | some [d] =>
           let first ← pushStmt (.let_ (.var "%assigned") value)
           let second ← pushStmt (.let_ (.var "%place") place)
@@ -1196,7 +1193,7 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
       let e ← untraitExpr tr owner e
       let rest ← untraitStmts tr owner pos rest
       -- A value nothing takes, of a type to destroy, is destroyed there.
-      match (if rest.isEmpty then none else dropHook tr ⟨owner, pos.1, pos.2, stmtValue, false⟩) with
+      match (if rest.isEmpty then none else dropHook tr ⟨owner, pos.1, pos.2, .name stmtValue, false⟩) with
       | some hook => pure ((← pushStmt (.let_ (.var stmtValue) e)) :: (← hookS hook true) :: rest)
       | none => pure ((← pushStmt (.expr e)) :: rest)
     | .defer e =>

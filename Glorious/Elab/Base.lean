@@ -73,9 +73,34 @@ def letWildName (line col k : Nat) : String := s!"{wildName k}@{line}:{col}"
 /-- The name the value of a statement has where it is destroyed. -/
 def stmtValue : String := "%stmt"
 
-/-- The name what a reference points to has where it is written over, and
-what was there is destroyed. -/
-def derefSite : String := "%deref"
+/-- What at a place is destroyed (`DropSite`). -/
+inductive SiteName where
+  /-- What the name `x` holds: a variable's, a clause's name's, or a name the
+  elaborator makes (`wildName`, `stmtValue`). -/
+  | name (x : String)
+  /-- What a name bound by the pattern of a `let` holds: the place is the
+  statement's, which a clause's own names are known by too when the
+  statement is its first. -/
+  | letBound (x : String)
+  /-- What a callable captured of `x`, if it is let go without being called. -/
+  | capture (x : String)
+  /-- What `x` holds, where it is not given away on every path: the flag that
+  says whether it was (`Syntax.movedFlag`). -/
+  | given (x : String)
+  /-- A part of `x` with something to destroy, taken at the node the site's
+  place says (`takenSite`): `x`'s flag is set there too. -/
+  | taken (x : String)
+  /-- The part `i` of `x`'s value, where the part is never read. -/
+  | part (x : String) (i : Nat)
+  /-- What is written through a reference, `*r = v`: what it held. -/
+  | deref
+  deriving BEq, Hashable, Inhabited
+
+/-- The name of what is destroyed, for the call that destroys it and for
+messages. -/
+def SiteName.var : SiteName → String
+  | .name x | .letBound x | .capture x | .given x | .taken x | .part x _ => x
+  | .deref => "*"
 
 /-- A place where what a variable holds is destroyed: where the variable is
 declared, for the end of its block, or where it is assigned, for what it held. -/
@@ -83,20 +108,20 @@ structure DropSite where
   owner : String
   line : Nat
   col : Nat
-  name : String
+  name : SiteName
   assign : Bool
   deriving BEq, Hashable
 
 /-- The site under which the checker says that the part of `x` read at the
 node `node` (its identity, `Flat.Body.ids`) has something to destroy: where
-it is taken, `x` is given away (`Syntax.takenSite`). -/
+it is taken, `x` is given away. -/
 def takenSite (owner : String) (node : Nat) (x : String) : DropSite :=
-  ⟨owner, 0, node, Syntax.takenSite x, false⟩
+  ⟨owner, 0, node, .taken x, false⟩
 
 /-- The site under which the checker says how what `x` holds is destroyed when
 the callable written as `written` (its hash), which captured it, is let go. -/
 def captureDropSite (owner : String) (written : UInt64) (x : String) : DropSite :=
-  ⟨owner, written.toNat, 0, Syntax.captureSite x, false⟩
+  ⟨owner, written.toNat, 0, .capture x, false⟩
 
 /-- The identity given to the calls of `Drop`'s function that the compiler
 writes, so that the borrow each passes is not taken for one the program wrote. -/
@@ -200,8 +225,8 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
     dictsAt := firstOf t.dicts, methodsAt := firstOf t.methods, boundedAt := firstOf t.bounded
     implsAt := firstOf (t.impls.map fun im => (im.dictFn, im)), dropsAt := firstOf t.drops
     partsAt := t.drops.foldl (fun m (site, _) =>
-      match Syntax.partOf site.name, site.assign with
-      | some (x, _), false =>
+      match site.name, site.assign with
+      | .part x _, false =>
         m.alter (site.owner, site.line, site.col, x) fun
           | some sites => some (sites.push site)
           | none => some #[site]
