@@ -3293,9 +3293,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
       if life then none else some t
     unless which.isEmpty do
       -- (Told by the number of the call that is the computation handled.)
-      let subjectId := match b.expr subject with
-        | .call id _ _ => id
-        | _ => 0
+      let subjectId := b.subjectCall subject
       modify fun st => { st with instSites := st.instSites.push (st.owner, subjectId, "handle", e, which) }
     unless decl.ops.all covered.contains do
       try unifyRow amb ⟨[(e, inst)], some (← freshRowVar)⟩

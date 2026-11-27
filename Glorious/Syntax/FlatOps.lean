@@ -751,6 +751,22 @@ def renameInBody (pairs : List (String × String)) (b : Body) : Body :=
     pushClause ⟨cl.pats, body.toArray⟩ : Build ClauseId)).run b
   { b with roots }
 
+/-- The number of the call a handler handles: the call itself, or the last
+of the block made around it where what it borrows is named first
+(`nameBorrowsE`); `0` where it is no call. -/
+partial def Body.subjectCall (b : Body) (e : ExprId) (fuel : Nat := 8) : Nat :=
+  match fuel, b.expr e with
+  | _, .call id _ _ => id
+  | fuel + 1, .labelScope "%block" body =>
+    let rec last (s : StmtId) (fuel : Nat) : Nat := match fuel, b.stmt s with
+      | _, .expr e => b.subjectCall e fuel
+      | fuel + 1, .located _ _ inner => last inner fuel
+      | _, _ => 0
+    match body.back? with
+    | some s => last s fuel
+    | none => 0
+  | _, _ => 0
+
 /-- Is a name bound here one that what follows borrows with `&` and never
 changes (`Syntax.borrowedOnly`)? -/
 def Body.borrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=

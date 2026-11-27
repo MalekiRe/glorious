@@ -68,9 +68,7 @@ def copyRewrite (c : Copy) : Flat.FRewrite where
     | .call id f args => named id f args false
     | .tailCall id f args => named id f args true
     | .handle subject arms =>
-      let id := match b.expr subject with
-        | .call id _ _ => id
-        | _ => 0
+      let id := b.subjectCall subject
       -- The effects this handler handles an instance of, with which.
       let handled := c.table.filterMap fun (i, kind, e, off, len) =>
         if i == id && id != 0 && kind == "handle" && c.several.contains e then some (e, c.key off len) else none

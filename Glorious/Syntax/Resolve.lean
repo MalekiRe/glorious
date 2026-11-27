@@ -96,9 +96,6 @@ end
 /-- How `givesReference`'s functions are kept among `takesReference`'s. -/
 def givesKey (name : String) : String := "%gives:" ++ name
 
-/-- The key under which `taken` says `x` is an effect's operation. -/
-def opKey (x : String) : String := s!"{x} is an operation"
-
 /-- The functions written to give a reference: a dot call on what one gives
 is given it as it is, not borrowed again. -/
 partial def givesReference : List Item → List String
@@ -422,7 +419,6 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (e : ExprId) : Build 
         -- to say how the call takes it, `Mark.held`.)
         let made : Bool := match b.expr receiver with
           | .call _ g _ => (b.name? g).map (·.2) != some "element_at"
-              && !((b.name? g).any fun (_, n) => taken.contains (opKey (lastSegment n)))
           | .name none x => (lastSegment x).front.isUpper
           | _ => false
         if made then
@@ -578,16 +574,8 @@ clause where a borrow may be made, the rest as the text's were made so
 (`promoteItems`). -/
 partial def borrowReceivers (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
   let decls := items.map Item.declared
-  -- (And the operations, by name: what one gives is not named to be called
-  -- on, `Mark.held`, as it is the handler's.)
-  let rec ops : Item → List String
-    | .effect _ _ os => os.map (·.name)
-    | .pub _ item => ops item
-    | .module _ (some body) => body.flatMap ops
-    | _ => []
   let taken : Std.HashMap String Bool :=
-    (takesReference decls ++ (givesReference decls).map (givesKey ·, false)
-      ++ (items.flatMap ops).map (opKey ·, false)).foldl (fun m (k, v) => m.insertIfNew k v) {}
+    (takesReference decls ++ (givesReference decls).map (givesKey ·, false)).foldl (fun m (k, v) => m.insertIfNew k v) {}
   -- (`promote`: not of a trait's defaults, which are made so where they are
   -- written out.)
   let rec go (promote : Bool) : Item → Item
