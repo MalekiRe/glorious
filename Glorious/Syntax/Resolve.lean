@@ -476,7 +476,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
           -- (A name that is no variable: borrowed where the call is read, as
           -- the function in scope takes it, `Check.receiverByName`.)
           if let some x := b.bare? receiver then
-            if known.lookup x != some 1 && !(lastSegment x).front.isUpper then
+            if !(lastSegment x).front.isUpper then
               return ← pushExpr (.call 0 (← pushExpr (.mark .receiver)) #[receiver])
           match taken[name]?, place receiver 64, throughRef receiver 64 with
             | some uniq, some (x, [], _), _ => pushExpr (.ref uniq x)

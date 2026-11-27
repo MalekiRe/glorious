@@ -1261,6 +1261,36 @@ partial def fieldThroughRef (scope : Scope) (e : Flat.ExprId) : M (Option (Strin
       pure ((← fieldThroughRef scope inner).map fun (x, path, _) => (x, path ++ [field], fid))
   | _ => pure none
 
+/-- The dot calls on the variable `x` in `rest` (`f(%receiver(x), ..)`),
+each receiver borrowed as the function in scope takes it (`receiverKinds`),
+written where it is before the variable's uses are looked at: whether it
+gives its value away (`givenAway`) is seen of them so. One whose function
+says nothing is left for the parameter's type (`receiverByType`). -/
+partial def variableReceivers (x : String) (rest : List Flat.StmtId) : M Unit := do
+  let b := (← get).body
+  let rec calls (fuel : Nat) (e : Flat.ExprId) : List (Flat.ExprId × String) :=
+    match fuel with
+    | 0 => []
+    | fuel + 1 =>
+      let here := match b.expr e with
+        | .call _ f args | .tailCall _ f args =>
+          match b.bare? f, args[0]? with
+          | some fx, some a =>
+            match b.expr a with
+            | .call _ m #[r] => if b.mark? m == some .receiver && b.bare? r == some x then [(a, fx)] else []
+            | _ => []
+          | _, _ => []
+        | _ => []
+      here ++ (b.children e).flatMap (calls fuel)
+  let found := rest.flatMap fun s => (b.stmtExprs s).toList.flatMap (calls 256)
+  for (a, fx) in found do
+    let given : Option Flat.FExpr := match (← receiverKinds fx fx).1 with
+      | some 0 => some (.name none x)
+      | some k => some (.ref (k == 2) x)
+      | none => none
+    if let some n := given then
+      modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a n } }
+
 /-- A dot call `f(%receiver(x), ..)` of a function in scope `f`: the
 receiver borrowed as `f` takes it (`receiverKinds`), given as it is where
 `x` holds a reference, written where it is; what the call's choice of a
@@ -2450,6 +2480,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
 /-- `let mut x = value` and the statements after it (`inferStmts`). -/
 partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     (want : Option (Ty × Option Elab.Site)) (x : String) (value : Flat.ExprId) : M Ty := do
+  variableReceivers x rest
   let b := (← get).body
   let (at_, pos) := ((← get).at_, (← get).pos)
   let t ← withLater (b.fvStmts [x] rest) (inferRoot scope amb value)
