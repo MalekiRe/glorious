@@ -1365,6 +1365,9 @@ structure Copies where
   function's copies for effects are made (`callsCopied`), which name the
   function called first. -/
   calls : Array (Nat × List Nat) := #[]
+  /-- The spreads written out for a length (`spreadItem`), by the name each
+  is called by: which, and the length. -/
+  spreads : Std.HashMap String (String × Nat) := {}
 
 def internId (f : String) (ids : List Nat) : StateM Copies Nat := do
   match (← get).pool[(f, ids)]? with

@@ -120,31 +120,6 @@ inductive Head where
   | transmute
   | const (e : Expr)
 
-/-- A spread written out for its length (`Specialize.specCall`): `%spread_split#n`. -/
-def spreadOf (x : String) : Option (String × Nat) :=
-  if x.startsWith "%spread_" then
-    match ((x.drop 8).toString.splitOn "#") with
-    | [kind, n] => n.toNat?.map (kind, ·)
-    | _ => none
-  else none
-
-/-- The function a spread is for a list of `n`: `spread_split` takes a tuple
-of `n + 1` apart, its first and a tuple of the rest; `spread_cons` and
-`spread_snoc` put one before or after a tuple of `n`; `spread_call` calls a
-callable with a tuple of `n`'s parts. Each clause's locals are its
-arguments, then what its patterns bind. -/
-def spreadFn (kind : String) (n : Nat) : M Nat := do
-  let parts := fun (base : Nat) => (List.range n).map fun i => Atom.var (base + i)
-  let clause : Core.Clause := match kind with
-    | "split" => ⟨[.ctor 0 (List.replicate (n + 1) .bind)],
-        .let_ (.construct 0 (parts 2)) (.let_ (.construct 0 [.var 1, .var (n + 2)]) (.ret (.var (n + 3))))⟩
-    | "cons" => ⟨[.wild, .ctor 0 (List.replicate n .bind)],
-        .let_ (.construct 0 (.var 0 :: parts 2)) (.ret (.var (n + 2)))⟩
-    | "call" => ⟨[.wild, .ctor 0 (List.replicate n .bind)], .tail (.var 0) (parts 2)⟩
-    | _ => ⟨[.ctor 0 (List.replicate n .bind), .wild],
-        .let_ (.construct 0 (parts 2 ++ [.var 1])) (.ret (.var (n + 2)))⟩
-  addFn ⟨[clause]⟩ s!"`spread_{kind}` of {n}"
-
 def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head := do
   -- (`%prelude`: the prelude's function, whatever is named the same here.)
   let qual := if asked == some "%prelude" then none else asked
@@ -159,9 +134,10 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
     if let some q := qual then
       unless q == info.owner do throw s!"`{x}` is not an operation of `{q}`"
     return .op info
-  -- (A spread whose length the specializer did not find: its function in
-  -- the prelude only stands for the one written out for a length.)
-  if (spreadOf x).isNone && ["spread_split", "spread_cons", "spread_snoc", "spread_call"].any (fun p => x.startsWith p) then
+  -- (A spread whose length the copier did not find: its function in the
+  -- prelude only stands for the one written out for a length,
+  -- `spreadItem`.)
+  if ["spread_split", "spread_cons", "spread_snoc", "spread_call"].any (fun p => x.startsWith p) && (← fnAt x).isNone then
     throw s!"a list of values is spread here (`{x}`) whose length is not known when the program is compiled"
   if let some idx ← fnAt x then return .fn idx
   if let some (p, n) := prims.lookup x then return .prim p n
@@ -177,7 +153,6 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if x == "read_out" then return .readOut
   if x == "transmute" then return .transmute
   if let some e := g.aliases[x]? then return .const e
-  if let some (kind, n) := spreadOf x then return .fn (← spreadFn kind n)
   throw s!"unknown name `{x}`"
 
 /-! ## Expressions -/
@@ -914,7 +889,10 @@ def copyFor (tr : TraitInfo) (env : Array Nat) (call : Nat) (g : String) (ds : L
   -- has `Spread`: one implementation for each of its parts.)
   if let some kind := spreadKind g then
     for i in ids do
-      if let some n := spreadLength (← get).byId i 4096 then return s!"%spread_{kind}#{n}"
+      if let some n := spreadLength (← get).byId i 4096 then
+        let name := s!"{g} of {n}"
+        modify fun c => { c with spreads := c.spreads.insert name (kind, n) }
+        return name
   copyAt call ids.toList
   pure g
 

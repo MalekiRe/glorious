@@ -63,6 +63,8 @@ structure LowerKept where
   item : Option Syntax.Item
   pool : Array (String × List Nat)
   asked : Array ((String × List Nat × Bool) × String)
+  /-- The spreads it asked written out (`Copies.spreads`). -/
+  spreads : Array (String × String × Nat) := #[]
   made : Nat
 
 /-- Each function's `LowerKept`, by its name once lowered. -/
@@ -157,6 +159,21 @@ def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Exc
         if fns.contains n then twice := (n, get) :: twice else fns := fns.insert n get
   pure { blocks := b, others, fns, twice, aliasUses, srcKeys, globalKey }
 
+/-- The function a spread is for a list of `n` (`copyFor`), under `name`:
+`spread_split` takes a tuple of `n + 1` apart, its first and a tuple of the
+rest; `spread_cons` and `spread_snoc` put one before or after a tuple of
+`n`; `spread_call` calls a callable with a tuple of `n`'s parts. -/
+def spreadItem (name kind : String) (n : Nat) : Syntax.Item :=
+  let xs := (List.range n).map fun i => s!"%p{i}"
+  let pats := xs.map Pattern.var
+  let vals := xs.map (Expr.name none ·)
+  let clause : Clause := match kind with
+    | "split" => .mk [.tuple (.var "%first" :: pats)] [.expr (.tuple [.name none "%first", .tuple vals])]
+    | "cons" => .mk [.var "%first", .tuple pats] [.expr (.tuple (.name none "%first" :: vals))]
+    | "call" => .mk [.var "%f", .tuple pats] [.expr (.tailCall 0 (.name none "%f") vals)]
+    | _ => .mk [.tuple pats, .var "%last"] [.expr (.tuple (vals ++ [.name none "%last"]))]
+  Item.fnOf name [] [] none [clause]
+
 /-- Where lowering starts: no copy asked, the implementations numbered as the
 checker numbered them. -/
 def Lowering.start (L : Lowering) : Lowered :=
@@ -206,6 +223,7 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
           let copies := k.asked.foldl (fun c (key, name) =>
             { c with byKey := c.byKey.insert key name, byName := c.byName.insert name key
                      asked := c.asked.push (key, name) }) copies
+          let copies := k.spreads.foldl (fun c (name, kind, n) => { c with spreads := c.spreads.insert name (kind, n) }) copies
           let chain := k.asked.foldl (fun h e => mixHash h (hash e)) (k.pool.foldl (fun h e => mixHash h (hash e)) st.chain)
           st := { st with copies, made := st.made + k.made, chain, keptMade := st.keptMade.insert x k }
           if let some (.fn name ps annots ret b) := k.item then
@@ -213,9 +231,9 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
             todo := todo ++ (b.fvClauses b.roots).reverse.toArray ++ (coercedIn x b).toArray
           continue
     let (pool0, asked0) := (st.copies.byId.size, st.copies.asked.size)
-    -- A copy for known implementations, made from the function it is of; or
-    -- a function as it is, with the calls in it sent to copies if it is
-    -- given no implementation.
+    let spreads0 := st.copies.spreads
+    -- A copy for the implementations it is given, made from the function it
+    -- is of; or a function given none, as it is.
     let (item, copies, made) := match st.copies.byName[x]? with
       | some (fn, ids, _) =>
         match L.fns[fn]? with
@@ -224,11 +242,12 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
           (item, copies, st.made + 1)
         | none => (none, st.copies, st.made)
       | none =>
-        match L.fns[x]? with
-        | some make =>
+        match L.fns[x]?, st.copies.spreads[x]? with
+        | some make, _ =>
           let (item, copies) := (make #[] x).run st.copies
           (item, copies, st.made)
-        | none => (none, st.copies, st.made)
+        | none, some (kind, n) => (some (spreadItem x kind n), st.copies, st.made)
+        | none, none => (none, st.copies, st.made)
     if made > copyFuel then return none
     let pool := copies.byId.extract pool0 copies.byId.size
     let asked := copies.asked.extract asked0 copies.asked.size
@@ -239,7 +258,8 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
       | some (.fn name ps annots ret b) => some (Syntax.Item.fn name ps annots ret b)
       | _ => none
     if key != 0 then
-      st := { st with keptMade := st.keptMade.insert x { key, item := lowered, pool, asked, made := madeHere } }
+      let spreads := copies.spreads.fold (fun acc name v => if spreads0.contains name then acc else acc.push (name, v.1, v.2)) #[]
+      st := { st with keptMade := st.keptMade.insert x { key, item := lowered, pool, asked, spreads, made := madeHere } }
     if let some (.fn name ps annots ret b) := lowered then
       st := { st with done := st.done.push (.fn name ps annots ret b) }
       todo := todo ++ (b.fvClauses b.roots).reverse.toArray ++ (coercedIn x b).toArray
