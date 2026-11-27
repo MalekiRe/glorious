@@ -1261,6 +1261,30 @@ partial def fieldThroughRef (scope : Scope) (e : Flat.ExprId) : M (Option (Strin
       pure ((← fieldThroughRef scope inner).map fun (x, path, _) => (x, path ++ [field], fid))
   | _ => pure none
 
+/-- A path of fields from a name, `x.f.g`: the name, the path, and the
+outermost field's identity. -/
+partial def fieldRoot (b : Flat.Body) (e : Flat.ExprId) : Option (String × List String × Nat) :=
+  let rec go (e : Flat.ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
+    match fuel, b.expr e with
+    | fuel + 1, .fieldOf fid inner name =>
+      match b.bare? inner with
+      | some x => some (x, [name], fid)
+      | none => (go inner fuel).map fun (x, path, _) => (x, path ++ [name], fid)
+    | _, _ => none
+  (go e 64).filter (·.2.2 != 0)
+
+/-- The receiver at `a`, `%receiver(x.f)`, of a dot call of `fx`: borrowed
+where it is as `fx` takes it (`&x.f`, through the reference `x` holds
+where `star`), read as it is otherwise. -/
+partial def writeFieldReceiver (a : Flat.ExprId) (fx : String) (star : Bool) : M Unit := do
+  let b := (← get).body
+  let .call _ _ #[r] := b.expr a | return
+  let some (x, path, fid) := fieldRoot b r | return
+  let given : Flat.FExpr ← match (← receiverKinds fx fx).1 with
+    | some 0 | none => pure (b.expr r)
+    | some k => pure (.refField fid (k == 2) x path star)
+  modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a given } }
+
 /-- The dot calls on the variable `x` in `rest` (`f(%receiver(x), ..)`),
 each receiver borrowed as the function in scope takes it (`receiverKinds`),
 written where it is before the variable's uses are looked at: whether it
@@ -1290,6 +1314,24 @@ partial def variableReceivers (x : String) (rest : List Flat.StmtId) : M Unit :=
       | none => none
     if let some n := given then
       modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a n } }
+  -- (And a field of it, `v.items.len()`: borrowed where it is.)
+  let rec fields (fuel : Nat) (e : Flat.ExprId) : List (Flat.ExprId × String) :=
+    match fuel with
+    | 0 => []
+    | fuel + 1 =>
+      let here := match b.expr e with
+        | .call _ f args | .tailCall _ f args =>
+          match b.bare? f, args[0]? with
+          | some fx, some a =>
+            match b.expr a with
+            | .call _ m #[r] =>
+              if b.mark? m == some .receiver && ((fieldRoot b r).map (·.1)) == some x then [(a, fx)] else []
+            | _ => []
+          | _, _ => []
+        | _ => []
+      here ++ (b.children e).flatMap (fields fuel)
+  for (a, fx) in rest.flatMap fun s => (b.stmtExprs s).toList.flatMap (fields 256) do
+    writeFieldReceiver a fx false
 
 /-- A dot call `f(%receiver(x), ..)` of a function in scope `f`: the
 receiver borrowed as `f` takes it (`receiverKinds`), given as it is where
@@ -1303,7 +1345,17 @@ partial def receiverByName (scope : Scope) (f : Flat.ExprId) (args : Array Flat.
   let .call _ m #[r] := b.expr a | return
   unless b.mark? m == some .receiver do return
   let some fx := b.bare? f | return
-  let some x := b.bare? r | return
+  let some x := b.bare? r | do
+    -- (A field of a name, `p.items.len()`: borrowed where it is, through
+    -- the reference the name holds where it holds one.)
+    let some (x, _, _) := fieldRoot b r | return
+    let star ← match scope.lookup x with
+      | some (.val t _) | some (.cell t _) => do
+        match ← find t with
+        | .ref .. => pure true
+        | _ => pure false
+      | _ => pure false
+    writeFieldReceiver a fx star
   let held ← match scope.lookup x with
     | some (.val t _) | some (.cell t _) => do pure (some (← find t))
     | _ => pure none

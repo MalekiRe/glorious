@@ -478,6 +478,12 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
           if let some x := b.bare? receiver then
             if !(lastSegment x).front.isUpper then
               return ← pushExpr (.call 0 (← pushExpr (.mark .receiver)) #[receiver])
+          -- (A field of a name likewise, `Check.writeFieldReceiver`.)
+          let fieldOfName := match place receiver 64, throughRef receiver 64 with
+            | some (_, _ :: _, fid), _ => fid != 0
+            | _, some (_, _, fid) => fid != 0
+            | _, _ => false
+          if fieldOfName then return ← pushExpr (.call 0 (← pushExpr (.mark .receiver)) #[receiver])
           match taken[name]?, place receiver 64, throughRef receiver 64 with
             | some uniq, some (x, [], _), _ => pushExpr (.ref uniq x)
             | some uniq, some (x, path, fid), _ => if fid == 0 then pure receiver else pushExpr (.refField fid uniq x path false)
