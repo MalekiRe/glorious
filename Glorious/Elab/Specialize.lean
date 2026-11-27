@@ -327,15 +327,23 @@ def splitFieldItems (all items : List Syntax.Item) : List Syntax.Item :=
 /-- A clause whose patterns bind `x` that starts by keeping it in a variable,
 written at the place of its first statement (`letMutRewriteF`); a `let x`
 the compiler wrote at no place, as of a pattern by reference
-(`Flat.byReference`), `let mut x`. -/
-def heldFirst (x : String) : Flat.FRewrite where
+(`Flat.byReference`), `let mut x`, and so one at `at_` (a value the front
+end named for the statement there, in a block of the statement's own). -/
+def heldFirst (x : String) (at_ : Option (Nat × Nat) := none) : Flat.FRewrite where
   onStmts go b ss :=
     match ss with
     | s :: rest =>
+      let letOf := fun (s : Flat.StmtId) => match b.stmt s with
+        | .let_ (.var y) value => if y == x then some value else none
+        | _ => none
       match b.stmt s with
-      | .let_ (.var y) value =>
-        if y != x then none else
-        some (do pure ((← Flat.pushStmt (.letMut y (← go.ex value))) :: (← go.stmts rest)))
+      | .let_ (.var _) _ =>
+        (letOf s).map fun value => do pure ((← Flat.pushStmt (.letMut x (← go.ex value))) :: (← go.stmts rest))
+      | .located l c inner =>
+        if at_ != some (l, c) then none else
+        (letOf inner).map fun value => do
+          let held ← Flat.pushStmt (.letMut x (← go.ex value))
+          pure ((← Flat.pushStmt (.located l c held)) :: (← go.stmts rest))
       | _ => none
     | [] => none
   onClause go b c :=
@@ -394,7 +402,7 @@ def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
               else pure (first :: rest))
         -- (A name a clause in the statement binds, `A(name, n) => ..` of a
         -- `match`: kept in a variable where the clause starts.)
-        | _ => some (do pure ((← (heldFirst x).st s) :: (← go.stmts rest)))
+        | _ => some (do pure ((← (heldFirst x (some (l, c))).st s) :: (← go.stmts rest)))
       | .let_ (.var y) _ =>
         if line != 0 || col != 0 || y != x then none else (heldFirst x).onStmts go b ss
       | _ => none

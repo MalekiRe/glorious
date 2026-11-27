@@ -605,6 +605,13 @@ partial def nameBorrowsE (e : ExprId) : StateT (Array StmtId) Build ExprId := do
     match b.mark? f with
     | some mark =>
       let x' ← nameBorrowsE x
+      -- (A value named where a dot call is made on it: the variable, given
+      -- by name, `Syntax.Mark.held`.)
+      if mark == .held then
+        let name := s!"borrowed%{id}"
+        let st ← (pushStmt (.let_ (.var name) x') : Build StmtId)
+        modify (·.push st)
+        return ← (pushExpr (.name none name) : Build ExprId)
       if mark != .borrow && mark != .borrowMut then
         return ← if x' == x then pure e else (pushExpr (.call id f #[x']) : Build ExprId)
       let name := s!"borrowed%{id}"

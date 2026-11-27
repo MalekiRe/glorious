@@ -850,7 +850,11 @@ partial def inferExprRef (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Fla
             | none =>
               let named ← pushE (.name none x)
               return ← inferExpr scope amb (← pushE (.reborrow true named))
-        throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
+        -- (A value made where a dot call is made on it, named for it,
+        -- `Mark.held`: a place, as Rust's temporary is, which the call may
+        -- change.)
+        unless x.startsWith "borrowed%" do
+          throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
       do
         -- A value a name holds is a place: borrowed, it is one from where
         -- it is first borrowed, its reads after uses of it (`placeVal`).
@@ -858,11 +862,11 @@ partial def inferExprRef (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Fla
         -- read after, as only what is copied can be.)
         readBefore id x
         placeVal id x t
-        use scope (.var id x .share)
+        use scope (.var id x (if uniq then .lend else .share))
         let cap ← freshCap
         captures cap (.brand id)
-        captures cap (.loan (← freshLoan (some id) false none))
-        pure (.ref .shared t cap)
+        captures cap (.loan (← freshLoan (some id) uniq none))
+        pure (.ref (if uniq then .uniq else .shared) t cap)
     | some _ => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
   | .reborrow uniq e => do

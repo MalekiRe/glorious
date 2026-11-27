@@ -28,6 +28,10 @@ inductive Mark where
   | borrow
   /-- `&mut value` where the value has no name. -/
   | borrowMut
+  /-- A value made where a dot call is made on it, `half(4).is_ok()`: given
+  a name of its own for the statement, a variable, and the name given, the
+  checker to say how the call takes it (`Check.variableReceivers`). -/
+  | held
   /-- `subject is Pattern` leaves the parser as the call `%is(subject, { Pattern
   => })`. Where names are resolved, and so which names of the pattern are new,
   it becomes a pattern callable applied to the subject: on a match `Ok` of the
@@ -107,6 +111,7 @@ def Mark.shown : Mark → String
   | .through => "%through"
   | .borrow => "%borrow"
   | .borrowMut => "%borrow_mut"
+  | .held => "%named"
   | .is_ => "%is"
   | .ctorIs => "%ctor_is"
   | .ascribe => "%as"
