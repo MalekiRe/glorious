@@ -1261,6 +1261,30 @@ partial def fieldThroughRef (scope : Scope) (e : Flat.ExprId) : M (Option (Strin
       pure ((← fieldThroughRef scope inner).map fun (x, path, _) => (x, path ++ [field], fid))
   | _ => pure none
 
+/-- A dot call `f(%receiver(x), ..)` of a function in scope `f`: the
+receiver borrowed as `f` takes it (`receiverKinds`), given as it is where
+`x` holds a reference, written where it is; what the call's choice of a
+function of the receiver's type does after (`inferDotAltCall`) starts from
+that, as from the resolver's. Left where `f` says nothing of it, for the
+parameter's type (`receiverByType`). -/
+partial def receiverByName (scope : Scope) (f : Flat.ExprId) (args : Array Flat.ExprId) : M Unit := do
+  let b := (← get).body
+  let some a := args[0]? | return
+  let .call _ m #[r] := b.expr a | return
+  unless b.mark? m == some .receiver do return
+  let some fx := b.bare? f | return
+  let some x := b.bare? r | return
+  let held ← match scope.lookup x with
+    | some (.val t _) | some (.cell t _) => do pure (some (← find t))
+    | _ => pure none
+  let given : Option Flat.FExpr := match (← receiverKinds fx fx).1, held with
+    | _, some (.ref ..) => some (.name none x)
+    | some 0, _ => some (.name none x)
+    | some k, _ => some (.ref (k == 2) x)
+    | none, _ => none
+  if let some n := given then
+    modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a n } }
+
 /-- A dot call's receiver `%receiver(x)` at `a`, given to a parameter of
 type `p`: `&x` (`&mut x`) where `p` is a reference and `x` holds no
 reference, `x` where `p` is known otherwise; left where `p` is not known
@@ -2191,8 +2215,9 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
 
 partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Array Flat.ExprId)
     (call : Nat := 0) : M Ty := do
-  let b := (← get).body
   if let some t ← inferMarkedCall scope amb f args then return t
+  receiverByName scope f args
+  let b := (← get).body
   if let some t ← inferDotAltCall scope amb f args call then return t
   -- `T::f(..)` of a type parameter `T` and a trait's function `f`: as
   -- `<T as Trait>::f(..)` is.

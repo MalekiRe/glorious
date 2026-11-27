@@ -473,12 +473,13 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String
       let givenOf := fun (k : Nat) (receiver : ExprId) => (do
         let borrowed := fun (uniq : Bool) => (do
           pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark (if uniq then .borrowMut else .borrow))) #[receiver]) : Build ExprId)
+          -- (A name that is no variable: borrowed where the call is read, as
+          -- the function in scope takes it, `Check.receiverByName`.)
+          if let some x := b.bare? receiver then
+            if known.lookup x != some 1 && !(lastSegment x).front.isUpper then
+              return ← pushExpr (.call 0 (← pushExpr (.mark .receiver)) #[receiver])
           match taken[name]?, place receiver 64, throughRef receiver 64 with
-            -- (A name that holds a value: as the function's type says, where
-            -- the call is read, `Check.receiverByType`.)
-            | some uniq, some (x, [], _), _ =>
-              if known.lookup x == some 1 then pushExpr (.ref uniq x)
-              else pure (← pushExpr (.call 0 (← pushExpr (.mark .receiver)) #[receiver]))
+            | some uniq, some (x, [], _), _ => pushExpr (.ref uniq x)
             | some uniq, some (x, path, fid), _ => if fid == 0 then pure receiver else pushExpr (.refField fid uniq x path false)
             | some uniq, none, some (x, path, fid) => pushExpr (.refField fid uniq x path true)
             | some uniq, none, none =>
