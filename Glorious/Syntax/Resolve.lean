@@ -93,20 +93,6 @@ partial def expandNamed (aliases : Std.HashMap String (List String × TypeExpr))
 
 end
 
-/-- The functions written to take a reference first, each with whether it is
-`&mut`: a function by its first parameter's type, a trait's function by the
-first type it lists. -/
-partial def takesReference : List Item → List (String × Bool)
-  | [] => []
-  | .pub _ item :: rest => takesReference (item :: rest)
-  | .module _ (some body) :: rest => takesReference body ++ takesReference rest
-  | .fn name _ (some (.ref uniq _ _) :: _) _ _ :: rest => (name, uniq) :: takesReference rest
-  | .trait _ methods :: rest =>
-    methods.filterMap (fun md => match md.params with
-      | .ref uniq _ _ :: _ => some (md.name, uniq)
-      | _ => none) ++ takesReference rest
-  | _ :: rest => takesReference rest
-
 
 /-- The names a type mentions, not through a reference or a callable (each
 of which holds the other where it is). -/
@@ -343,12 +329,12 @@ fields from one, an element read where it is, or a value made where it is
 called on, given a name for the statement (`Mark.held`). (A field of an
 element, and what an operation gives, borrowed here as `f` is declared to
 take it, `taken`.) And `a[i]`, read where it is (`elementRead`). -/
-partial def receiverExpr (taken : Std.HashMap String Bool) (e : ExprId) : Build ExprId := do
+partial def receiverExpr (e : ExprId) : Build ExprId := do
   let b ← get
   match b.expr e with
   | .call id f args =>
-    let f ← receiverExpr taken f
-    let args ← args.mapM (receiverExpr taken)
+    let f ← receiverExpr f
+    let args ← args.mapM (receiverExpr)
     let b ← get
     let plain := fun (_ : Unit) => pushExpr (.call id f args)
     match b.expr f, args.toList with
@@ -401,36 +387,29 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (e : ExprId) : Build 
           | _ => false
         if made then
           return ← mark (← pushExpr (.call (if k == 0 then id else id + 500000 * k) (← pushExpr (.mark .held)) #[receiver]))
-        match taken[name]? with
-        | some uniq =>
-          -- (A field of an element, `v[0].i.to_string()`: borrowed
-          -- through the element's reference, named first.)
-          let rec ofElement (e : ExprId) (fuel : Nat) : Option (ExprId × List String) :=
-            match fuel, b.expr e with
-            | 0, _ => none
-            | fuel + 1, .fieldOf _ inner field =>
-              let r := match b.expr inner with
-                | .deref r => r
-                | _ => inner
-              match b.expr r with
-              | .call _ g _ => if (b.name? g).map (·.2) == some "element_at" then some (r, [field]) else none
-              | _ => (ofElement inner fuel).map fun (r, path) => (r, path ++ [field])
-            | _, _ => none
-          if let some (r, path) := ofElement receiver 16 then
-            -- (For writing, the element's place: `place_at`.)
-            let r ← if !uniq then pure (some r) else match b.expr r with
-              | .call cid _ #[a, i] =>
-                match b.expr a with
-                | .ref _ x => do pure (some (← pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, ← pushExpr (.ref true x)])))
-                | .refField fid _ x path star => do
-                  pure (some (← pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, ← pushExpr (.refField fid true x path star)])))
-                | _ => pure none
-              | _ => pure none
-            if let some r := r then
-              let steps ← pushExpr (.tuple (← path.toArray.mapM fun s => pushExpr (.name none s)))
-              return ← pushExpr (.call (id + 600000 + k) (← pushExpr (.mark .through))
-                #[r, steps, ← pushExpr (.int (if uniq then 1 else 0))])
-          pure receiver
+        -- (A field of an element, `v[0].i.to_string()`: the element's
+        -- reference named first, `Mark.held`, the field read through it,
+        -- and the checker to say how the call takes it; for writing, it
+        -- names the element's place, `Check.elementPlaceFor`.)
+        let rec ofElement (e : ExprId) (fuel : Nat) : Build (Option ExprId) := do
+          match fuel, b.expr e with
+          | 0, _ => pure none
+          | fuel + 1, .fieldOf fid inner field =>
+            let r := match b.expr inner with
+              | .deref r => r
+              | _ => inner
+            let atElement : Bool := match b.expr r with
+              | .call _ g _ => (b.name? g).map (·.2) == some "element_at"
+              | _ => false
+            let inner' ← if atElement then
+                some <$> pushExpr (.call (id + 600000 + k) (← pushExpr (.mark .held)) #[r])
+              else ofElement inner fuel
+            match inner' with
+            | some i' => some <$> pushExpr (.fieldOf fid i' field)
+            | none => pure none
+          | _, _ => pure none
+        match ← ofElement receiver 16 with
+        | some r => mark r
         | none => pure receiver : Build ExprId)
       let given ← args0.toArray.zipIdx.mapM fun (a, k) => match marked a with
         | some r => givenOf k r
@@ -440,7 +419,7 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (e : ExprId) : Build 
   -- (`a[i].f`: the field read through the element's reference, the rest of
   -- the element not copied.)
   | .fieldOf fid inner field => do
-    let inner' ← receiverExpr taken inner
+    let inner' ← receiverExpr inner
     let b ← get
     match b.expr inner' with
     | .deref r =>
@@ -452,37 +431,37 @@ partial def receiverExpr (taken : Std.HashMap String Bool) (e : ExprId) : Build 
       | _ => if inner' == inner then pure e else pushExpr (.fieldOf fid inner' field)
     | _ => if inner' == inner then pure e else pushExpr (.fieldOf fid inner' field)
   | n => do
-    let n' ← n.mapIds (receiverExpr taken) (receiverClause taken)
-      fun body => do pure (← receiverStmts taken body.toList).toArray
+    let n' ← n.mapIds (receiverExpr) (receiverClause)
+      fun body => do pure (← receiverStmts body.toList).toArray
     if n' == n then pure e else pushExpr n'
 
-partial def receiverClause (taken : Std.HashMap String Bool) (c : ClauseId) : Build ClauseId := do
+partial def receiverClause (c : ClauseId) : Build ClauseId := do
   let ⟨pats, body⟩ := (← get).clause c
-  pushClause ⟨pats, (← receiverStmts taken body.toList).toArray⟩
+  pushClause ⟨pats, (← receiverStmts body.toList).toArray⟩
 
-partial def receiverStmts (taken : Std.HashMap String Bool) : List StmtId → Build (List StmtId)
+partial def receiverStmts : List StmtId → Build (List StmtId)
   | [] => pure []
   | s :: rest => do
     let rec here (s : StmtId) (fuel : Nat) : Build StmtId := do
       let b ← get
       match fuel, b.stmt s with
       | 0, _ => pure s
-      | _, .let_ pat value => pushStmt (.let_ pat (← receiverExpr taken value))
-      | _, .letMut x value => pushStmt (.letMut x (← receiverExpr taken value))
-      | _, .expr e => pushStmt (.expr (← receiverExpr taken e))
-      | _, .defer e => pushStmt (.defer (← receiverExpr taken e))
+      | _, .let_ pat value => pushStmt (.let_ pat (← receiverExpr value))
+      | _, .letMut x value => pushStmt (.letMut x (← receiverExpr value))
+      | _, .expr e => pushStmt (.expr (← receiverExpr e))
+      | _, .defer e => pushStmt (.defer (← receiverExpr e))
       | _, .assign target value =>
         -- (`a[i] = v` is written where it is: what is below it is looked at.)
         let t ← match b.expr target with
           | .call id f #[a, i] =>
             if (b.name? f).map (·.2) == some "index" then do
-              pushExpr (.call id f #[← receiverExpr taken a, ← receiverExpr taken i])
-            else receiverExpr taken target
-          | _ => receiverExpr taken target
-        let v ← receiverExpr taken value
+              pushExpr (.call id f #[← receiverExpr a, ← receiverExpr i])
+            else receiverExpr target
+          | _ => receiverExpr target
+        let v ← receiverExpr value
         pushStmt (.assign t v)
       | fuel + 1, .located line col inner => pushStmt (.located line col (← here inner fuel))
-    pure ((← here s 64) :: (← receiverStmts taken rest))
+    pure ((← here s 64) :: (← receiverStmts rest))
 
 end
 
@@ -526,29 +505,23 @@ def nameBorrowsItems (items : List Item) (memo : FrontMemo := {}) : List Item ×
   (out.toList, memo)
 
 /-- Every dotted call of a program with what it is called on marked for the
-checker, or borrowed where the function is declared to take a reference:
-see `receiverExpr`; and what is then borrowed named first
-(`nameBorrowsClause`). -/
+checker, `receiverExpr`, and what is then borrowed named first
+(`nameBorrowsClause`): of each item from the item alone. -/
 partial def borrowReceivers (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
-  let decls := items.map Item.declared
-  let taken : Std.HashMap String Bool :=
-    (takesReference decls).foldl (fun m (k, v) => m.insertIfNew k v) {}
   let rec go : Item → Item
     | .pub parent item => .pub parent (go item)
     | .module name (some body) => .module name (some (body.map go))
     | .fn name ps annots ret b =>
-      let (roots, b) := (b.roots.mapM fun c => (do nameBorrowsClause (← receiverClause taken c) : Build ClauseId)).run b
+      let (roots, b) := (b.roots.mapM fun c => (do nameBorrowsClause (← receiverClause c) : Build ClauseId)).run b
       .fn name ps annots ret { b with roots }
     | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map go) }
     | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map go) params assocs
     | .alias name b value =>
-      let (value, b) := (receiverExpr taken value).run b
+      let (value, b) := (receiverExpr value).run b
       .alias name b value
     | item => item
-  -- (Each item made from it and what dotted calls borrow.)
-  let ctx := mixHash (hash "receivers") (unorderedHash taken)
   let (out, memo) := items.foldl (init := (#[], memo)) fun (out, memo) item =>
-    let (v, memo) := memo.take (mixHash ctx (hash item)) fun _ => [go item]
+    let (v, memo) := memo.take (mixHash (hash "receivers") (hash item)) fun _ => [go item]
     (out ++ v.toArray, memo)
   (out.toList, memo)
 

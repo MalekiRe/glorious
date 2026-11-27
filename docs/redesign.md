@@ -576,3 +576,21 @@ Left of section 7: a job's result is kept by the hash of what it read, not
 by ids with a list of what it depends on; an edit finds the jobs to do again
 by their keys changing, which comes to the same where the keys hash all a
 job reads.
+
+## Step 7, the front passes: what is left decides nothing
+
+The front end decides no borrow. What `receiverExpr`, `elementRead`,
+`promote` and `nameBorrows` decided from the text (which names are values,
+variables or references; what a dot call's receiver is borrowed as, by the
+function's declared first parameter, `takesReference`, or its result,
+`givesReference`; a `&mut [T]` written through; a name an `is` binds only
+borrowed) is the checker's, by types: `elementBase`, `receiverByName`,
+`writeFieldReceiver`, `writeElementReceiver`, `elementPlaceFor`,
+`variableReceivers`, `placeVal` with `heldFirst` in the elaborator.
+`promote` is gone. What is left of the others is desugaring, each item's
+from the item alone: a dot call's receiver marked for the checker
+(`%receiver`), a value made where it is called on named for the statement
+(`Mark.held`), `a[i]` read where it is (`*element_at(&a, i)`), and what is
+borrowed named first (`nameBorrows`, and the parser's `hoist` of a field
+borrowed through what an expression points to, which says where that is
+computed out of turn).

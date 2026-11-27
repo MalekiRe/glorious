@@ -286,10 +286,6 @@ inductive Decision where
   reference the name holds where `star`), borrowed where it is
   (`receiverFieldNode`). -/
   | receiverField (call : Nat) (fn : Option String) (uniq star : Bool)
-  /-- The dot call `call`, its receiver no name and borrowed: kept in a
-  variable of its own for the statement whose expression is the node
-  `root` (its identity), and borrowed there (`receiverTempNode`). -/
-  | receiverTemp (call : Nat) (fn : Option String) (uniq : Bool) (root : Nat)
   /-- The field read `id` of a name, of what `Deref::deref` gives of it,
   written where it is (`derefNode`): the name borrowed (`some false`) or
   given as it is, a reference. -/
@@ -351,7 +347,7 @@ The dot call `call`'s node written where it is, as the checker reads it
 on (`Check.receiverHere`) and the elaborator writes it: of `fn` where
 given, its receiver a name borrowed (`some uniq`) or given as it is (what
 is no name given whole, as it is written). None where what is borrowed is
-no name (`receiverFieldNode`, `receiverTempNode`). -/
+no name (`receiverFieldNode`). -/
 def receiverNode (call : Nat) (fn : Option String) (borrow : Option Bool) (b : Flat.Body)
     (at_ : Option Flat.ExprId := none) : Option Flat.Body := do
   -- (The checker says which node: its body has copies of nodes it made to
@@ -508,52 +504,6 @@ def receiverFieldNode (call : Nat) (fn : Option String) (uniq star : Bool) (b : 
     let last := b.stmts.size
     let b := { b with stmts := b.stmts.push (.expr ce) }
     pure { b with exprs := b.exprs.set! e (.labelScope "%block" #[first, last]) }
-
-/-- The dot call `call`, its receiver no name and borrowed (`&mut` where
-`uniq`), of `fn` where given: the statement's expression it is in, the
-node whose identity is `root`, made a block that keeps the receiver in a
-variable of its own first and borrows that, `{ let mut r = make(); f(&r)
-.. }`, as Rust keeps a temporary till its statement is done. As the checker
-reads it on and the elaborator writes it (`Decision.receiverTemp`). None
-where the call is not in that expression or its receiver is a name. -/
-def receiverTempNode (call : Nat) (fn : Option String) (uniq : Bool) (root : Nat) (b : Flat.Body) :
-    Option Flat.Body := do
-  let r ← (List.range b.exprs.size).reverse.find? fun i => b.idOf i == root
-  let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
-    | .call i _ _ | .tailCall i _ _ => i == call
-    | _ => false
-  let inRoot := b.anyExpr (fun n => match n with
-    | .call i _ _ | .tailCall i _ _ => i == call
-    | _ => false) r
-  if !inRoot then none
-  let (tail, f, args) ← match b.exprs[e]! with
-    | .call _ f args => some (false, f, args)
-    | .tailCall _ f args => some (true, f, args)
-    | _ => none
-  let (callee, recv, rest) ← match b.expr f, fn with
-    | .fieldOf _ recv _, some g => some (Flat.FExpr.name none g, unmarked b recv, args)
-    | _, _ =>
-      let callee := match fn with
-        | some g => Flat.FExpr.name none g
-        | none => b.expr f
-      if h : 0 < args.size then some (callee, unmarked b args[0], args.extract 1 args.size) else none
-  -- (A temporary: what a call gives. A name or a field of one is a place,
-  -- borrowed where it is.)
-  match b.expr recv with
-  | .call .. | .tailCall .. => pure ()
-  | _ => none
-  let held := s!"%receiver{call}"
-  let (fe, b) := b.add callee
-  let (ge, b) := b.add (.ref uniq held)
-  let b := { b with exprs := b.exprs.set! e (if tail then .tailCall call fe (#[ge] ++ rest) else .call call fe (#[ge] ++ rest)) }
-  -- (The statement's expression, now with the call so written, moved to a
-  -- node of its own, known as it was.)
-  let (moved, b) := b.add (b.exprs[r]!) (some root)
-  let first := b.stmts.size
-  let b := { b with stmts := b.stmts.push (.letMut held recv) }
-  let last := b.stmts.size
-  let b := { b with stmts := b.stmts.push (.expr moved) }
-  pure { b with exprs := b.exprs.set! r (.labelScope "%block" #[first, last]) }
 
 /-- The field read `id`, `x.f` of a name, written of what `deref` gives of
 it where it is: `deref(&x).f` (`borrow` is `some false`) or `deref(x).f`

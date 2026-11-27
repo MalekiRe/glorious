@@ -742,25 +742,8 @@ partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : N
       | .error e' s => .error e' s
     | _ => .error e s
 
-/-- A statement's expression, `e`. Where a dot call in it is decided of a
-receiver that is no name and is borrowed, the receiver is kept in a
-variable of its own for the statement (`Elab.receiverTempNode`), what the
-first reading recorded taken back (`Marks`), and the expression read
-again, once a call. -/
-partial def inferRoot (scope : Scope) (amb : Row) (e : Flat.ExprId) : M Ty := fun s =>
-  let marks := Marks.of s
-  match inferExpr scope amb e s with
-  | .ok t s => .ok t s
-  | .error err s =>
-    match err.decision with
-    | some (.receiver c fn (some uniq)) =>
-      if s.decided.any (fun | .receiverTemp c' _ _ _ => c' == c | _ => false) then .error err s else
-      let root := s.body.idOf e
-      match Elab.receiverTempNode c fn uniq root s.body with
-      | some b' =>
-        inferRoot scope amb e { marks.undo s with body := b', decided := s.decided ++ [.receiverTemp c fn uniq root] }
-      | none => .error err s
-    | _ => .error err s
+/-- A statement's expression, `e`. -/
+partial def inferRoot (scope : Scope) (amb : Row) (e : Flat.ExprId) : M Ty := inferExpr scope amb e
 
 /-- A call or a callable (`inferExpr`). -/
 partial def inferExprCall (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty := do
@@ -1258,6 +1241,40 @@ partial def dotBorrows (b : Flat.Body) (x : String) (t : Ty) (rest : List Flat.S
     match ← receiverKinds name alt with
     | (some 0, some k) => pure (if k != 0 then some (a, k == 2) else none)
     | _ => pure none
+
+/-- `let x = element_at(r, i)` named by the front end for a dot call on a
+field of the element, `v[0].items.push(..)` (`Syntax.receiverExpr`): where
+the function takes the field by `&mut`, the element's place,
+`place_at(i, &mut ..)`, for writing through. -/
+partial def elementPlaceFor (x : String) (value : Flat.ExprId) (rest : List Flat.StmtId) : M Unit := do
+  let b := (← get).body
+  unless x.startsWith "borrowed%" do return
+  let .call cid g #[base, i] := b.expr value | return
+  unless (b.name? g).map (·.2) == some "element_at" do return
+  let rec rooted (fuel : Nat) (e : Flat.ExprId) : Bool := match fuel, b.expr e with
+    | fuel + 1, .fieldOf _ inner _ => b.bare? inner == some x || rooted fuel inner
+    | _, _ => false
+  let rec calls (fuel : Nat) (e : Flat.ExprId) : List String :=
+    match fuel with
+    | 0 => []
+    | fuel + 1 =>
+      let here := match b.expr e with
+        | .call _ f args | .tailCall _ f args =>
+          match b.bare? f, args[0]?.map b.expr with
+          | some fx, some (.call _ m #[r]) => if b.mark? m == some .receiver && rooted 64 r then [fx] else []
+          | _, _ => []
+        | _ => []
+      here ++ (b.children e).flatMap (calls fuel)
+  for fx in rest.flatMap fun s => (b.stmtExprs s).toList.flatMap (calls 256) do
+    if (← receiverKinds fx fx).1 == some 2 then
+      let base' : Flat.FExpr := match b.expr base with
+        | .ref _ y => .ref true y
+        | .refField fid _ y path star => .refField fid true y path star
+        | n => n
+      let (be, b') := b.add base'
+      let (pe, b') := b'.add (.name none "place_at")
+      modify fun s => { s with body := { b' with exprs := b'.exprs.set! value (.call cid pe #[i, be]) } }
+      return
 
 /-- Each of `dotBorrows`' receivers borrowed where it is, `&x`. -/
 partial def writeDotBorrows (x : String) (borrows : List (Flat.ExprId × Bool)) : M Unit :=
@@ -2560,6 +2577,8 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     pure result
   | none => do
   let (at_, pos) := ((← get).at_, (← get).pos)
+  if let .var x := pat then elementPlaceFor x value rest
+  let b := (← get).body
   let t ← withLater (b.fvStmts (Elab.patVars pat) rest) (inferRoot scope amb value)
   -- A value given a name that nothing then uses is owned by the name: if it
   -- is one to destroy, that happens when the block ends.
