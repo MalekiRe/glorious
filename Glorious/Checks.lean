@@ -61,15 +61,10 @@ def flatRoundTrips (_ : Unit) : Bool :=
   | _, _ => false
 
 /-- What a check of `tests/checks.cases` finds of its program, written as its
-`#### expect` is: what the typing of its Core shows, what is said when it goes
-wrong, the cells live and the cleanups run at its end. -/
+`#### expect` is: what is said when it goes wrong, the cells live and the
+cleanups run at its end. -/
 def found (kind src : String) : String :=
   match kind with
-  | "owned" => reprStr (owned src)
-  | "borrowChecked" => reprStr (borrowChecked src)
-  | "lentBorrows" => reprStr (lentBorrows src)
-  | "unprovedBorrows" => reprStr ((unprovedBorrows src).map (·.length))
-  | "borrowFns" => reprStr (borrowFns src)
   | "diagnose" => diagnose src
   | "liveCells" => reprStr (liveCells src)
   | "cleanups" => reprStr (cleanups src)

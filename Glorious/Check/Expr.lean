@@ -351,9 +351,7 @@ partial def shortenStatic (t : Ty) : M Ty := do
   go t 8
 
 partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := do
-  let t ← shortenStatic (← inferExprAt scope amb e0)
-  modify fun s => { s with nodeTys := (s.owner, s.body.idOf e0, t) :: s.nodeTys }
-  pure t
+  shortenStatic (← inferExprAt scope amb e0)
 
 partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := do
   -- A text written is a `&'static str`: its UTF-8 bytes, where the program
@@ -911,10 +909,6 @@ partial def inferPlace (scope : Scope) (amb : Row) (e : Flat.ExprId) : M Ty := d
 partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : Flat.ExprId)
     (site : Option Elab.Site) : M (Option String) := do
   let b := (← get).body
-  -- (Its type as wanted, where it is read otherwise than by `inferExpr`, a
-  -- callable read against what is wanted: `St.nodeTys`, a later reading's
-  -- first.)
-  modify fun s => { s with nodeTys := (s.owner, b.idOf a, p) :: s.nodeTys }
   -- A whole number written where a type of whole numbers is wanted is of it.
   if let .int n := b.expr a then
     -- (Wanted where a trait asked of a decided type takes that type where a
@@ -2148,15 +2142,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
       throwThe Elab.Said e
     match head with
     | .ctor .. | .op _ | .prim | .pack _ | .host _ => inferCallBuiltin scope amb args call x head
-    | .fn t .. =>
-      -- (The callee at this call: what the elaborator's closure of it is,
-      -- `St.nodeTys`.)
-      modify fun s => { s with nodeTys := (s.owner, s.body.idOf f, t) :: s.nodeTys }
-      inferCallFn scope amb args call x head
-    | .method _ | .const _ => inferCallFn scope amb args call x head
-    | .local (.val t _) | .local (.cell t _) =>
-      modify fun s => { s with nodeTys := (s.owner, s.body.idOf f, t) :: s.nodeTys }
-      inferCallPlace scope amb args call x head
+    | .fn .. | .method _ | .const _ => inferCallFn scope amb args call x head
     | _ => inferCallPlace scope amb args call x head
   | .label l => do
     applyTy scope amb s!"the label `@{l}`" (← inferExpr scope amb f) args call

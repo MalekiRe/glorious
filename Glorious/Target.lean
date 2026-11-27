@@ -12,11 +12,9 @@ everything it was made from: the program's texts, its modules' texts and the
 compiler itself. Where none of that has changed, the next compile is the
 reading of one file.
 
-What is kept of a compile (`Built`) is what the commands that run or report
-on a program need: the bytecode, the constructor names values are printed
-with, what Core's typing showed, which borrows are not scopes of their own,
-and how each place where a borrow can be a scope of its own was made, which
-a later compile of a changed program starts from.
+What is kept of a compile (`Built`) is what the commands that run a program
+need: the bytecode, the constructor names values are printed with, and the
+local slots each function starts with.
 
 Nothing here is trusted beyond the compiler that wrote it: the key names the
 compiler's own file, by its size and the time it was written, so a file
@@ -33,26 +31,10 @@ structure Built where
   ctorNames : Array String
   /-- The local slots each function needs, for the Rust VM's bytecode file. -/
   startLocals : List Nat
-  /-- How many function signatures the certificate has, and which of Core's
-  sets of rules it shows: none if the program has no certificate. -/
-  sigs : Nat
-  strict : Bool
-  regions : Bool
-  loans : Bool
-  /-- How many borrows are scopes of their own, and the others, as written. -/
-  lent : Nat
-  plain : List String
-  /-- Whether the places where a borrow can be a scope of its own were looked
-  for one by one (`certify` asks for it; `run` does not need it). -/
-  searched : Bool := true
 
 /-- What a compile keeps of a program it compiled. -/
-def Built.of (c : Compiled) (startLocals : List Nat) (searched : Bool := true) : Built :=
-  let has := fun (f : Typing.Cert → Bool) => (c.cert.map f).getD false
-  { bytecode := compile c.core, ctorNames := c.ctorNames, startLocals
-    sigs := (c.cert.map (·.sigs.size)).getD 0
-    strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
-    lent := c.lent, plain := c.plain.map (·.show), searched }
+def Built.of (c : Compiled) (startLocals : List Nat) : Built :=
+  { bytecode := compile c.core, ctorNames := c.ctorNames, startLocals }
 
 /-! ## Where it is kept -/
 
@@ -87,21 +69,11 @@ def keyOf (src : String) (files : List (List String × String)) : IO String := d
   pure s!"{exe} {info.byteSize} {info.modified.sec}.{info.modified.nsec} {texts.length} {hashed}"
 
 deriving instance Nonempty for Bytecode.Program
-deriving instance Nonempty for Typing.Ty
 deriving instance Nonempty for Built
-deriving instance Nonempty for Typing.Cert
 
 /-- What the last compile kept, if it was made from `key`. -/
 def read (dir : System.FilePath) (key : String) : IO (Option Built) :=
   Store.load (dir / "program") key
-
-/-- The certificate the last compile found, if one was kept. -/
-def readCert (dir : System.FilePath) : IO (Option Typing.Cert) := do
-  pure ((← Store.load (dir / "certificate") "certificate").map Typing.Cert.withIndex)
-
-/-- Keep a certificate. -/
-def writeCert (dir : System.FilePath) (c : Typing.Cert) : IO Unit :=
-  Store.save (dir / "certificate") "certificate" c
 
 /-- Keep what a compile made. -/
 def write (dir : System.FilePath) (key : String) (b : Built) : IO Unit :=

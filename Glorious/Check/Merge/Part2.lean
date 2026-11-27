@@ -13,7 +13,6 @@ delta_part StDelta2 diffPart2 applyPart2 fitsPart2 clearPart2 restorePart2 [
   fieldNames : MapLD String String,
   dotChosen : ListD (Nat × String × Nat),
   scalarLits : ListD (String × Nat × String),
-  nodeTys : ListD (String × Nat × Ty),
   argsChosen : ListD ((Nat × Nat) × Expr),
   decided : ListD Elab.Decision,
   traitShape : MapD String (Nat × List String),

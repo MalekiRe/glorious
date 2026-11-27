@@ -709,9 +709,6 @@ structure Blocks where
   /-- Each whole number written where a scalar type is wanted, by its
   function and its place there: the type's name. -/
   scalarLits : Std.HashMap (String × Nat) String := {}
-  /-- The type the checker found of each expression, by its function and its
-  node's identity (`Check.St.nodeTys`): what Core's types are written from. -/
-  nodeTys : Std.HashMap (String × Nat) Syntax.TypeExpr := {}
   /-- Arguments given as other than written (`Check.argsChosen`), by the call
   and the place. -/
   argsChosen : Std.HashMap (Nat × Nat) Expr := {}
@@ -728,27 +725,6 @@ structure Globals where
   bodies : Std.HashMap String Flat.Body := {}
   /-- What the checker learnt about the program's blocks, if it was run. -/
   blocks : Option Blocks := none
-  /-- How each place a borrow is written, counted in the order they are
-  elaborated, is made a scope of its own in Core. `0`: it is not; the borrow is
-  the reference it borrows. For a call of a function with borrows as arguments,
-  `1`: each is a scope that lasts as long as the call; `2`: each is a scope
-  that lasts while what the call gave is used. For `let p = &x`, `1`: a scope
-  that lasts while `p` is mentioned; `2`: while `p` or anything made from it
-  is. -/
-  lends : Nat → Nat := fun _ => 0
-
-/-- A borrow written in the source: where, of which variable, and whether for
-writing. -/
-structure Borrow where
-  owner : String
-  line : Nat
-  col : Nat
-  name : String
-  uniq : Bool
-  deriving BEq
-
-def Borrow.show (b : Borrow) : String :=
-  s!"{b.line}:{b.col}: in `{b.owner}`: `{if b.uniq then "&mut " else "&"}{b.name}`"
 
 /-- Machine intrinsics by surface name, with their argument counts. -/
 def prims : List (String × Prim × Nat) :=
@@ -849,14 +825,10 @@ structure Builder where
   it, because a block that runs in another's place took them from what the
   other captured: each such activation and the local there, nearest first. -/
   origins : List (Atom × List (Nat × Atom)) := []
-  /-- The type the checker found of what some of its locals hold, by the
-  local's place (`elabExpr`). -/
-  tys : Array (Nat × Syntax.TypeExpr) := #[]
 
 /-- What elaborating one top-level function read that is not its own body:
 kept with what it made (`ElabKept`), and read again before that is taken. -/
 inductive ElabRead where
-  | lend (site mode : Nat)
   | given (id : Nat) (v : Bool)
   | link (id : Nat) (v : Option Nat)
   | pack (id : Nat) (v : Option (List String))
@@ -865,11 +837,6 @@ inductive ElabRead where
 
 structure St where
   fns : Array Core.Fn
-  /-- For each function, for each of its clauses, the type the checker found
-  of what its locals hold, by the local's place (`Builder.tys`). -/
-  fnTys : Std.HashMap Nat (List (Array (Nat × Syntax.TypeExpr))) := {}
-  /-- The same of each body made, by its hash, until its function is made. -/
-  finishedTys : Std.HashMap UInt64 (Array (Nat × Syntax.TypeExpr)) := {}
   /-- A description of each function, for diagnostics. -/
   names : Array String
   /-- The top-level function being elaborated. -/
@@ -884,35 +851,17 @@ structure St where
   was built in, and each captured name with the local it stood for there. -/
   layouts : List (Nat × Nat × List (String × Atom × List (Nat × Atom))) := []
   /-- Functions that are only ever given the environment of another, with how
-  many values that environment has and how many arguments the other took. -/
-  envSizes : List (Nat × Nat × Nat) := []
-  /-- How many borrows were made scopes of their own. -/
-  lent : Nat := 0
-  /-- How many places a borrow could be made a scope there were. -/
-  sites : Nat := 0
-  /-- A place that is a call inside a statement that is a place itself, with
-  the statement's: where the statement's borrows are made scopes, the call's
-  are among them. -/
-  under : List (Nat × Nat) := []
-  /-- The places that can be tried two ways, the second with the borrow
-  lasting longer: the others are a call's, and a call's lasts as long as
-  the call. -/
-  twoWays : List Nat := []
-  /-- The function each place is in, by place. -/
-  siteOwners : Array String := #[]
-  /-- The place being elaborated as a scope of its own, while it is. -/
-  curSite : Option Nat := none
-  /-- For each function made, the place being elaborated as a scope of its
-  own when it was made, if one was. -/
-  fnSites : Array (Option Nat) := #[]
+  many values that environment has, how many arguments the other took, and
+  the other's function (`literalFns`; 0 if not known). -/
+  envSizes : List (Nat × Nat × Nat × Nat) := []
+  /-- The function of each callable literal this function made, by the
+  literal's identity. -/
+  literalFns : Std.HashMap Nat Nat := {}
   /-- Where the statement being elaborated starts. -/
   pos : Nat × Nat := (0, 0)
-  /-- The borrows that are not scopes of their own: each is the reference it
-  borrows. -/
-  plain : List Borrow := []
-  /-- Does the program call a foreign function, or read or write memory at an
-  address? -/
-  foreign : Bool := false
+  /-- How many calls the top-level function being elaborated split at a
+  borrow's end (`splitCallOn`): the names of the parts taken out are of it. -/
+  splits : Nat := 0
   /-- Each function whose closures say how they are destroyed, with the
   function that destroys what one captured. -/
   drops : List (Nat × Nat) := []
@@ -937,18 +886,10 @@ structure ElabKept where
   clauses : List Core.Clause
   fns : Array Core.Fn
   names : Array String
-  fnSites : Array (Option Nat)
-  siteOwners : Array String
   layouts : List (Nat × Nat × List (String × Atom × List (Nat × Atom)))
-  envSizes : List (Nat × Nat × Nat)
-  under : List (Nat × Nat)
-  twoWays : List Nat
-  plain : List Borrow
+  envSizes : List (Nat × Nat × Nat × Nat)
   drops : List (Nat × Nat)
   activations : Nat
-  lent : Nat
-  sites : Nat
-  foreign : Bool
   pos : Nat × Nat
 
 /-- Each top-level function's `ElabKept`, by its name. -/
@@ -979,12 +920,7 @@ def terminate (t : Core.Tm) : M Unit :=
 
 def finish (result : Atom) : M Core.Tm := do
   let s ← get
-  let tm := s.b.ops.foldr (fun op k => op k) (s.b.done.getD (.ret result))
-  -- (The types its locals were found of, for the function the body is made
-  -- a clause of: `addFn`.)
-  unless s.b.tys.isEmpty do
-    set { s with finishedTys := s.finishedTys.insert (hash tm) s.b.tys }
-  pure tm
+  pure (s.b.ops.foldr (fun op k => op k) (s.b.done.getD (.ret result)))
 
 /-- Build a computation whose locals start at `depth`, then restore the outer one. -/
 def withBuilder {α : Type} (depth : Nat) (k : M α) : M α := do
@@ -1033,12 +969,6 @@ private unsafe def sameObjImpl {α : Type} (a b : α) : Bool := ptrAddrUnsafe a 
 
 def noteRead (r : ElabRead) : M Unit := modify fun s => { s with reads := s.reads.push r }
 
-/-- How the place `site` is made a scope, noted. -/
-def lendAt (site : Nat) : M Nat := do
-  let m := (← read).lends site
-  noteRead (.lend site m)
-  pure m
-
 /-- Whether the checker found block `id` takes the argument it does not name, noted. -/
 def givenAt (id : Nat) : M Bool := do
   let v := ((← read).blocks.getD {}).given.contains id
@@ -1078,7 +1008,6 @@ where
 
 /-- Is what `r` read still what it is? -/
 def readHolds : ElabRead → M Bool
-  | .lend site mode => do pure ((← read).lends site == mode)
   | .given id v => do pure (((← read).blocks.getD {}).given.contains id == v)
   | .link id v => do pure (((← read).blocks.getD {}).links[id]? == v)
   | .pack id v => do pure (((← read).blocks.getD {}).packs[id]? == v)
@@ -1096,18 +1025,7 @@ where
 
 def addFn (f : Core.Fn) (name : String) : M Nat := do
   modifyGet fun s =>
-    let tys := f.clauses.map fun c => (s.finishedTys[hash c.body]?).getD #[]
-    (s.fns.size, { s with fns := s.fns.push f, names := s.names.push name, fnSites := s.fnSites.push s.curSite,
-                          fnTys := s.fnTys.insert s.fns.size tys })
-
-/-- Elaborate as part of the place `site`, which is a scope of its own: what
-functions are made are that place's. -/
-def atSite {α : Type} (site : Nat) (act : M α) : M α := do
-  let outer := (← get).curSite
-  modify fun s => { s with curSite := some site }
-  let r ← act
-  modify fun s => { s with curSite := outer }
-  pure r
+    (s.fns.size, { s with fns := s.fns.push f, names := s.names.push name })
 
 def indexed (names : List String) (base : Nat) : Scope :=
   (names.zip (List.range names.length)).map fun (x, k) => (x, .var (base + k))
@@ -1188,76 +1106,6 @@ had it written in it? Such a `let p = &x` is a scope, and not a place of its
 own: the statement was the place. -/
 def madeBorrow (p : String) : Bool :=
   p.startsWith "%lend" || p.startsWith "%held" || p.startsWith "%borrow"
-
-open Flat in
-/-- A statement's expression with what is worked out before its first borrow
-is used taken out and named, in the order it is worked out: so that a borrow
-made a scope around the statement does not last while that runs, which may
-read the variable borrowed. (`a[len(a) - 1] = v`.)
-
-Only what comes first can be taken out without changing the order: once a
-call that is given a borrow has run, what follows stays where it is. Nothing
-is taken out of what a handler watches: it would then run unwatched. -/
-partial def pullFirst (site : Nat) (isCell : String → Bool) (e : ExprId) :
-    Build (ExprId × List (String × ExprId)) := do
-  let (e, pulled, _) ← go e [] true
-  pure (e, pulled.reverse)
-where
-  has (b : Body) (e : ExprId) : Bool :=
-    match b.expr e with
-    | .name none n => madeBorrow n
-    | .call _ f args => has b f || args.any (has b)
-    | .tuple args => args.any (has b)
-    | .deref e | .proj e _ => has b e
-    | .handle subject _ => has b subject
-    | _ => false
-  /-- Is it worked out at all: not a number, a callable written out, or a
-  name that is not a variable's. -/
-  worth (b : Body) (e : ExprId) : Bool :=
-    match b.expr e with
-    | .int _ | .closure _ _ | .label _ => false
-    | .name none n => isCell n
-    | .name (some _) _ => false
-    | _ => true
-  operand (e : ExprId) (pulled : List (String × ExprId)) (first : Bool) :
-      Build (ExprId × List (String × ExprId) × Bool) := do
-    let b ← get
-    if has b e then go e pulled first
-    else if first && worth b e then
-      let n := s!"%pre{site}.{pulled.length}"
-      pure (← pushExpr (.name none n), (n, e) :: pulled, first)
-    else pure (e, pulled, first)
-  operands (es : Array ExprId) (pulled : List (String × ExprId)) (first : Bool) :
-      Build (Array ExprId × List (String × ExprId) × Bool) := do
-    let mut out : Array ExprId := #[]
-    let mut pulled := pulled
-    let mut first := first
-    for e in es do
-      let (e', pulled', first') ← operand e pulled first
-      out := out.push e'
-      pulled := pulled'
-      first := first'
-    pure (out, pulled, first)
-  go (e : ExprId) (pulled : List (String × ExprId)) (first : Bool) :
-      Build (ExprId × List (String × ExprId) × Bool) := do
-    match (← get).expr e with
-    | .call id f args =>
-      let (f, pulled, first) ← match (← get).expr f with
-        | .name _ _ => pure (f, pulled, first)
-        | _ => operand f pulled first
-      let (args, pulled, _) ← operands args pulled first
-      -- (The call runs now: nothing after it is first.)
-      pure (← pushExpr (.call id f args), pulled, false)
-    | .tuple args =>
-      let (args, pulled, first) ← operands args pulled first
-      pure (← pushExpr (.tuple args), pulled, first)
-    | .deref x =>
-      let (x, pulled, first) ← operand x pulled first
-      pure (← pushExpr (.deref x), pulled, first)
-    | .proj x n =>
-      let (x, pulled, first) ← operand x pulled first
-      pure (← pushExpr (.proj x n), pulled, first)
-    | _ => pure (e, pulled, false)
 
 open Flat in
 /-- The statements of a block with each `let p = &x` moved to just before the

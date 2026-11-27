@@ -1,14 +1,13 @@
 module
 
 public import Glorious.Lay
-public import Glorious.Typing.Checker
-public import Glorious.Typing.Certify
+public import Glorious.Lower.Types
 
 /-!
 # The layout of a Core type
 
 What a value of a type is in memory (`Lay`), from its type as the
-certificate has it: Rust's layout, as the library's `Layout` writes it out
+types have it: Rust's layout, as the library's `Layout` writes it out
 for a type from its declaration (`Syntax.Flat.writeLayouts`), so that the
 two say the same size of every type.
 
@@ -25,11 +24,9 @@ two say the same size of every type.
 
 namespace Glorious.Lower
 
-open Typing
-
 /-- The declared types a value of a type holds within its bytes, `seen` those
 already found. -/
-partial def heldWithin (C : Cert) (seen : List (Nat × List Ty)) : Ty → List (Nat × List Ty)
+partial def heldWithin (C : Types) (seen : List (Nat × List Ty)) : Ty → List (Nat × List Ty)
   | .tuple fs => fs.foldl (heldWithin C) seen
   | .data name args =>
     if seen.contains (name, args) then seen
@@ -41,13 +38,10 @@ partial def heldWithin (C : Cert) (seen : List (Nat × List Ty)) : Ty → List (
 /-- Whether a value of the declared type would hold one of itself in its bytes:
 held by the machine wherever it is, so that a reference to one is to the same
 bytes whatever it is reached through. -/
-def holdsItself (C : Cert) (name : Nat) (args : List Ty) : Bool :=
+def holdsItself (C : Types) (name : Nat) (args : List Ty) : Bool :=
   match findData C.datas name args with
   | some ctors => (ctors.foldl (fun s (_, fs) => fs.foldl (heldWithin C) s) []).contains (name, args)
   | none => false
-
-deriving instance Hashable for Rgn
-deriving instance Hashable for Ty
 
 /-- What the lowering has worked out of types, each once: a type's layout,
 and whether a declared type at its arguments holds itself. -/
@@ -60,7 +54,7 @@ worked out of types on the way. -/
 abbrev L := StateT LayCache (Except String)
 
 /-- `holdsItself`, worked out once for each declared type at its arguments. -/
-def holdsM (C : Cert) (name : Nat) (args : List Ty) : L Bool := do
+def holdsM (C : Types) (name : Nat) (args : List Ty) : L Bool := do
   if let some h := (← get).holds[(name, args)]? then return h
   let h := holdsItself C name args
   modify fun c => { c with holds := c.holds.insert (name, args) h }
@@ -69,7 +63,7 @@ def holdsM (C : Cert) (name : Nat) (args : List Ty) : L Bool := do
 /-- The layout of a type, each worked out once. (A declared type that holds
 itself is held by the machine; one that does not reaches no cycle, so each
 is a matter of its name and arguments alone.) -/
-partial def layOf (C : Cert) (t : Ty) : L Laid := do
+partial def layOf (C : Types) (t : Ty) : L Laid := do
   if let some l := (← get).lays[t]? then return l
   let l ← match t with
     | .int => pure ⟨.int 8 true, 8, 8⟩
@@ -100,7 +94,7 @@ partial def layOf (C : Cert) (t : Ty) : L Laid := do
           pure ⟨.tagged (each.map fun (tag, (at_, _, _)) => (tag, at_)), alignUp size align, align⟩
         | none => pure ⟨.held, 8, 8⟩
     | .fn .. => pure ⟨.held, 16, 8⟩
-    | .ref _ _ => pure ⟨.addr, 8, 8⟩
+    | .ref _ => pure ⟨.addr, 8, 8⟩
     | .never => pure ⟨.nothing, 0, 1⟩
   modify fun c => { c with lays := c.lays.insert t l }
   pure l

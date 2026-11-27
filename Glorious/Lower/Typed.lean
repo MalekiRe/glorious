@@ -1,15 +1,16 @@
 module
 
 public import Glorious.Lower.Layout
+public import Glorious.Trace
 
 /-!
 # The typed lowering
 
-A program whose certificate types it, with each cell made a cell of memory
-and each memory operation one of an address, of the layout of the type the
-reference is to (`Tm.cellL`, `MemOp.loadL` and the rest). The types are
-found as the checker finds them (`Typing.checkTm`): each local's from the
-hints, the signatures and the certificate's data and operations.
+A program whose types (`Typer`) type it, with each cell made a cell of
+memory and each memory operation one of an address, of the layout of the
+type the reference is to (`Tm.cellL`, `MemOp.loadL` and the rest). Each
+local's type is found from the hints, the signatures and the types' data and
+operations.
 
 A function is lowered at each of its signatures; until each is a copy of its
 own, the lowerings must be the same, and a program whose are not, or that
@@ -21,12 +22,12 @@ the machine holds), is not lowered.
 
 namespace Glorious.Lower
 
-open Typing Core
+open Core
 
 /-- Whether how a type is laid out has in it what nothing decided
 (`anyName`): where it is laid out in place, not behind a reference, in what
 the machine holds, or in a type parameter no field has. -/
-partial def undecided (C : Cert) : Ty → L Bool
+partial def undecided (C : Types) : Ty → L Bool
   | .tuple fs => fs.anyM (undecided C)
   | .data name args => do
     if name == anyName then return true
@@ -57,10 +58,10 @@ def need {α : Type} (o : Option α) (why : String) : L α :=
 
 /-- The memory operation `op` of an address, laid out as what the reference
 `args`' first is to; not if what it reaches into is not bytes. -/
-def laidOp (C : Cert) (Γ : Env) (op : MemOp) (args : List Atom) : L MemOp := do
+def laidOp (C : Types) (Γ : Env) (op : MemOp) (args : List Atom) : L MemOp := do
   -- (Those by address are as they are.)
   if [.alloc, .free, .readBits, .writeBits, .copy, .sizeOf, .alignOf, .deref, .staticAt, .addressOf].contains op then return op
-  let some (.ref _ σ) := args.head?.bind (aTy Γ) | throw "a memory operation not of a reference"
+  let some (.ref σ) := args.head?.bind (aTy Γ) | throw "a memory operation not of a reference"
   -- (What nothing decided may be laid out otherwise where it is decided.)
   if ← undecided C σ then throw "a reference to what nothing decided the type of"
   let l := (← layOf C σ).lay
@@ -100,30 +101,29 @@ def _root_.Glorious.Core.Tm.anyFn (p : Nat → Bool) : Tm → Bool
   | _ => false
 
 /-- Which of `fn`'s signatures a use of it is at: the first whose captures are
-`Cs`, whose parameters begin with `Ps` and whose result is `ρ` (where given),
-made with the regions `θ`. -/
-def sigAt (C : Cert) (fn : Nat) (θ : List Rgn) (Cs : List Ty) (Ps : List Ty) (ρ : Option Ty) : Option Nat :=
+`Cs`, whose parameters begin with `Ps` and whose result is `ρ` (where
+given). -/
+def sigAt (C : Types) (fn : Nat) (Cs : List Ty) (Ps : List Ty) (ρ : Option Ty) : Option Nat :=
   (C.sigsOf fn).findIdx? fun e =>
-    θ.length == e.sig.crgns && Cs == e.sig.caps.map (Ty.inst θ)
-      && Ps == (e.sig.params.take Ps.length).map (Ty.inst θ) && ρ.all (· == e.sig.ret.inst θ)
+    Cs == e.sig.caps && Ps == e.sig.params.take Ps.length && ρ.all (· == e.sig.ret)
 
 /-- A use of a function as a function's lowering finds it: at the signature
-its captures, parameters and result say, made with `θ` (`sigAt`); or at none.
+its captures, parameters and result say (`sigAt`); or at none.
 Which function that is, is worked out once every function is lowered
 (`Ask.target`): a lowering asks, and is kept with what it asked
 (`TypedKept`). -/
 inductive Ask where
-  | at (fn : Nat) (θ : List Rgn) (Cs Ps : List Ty) (ρ : Option Ty)
+  | at (fn : Nat) (Cs Ps : List Ty) (ρ : Option Ty)
   | whole (fn : Nat)
 
 def Ask.mapFn (f : Nat → Nat) : Ask → Ask
-  | .at fn θ Cs Ps ρ => .at (f fn) θ Cs Ps ρ
+  | .at fn Cs Ps ρ => .at (f fn) Cs Ps ρ
   | .whole fn => .whole (f fn)
 
 /-- The use as the lowering first writes it (`Uses`). -/
-def Ask.target (C : Cert) (U : Uses) : Ask → Nat
-  | .at fn θ Cs Ps ρ =>
-    match sigAt C fn θ Cs Ps ρ with
+def Ask.target (C : Types) (U : Uses) : Ask → Nat
+  | .at fn Cs Ps ρ =>
+    match sigAt C fn Cs Ps ρ with
     | some i => U.base[fn]!+ i
     | none => U.total + fn
   | .whole fn => U.total + fn
@@ -137,54 +137,51 @@ def ask (a : Ask) : LT Nat := modifyGet fun as => (as.size, as.push a)
 /-- The functions of a handler, each the one it is where it is lowered as more
 than one: the one for a result at the thunk's result, each arm at its
 operation's payload. -/
-def handlerFns (C : Cert) (Γ : Env) (ret : Nat) (ops : List (Nat × Nat))
-    (captures : List Atom) (thunk : Atom) (ρ : Option Ty) (H : Row) (θs : List (List Rgn)) :
+def handlerFns (C : Types) (Γ : Env) (ret : Nat) (ops : List (Nat × Nat))
+    (captures : List Atom) (thunk : Atom) (ρ : Option Ty) (H : Row) :
     LT (Nat × List (Nat × Nat)) := do
   let Cs ← need (asTy Γ captures) "a handler's captures have no type"
   let σ := match aTy Γ thunk with
-    | some (.fn _ _ σ ..) => [σ]
+    | some (.fn _ σ ..) => [σ]
     | _ => []
-  let ret ← ask (.at ret (θs.headD []) Cs σ ρ)
-  let ops ← (ops.zip (H.zip (θs.drop 1))).mapM fun ((op, arm), ((_, targs), θ)) => do
+  let ret ← ask (.at ret Cs σ ρ)
+  let ops ← (ops.zip H).mapM fun ((op, arm), (_, targs)) => do
     let Ps := match findOp C.ops op targs with
       | some (Ps, _) => Ps
       | none => []
-    pure (op, ← ask (.at arm θ Cs Ps ρ))
+    pure (op, ← ask (.at arm Cs Ps ρ))
   pure (ret, ops)
 
 /-- The computation lowered: `ε` the operations it may perform, the hints
-the certificate has for it; each use of a function asked (`Ask`). -/
-partial def lowerTm (C : Cert) (ε : Row) : Env → Tm → List Hint → LT Tm
+the types have for it; each use of a function asked (`Ask`). -/
+partial def lowerTm (C : Types) (ε : Row) : Env → Tm → List Hint → LT Tm
   | _, .ret a, _ => pure (.ret a)
-  | Γ, .let_ rhs body, h :: hs => do
-    let (σ, θ) ← need h.bind? "a `let` without its type"
+  | Γ, .let_ rhs body, .ty σ :: hs => do
     let rhs ← match rhs, σ with
-      | .closure fn captures, .fn _ Ps ρ .. => do
+      | .closure fn captures, .fn Ps ρ .. => do
         let Cs ← need (asTy Γ captures) "a closure of what has no type"
-        pure (.closure (← ask (.at fn θ Cs Ps (some ρ))) captures)
-      | .rebind a fn, .fn _ Ps ρ .. =>
-        match aTy Γ a with
-        | some (.fn _ _ _ _ _ (some Cs) _) => do pure (.rebind a (← ask (.at fn θ Cs Ps (some ρ))))
-        | _ => do pure (.rebind a (← ask (.whole fn)))
+        pure (.closure (← ask (.at fn Cs Ps (some ρ))) captures)
+      -- (Made with what `a` was made with: its type says so.)
+      | .rebind a fn, .fn Ps ρ _ _ (some Cs) => do pure (.rebind a (← ask (.at fn Cs Ps (some ρ))))
+      | .rebind a fn, _ => do pure (.rebind a (← ask (.whole fn)))
       | _, _ => pure rhs
     pure (.let_ rhs (← lowerTm C ε (Γ.push σ) body hs))
-  | _, .let_ _ _, [] => throw "a `let` without its type"
+  | _, .let_ _ _, _ => throw "a `let` without its type"
   | Γ, .call f args body, hs => do
-    let some (.fn n _ σ ..) := aTy Γ f | throw "a call of what is not callable"
-    let (rs, hs) ← need (takeRgns n hs) "a call without its regions"
-    if σ = .never then
+    let some (.fn _ σ ..) := aTy Γ f | throw "a call of what is not callable"
+    if σ == .never then
       let .ty σ' :: hs := hs | throw "a call that does not return without its type"
       pure (.call f args (← lowerTm C ε (Γ.push (σ')) body hs))
-    else pure (.call f args (← lowerTm C ε (Γ.push (σ.open rs)) body hs))
+    else pure (.call f args (← lowerTm C ε (Γ.push σ) body hs))
   | _, .tail f args, _ => pure (.tail f args)
   | Γ, .handle ret ops captures thunk body, hs => do
-    let .handler ρ H _ θs :: hs := hs | throw "a handler without its type"
-    let (ret, ops) ← handlerFns C Γ ret ops captures thunk ρ H θs
+    let .handler ρ H :: hs := hs | throw "a handler without its type"
+    let (ret, ops) ← handlerFns C Γ ret ops captures thunk ρ H
     pure (.handle ret ops captures thunk (← lowerTm C ε (Γ.push (ρ)) body hs))
   | Γ, .handleTail ret ops captures thunk, hs => do
-    let .handler _ H _ θs :: _ := hs | throw "a handler without its type"
+    let .handler _ H :: _ := hs | throw "a handler without its type"
     -- (What it yields is what the activation does: not known here.)
-    let (ret, ops) ← handlerFns C Γ ret ops captures thunk none H θs
+    let (ret, ops) ← handlerFns C Γ ret ops captures thunk none H
     pure (.handleTail ret ops captures thunk)
   | _, .raise op args, _ => pure (.raise op args)
   | Γ, .perform op args body, hs => do
@@ -192,29 +189,29 @@ partial def lowerTm (C : Cert) (ε : Row) : Env → Tm → List Hint → LT Tm
     let some (_, some σ) := findOp C.ops op targs | throw "an operation without its type"
     pure (.perform op args (← lowerTm C ε (Γ.push σ) body hs))
   | Γ, .label thunk body, hs => do
-    let some (.fn _ _ σ ..) := aTy Γ thunk | throw "a label's scope not callable"
+    let some (.fn _ σ ..) := aTy Γ thunk | throw "a label's scope not callable"
     pure (.label thunk (← lowerTm C ε (Γ.push σ) body hs))
   | _, .labelTail thunk, _ => pure (.labelTail thunk)
   | Γ, .guard cleanup thunk body, hs => do
-    let some (.fn _ _ σ ..) := aTy Γ thunk | throw "a guard's scope not callable"
+    let some (.fn _ σ ..) := aTy Γ thunk | throw "a guard's scope not callable"
     pure (.guard cleanup thunk (← lowerTm C ε (Γ.push σ) body hs))
   | _, .guardTail cleanup thunk, _ => pure (.guardTail cleanup thunk)
   | Γ, .cancel k body, hs => do pure (.cancel k (← lowerTm C ε (Γ.push (.unit)) body hs))
   | Γ, .cell init thunk body, hs => do
     let σ ← need (aTy Γ init) "a cell of what has no type"
-    let some (.fn _ _ ρ ..) := aTy Γ thunk | throw "a cell's scope not callable"
+    let some (.fn _ ρ ..) := aTy Γ thunk | throw "a cell's scope not callable"
     pure (.cellL (← layOf C σ) init thunk (← lowerTm C ε (Γ.push (ρ)) body hs))
   | Γ, .cellTail init thunk, _ => do
     pure (.cellTailL (← layOf C (← need (aTy Γ init) "a cell of what has no type")) init thunk)
   | _, .cellL .., _ | _, .cellTailL .., _ => throw "lowered already"
   | Γ, .lend uniq r thunk pre post body, hs => do
-    let some (.fn _ _ ρ ..) := aTy Γ thunk | throw "a borrow's scope not callable"
+    let some (.fn _ ρ ..) := aTy Γ thunk | throw "a borrow's scope not callable"
     pure (.lend uniq r thunk pre post (← lowerTm C ε (Γ.push (ρ)) body hs))
   -- (What a type takes, a number now.)
   | Γ, .mem op [a] body, hs =>
     if op == .sizeOf || op == .alignOf then do
       let some t := (match aTy Γ a with
-        | some (.ref _ t) | some (.data _ (t :: _)) => some t
+        | some (.ref t) | some (.data _ (t :: _)) => some t
         | _ => none) | throw "the size of what is not a pointer's or a reference's"
       let l ← layOf C t
       pure (.let_ (.atom (.int (if op == .sizeOf then l.size else l.align)))
@@ -223,7 +220,7 @@ partial def lowerTm (C : Cert) (ε : Row) : Env → Tm → List Hint → LT Tm
   -- (A raw pointer's target, its address.)
   | Γ, .mem .deref [base, a, _] body, hs => do
     let some (.data _ (t :: _)) := aTy Γ base | throw "what a pointer of no type points to"
-    pure (.let_ (.atom a) (← lowerTm C ε (Γ.push (.ref (.cell 0) t)) body hs))
+    pure (.let_ (.atom a) (← lowerTm C ε (Γ.push (.ref t)) body hs))
   | Γ, .mem op args body, hs => lowerMem C ε Γ op args body hs
   | Γ, .host id args body, hs => do
     match id, hs with
@@ -233,45 +230,44 @@ partial def lowerTm (C : Cert) (ε : Row) : Env → Tm → List Hint → LT Tm
     | _, _ => throw "a host operation without its type"
 where
   /-- A memory operation lowered: of the layout of what its reference is to. -/
-  lowerMem (C : Cert) (ε : Row) (Γ : Env) (op : MemOp) (args : List Atom) (body : Tm)
+  lowerMem (C : Types) (ε : Row) (Γ : Env) (op : MemOp) (args : List Atom) (body : Tm)
       (hs : List Hint) : LT Tm := do
     let σ ← match op, args.head?.bind (aTy Γ) with
-      | .load, some (.ref _ σ) | .swap, some (.ref _ σ) => pure σ
+      | .load, some (.ref σ) | .swap, some (.ref σ) => pure σ
       | .store, _ | .free, _ | .writeBits, _ | .copy, _ => pure .unit
       | .tag, _ | .readBits, _ => pure .int
       | .alloc, _ | .staticAt, _ => pure (.scalar (-64))
       | .addressOf, _ => match args with
         | [r, .int tag] => match aTy Γ r with
-          | some (.ref _ σ) => do
+          | some (.ref σ) => do
             let ptr ← need (C.datas.find? fun d => d.ctors.any (·.1 == tag.toNat)) "a pointer type not known"
             pure (.data ptr.name [← need (fixedElem σ) "the address of what is not a `[T; N]`"])
           | _ => throw "the address of what is not a reference"
         | _ => throw "an address without its pointer's constructor"
-      | .focus, some (.ref r σ) =>
+      | .focus, some (.ref σ) =>
         match args with
         | [_, ix] => do
           let at_ := match ix with
             | .int (.ofNat i) => (placeTy C σ [i]).orElse fun _ => fixedElem σ
             | _ => if aTy Γ ix == some .int then fixedElem σ else none
-          pure (.ref r (← need at_ "a field not known"))
-        | [_, _, .int (-1)] => do pure (.ref r (← need (fixedElem σ) "a place in what is not a `[T; N]`"))
+          pure (.ref (← need at_ "a field not known"))
+        | [_, _, .int (-1)] => do pure (.ref (← need (fixedElem σ) "a place in what is not a `[T; N]`"))
         | [_, .int (.ofNat i), .int (.ofNat built)] => do
-          pure (.ref r (← need ((ctorFieldsOf C built σ).bind (·[i]?)) "a field not known"))
+          pure (.ref (← need ((ctorFieldsOf C built σ).bind (·[i]?)) "a field not known"))
         | _ => throw "a field not known"
       | _, _ => throw "a memory operation not of a reference"
     pure (.mem (← laidOp C Γ op args) args (← lowerTm C ε (Γ.push σ) body hs))
 
 /-- A function's clauses lowered at a signature, with their hints there. -/
-def lowerClauses (C : Cert) (e : SigEntry) (cs : List Clause) : LT (List Clause) :=
+def lowerClauses (C : Types) (e : SigEntry) (cs : List Clause) : LT (List Clause) :=
   let sig := e.sig
-  let params := sig.params.map (Ty.open sig.vars)
   (cs.zip e.hints).mapM fun (c, hs) => do
-    let Bs ← need (patsTys C c.pats params) "patterns not of their types"
-    pure { c with body := ← lowerTm C (sig.eff.open sig.vars) (params ++ sig.caps ++ Bs).toArray c.body hs }
+    let Bs ← need (patsTys C c.pats sig.params) "patterns not of their types"
+    pure { c with body := ← lowerTm C sig.eff (sig.params ++ sig.caps ++ Bs).toArray c.body hs }
 
 /-- Which function each of a function's signatures is lowered as: itself, or a
 copy of it (`ids`, by function and by the place of the signature in
-`Cert.sigsOf`). -/
+`Types.sigsOf`). -/
 structure Targets where
   ids : Array (Array Nat) := #[]
 
@@ -305,9 +301,6 @@ def targetsOf (n : Nat) (kinds : Array (List Nat)) : Targets × List Nat := Id.r
     ids := ids.push row
   pure (⟨ids⟩, copies)
 
-deriving instance Hashable for Glorious.Typing.DataInst, Glorious.Typing.OpInst, Glorious.Typing.Hint,
-  Glorious.Typing.FnSig
-
 /-- A function lowered at a signature, kept for a later compile: its clauses,
 each block of bytes in them by its bytes, and the uses it asked, each
 function by `Program.sids`. -/
@@ -316,16 +309,16 @@ structure TypedKept where
   asks : Array Ask
 
 /-- What each function's lowering at a signature made, by a key of what it
-is made of, the signature and its hints, and the certificate's types. -/
+is made of, the signature and its hints, and the types'. -/
 abbrev TypedMemo := Std.HashMap UInt64 TypedKept
 
-/-- The program lowered, if its certificate types all of it; or why not. A
+/-- The program lowered, if its types type all of it; or why not. A
 function is copied for each kind of layout its signatures need, each use of
 it made of the copy for its signature; one with no signature is never
 called, and stays as it is. What each copy is a copy of comes with it; and
 what was lowered, for the next compile, which takes what `kept` has (none:
 nothing is kept, and nothing keyed). -/
-def lowered (C : Cert) (p : Program) (kept : Option TypedMemo := none) : L (Program × List Nat × TypedMemo) := do
+def lowered (C : Types) (p : Program) (kept : Option TypedMemo := none) : L (Program × List Nat × TypedMemo) := do
   let C := C.withIndex
   let sigs := (List.range p.fns.size).toArray.map C.sigsOf
   let base := sigs.foldl (fun (acc : Array Nat × Nat) es => (acc.1.push acc.2, acc.2 + es.length)) (#[], 0)
@@ -334,7 +327,7 @@ def lowered (C : Cert) (p : Program) (kept : Option TypedMemo := none) : L (Prog
   let owner := (sigs.toList.zipIdx.flatMap fun (es, fn) => es.zipIdx.map fun (_, i) => (fn, i)).toArray
   -- (A function's lowering is kept by what it is made of as another
   -- compile knows it, `Program.keyed`, and what every one is lowered with:
-  -- the types the certificate declares and its operations.)
+  -- the declared types and operations the types use.)
   let sids := p.sids
   let bySid : Std.HashMap UInt64 Nat := sids.zipIdx.foldl (fun m (k, f) => m.insert k f) {}
   let staticAt : Std.HashMap Int Int := p.statics.zipIdx.foldl (fun m (bytes, i) =>
@@ -419,7 +412,9 @@ def lowered (C : Cert) (p : Program) (kept : Option TypedMemo := none) : L (Prog
   pure ({ p with fns := fns.toArray, main := main.mapFns resolve, drops, names }, copies, made)
 
 /-- The program lowered, if it can be (`lowered`). -/
-def program (C : Cert) (p : Program) (kept : Option TypedMemo := none) : Option (Program × List Nat × TypedMemo) :=
-  ((lowered C p kept).run' {}).toOption
+def program (C : Types) (p : Program) (kept : Option TypedMemo := none) : Option (Program × List Nat × TypedMemo) :=
+  match (lowered C p kept).run' {} with
+  | .ok r => some r
+  | .error e => if Trace.enabled then dbgTrace s!"not lowered: {e}" fun _ => none else none
 
 end Glorious.Lower

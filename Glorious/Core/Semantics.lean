@@ -280,24 +280,27 @@ def step (p : Program) (s : State) : Step State Value :=
     | some v, some c => apply p c (.cell s.store.cells.size :: s.stack) (s.store.alloc v)
     | _, _ => .stuck
   | .cellL l init thunk body =>
-    match init.eval s.env with
+    -- (The state taken apart first: the store then changes in place.)
+    let ⟨_, env, stack, store⟩ := s
+    match init.eval env with
     | none => .stuck
     | some v =>
-      match s.store.allocLaid l v with
+      match store.allocLaid l v with
       | none => .stuck
       | some (a, store) =>
-        match evalScope s.env thunk (.ref a 0 []) with
-        | some c => apply p c (.cell a :: .call s.env body :: s.stack) store
+        match evalScope env thunk (.ref a 0 []) with
+        | some c => apply p c (.cell a :: .call env body :: stack) store
         | none => .stuck
   | .cellTailL l init thunk =>
-    match init.eval s.env with
+    let ⟨_, env, stack, store⟩ := s
+    match init.eval env with
     | none => .stuck
     | some v =>
-      match s.store.allocLaid l v with
+      match store.allocLaid l v with
       | none => .stuck
       | some (a, store) =>
-        match evalScope s.env thunk (.ref a 0 []) with
-        | some c => apply p c (.cell a :: s.stack) store
+        match evalScope env thunk (.ref a 0 []) with
+        | some c => apply p c (.cell a :: stack) store
         | none => .stuck
   | .lend uniq r thunk pre post body =>
     match evalLend s.env r thunk pre post (s.store.labels + 1) with
@@ -307,12 +310,13 @@ def step (p : Program) (s : State) : Step State Value :=
       apply p c (.lend uniq a (s.store.labels + 1) :: .call s.env body :: s.stack)
         { s.store with labels := s.store.labels + 1 }
   | .mem op args body =>
-    match evalAtoms s.env args with
+    let ⟨_, env, stack, store⟩ := s
+    match evalAtoms env args with
     | none => .stuck
     | some vs =>
-      match s.store.memOp op vs with
+      match store.memOp op vs with
       | none => .stuck
-      | some (r, store) => .next ⟨body, s.env ++ [r], s.stack, store⟩
+      | some (r, store) => .next ⟨body, env ++ [r], stack, store⟩
   -- A host operation is a step of the program in its world; see `stepIO`.
   | .host _ _ _ => .stuck
 

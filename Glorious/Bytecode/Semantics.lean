@@ -233,17 +233,20 @@ def step (p : Program) (s : State) : Step State Value :=
     | some v, some c => apply p c (.cell s.store.cells.size :: s.frames) (s.store.alloc v)
     | _, _ => .stuck
   | some (.cellL l init thunk) =>
-    match (init.eval s.locals).bind (s.store.allocLaid l) with
+    -- (The state taken apart first: the store then changes in place.)
+    let ⟨code, pc, locals, frames, store⟩ := s
+    match (init.eval locals).bind (store.allocLaid l) with
     | some (a, store) =>
-      match evalScope s.locals thunk (.ref a 0 []) with
-      | some c => apply p c (.cell a :: .ret s.code (s.pc + 1) s.locals :: s.frames) store
+      match evalScope locals thunk (.ref a 0 []) with
+      | some c => apply p c (.cell a :: .ret code (pc + 1) locals :: frames) store
       | none => .stuck
     | none => .stuck
   | some (.cellTailL l init thunk) =>
-    match (init.eval s.locals).bind (s.store.allocLaid l) with
+    let ⟨_, _, locals, frames, store⟩ := s
+    match (init.eval locals).bind (store.allocLaid l) with
     | some (a, store) =>
-      match evalScope s.locals thunk (.ref a 0 []) with
-      | some c => apply p c (.cell a :: s.frames) store
+      match evalScope locals thunk (.ref a 0 []) with
+      | some c => apply p c (.cell a :: frames) store
       | none => .stuck
     | none => .stuck
   | some (.lend _ r thunk pre post) =>
@@ -255,12 +258,13 @@ def step (p : Program) (s : State) : Step State Value :=
       apply p c (.ret s.code (s.pc + 1) s.locals :: s.frames)
         { s.store with labels := s.store.labels + 1 }
   | some (.mem op args) =>
-    match evalAtoms s.locals args with
+    let ⟨code, pc, locals, frames, store⟩ := s
+    match evalAtoms locals args with
     | none => .stuck
     | some vs =>
-      match s.store.memOp op vs with
+      match store.memOp op vs with
       | none => .stuck
-      | some (r, store) => .next ⟨s.code, s.pc + 1, s.locals ++ [r], s.frames, store⟩
+      | some (r, store) => .next ⟨code, pc + 1, locals ++ [r], frames, store⟩
   -- A host operation is a step of the program in its world; see `stepIO`.
   | some (.host _ _) => .stuck
 

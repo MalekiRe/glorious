@@ -10,8 +10,8 @@ public import Glorious.Elab.Specialize
 public import Glorious.Elab.Lower
 public import Glorious.Comptime
 public import Glorious.Check
-public import Glorious.Infer
-public import Glorious.Shadow
+public import Glorious.Typer
+public import Glorious.Core.Show
 public import Glorious.Lower.Typed
 public import Glorious.Prelude
 public import Glorious.Std
@@ -45,42 +45,19 @@ structure Compiled where
   /-- What the machines run: `checked` lowered by its types (`Lower.program`),
   where it can be; otherwise `checked` itself. -/
   core : Core.Program
-  /-- The Core the checker and the certificate are about. -/
+  /-- The Core as elaborated, before it is lowered. -/
   checked : Core.Program := core
   /-- Whether `core` is `checked` lowered. -/
   lowered : Bool := false
   ctorNames : Array String
   fnNames : Array String
   opNames : Array String
-  /-- The typing of `checked` that `Typing.checkProgram` accepted, when the program
-  was checked. With it, `Typing.checked_safety` applies to `checked`; if the
-  certificate is `strict`, so does `Typing.checked_owned_safety`; and if it has
-  `regions`, so does `Typing.checked_borrow_safety`; and if it has `loans`,
-  so does `Typing.checked_exclusive_safety`. -/
-  cert : Option Typing.Cert := none
-  /-- The types of `core`'s functions, as certificate inference found them:
-  the certificate where there is one; for a program with what is unsafe,
-  inference's alone, which the proved checker is not asked to accept. What
-  the typed lowering is to work from; found when it is first asked (a second
-  inference of a large program takes as long as the first). -/
-  types : Thunk (Option Typing.Cert) := Thunk.pure none
-  /-- How many borrows are scopes of their own in `core`: those written as
-  arguments of calls of functions, if the program could then be shown to
-  follow the rules for borrows. `checked_exclusive_safety` is about these. -/
-  lent : Nat := 0
-  /-- The borrows that are not: each is, in `core`, the reference it borrows,
-  and only the check of the source text keeps it exclusive. -/
-  plain : List Elab.Borrow := []
-  /-- How each place of `core` was elaborated (0 for a borrow that is the
-  reference it borrows, and 1 or 2 for a scope of its own), by the function it
-  is in and how many places of that function come before it: what a later
-  compile of a changed program can start from. -/
-  places : List ((String × Nat) × Nat) := []
+  /-- The types of `checked`'s functions (`Typer`): what the typed lowering
+  works from. -/
+  types : Thunk (Option Lower.Types) := Thunk.pure none
   /-- What the checker kept, for a later compile of the program in the same
   process (`Check.Kept`). -/
   checkKept : Check.Kept := []
-  /-- What certificate inference made, for a later compile (`Infer.Memo`). -/
-  inferMade : Infer.Made := {}
   /-- The prelude (and library) as checked, where this compile checked it:
   for a later process, by whether the library is in and whether `Drop` is. -/
   firstMade : Option ((Bool × Bool) × (Nat × Check.St)) := none
@@ -111,17 +88,6 @@ structure Compiled where
   lowerMade : Elab.LowerMemo := {}
   /-- What lowering each function by its types made (`Lower.TypedMemo`). -/
   typedMade : Lower.TypedMemo := {}
-
-/-- Each place by the function it is in and how many places of that function
-come before it: what stays the same of a place when other functions change. -/
-def placeKeys (owners : Array String) : Array (String × Nat) := Id.run do
-  let mut count : Std.HashMap String Nat := {}
-  let mut out := #[]
-  for o in owners do
-    let k := count.getD o 0
-    out := out.push (o, k)
-    count := count.insert o (k + 1)
-  pure out
 
 /-- What of a program's modules a unit's check reads besides its own items:
 the coercions that apply in it, the dot calls among its calls the resolver
@@ -189,13 +155,7 @@ partial def withoutUnreached (items : List Syntax.Item) : List Syntax.Item := Id
   pure <| indexed.filterMap fun (item, k) =>
     if (isLibraryFn item).isSome && !kept.contains k then none else some item
 
-/-- The functions an error of certificate inference names: `function 12`. -/
-def named (e : String) : List Nat :=
-  ((e.splitOn "function ").drop 1).filterMap fun after =>
-    (String.ofList (after.toList.takeWhile Char.isDigit)).toNat?
-
-/-- What certificate inference or the checker of certificates said, with each
-function it names (`function 12`) followed by what that function is. -/
+/-- What the typer or the lowering said, with each function it names (`function 12`) followed by what that function is. -/
 def withFnNames (names : Array String) (e : String) : String :=
   match e.splitOn "function " with
   | [] => e
@@ -204,82 +164,6 @@ def withFnNames (names : Array String) (e : String) : String :=
       match digits.toNat? with
       | some n => s!"function {digits} ({(names[n]?).getD "?"})" ++ (after.drop digits.length).toString
       | none => "function " ++ after)
-
-/-- A certificate for `p` with these rules, and whether the proved checker
-accepts it: one of `kept` (what an earlier compile found) if the checker
-accepts it for `p`, and otherwise one found by inference, taking what an
-earlier compile kept of its inference (`memo`) and giving what this one made
-(nothing, where a kept certificate passed). Where what comes of `memo` is
-turned away, it is looked for afresh: what is kept makes a compile faster,
-never different. -/
-def certifyWith (kept : List Typing.Cert) (items : List Syntax.Item) (p : Core.Program)
-    (strict : Bool) (envSizes : List (Nat × Nat × Nat)) (regions loans ranked widen : Bool)
-    (memo : Infer.Memo := {}) : Except String (Typing.Cert × Bool × Infer.Made) :=
-  match Trace.timed "certify: a kept certificate" fun _ => kept.find? fun c =>
-      c.strict == strict && c.regions == regions && c.loans == loans && Typing.checkProgram c p with
-  | some c => .ok (c, true, {})
-  | none =>
-    let infer := fun (memo : Infer.Memo) =>
-      (Trace.timed "certify: inference" fun _ => Infer.certifyKept items p strict envSizes regions loans ranked widen memo).map fun (cert, made) =>
-        (cert, Trace.timed "certify: the proved checker" fun _ => Typing.checkProgram cert p, made)
-    match infer memo with
-    | .ok (cert, true, made) => .ok (cert, true, made)
-    | other => if memo.isEmpty then other else infer {}
-
-/-- Functions in a Core program from which, with no way kept that passed, the
-ways to certify it are all tried at once (covey's simulation has about 2000,
-a test program well under 100). -/
-def largeProgram : Nat := 400
-
-/-- Find a certificate for a program's Core and have the proved checker accept
-it: with the ownership rules and the region rules if the program can be shown
-to meet them, and otherwise with those of them it can, or as a typing only.
-An error here is a defect in the compiler, not in the program. -/
-def certifyProgram (items : List Syntax.Item) (p : Core.Program)
-    (envSizes : List (Nat × Nat × Nat) := []) (failed : List (Bool × Bool) := [])
-    (first : Option Nat := none) (kept : List Typing.Cert := []) (memo : Infer.Memo := {}) :
-    Except String (Typing.Cert × Option Nat × Infer.Made) := do
-  -- With the region rules, first with callables taken to bind a region
-  -- where they are given a reference to a cell, and then without; and only
-  -- then with references taken to be to one of several cells where they
-  -- have to be.
-  -- (What was kept of an earlier compile's inference is taken first; if
-  -- what comes of it is turned away, the certificate is looked for afresh.)
-  let one (strict regions loans ranked widen : Bool) : Option (Typing.Cert × Infer.Made) :=
-    match certifyWith kept items p strict envSizes regions loans ranked widen memo with
-    | .ok (cert, true, made) => some (cert, made)
-    | _ => none
-  -- (`failed`: ways already seen to fail with every rule, not tried again.
-  -- `first`: the one of these attempts that passed last time, tried first.)
-  let ways := [(true, false), (false, false), (false, true), (true, true)]
-  let rules := [(true, true, true), (true, true, false), (true, false, false), (false, true, true),
-    (false, true, false)]
-  let attempts := rules.flatMap fun (strict, regions, loans) =>
-    (if regions then ways else [(false, false)]).map fun (ranked, widen) =>
-      (strict, regions, loans, ranked, widen)
-  let try_ := fun (k : Nat) => match attempts[k]? with
-    | some (strict, regions, loans, ranked, widen) =>
-      if strict && regions && loans && failed.contains (ranked, widen) then none
-      else Trace.timed s!"certificate way {k}" fun _ => one strict regions loans ranked widen
-    | none => none
-  -- (The one that passed last time, or else the first; and if that does
-  -- not pass, the others all at once, each on a thread of its own, the
-  -- first of them in order that passes taken.)
-  -- (A large program with nothing kept to start with: all at once from
-  -- the start, where the first alone takes as long as the rest together.)
-  let large := first.isNone && p.fns.size ≥ largeProgram
-  let start := first.getD 0
-  if !large then
-    if let some (cert, made) := try_ start then return (cert, some start, made)
-  let others := (List.range attempts.length).filter (large || · != start)
-  let tasks := others.map fun k => (k, Task.spawn fun _ => try_ k)
-  if let some found := tasks.findSome? fun (k, t) => t.get.map fun (cert, made) => (cert, some k, made) then
-    return found
-  let cert ← match Infer.certify items p false envSizes with
-    | .ok cert => pure cert
-    | .error e => throw s!"no certificate was found: {e}"
-  if Typing.checkProgram cert p then pure (cert, none, {})
-  else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
 /-- Does `text` have `pat` in it, byte for byte. -/
 def hasText (text pat : String) : Bool := Id.run do
@@ -758,9 +642,9 @@ partial def hasDrop : List Syntax.Item → Bool
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/
 def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
-    (lends : Nat → Nat := fun _ => 0) (root : String := "main") (kept : Option Elab.ElabMemo := none) :
+    (root : String := "main") (kept : Option Elab.ElabMemo := none) :
     Except String Elab.Output := do
-  Comptime.evaluate (← Elab.elabProgram items blocks lends root kept)
+  Comptime.evaluate (← Elab.elabProgram items blocks root kept)
 
 /-- (`GLORIOUS_UNLOWERED`: no program is lowered, for trying how one runs
 that is not.) -/
@@ -777,14 +661,13 @@ def Compiled.lower (kept : Option Lower.TypedMemo) (c : Compiled) : Compiled :=
              fnNames := c.fnNames ++ (copies.map fun fn => (c.fnNames[fn]?).getD "").toArray }
   | none => { c with checked := c.core }
 
-/-- Parse, check and elaborate a program together with the prelude, and have the
-proved Core type checker accept the result, and lower it by its types. With
-`check := false` both checks are skipped, so that programs which go wrong can
-still be run, and it is not lowered. -/
+/-- Parse, check and elaborate a program together with the prelude, find its
+Core's types and lower it by them. With `check := false` the check is
+skipped, so that programs which go wrong can still be run, and it is not
+lowered. -/
 def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
-    (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
-    (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
+    (checkKept : Check.Kept := [])
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
     (parsedKept : Parsed := {})
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
@@ -930,7 +813,7 @@ def compileSource (src : String) (check : Bool := true)
   let first := first.map fun (count, st) => ((Syntax.Item.withoutIntrinsics (all.take count)).length, st)
   let all := Syntax.Item.withoutIntrinsics all
   -- Lifetimes were the checker's to read; and, of what is declared, the
-  -- certificate's.
+  -- typer's.
   let written := Elab.declaredOf all
   let all := Trace.timed "erase lifetimes" fun _ => Elab.eraseLifetimes all
 -- From here on the program has no traits: the checker said how each bound
@@ -988,272 +871,34 @@ def compileSource (src : String) (check : Bool := true)
       | .ok _ => .ok ()
     | _, _, _ => .ok ()
   let declared := Trace.timed "what is declared" fun _ => Elab.withDeclared written (Elab.declaredOf all)
-  -- (What a compile gives, from what was elaborated and certified.)
-  let compiled := fun (out : Elab.Output) (cert : Option Typing.Cert) (lent : Nat)
-      (places : List ((String × Nat) × Nat)) (made : Infer.Made) =>
+  -- (What a compile gives, from what was elaborated, with Core's types.)
+  let compiled := fun (out : Elab.Output) (types : Option Lower.Types) =>
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
-       opNames := out.opNames, cert, types := Thunk.pure cert, lent, plain := out.plain, places, checkKept := checkMade
-       inferMade := made, firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade, frontMade := front.made,
+       opNames := out.opNames, types := Thunk.pure types, checkKept := checkMade
+       firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade, frontMade := front.made,
        parsedMade, textsMade, itemsMade, elabMade := out.made
        lowerMade := match lowered with
          | some st => st.keptMade
          | none => {} } : Compiled)
-  let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
+  let build := fun (blocks : Option Elab.Blocks) => do
     let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks (kept := elabKept) with
       | .ok out => do aside.get; pure out
       | .error e => do aside.get; throw e
-    -- What is unsafe is outside what Core's rules are about: a program that
-    -- calls a foreign function or reads memory at an address has no
-    -- certificate.
-    let first := List.lookup ("%way", 0) known
-    let (cert, way, made) ← if check && !out.foreign then
-        match Trace.timed "certify" fun _ => certifyProgram declared out.program out.envSizes failed first kept memo with
-        | .ok (cert, way, made) => pure (some cert, way, made)
-        | .error e =>
-          throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {withFnNames out.fnNames e}. This is a defect in the compiler"
-      else pure (none, none, {})
-    -- (And the way that passed, under a name no function has.)
-    let way := match way with
-      | some k => [(("%way", 0), k)]
-      | none => []
-    -- (Without a certificate, inference's types alone, for the lowering,
-    -- with what the last compile kept: `main`'s by its key among them.)
-    let (types, made) := if cert.isSome || !check then (cert, made)
-      else match Trace.timed "types" fun _ =>
-          Infer.certifyKept declared out.program false out.envSizes (memo := memo) (anyUnknown := true) with
-        | .ok (types, made) => (some types, made)
+    -- Core's types, for the lowering (`Typer`). Where they are not found,
+    -- the program runs as it is.
+    let types : Except String (Option Lower.Types) := if !check then .ok none else
+      match Trace.timed "types" fun _ => Typer.typesOf declared out with
+      | .ok types =>
+        if Trace.typesTraced then dbgTrace (Core.showCore out.fnNames out.program ++ "\n" ++ Typer.showSigs types) fun _ => .ok (some types)
+        else .ok (some types)
+      | .error e =>
+        -- (A block given the environment of what is not the block it was
+        -- made for: blocks are not to share environments, below.)
+        if e.startsWith Typer.envMismatch && (blocks.map fun (b : Elab.Blocks) => !b.links.isEmpty).getD false then .error e
         -- (`GLORIOUS_TRACE`: why there are none.)
-        | .error e => if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => (none, made) else (none, made)
-    -- (`GLORIOUS_TRACE=types`: the elaborator's types beside the
-    -- certificate's, `Shadow`.)
-    if Trace.typesTraced then
-      if let some c := types then
-        let n := Shadow.compare declared out c
-        let said := "\n".intercalate (s!"shadow: {n.lets} lets, {n.typed} with the checker's type, {n.same} of the same shape"
-          :: s!"shadow: without one: {n.untyped.toList}" :: n.differ.map ("shadow: " ++ ·))
-        dbgTrace said fun _ => pure ()
-    pure { compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made with
-      types := Thunk.pure types }
-  -- A borrow given a name, or written as an argument of a call of a function,
-  -- is a scope of its own in Core if the program can then be shown to follow
-  -- every rule. Where it cannot, the borrow is the reference it borrows, as in
-  -- a program that is not checked: first every place is tried with the
-  -- narrower scope, then each as it passes alone.
-  -- (Whether the program can be shown at all with callables taken to bind the
-  -- regions of the references they are given, before any borrow is a scope:
-  -- where it cannot, no borrow made a scope will change that, and that way
-  -- is not tried for each.)
-  -- (Where it cannot be shown at all, or only with references taken to be to
-  -- one of several cells, which a borrow's scope cannot give out, no place
-  -- is tried alone.)
-  let shownAtAll := fun (blocks : Option Elab.Blocks) (ranked : Bool) =>
-    match Trace.timed "elaborate (borrow scopes)" fun _ => elaborate all blocks (fun _ => 0) (kept := elabKept) with
-    | .ok out =>
-      match Trace.timed "certify (borrow scopes)" fun _ =>
-          certifyWith kept declared out.program true out.envSizes true true ranked false memo with
-      | .ok (_, accepted, _) => some accepted
-      | .error _ => none
-    | .error _ => none
-  let lending := fun (blocks : Option Elab.Blocks) (ways : List Bool) (sites : Nat → Nat) =>
-    match Trace.timed "elaborate (borrow scopes)" fun _ => elaborate all blocks sites (kept := elabKept) with
-    | .ok out =>
-      -- As it is, and then with callables taken to bind the regions of the
-      -- references they are given: a function lent to by itself needs that.
-      ways.findSome? fun ranked =>
-        match Trace.timed "certify (borrow scopes)" fun _ =>
-            certifyWith kept declared out.program true out.envSizes true true ranked false memo with
-        | .ok (cert, accepted, made) =>
-          if out.lent != 0 && accepted then
-            some (compiled out (some cert) out.lent
-              (((placeKeys out.siteOwners).toList.zip (List.range out.sites)).map fun (k, i) => (k, sites i)) made)
-          else none
-        | .error _ => none
-    | .error _ => none
-  -- (The places an earlier compile found, without the way that passed.)
-  let placesKnown := known.filter fun (k, _) => k.1 != "%way"
-  let build := fun (blocks : Option Elab.Blocks) => do
-    if check then
-      if let .ok out := elaborate all blocks (fun _ => 1) (kept := elabKept) then
-        if out.lent != 0 && !out.foreign then
-          -- What an earlier compile found for each place is asked first, all
-          -- at once; a place it did not see is asked alone first.
-          -- (Not looked for one by one: what an earlier compile found, all
-          -- at once, and else none.)
-          unless search do
-            unless placesKnown.isEmpty do
-              let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known
-              let choice := fun (j : Nat) => match guess[j]? with
-                | some (some v) => v
-                | _ => 0
-              if let some c := lending blocks [false, true] choice then return c
-            return ← plain blocks []
-          unless placesKnown.isEmpty do
-            let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known
-            let fresh := (List.range out.sites).filter fun i => (guess[i]?.join).isNone
-            let alone := (fresh.map fun i => Task.spawn fun _ =>
-              if (lending blocks [false, true] (fun j => if j == i then 1 else 0)).isSome then (i, 1)
-              else if !out.twoWays.contains i then (i, 0)
-              else (i, ([2, 3, 4].find? fun m =>
-                (lending blocks [false, true] (fun j => if j == i then m else 0)).isSome).getD 0)).map Task.get
-            let choice := fun (j : Nat) => match guess[j]? with
-              | some (some v) => v
-              | _ => (List.lookup j alone).getD 0
-            if (List.range out.sites).all (choice · == 0) then return ← plain blocks []
-            if let some c := lending blocks [false, true] choice then return c
-          if let some c := lending blocks [false, true] (fun _ => 1) then return c
-          let ranked := shownAtAll blocks true
-          let plainly := shownAtAll blocks false
-          unless ranked == some true || plainly == some true do
-            -- (Those two ways are not tried again for the plain program.)
-            return ← plain blocks [(true, false), (false, false)]
-          let ways := if ranked.isSome then [false, true] else [false]
-          -- First, from every place at once, the places that what fails is
-          -- in are taken out, one round at a time: what fails names a
-          -- function, and the place it was made for, or every place of the
-          -- function it is. Then each place taken out is tried back.
-          let blame : List Nat → Sum Compiled (List Nat) := fun choice =>
-            match elaborate all blocks (fun j => choice[j]?.getD 0) (kept := elabKept) with
-            | .error _ => Sum.inr []
-            | .ok o =>
-              let outcomes : List (Sum Compiled (List Nat)) := ways.map fun ranked =>
-                match Trace.timed "certify (borrow scopes)" fun _ =>
-                    certifyWith kept declared o.program true o.envSizes true true ranked false memo with
-                | .ok (cert, accepted, made) =>
-                  if o.lent != 0 && accepted then
-                    Sum.inl (compiled o (some cert) o.lent
-                      (((placeKeys o.siteOwners).toList.zip (List.range o.sites)).map
-                        fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)) made)
-                  else Sum.inr (cert.sigs.toList.filterMap fun (e : Typing.SigEntry) =>
-                    match o.program.fns[e.fn]? with
-                    | some F => if Typing.checkFn cert e F then none else some e.fn
-                    | none => none)
-                | .error e => Sum.inr (named e)
-              match outcomes.find? Sum.isLeft with
-              | some found => found
-              | none =>
-                let fns := outcomes.flatMap fun (x : Sum Compiled (List Nat)) => match x with
-                  | .inr fs => fs
-                  | .inl _ => []
-                -- (The places a function was made for, or those of the
-                -- function it is.)
-                Sum.inr (fns.eraseDups.flatMap fun f =>
-                  match o.fnSites[f]?.join with
-                  | some site => [site]
-                  | none =>
-                    -- (A function made in another is named `.. in `f``.)
-                    let described := o.fnNames[f]?.getD ""
-                    let name := match (described.splitOn " in `").getLast? with
-                      | some last => if (described.splitOn " in `").length > 1
-                          then (last.splitOn "`").headD last else described
-                      | none => described
-                    (List.range o.sites).filter fun j => o.siteOwners[j]? == some name)
-          let rec narrow (fuel : Nat) (choice : List Nat) : Option (Compiled × List Nat) :=
-            match fuel with
-            | 0 => none
-            | fuel + 1 =>
-              match blame choice with
-              | .inl c => some (c, choice)
-              | .inr sites =>
-                let next := (List.range choice.length).map fun j =>
-                  if sites.contains j then 0 else choice[j]?.getD 0
-                if next == choice then none else narrow fuel next
-          if let some (c, choice) := narrow 24 (List.replicate out.sites 1) then
-            let rec back (best : Compiled) (choice : List Nat) : List Nat → Compiled
-              | [] => best
-              | j :: rest =>
-                let tried := choice.set j 1
-                match blame tried with
-                | .inl c => back c tried rest
-                | .inr _ => back best choice rest
-            -- (Each taken out is tried back alone, side by side; those that
-            -- pass, together; and if that fails, one at a time.)
-            let out_ := (List.range choice.length).filter fun j => choice[j]?.getD 0 == 0
-            let alone : List (Nat × Bool) :=
-              (out_.map fun j => Task.spawn fun _ => (j, (blame (choice.set j 1)).isLeft)).map Task.get
-            let passing := alone.filterMap fun (p : Nat × Bool) => if p.2 then some p.1 else none
-            if passing.isEmpty then return c
-            let together := passing.foldl (fun (ch : List Nat) j => ch.set j 1) choice
-            if let .inl c := blame together then return c
-            return back c choice passing
-          let lending := lending blocks ways
-          if out.sites ≤ 160 then
-            -- How each place fares alone, trying the narrower scope first.
-            -- (Each is asked apart from the others, so all are asked side
-            -- by side: the answers are what they would be one at a time.)
-            let try_ := fun (i : Nat) =>
-              if (lending (fun j => if j == i then 1 else 0)).isSome then 1
-              -- (The second way, where the place has one; then the third,
-              -- with one of the borrows lasting longer, the first or the
-              -- second.)
-              else if !out.twoWays.contains i then 0
-              else ([2, 3, 4].find? fun m => (lending (fun j => if j == i then m else 0)).isSome).getD 0
-            -- A call inside a statement is asked only if the statement's
-            -- own place fails: where that passes, the call's borrows are
-            -- the statement's.
-            -- Where there are many places, they are first asked a run of
-            -- them at a time: few fail, and a run that passes whole needs
-            -- no place of it asked alone. (Places are numbered in the order
-            -- they are written, so a run is mostly one function's.)
-            let size := if out.sites ≤ 16 then 1 else (out.sites + 7) / 8
-            let whole : List (Task Bool) :=
-              if size == 1 then []
-              else (List.range ((out.sites + size - 1) / size)).map fun g => Task.spawn fun _ =>
-                (lending (fun j => if j / size == g then 1 else 0)).isSome
-            let whole := whole.map Task.get
-            let passed := fun (i : Nat) => size != 1 && whole[i / size]?.getD false
-            -- Where no run passes, a few places spread among them are asked
-            -- alone first: if none of those passes either, what fails is not
-            -- some few places, and the rest are not asked.
-            let hopeless :=
-              if size == 1 || whole.any id then false
-              else
-                let sample := ((List.range 12).map fun k => (k * out.sites) / 12).eraseDups
-                let asked := sample.map fun i => Task.spawn fun _ => try_ i
-                (asked.map Task.get).all (· == 0)
-            if hopeless then return ← plain blocks []
-            let first : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
-              if passed i then 1 else if (out.under.lookup i).isSome then 0 else try_ i
-            let first := first.map Task.get
-            let second : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
-              if passed i then 1
-              else match out.under.lookup i with
-              | some stmt => if first[stmt]?.getD 0 == 0 then try_ i else 0
-              | none => first[i]?.getD 0
-            let alone : List Nat := second.map Task.get
-            if alone.any (· != 0) then
-              if let some c := lending (fun j => alone[j]?.getD 0) then return c
-              -- Not all at once: keep each that passes with those kept
-              -- before it. A run of them is asked whole first, and by halves
-              -- where it fails, so that the few that fail are found without
-              -- every place being asked for.
-              -- (While a run is asked, so is its first half with what is
-              -- kept: the answer wanted next if the run fails.)
-              let with_ := fun (kept : List Nat) (coming : List Nat) =>
-                coming.foldl (fun (k : List Nat) (i : Nat) => k.set i (alone[i]?.getD 0)) kept
-              let ask : List Nat → Task (Option Compiled) := fun next =>
-                Task.spawn fun _ => lending (fun j => next[j]?.getD 0)
-              let rec add (fuel : Nat) (kept : List Nat) (coming : List Nat) (best : Option Compiled)
-                  (whole : Task (Option Compiled)) : List Nat × Option Compiled :=
-                match fuel, coming with
-                | 0, _ => (kept, best)
-                | _, [] => (kept, best)
-                | _, [i] =>
-                  match Task.get whole with
-                  | some c => (with_ kept [i], some c)
-                  | none => (kept, best)
-                | fuel + 1, _ =>
-                  let (a, b) := coming.splitAt (coming.length / 2)
-                  let half := ask (with_ kept a)
-                  match Task.get whole with
-                  | some c => (with_ kept coming, some c)
-                  | none =>
-                    let (kept, best) := add fuel kept a best half
-                    add fuel kept b best (ask (with_ kept b))
-              let coming := (List.range out.sites).filter fun i => alone[i]?.getD 0 != 0
-              -- (All of them at once has just failed.)
-              if let some c := (add out.sites (List.replicate out.sites 0) coming none
-                  (Task.spawn fun _ => none)).2 then return c
-    plain blocks []
+        else if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => .ok none
+        else .ok none
+    pure (compiled out (← types))
   -- Blocks can share an environment only where a type can state it. Where one
   -- cannot, as when what a block is given may also be a function that is not a
   -- block, every block captures for itself, as it would without the sharing.
@@ -1263,47 +908,6 @@ def compileSource (src : String) (check : Bool := true)
     match blocks with
     | some b => if b.links.isEmpty then throw e else build (some { b with links := {} })
     | none => throw e
-
-/-- Whether a program's Core was shown to follow the ownership rules: `some true`
-if so, `some false` if it was only shown to be well typed, `none` if it does not compile. -/
-def owned (src : String) : Option Bool :=
-  match compileSource src with
-  | .ok c => c.cert.map (·.strict)
-  | .error _ => none
-
-/-- Whether a program's Core was shown to follow the region rules, likewise. -/
-def borrowChecked (src : String) : Option Bool :=
-  match compileSource src with
-  | .ok c => c.cert.map (·.regions)
-  | .error _ => none
-
-/-- How many of a program's borrows are scopes of their own in its Core, which
-was then shown to follow the rules for borrows: `none` if the program does not
-compile or its Core was not shown to follow them. -/
-def lentBorrows (src : String) : Option Nat :=
-  match compileSource src with
-  | .ok c => if (c.cert.map (·.loans)).getD false then some c.lent else none
-  | .error _ => none
-
-/-- The borrows of a program that nothing is proved about: those that are not
-scopes of their own in its Core, or every one if the Core was not shown to
-follow the rules for borrows. `none` if the program does not compile. A program
-for which this is empty has every borrow covered by `checked_exclusive_safety`. -/
-def unprovedBorrows (src : String) : Option (List Elab.Borrow) :=
-  match compileSource src with
-  | .ok c =>
-    -- Where the rules were not shown to hold no borrow is a scope, and `plain`
-    -- lists every one.
-    some c.plain
-  | .error _ => none
-
-/-- How many functions the elaborator made for a program's borrows: one for a
-borrow that is given a name, and one for each borrow but the last among the
-arguments of a call. A call with one borrow needs none. -/
-def borrowFns (src : String) : Option Nat :=
-  match compileSource src with
-  | .ok c => some (c.fnNames.toList.filter fun n => (n.splitOn "borrow").length > 1).length
-  | .error _ => none
 
 /-- The characters of a text, if the value is one: a text written out in a
 program that is not checked (`Syntax.textItem`), or a line written; whose

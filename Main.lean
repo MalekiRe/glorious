@@ -18,7 +18,7 @@ public import Glorious.Bytecode.Encode
   they agree.
 * `glorious build FILE OUT` compiles it to a bytecode file for the Rust VM.
 * `glorious serve` compiles for the other commands, keeping what it can
-  between compiles; `run`, `certify` and `build` ask it where it runs.
+  between compiles; `run` and `build` ask it where it runs.
 * `glorious watch FILE [INPUT...]` compiles and runs it again on every change.
 * `glorious exe FILE OUT` writes an executable of the program's own with no
   other tool: the VM with the program at its end, loaded and compiled to
@@ -30,22 +30,11 @@ public import Glorious.Bytecode.Encode
   `vm`).
 * `glorious cases DIR` writes every test program, with its bytecode where it
   compiles, for what runs them from outside.
-* `glorious certify FILE` compiles it and says what the typing of its Core
-  shows: that it is well typed, and whether it also follows the ownership rules
-  and the region rules, which the proofs need to say that no resumption is used
-  twice and that no mutable variable or label is used after its block has ended.
-  With both, the program can go wrong only by arithmetic overflow. It also says
-  how many borrows are scopes of their own in Core under the rules for borrows:
-  of those the proofs say that what is lent is used only through the borrow.
-  It lists every borrow that is not one; with `--strict` it fails if there is
-  any.
-  Every command that compiles a program does this check; this one only reports
-  it.
 * `glorious selftest [VM]` runs the test programs on the Core machine and the
   Lean bytecode machine, and on the Rust VM if its path is given; then what
-  `Glorious/Checks.lean` asks; then says how many of the programs compile and
-  what Core shows of them. The programs are gone through side by side, on as
-  many cores as there are.
+  `Glorious/Checks.lean` asks; then says how many of the programs compile,
+  are typed and are lowered. The programs are gone through side by side, on
+  as many cores as there are.
 -/
 
 public section
@@ -91,17 +80,17 @@ def errorLines (pre e : String) : String := "\n".intercalate ((e.splitOn "\n").m
 def usage : String :=
   "usage: glorious run FILE [INPUT...]\n       glorious check FILE [INPUT...]\n" ++
   "       glorious watch FILE [INPUT...]   (compile and run again on every change)\n" ++
-  "       glorious build FILE OUT\n       glorious certify [--strict] FILE\n" ++
+  "       glorious build FILE OUT\n" ++
   "       glorious selftest [VM]"
 
 /-- How many locals each function starts with, its arguments and what its
-closure captured, and one more; zero where the certificate does not say.
-What runs the bytecode does not need this: it is for what rewrites it. -/
+closure captured, and one more; zero where its types do not say. What runs
+the bytecode does not need this: it is for what rewrites it. -/
 def startLocals (c : Compiled) : List Nat :=
   -- (Each function's first signature, found once: not looked for among
   -- them all for each function.)
-  let first : Std.HashMap Nat Nat := match c.cert with
-    | some cert => cert.sigs.foldl (init := {}) fun m entry =>
+  let first : Std.HashMap Nat Nat := match c.types.get with
+    | some types => types.sigs.foldl (init := {}) fun m entry =>
       m.insertIfNew entry.fn (entry.sig.params.length + entry.sig.caps.length + 1)
     | none => {}
   (List.range c.core.fns.size).map fun i => first.getD i 0
@@ -124,42 +113,27 @@ structure Outcome where
   error : Option String := none
   /-- Its bytecode file. -/
   bytes : Option ByteArray := none
-  /-- What the typing of its Core shows. -/
-  certified : Bool := false
+  /-- Whether its Core's types were found (`Typer`), and whether it is
+  lowered by them (`Lower.program`). -/
   typed : Bool := false
-  /-- Whether it is lowered by its types (`Lower.program`). -/
   lowered : Bool := false
-  strict : Bool := false
-  regions : Bool := false
-  loans : Bool := false
-  /-- The borrows that are scopes of their own, and those that are not. -/
-  lent : Nat := 0
-  plain : Nat := 0
   /-- Run on the Core machine: the cleanups installed, those started, and those
   left in resumptions never taken (`Core.cleanup_accounting`). -/
   cleanups : Option (Nat × Nat × Nat) := none
-  /-- What the compile found for each place, and the way its certificate
-  was found: what a later compile is given to try first. -/
-  places : List ((String × Nat) × Nat) := []
   deriving Inhabited
 
 /-- Compile a test program, and with `run` run it on the Lean machines. -/
-def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few : Bool := false)
-    (known : List ((String × Nat) × Nat) := []) : Outcome :=
-  match compileSource c.src true files few (known := known) with
+def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few : Bool := false) : Outcome :=
+  match compileSource c.src true files few with
   | .error e => { lean := errorLines "error: " e, error := some e }
   | .ok compiled =>
-    let has := fun (f : Typing.Cert → Bool) => (compiled.cert.map f).getD false
     -- (An example, a program as long as it needs, is given more steps, and
     -- more again on bytecode.)
     { lean := if run then evalCompiled compiled c.input (fuel := if few then 500000 else 200000) (vmScale := if few then 200 else 20) else ""
       lowered := compiled.lowered
       bytes := some (bytecodeBytes compiled)
-      certified := compiled.cert.isSome, typed := compiled.types.get.isSome
-      strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
-      lent := compiled.lent, plain := compiled.plain.length
-      cleanups := if run then cleanupsOf compiled.core c.input else none
-      places := compiled.places }
+      typed := compiled.types.get.isSome
+      cleanups := if run then cleanupsOf compiled.core c.input else none }
 
 /-- What every program starts from, the prelude and the library checked,
 found before the programs are gone through side by side: each would find it
@@ -242,90 +216,14 @@ partial def moduleFiles (path : System.FilePath) : IO (List (List String × Stri
     pure out
   load [] (← IO.FS.readFile path)
 
-/-- Where what the last compile of the program at `path` found for each place
-is kept: in its build directory. -/
-def placesFile (path : String) : IO System.FilePath := do
-  pure ((← Target.dirOf path) / "places")
-
-/-- Keep what a compile found for each place. -/
-def writePlaces (file : System.FilePath) (places : List ((String × Nat) × Nat)) : IO Unit := do
-  try
-    if let some dir := file.parent then IO.FS.createDirAll dir
-    IO.FS.writeFile file ("\n".intercalate (places.map fun ((owner, k), v) => s!"{k}\t{v}\t{owner}"))
-  catch _ => pure ()
-
-/-- What the last compile found for each place: a line for each, its number in
-its function, how it was elaborated and the function's name. -/
-def readPlaces (file : System.FilePath) : IO (List ((String × Nat) × Nat)) := do
-  unless ← file.pathExists do return []
-  let lines := (← IO.FS.readFile file).splitOn "\n"
-  pure <| lines.filterMap fun line =>
-    match line.splitOn "\t" with
-    | k :: v :: rest => do
-      pure ((("\t".intercalate rest), ← k.toNat?), ← v.toNat?)
-    | _ => none
-
-def showAtom : Atom → String
-  | .var i => s!"v{i}"
-  | .int n => s!"{n}"
-
-def showAtoms (as : List Atom) : String := ", ".intercalate (as.map showAtom)
-
-def showRhs : Rhs → String
-  | .atom a => showAtom a
-  | .prim _ args => s!"prim({showAtoms args})"
-  | .construct tag args => s!"#{tag}({showAtoms args})"
-  | .place pl => s!"v{pl.var}.{pl.path}"
-  | .closure fn caps => s!"fn{fn}[{showAtoms caps}]"
-  | .rebind a fn => s!"rebind({showAtom a}, fn{fn})"
-
-partial def showTm (n : Nat) : Core.Tm → String
-  | .ret a => s!"ret {showAtom a}"
-  | .let_ rhs body => s!"let v{n} = {showRhs rhs}\n" ++ showTm (n + 1) body
-  | .call f args body => s!"let v{n} = {showAtom f}({showAtoms args})\n" ++ showTm (n + 1) body
-  | .tail f args => s!"tail {showAtom f}({showAtoms args})"
-  | .handle _ _ caps thunk body =>
-    s!"let v{n} = handle {showAtom thunk} [{showAtoms caps}]\n" ++ showTm (n + 1) body
-  | .handleTail _ _ caps thunk => s!"handle {showAtom thunk} [{showAtoms caps}]"
-  | .raise op args => s!"raise op{op}({showAtoms args})"
-  | .perform op args body => s!"let v{n} = perform op{op}({showAtoms args})\n" ++ showTm (n + 1) body
-  | .label thunk body => s!"let v{n} = label {showAtom thunk}\n" ++ showTm (n + 1) body
-  | .labelTail thunk => s!"label {showAtom thunk}"
-  | .guard c thunk body => s!"let v{n} = guard {showAtom c} {showAtom thunk}\n" ++ showTm (n + 1) body
-  | .guardTail c thunk => s!"guard {showAtom c} {showAtom thunk}"
-  | .cancel k body => s!"let v{n} = cancel {showAtom k}\n" ++ showTm (n + 1) body
-  | .cell init thunk body => s!"let v{n} = cell {showAtom init} in {showAtom thunk}\n" ++ showTm (n + 1) body
-  | .cellTail init thunk => s!"cell {showAtom init} in {showAtom thunk}"
-  | .cellL l init thunk body => s!"let v{n} = cell[{l.size}] {showAtom init} in {showAtom thunk}\n" ++ showTm (n + 1) body
-  | .cellTailL l init thunk => s!"cell[{l.size}] {showAtom init} in {showAtom thunk}"
-  | .lend u r thunk pre post body =>
-    s!"let v{n} = lend{if u then " mut" else ""} {showAtom r} to {showAtom thunk}({showAtoms pre} | {showAtoms post})\n"
-      ++ showTm (n + 1) body
-  | .mem _ args body => s!"let v{n} = mem({showAtoms args})\n" ++ showTm (n + 1) body
-  | .host id args body => s!"let v{n} = host{id}({showAtoms args})\n" ++ showTm (n + 1) body
-
-
-def showCore (names : Array String) (p : Core.Program) : String := Id.run do
-  let mut out := ""
-  for (F, i) in p.fns.zipIdx do
-    out := out ++ s!"fn{i} {names[i]?.getD ""}:\n"
-    for c in F.clauses do
-      out := out ++ s!"  clause ({c.pats.length} patterns)\n"
-      let lines := (showTm 1000 c.body).splitOn "\n"
-      for l in lines do
-        out := out ++ s!"    {l}\n"
-  out ++ "main:\n" ++ "\n".intercalate (((showTm 0 p.main).splitOn "\n").map ("  " ++ ·))
-
-
-
 instance : Nonempty Syntax.Fixities := ⟨{}⟩
 
-/-- What certificate inference made is kept in this many files, by its keys
+/-- What some compiles keep is kept in this many files, by its keys
 (`shardOf`): each written on a thread of its own, and only those something
-was made anew in. One file took longer to write than all else kept. -/
-def inferShards : Nat := 8
+was made anew in. -/
+def keptShards : Nat := 8
 
-def shardOf (k : UInt64) : Nat := (k % inferShards.toUInt64).toNat
+def shardOf (k : UInt64) : Nat := (k % keptShards.toUInt64).toNat
 
 /-- What compiles are writing to keep, waited for before the process ends. -/
 initialize keeping : IO.Ref (Array (Task (Except IO.Error Unit))) ← IO.mkRef #[]
@@ -345,12 +243,12 @@ def keep (act : IO Unit) : IO Unit := do
   let t ← IO.asTask act
   keeping.modify (·.push t)
 
-/-- Entries by key, kept as `inferShards` files `name.i` by `shardOf`: each
+/-- Entries by key, kept as `keptShards` files `name.i` by `shardOf`: each
 written on a thread of its own, only where an entry not `kept` falls to it,
 pointing into what was read; the first `most` of each. -/
 def saveShards {α : Type} (dir : System.FilePath) (name key : String) (entries : List (UInt64 × α))
     (kept : UInt64 → Bool) (most : Nat := 1 <<< 30) : IO Unit := do
-  for i in [0:inferShards] do
+  for i in [0:keptShards] do
     let mine := entries.filter (shardOf ·.1 == i)
     if mine.any (!kept ·.1) then
       keep <| Trace.timedIO s!"save: {name}" (Store.save (dir / s!"{name}.{i}") key (mine.take most) (chain := 64))
@@ -358,7 +256,7 @@ def saveShards {α : Type} (dir : System.FilePath) (name key : String) (entries 
 /-- What `saveShards` kept, all of it. -/
 def loadShards {α : Type} (dir : System.FilePath) (name key : String) : IO (List (UInt64 × α)) := do
   let mut all : List (UInt64 × α) := []
-  for i in [0:inferShards] do
+  for i in [0:keptShards] do
     if let some part ← Store.load (α := List (UInt64 × α)) (dir / s!"{name}.{i}") key then
       all := part ++ all
   pure all
@@ -374,39 +272,16 @@ def keptIn {α : Type} [Nonempty α] (fresh : Bool) (file : System.FilePath) (ke
     IO α := do
   if fresh then pure none_ else pure ((← Trace.timedIO s!"load: {key}" (Store.load file key)).getD none_)
 
-/-- Compile the program at `path`, with the modules it has in other files.
-What the last compile of it found for each place where a borrow can be a scope
-of its own is where this one starts; and what this one finds is kept for the
-next, with the certificate it found: one that the proved checker accepts for
-the program now is used, and no other looked for (`GLORIOUS_FRESH` set:
-neither is read). -/
-def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool := true)
+/-- Compile the program at `path`, with the modules it has in other files,
+taking what earlier compiles kept (`GLORIOUS_FRESH` set: nothing is read). -/
+def compileFile (path : String) (checkKept : Check.Kept := [])
     (reachOnly : Bool := false) : IO (Except String Compiled) := do
-  let file ← placesFile path
   let fresh := (← IO.getEnv "GLORIOUS_FRESH").isSome
   let dir ← Target.dirOf path
   let library ← Target.libraryDir
-  let known ← if fresh then pure [] else readPlaces file
-  -- (Which way of finding a certificate passed last time, kept by any
-  -- compile, where the places say none.)
-  let known ← if (List.lookup ("%way", 0) known).isSome then pure known
-    else match ← (if fresh then pure none else Store.load (α := Nat) (dir / "way") "way") with
-      | some k => pure ((("%way", 0), k) :: known)
-      | none => pure known
-  let kept ← if fresh then pure [] else pure ((← Target.readCert dir).toList)
   -- (And what any program kept of the library's modules, checked first.)
   let libraryKept ← keptIn fresh (library / "units") "units" ([] : Check.Kept)
   let checkKept := checkKept ++ libraryKept
-  -- (What certificate inference made the last time, by function and signature.)
-  -- (Each shard as it was read, to be written again with what was made
-  -- of it added: what was read, the same objects.)
-  let memoShards : Array Infer.Memo ← if fresh then pure #[] else Trace.timedIO "load: infer" do
-    (List.range inferShards).toArray.mapM fun i => do
-      pure ((← Store.load (α := Infer.Memo) (dir / s!"infer.{i}") "infer").getD {})
-  let memo : Infer.Memo := memoShards.foldl (init := {}) fun m part =>
-    if m.isEmpty then part else
-      { inst := part.inst.fold (·.insert) m.inst, schemes := part.schemes.fold (·.insert) m.schemes
-        faces := part.faces.fold (·.insert) m.faces, mains := part.mains.fold (·.insert) m.mains }
   -- (The prelude and library as checked, by an earlier process of this
   -- compiler, for any program.)
   let firsts ← [(true, false), (true, true), (false, false), (false, true)].filterMapM fun (std, drop) => do
@@ -438,18 +313,13 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
-    compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept texts
+    compileSource text true files (few := true) checkKept firsts parsedKept preludeKept texts
       (groupsKept := some groupsKept) (unitsKept := some unitsKept) (frontKept := some frontKept)
       (itemsKept := some itemsKept) (elabKept := some elabKept) (lowerKept := some lowerKept)
       (typedKept := some typedKept) (reachOnly := reachOnly))
   -- (Of a compile of what `main` reaches alone, nothing is kept: the one
   -- after it, of everything, keeps what it makes.)
   if let .ok c := result then unless reachOnly do keep <| Trace.timedIO "save what is kept" do
-    -- (What a compile that did not look for each place found is not kept
-    -- for one that does.)
-    if search then
-      writePlaces file c.places
-      if let some cert := c.cert then Target.writeCert dir cert
     -- (The program's own unit's state is not kept: a compile of the same
     -- texts takes the program built, and one of others checks it anew.
     -- The states before it are kept with the library, for any program.)
@@ -461,30 +331,6 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     -- (Saved again only where something was made anew, pointing into what
     -- was read.)
     -- (The large ones each on a thread of its own, beside the others.)
-    -- (In `inferShards` files, each written on a thread of its own, and
-    -- only where something of it was made anew.)
-    for i in [0:inferShards] do
-      let made : Infer.Made :=
-        { inst := c.inferMade.inst.filter (shardOf ·.1 == i), schemes := c.inferMade.schemes.filter (shardOf ·.1 == i)
-          faces := c.inferMade.faces.filter (shardOf ·.1 == i), mains := c.inferMade.mains.filter (shardOf ·.1 == i) }
-      let inferNew := made.inst.any (fun (k, sig, _) => !((memo.inst.get? k).getD []).any (·.1 == sig))
-        || made.schemes.any (fun (k, _) => !memo.schemes.contains k)
-        || made.faces.any (fun (k, _) => !memo.faces.contains k)
-        || made.mains.any (fun (k, _) => !memo.mains.contains k)
-      -- (With what was kept before and not made again: a compile that took
-      -- what it needed from what was kept makes nothing of the rest, which
-      -- the next may need.)
-      if inferNew then
-        -- (What was read of the shard, with what was made added: the shard's
-        -- objects are the same, and written again point into what was read.)
-        let now := Infer.toMemo made
-        let was := memoShards.getD i {}
-        let merged : Infer.Memo :=
-          { inst := now.inst.fold (fun m k v => m.insert k v) was.inst
-            schemes := now.schemes.fold (fun m k v => m.insert k v) was.schemes
-            faces := now.faces.fold (fun m k v => m.insert k v) was.faces
-            mains := now.mains.fold (fun m k v => m.insert k v) was.mains }
-        keep <| Trace.timedIO "save: infer" (Store.save (dir / s!"infer.{i}") "infer" merged (chain := 64))
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
     -- (The library's modules, and the program's modules that are files, as
@@ -494,7 +340,6 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     unless c.libraryKept.isEmpty || newKeys.all (fun k => libraryKept.any (·.1 == k)) do
       Store.save (library / "units") "units"
         ((c.libraryKept ++ libraryKept.filter fun (k, _) => !newKeys.contains k).take 96)
-    if let some k := List.lookup ("%way", 0) c.places then Store.save (dir / "way") "way" k
     -- (Saved again only where something was made anew; pointing into what
     -- was read, up to 64 files, then all written again.)
     saveShards dir "front" "front" c.frontMade.toList (frontKept.contains ·)
@@ -521,14 +366,14 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     let made : Std.HashSet UInt64 := c.groupsMade.foldl (fun s (k, _) => s.insert k) {}
     let older := groupsKeptList.filter fun (k, _) => !made.contains k
     saveShards dir "groups.kept" "groups" (c.groupsMade.toList ++ older) (groupsKept.contains ·)
-      (most := 4096 / inferShards)
+      (most := 4096 / keptShards)
     -- (The builds of other programs, the oldest written first, taken away
     -- past `GLORIOUS_CACHE_MB`, 4096 where it is not said.)
     let cap := (((← IO.getEnv "GLORIOUS_CACHE_MB").bind String.toNat?).getD 4096) * (1 <<< 20)
     keep <| Store.collect ((← Target.cacheDir) / "build") cap dir
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
-      IO.eprintln (showCore c.fnNames c.core)
+      IO.eprintln (Core.showCore c.fnNames c.core)
       IO.eprintln s!"drops: {c.core.drops}"
     -- (`GLORIOUS_LOWER`: whether the program is lowered by its types, or why not.)
     if (← IO.getEnv "GLORIOUS_LOWER").isSome then
@@ -558,24 +403,21 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
 /-- The program at `path` built: what the last compile kept in the build
 directory, if it was made from the same texts by the same compiler, and
 otherwise compiled and kept (`GLORIOUS_FRESH` set: compiled whatever is kept). -/
-def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check.Kept))) := none)
-    (search : Bool := true) : IO (Except String Target.Built) := do
+def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check.Kept))) := none) :
+    IO (Except String Target.Built) := do
   let dir ← Target.dirOf path
   let key ← Trace.timedIO "key of the texts" do Target.keyOf (← IO.FS.readFile path) (← moduleFiles path)
   if (← IO.getEnv "GLORIOUS_FRESH").isNone then
-    if let some b ← Trace.timedIO "read the program" (Target.read dir key) then
-      -- (One built without looking for each place serves what does not
-      -- ask for that.)
-      if b.searched || !search then return .ok b
+    if let some b ← Trace.timedIO "read the program" (Target.read dir key) then return .ok b
   let kept ← match checkKept with
     | some ref => pure (((← ref.get).lookup path).getD [])
     | none => pure []
-  match ← Trace.timedIO "compile file" (compileFile path kept search) with
+  match ← Trace.timedIO "compile file" (compileFile path kept) with
   | .error e => pure (.error e)
   | .ok c =>
     if let some ref := checkKept then
       ref.modify fun ks => (path, c.checkKept) :: ks.filter (·.1 != path)
-    let b := Trace.timed "bytecode" fun _ => Target.Built.of c (startLocals c) search
+    let b := Trace.timed "bytecode" fun _ => Target.Built.of c (startLocals c)
     -- (Written while it runs.)
     keep <| Trace.timedIO "write the program" (Target.write dir key b)
     pure (.ok b)
@@ -584,10 +426,10 @@ def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check
 
 `glorious serve` keeps one process for compiling: what any compile finds
 once and for all (the prelude checked, the library's texts read) is found
-once, and later what it keeps of each program. Where one runs, `run`,
-`certify` and `build` ask it for the program built, and run or report on
-what it gives as they would on their own; where none runs, or one of another
-compiler, they build it themselves. -/
+once, and later what it keeps of each program. Where one runs, `run` and
+`build` ask it for the program built, and run what it gives as they would on
+their own; where none runs, or one of another compiler, they build it
+themselves. -/
 
 /-- Where a running server says it is: its port and the compiler it is. -/
 def serverFile : IO System.FilePath := do
@@ -685,10 +527,10 @@ def builtBytes (b : Target.Built) : ByteArray :=
 
 /-- The program at `path` built: by the running server if there is one, and
 otherwise here. -/
-def buildAsked (path : String) (search : Bool := true) : IO (Except String Target.Built) := do
+def buildAsked (path : String) : IO (Except String Target.Built) := do
   match ← Trace.timedIO "ask the server" (buildByServer path) with
   | some result => pure result
-  | none => buildFile path (search := search)
+  | none => buildFile path
 
 /-- The example programs that state what they must print. -/
 def exampleCases (dir : System.FilePath) :
@@ -713,7 +555,7 @@ def expectMatches (expect got : String) : Bool :=
 /-- Run every test program and every example on the Lean machines, and on the
 Rust VM if its path is given. Each is compiled once; the programs are gone
 through side by side, and what failed is said in the order they are in. Then
-how many compile, and how many are shown to follow each set of Core's rules. -/
+how many compile, are typed and are lowered. -/
 def selftest (vm : Option String) : IO UInt32 := do
   let tmp : System.FilePath := (← IO.getEnv "TMPDIR").getD "/tmp"
   let stamp ← IO.monoMsNow
@@ -764,14 +606,6 @@ def selftest (vm : Option String) : IO UInt32 := do
   let asked := if checksAsked then Checks.all.toArray.map fun (_, check) => Task.spawn fun _ => check () else #[]
   warm
   lap "the prelude and library checked"
-  -- (What the last run found of each program's places and the way its
-  -- certificate was found, by its text: tried first, as a compile of the
-  -- command tries what the last compile of the file found. Only where to
-  -- look first: a certificate is checked as any other.)
-  let knownFile := (← Target.libraryDir) / "selftest-known"
-  let knownBefore : Std.HashMap UInt64 (List ((String × Nat) × Nat)) ←
-    if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {}
-    else pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List ((String × Nat) × Nat))) knownFile "known").getD []))
   -- (The examples first, and the long ones among them: the others, which
   -- are quick, fill in around them.)
   let order := (all.zipIdx.filter fun (_, i) => cases.length ≤ i) ++ (all.zipIdx.filter fun (_, i) => i < cases.length)
@@ -803,7 +637,6 @@ def selftest (vm : Option String) : IO UInt32 := do
   let run := fun (((c, files), i) : (Case × List (List String × String)) × Nat) =>
     -- (An example is compiled as the command compiles a file.)
     outcome (onLean i c) c files (cases.length ≤ i && i < quick.length)
-      (known := knownBefore.getD (hash c.src) [])
   let timed ← sideBySideTimed order run
   if times then
     let slow := ((order.zip timed.toList).toArray.qsort fun a b => a.2.2 > b.2.2).toList.take 8
@@ -817,9 +650,7 @@ def selftest (vm : Option String) : IO UInt32 := do
     if onLean i c then m.insert (hash c.src) ms else m) slowBefore
   Store.save slowFile "slow" slowNow.toList
   lap "programs compiled and run on the Lean machines"
-  Store.save knownFile "known" ((all.zip found.toList).filterMap fun ((c, _), o) =>
-    if o.places.isEmpty then none else some (hash c.src, o.places))
-  -- What is unsafe runs on the Rust VM alone, and the proved machines say so.
+  -- What is unsafe runs on the Rust VM alone.
   let foreign ← if vm.isSome then sideBySide foreignCases fun c => outcome false c [] else pure #[]
   let mut failures : Array (Nat × String) := #[]
   for ((c, _), i) in all.zipIdx do
@@ -840,9 +671,6 @@ def selftest (vm : Option String) : IO UInt32 := do
     | some o =>
       if let some e := o.error then
         failures := failures.push (2 * (all.length + i), s!"foreign: {e}\nfor\n{c.src}\n")
-      else if o.certified then
-        failures := failures.push (2 * (all.length + i),
-          s!"foreign: a program that calls a foreign function has a certificate\nfor\n{c.src}\n")
     | none => pure ()
   if let some runner := runner then
     -- Each program's bytecode, what it is given, what it should give, and
@@ -891,10 +719,7 @@ def selftest (vm : Option String) : IO UInt32 := do
   let machines := if leanSkipped.isEmpty then machines else s!"{machines} ({leanSkipped.size} slow ones on the Rust VM alone)"
   IO.println s!"{ran} programs ({examples.length} examples) on {machines}, and {Checks.all.length} checks: {failures.size} failures"
   let count := fun (f : Outcome → Bool) => (found.filter f).size
-  let scopes := found.foldl (fun n o => n + o.lent) 0
-  let plain := found.foldl (fun n o => n + o.plain) 0
-  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.typed)} typed; {count (·.lowered)} lowered; {count (·.certified)} with a certificate; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
-  IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {count (·.plain > 0)} programs"
+  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.typed)} typed; {count (·.lowered)} lowered"
   let installs := count fun o => match o.cleanups with
     | some (n, _, _) => decide (n > 0)
     | none => false
@@ -904,39 +729,11 @@ def selftest (vm : Option String) : IO UInt32 := do
   IO.println s!"{installs} programs install cleanups on the Core machine; {lost} leave one in a resumption never taken"
   pure (if failures.isEmpty then 0 else 1)
 
-/-- Say what the typing of a program's Core shows. With `strict`, fail if some
-borrow is not covered by the proof about borrows. -/
-def certify (path : String) (strict : Bool) : IO UInt32 := do
-  match ← buildAsked path with
-  | .ok c =>
-    let n := c.sigs
-    let owned := c.strict
-    let regions := c.regions
-    let how := if owned then "well typed and well owned" else "well typed, not shown well owned,"
-    let borrows :=
-      if regions then "its mutable variables and labels shown never to be used after their blocks end"
-      else "its mutable variables and labels not shown to stay within their blocks"
-    let loans := c.loans
-    let lent :=
-      if !loans then "the rules for borrows not shown to hold"
-      else if c.lent == 0 then "no borrow made a scope of its own"
-      else s!"{c.lent} borrows shown to be the only way to what they borrow while they last"
-    IO.println s!"{path}: {how} in Core, {borrows}, {lent}, with {n} function signatures"
-    for b in c.plain do
-      IO.println s!"{path}:{b} is not shown exclusive in Core"
-    if strict && !c.plain.isEmpty then
-      IO.eprintln s!"{path}: {c.plain.length} borrows are kept exclusive only by the check of the source text"
-      pure 1
-    else pure 0
-  | .error e =>
-    IO.eprintln (errorLines s!"{path}: " e)
-    pure 1
-
 /-- The signature of each function a program writes, as the checker found it
 (name, type parameters, parameters, result, effects, asks), and each trait's
 functions as declared; with `library`, the prelude's and library's too. -/
 def signatures (path : String) (library : Bool) : IO UInt32 := do
-  match compileSource (← IO.FS.readFile path) true (← moduleFiles path) (search := false) (lenient := true) with
+  match compileSource (← IO.FS.readFile path) true (← moduleFiles path) (lenient := true) with
     | .ok c =>
       let st := c.checkKept.foldl (fun (best : Option Check.St) (_, s) =>
         match best with
@@ -1012,7 +809,7 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
         let start ← IO.monoMsNow
         -- (What `main` reaches checked first, and run; then the rest, and
         -- what it refuses said after.)
-        match ← compileFile path kept (search := false) (reachOnly := true) with
+        match ← compileFile path kept (reachOnly := true) with
         | .error e => IO.eprintln (errorLines s!"{path}: " e)
         | .ok c =>
           let compiled ← IO.monoMsNow
@@ -1028,7 +825,7 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
             | .halt r => IO.println (showValue c.ctorNames r.value)
             | _ => wrong ()
           (← IO.getStdout).flush
-          match ← compileFile path kept (search := false) with
+          match ← compileFile path kept with
           | .error e => IO.eprintln (errorLines s!"{path}: " e)
           | .ok c => kept := c.checkKept
         (← IO.getStdout).flush
@@ -1048,8 +845,6 @@ def main (args : List String) : IO UInt32 := do
 where
   command (args : List String) : IO UInt32 := do
   match args with
-  | ["certify", path] => certify path false
-  | ["certify", "--strict", path] => certify path true
   -- (How many cleanups the Core machine installed, started, and left in a
   -- resumption never taken, running the program: `Core.cleanup_accounting`.)
   | ["cleanups", path] => do
@@ -1064,25 +859,34 @@ where
   | ["signatures", "--library", path] => signatures path true
   -- (Why a program goes wrong, compiled without the checks: what the
   -- `diagnose` cases of `tests/checks.cases` ask.)
+  | ["eval", path] => do
+    -- (What the test suite gives of an example: both Lean machines, with
+    -- its steps.)
+    match ← compileFile path with
+    | .ok c => IO.println (evalCompiled c [] (fuel := 500000) (vmScale := 200)); pure 0
+    | .error e => IO.eprintln e; pure 1
+  | ["core", path] => do
+    -- (A program's Core, as compiled with the checks.)
+    match compileSource (← IO.FS.readFile path) with
+    | .ok c => IO.println (Core.showCore c.fnNames c.core); pure 0
+    | .error e => IO.eprintln e; pure 1
   | ["diagnose", path] => do
     let src ← IO.FS.readFile path
     -- (`GLORIOUS_CORE`: its Core, as compiled without the checks.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
-      if let .ok c := compileSource src (check := false) then IO.eprintln (showCore c.fnNames c.core)
+      if let .ok c := compileSource src (check := false) then IO.eprintln (Core.showCore c.fnNames c.core)
     IO.println (diagnose src)
     pure 0
   | ["sigs", path] =>
     match ← compileFile path with
     | .ok c =>
-      -- (The types where there is no certificate.)
-      match c.cert.orElse fun _ => c.types.get with
-      | some cert =>
-        IO.println s!"strict={cert.strict} regions={cert.regions} loans={cert.loans}"
-        for e in cert.sigs do
-          IO.println s!"{c.fnNames[e.fn]?.getD ""} ({e.fn}): {Infer.showSig e.sig}"
+      match c.types.get with
+      | some types =>
+        for e in types.sigs do
+          IO.println s!"{c.fnNames[e.fn]?.getD ""} ({e.fn}): {Typer.showSig e.sig}"
         pure 0
       | none =>
-        IO.println "no certificate"
+        IO.println "no types"
         pure 1
     | .error e =>
       IO.eprintln (errorLines s!"{path}: " e)
@@ -1090,7 +894,7 @@ where
   | ["native", path, out] =>
     -- A program of its own: the bytecode, a body for every function made by
     -- LLVM, and the runtime, linked (`vmDir`).
-    match ← compileFile path (search := false) with
+    match ← compileFile path with
     | .ok c => do
       let dir ← vmDir
       let gbc := out ++ ".gbc"
@@ -1122,7 +926,7 @@ where
   | ["exe", path, out] =>
     -- An executable of the program's own with no other tool: the VM with
     -- the program at its end, loaded and compiled to machine code by it.
-    match ← compileFile path (search := false) with
+    match ← compileFile path with
     | .ok c => do
       let dir ← vmDir
       let gbc := out ++ ".gbc"
@@ -1160,7 +964,7 @@ where
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>
-    match ← buildAsked path (search := false) with
+    match ← buildAsked path with
     | .ok b =>
       IO.FS.writeBinFile out (builtBytes b)
       pure 0
@@ -1181,9 +985,7 @@ where
         IO.eprintln e
         return 64
     if command == "run" then
-      -- (Running needs the program, not how much of it is shown: the places
-      -- where a borrow can be a scope of its own are not looked for.)
-      let b ← match ← buildAsked path (search := false) with
+      let b ← match ← buildAsked path with
         | .ok b => pure b
         | .error e =>
           IO.eprintln (errorLines s!"{path}: " e)
@@ -1210,7 +1012,7 @@ where
           IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
         | .error e => IO.eprintln s!"the program went wrong; compiled again: {e}"
         return 2
-    let c ← match ← compileFile path (search := false) with
+    let c ← match ← compileFile path with
       | .ok c => pure c
       | .error e =>
         IO.eprintln (errorLines s!"{path}: " e)

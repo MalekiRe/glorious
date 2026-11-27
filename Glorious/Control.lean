@@ -275,7 +275,7 @@ def MemOp.evalBytes (m : Memory) : MemOp → List Value → Option (Value × Mem
     pure (.unit, ← m.write addr.toNat (width.natAbs / 8) (bitsOf v (width.natAbs / 8)))
   | .copy, [.int to, .int src, .int n] => do
     unless 0 ≤ to ∧ 0 ≤ src ∧ 0 ≤ n do none
-    pure (.unit, ← m.write to.toNat n.toNat (← m.read src.toNat n.toNat))
+    pure (.unit, ← m.copy to.toNat src.toNat n.toNat)
   | _, _ => none
 
 /-- The layout a path of field numbers leads to from `addr`, and its address:
@@ -412,8 +412,13 @@ structure Store (φ : Type) where
 cell of memory, `Tm.cellL`, has an address from `memBase` on; its block is
 freed). -/
 def Store.release {φ : Type} (store : Store φ) (a : Nat) : Store φ :=
-  if memBase ≤ a then { store with mem := (store.mem.free a).getD store.mem }
-  else { store with cells := store.cells.setIfInBounds a none }
+  let ⟨conts, labels, cells, mem, held⟩ := store
+  if memBase ≤ a then
+    -- (Whether it can be freed asked first: the memory is then freed in
+    -- place, not held for the other answer.)
+    if mem.blocks.contains a then ⟨conts, labels, cells, (mem.free a).getD {}, held⟩
+    else ⟨conts, labels, cells, mem, held⟩
+  else ⟨conts, labels, cells.setIfInBounds a none, mem, held⟩
 
 /-- The store with a new cell holding `v`; its address is the old number of cells. -/
 def Store.alloc {φ : Type} (store : Store φ) (v : Value) : Store φ :=
@@ -421,12 +426,23 @@ def Store.alloc {φ : Type} (store : Store φ) (v : Value) : Store φ :=
 
 /-- Perform a memory operation on the store. -/
 def Store.memOp {φ : Type} (store : Store φ) (op : MemOp) (vs : List Value) : Option (Value × Store φ) :=
-  match op.eval store.cells vs with
-  | some (r, cells) => some (r, { store with cells })
+  -- (Each part given to what changes it alone, the store taken apart: held
+  -- by the store too, a part would be copied whole by its first change.)
+  let ⟨conts, labels, cells, mem, held⟩ := store
+  -- Of a cell, or a step into one: the cell's.
+  let ofCell := match op, vs with
+    | .focus, _ => true
+    | .load, .ref a _ _ :: _ | .store, .ref a _ _ :: _ | .swap, .ref a _ _ :: _ | .tag, .ref a _ _ :: _ =>
+      decide (a < cells.size)
+    | _, _ => false
+  let onCell := if ofCell then op.eval cells vs else none
+  match onCell with
+  | some (r, cells) => some (r, ⟨conts, labels, cells, mem, held⟩)
   | none =>
-    match op.evalBytes store.mem vs with
-    | some (r, mem) => some (r, { store with mem })
-    | none =>
+    match op with
+    | .staticAt | .alloc | .free | .readBits | .writeBits | .copy =>
+      (op.evalBytes mem vs).map fun (r, mem) => (r, ⟨conts, labels, cells, mem, held⟩)
+    | _ =>
       -- (An address seen as a whole number, `transmute`, is the reference.)
       let vs : List Value := match vs with
         | .int a :: rest => if 0 ≤ a then .ref a.toNat 0 [] :: rest else vs
@@ -438,17 +454,18 @@ def Store.memOp {φ : Type} (store : Store φ) (op : MemOp) (vs : List Value) : 
         | .load => some (.loadL .held) | .store => some (.storeL .held) | .swap => some (.swapL .held)
         | .tag => some (.tagL .held) | .focus => some (.focusL .held) | _ => none
       match op, vs with
-      | .sizeOf, [_] | .alignOf, [_] => some (Value.int 8, store)
+      | .sizeOf, [_] | .alignOf, [_] => some (Value.int 8, ⟨conts, labels, cells, mem, held⟩)
       | .deref, [_, .int at_, _] =>
-        if 0 ≤ at_ then some (Value.ref at_.toNat 0 [], store) else none
+        if 0 ≤ at_ then some (Value.ref at_.toNat 0 [], ⟨conts, labels, cells, mem, held⟩) else none
       | _, _ =>
-        ((unlaid.getD op).evalLaid store.mem store.held vs).map fun (r, mem, held) => (r, { store with mem, held })
+        ((unlaid.getD op).evalLaid mem held vs).map fun (r, mem, held) => (r, ⟨conts, labels, cells, mem, held⟩)
 
 /-- The store with a new cell of memory (`Tm.cellL`) holding `v`, laid out so;
 its address. -/
 def Store.allocLaid {φ : Type} (store : Store φ) (l : Laid) (v : Value) : Option (Nat × Store φ) := do
-  let (a, mem) := store.mem.alloc l.size l.align
-  let (mem, held) ← l.lay.write mem store.held a v
-  pure (a, { store with mem, held })
+  let ⟨conts, labels, cells, mem, held⟩ := store
+  let (a, mem) := mem.alloc l.size l.align
+  let (mem, held) ← l.lay.write mem held a v
+  pure (a, ⟨conts, labels, cells, mem, held⟩)
 
 end Glorious

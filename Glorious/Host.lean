@@ -42,16 +42,32 @@ def read (m : Memory) (addr n : Nat) : Option Nat :=
 /-- The low `n` bytes of `v` written from `at`; none if one of them is in no
 live block. -/
 def write (m : Memory) (addr n v : Nat) : Option Memory :=
-  (List.range n).foldlM (fun (m : Memory) i =>
-    if m.bytes.contains (addr + i) then some { m with bytes := m.bytes.insert (addr + i) (v / 256 ^ i).toUInt8 }
-    else none) m
+  -- (What is left of `v` past the bytes written, carried: dividing it by
+  -- `256 ^ i` at each byte is quadratic in a wide write.)
+  let ⟨bytes, blocks, next, statics⟩ := m
+  let written := (List.range n).foldlM (fun ((bytes, rest) : Std.HashMap Nat UInt8 × Nat) i =>
+    if bytes.contains (addr + i) then some (bytes.insert (addr + i) rest.toUInt8, rest / 256)
+    else none) (bytes, v)
+  written.map fun (bytes, _) => ⟨bytes, blocks, next, statics⟩
+
+/-- The `n` bytes from `src` put at `to`, as they were before any is put
+(the two may overlap); none if one of them is in no live block. A byte at a
+time: read as one number, a wide copy is quadratic. -/
+def copy (m : Memory) (to src n : Nat) : Option Memory := do
+  let bs ← (List.range n).mapM fun i => m.bytes[src + i]?
+  let ⟨bytes, blocks, next, statics⟩ := m
+  let bytes ← (bs.zipIdx).foldlM (fun bytes (b, i) =>
+    if bytes.contains (to + i) then some (bytes.insert (to + i) b) else none) bytes
+  pure ⟨bytes, blocks, next, statics⟩
 
 /-- A new block of `size` bytes at a multiple of `align`, zeroed. -/
 def alloc (m : Memory) (size align : Nat) : Nat × Memory :=
+  -- (Taken apart first: the bytes then change in place, not as a copy.)
+  let ⟨bytes, blocks, next, statics⟩ := m
   let align := max align 1
-  let addr := (m.next + align - 1) / align * align
-  let bytes := (List.range size).foldl (fun b i => b.insert (addr + i) 0) m.bytes
-  (addr, { m with bytes, blocks := m.blocks.insert addr size, next := addr + max size 1 })
+  let addr := (next + align - 1) / align * align
+  let bytes := (List.range size).foldl (fun b i => b.insert (addr + i) 0) bytes
+  (addr, ⟨bytes, blocks.insert addr size, addr + max size 1, statics⟩)
 
 /-- Memory with the program's static blocks in it, each its bytes. -/
 def withStatics (blocks : List (List Nat)) : Memory :=
@@ -62,9 +78,10 @@ def withStatics (blocks : List (List Nat)) : Memory :=
 
 /-- The block that starts at `addr`, freed; none if no live block starts there. -/
 def free (m : Memory) (addr : Nat) : Option Memory := do
-  let size ← m.blocks[addr]?
-  let bytes := (List.range size).foldl (fun b i => b.erase (addr + i)) m.bytes
-  pure { m with bytes, blocks := m.blocks.erase addr }
+  let ⟨bytes, blocks, next, statics⟩ := m
+  let size ← blocks[addr]?
+  let bytes := (List.range size).foldl (fun b i => b.erase (addr + i)) bytes
+  pure ⟨bytes, blocks.erase addr, next, statics⟩
 
 end Memory
 

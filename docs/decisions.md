@@ -5,6 +5,15 @@ open, or that deliberately depart from them. Read it before changing the
 kernel. Where it disagrees with a specification in the repository root, this
 file is the current intent for this branch.
 
+## No certificate: Core's types are found, not proved
+
+The proved Core checker, the certificate it checked (`Infer`) and the proofs
+are gone. The checker of the source text is what a program is held to; the
+typed lowering's types are found from Core by `Typer` (docs/redesign.md, step
+2), and a program they do not type runs unlowered. Every borrow is the
+reference it borrows in Core. What follows below about certificates,
+regions, loans and `glorious certify` is history.
+
 ## covey's borrows shown exclusive
 
 `emit` lent the app's systems and its world at once, both fields of what one
