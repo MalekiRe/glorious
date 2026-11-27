@@ -614,14 +614,14 @@ function is given how to destroy the types it is generic in. -/
 def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   if !std then
     let (prelude, _) ← readPrelude.get
-    let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (prelude)).1 []
+    let resolved ← Syntax.Modules.resolve (Syntax.Flat.nameBorrowsItems (prelude)).1 []
     let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases resolved.items).1).1
     -- (Compacted, as a program's are before they are checked: what the
     -- check records of an expression is by its place in the body.)
     let all := all.map Syntax.Item.compact
     return (all.length, ← Check.checkFirst all resolved.info drop)
   let (prelude, items, _, _, _) ← parseProgram "// std" []
-  let resolved ← Syntax.Modules.resolve (Syntax.Flat.promoteItems (prelude)).1 (Syntax.Flat.promoteItems (items)).1
+  let resolved ← Syntax.Modules.resolve (Syntax.Flat.nameBorrowsItems (prelude)).1 (Syntax.Flat.nameBorrowsItems (items)).1
   -- (Its modules in the order a program has them, marks and all, so that
   -- what a program has first is these, item for item.)
   let (first, units) := unitsOfFlat resolved.items resolved.info.unitUses
@@ -695,8 +695,8 @@ def compileSource (src : String) (check : Bool := true)
   -- the same: `Syntax.Flat.FrontMemo`.)
   let front : Syntax.Flat.FrontMemo := { kept := m.front, keep := memos.isSome }
   let (flatPrelude, flatItems, front) := Trace.timed "flat bodies" fun _ =>
-    let (p, front) := Syntax.Flat.promoteItems (prelude) front
-    let (i, front) := Syntax.Flat.promoteItems (items) front
+    let (p, front) := Syntax.Flat.nameBorrowsItems (prelude) front
+    let (i, front) := Syntax.Flat.nameBorrowsItems (items) front
     (p, i, front)
   let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve flatPrelude flatItems (memos.map (·.units))
   let (firstItems, unitItems) := unitsOfFlat resolved.items resolved.info.unitUses

@@ -852,8 +852,12 @@ partial def inferExprRef (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Fla
               return ← inferExpr scope amb (← pushE (.reborrow true named))
         -- (A value made where a dot call is made on it, named for it,
         -- `Mark.held`: a place, as Rust's temporary is, which the call may
-        -- change.)
-        unless x.startsWith "borrowed%" do
+        -- change. And a `&mut [T]`, a `SliceMut`, written through, `xs[i] =
+        -- v`, as Rust's is without `mut`.)
+        let sliceMut := match ← find t with
+          | .con n _ => Syntax.lastSegment n == "SliceMut"
+          | _ => false
+        unless x.startsWith "borrowed%" || sliceMut do
           throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
       do
         -- A value a name holds is a place: borrowed, it is one from where

@@ -536,61 +536,41 @@ def FrontMemo.take (m : FrontMemo) (key : UInt64) (make : Unit → List Item) : 
     | none => make ()
   (v, if m.keep then { m with made := m.made.push (key, v) } else m)
 
-/-- An item's functions made so (`promoteFnClause`), as it is read, before
-its names are resolved: not a trait's defaults, made so where they are
-written out (`borrowReceivers`). -/
-partial def promoteItem : Item → Item
+/-- An item's functions with what they borrow in the text named first
+(`nameBorrowsClause`), as it is read, before its names are resolved. -/
+partial def nameBorrowsItem : Item → Item
   | .fn name ps annots ret b =>
-    let (roots, b) := (b.roots.mapM (promoteFnClause annots)).run b
+    let (roots, b) := (b.roots.mapM nameBorrowsClause).run b
     .fn name ps annots ret { b with roots }
-  | .pub parent item => .pub parent (promoteItem item)
-  | .module name (some inner) => .module name (some (inner.map promoteItem))
-  | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map promoteItem) }
+  | .pub parent item => .pub parent (nameBorrowsItem item)
+  | .module name (some inner) => .module name (some (inner.map nameBorrowsItem))
+  | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map nameBorrowsItem) }
   | item => item
 
-/-- Every item made so (`promoteItem`), each as an earlier compile made it
-where it is the same. -/
-def promoteItems (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
+/-- Every item made so (`nameBorrowsItem`), each as an earlier compile made
+it where it is the same. -/
+def nameBorrowsItems (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
   let (out, memo) := items.foldl (fun ((acc : Array Item), m) item =>
-    let (made, m) := m.take (hash ("promote", item)) fun _ => [promoteItem item]
+    let (made, m) := m.take (hash ("names", item)) fun _ => [nameBorrowsItem item]
     (acc ++ made.toArray, m)) (#[], memo)
   (out.toList, memo)
 
-/-- Does a body call, on what it is called on, a function that takes
-a reference (`taken`), so that `receiverExpr` may borrow it? -/
-def Body.borrowsReceiver (b : Body) (taken : Std.HashMap String Bool) (body : Array StmtId) : Bool :=
-  body.any fun s => b.anyStmt (fun n => match n with
-    | .call _ f args =>
-      match b.name? f, args[0]?.map b.expr with
-      | some (_, name), some (.call _ m _) => b.mark? m == some .receiver && taken.contains name
-      | _, _ => false
-    | _ => false) s
-
-/-- Every dotted call of a program with what it is called on borrowed where
-the function takes a reference: see `receiverExpr`. A name that is then
-borrowed and was not a variable is kept where a reference can point, as one
-borrowed with `&` in the text is (`promoteFnClause`): in each function's
-clause where a borrow may be made, the rest as the text's were made so
-(`promoteItems`). -/
+/-- Every dotted call of a program with what it is called on marked for the
+checker, or borrowed where the function is declared to take a reference:
+see `receiverExpr`; and what is then borrowed named first
+(`nameBorrowsClause`). -/
 partial def borrowReceivers (items : List Item) (memo : FrontMemo := {}) : List Item × FrontMemo :=
   let decls := items.map Item.declared
   let taken : Std.HashMap String Bool :=
     (takesReference decls ++ (givesReference decls).map (givesKey ·, false)).foldl (fun m (k, v) => m.insertIfNew k v) {}
-  -- (`promote`: not of a trait's defaults, which are made so where they are
-  -- written out.)
-  let rec go (promote : Bool) : Item → Item
-    | .pub parent item => .pub parent (go promote item)
-    | .module name (some body) => .module name (some (body.map (go promote)))
+  let rec go : Item → Item
+    | .pub parent item => .pub parent (go item)
+    | .module name (some body) => .module name (some (body.map go))
     | .fn name ps annots ret b =>
-      let (roots, b) := (b.roots.mapM fun c => (do
-        let b ← get
-        let ⟨_, body⟩ := b.clause c
-        let borrows := b.borrowsReceiver taken body
-        let c' ← nameBorrowsClause (← receiverClause taken c)
-        if promote && borrows then promoteFnClause annots c' else pure c' : Build ClauseId)).run b
+      let (roots, b) := (b.roots.mapM fun c => (do nameBorrowsClause (← receiverClause taken c) : Build ClauseId)).run b
       .fn name ps annots ret { b with roots }
-    | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map (go promote)) }
-    | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map (go false)) params assocs
+    | .impl whole@{ methods := methods, .. } => .impl { whole with methods := (methods.map go) }
+    | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map go) params assocs
     | .alias name b value =>
       let (value, b) := (receiverExpr taken value).run b
       .alias name b value
@@ -598,7 +578,7 @@ partial def borrowReceivers (items : List Item) (memo : FrontMemo := {}) : List 
   -- (Each item made from it and what dotted calls borrow.)
   let ctx := mixHash (hash "receivers") (unorderedHash taken)
   let (out, memo) := items.foldl (init := (#[], memo)) fun (out, memo) item =>
-    let (v, memo) := memo.take (mixHash ctx (hash item)) fun _ => [go true item]
+    let (v, memo) := memo.take (mixHash ctx (hash item)) fun _ => [go item]
     (out ++ v.toArray, memo)
   (out.toList, memo)
 

@@ -767,13 +767,6 @@ partial def Body.subjectCall (b : Body) (e : ExprId) (fuel : Nat := 8) : Nat :=
     | none => 0
   | _, _ => 0
 
-/-- Is a name bound here one that what follows borrows with `&` and never
-changes (`Syntax.borrowedOnly`)? -/
-def Body.borrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=
-  let u := b.nameUseStmts false x after
-  -- (One whose elements alone are read, `x[i]`, is borrowed for each.)
-  !x.startsWith "%" && (u.shared || (u.indexed && !u.valued && !u.valuedInside)) && !u.changed
-
 /-- `let mut x = x` for each name, where the body starts. -/
 def heldStmts (held : List String) (body : List StmtId) : Build (List StmtId) := do
   let b ← get
@@ -787,36 +780,6 @@ def heldStmts (held : List String) (body : List StmtId) : Build (List StmtId) :=
     match first with
     | some (line, col) => pushStmt (.located line col v)
     | none => pure v
-
-/-- The `&mut [T]`s among `slicesMut` a clause binds that it writes through,
-`xs[i] = v`, and does not give away, each kept in a variable of the same
-name where the clause starts, as Rust's is written through without `mut`
-(`Syntax.promoteHeld`). (A name only borrowed is a place where it is
-borrowed, the checker's `placeVal`.) -/
-def promoteHeld (c : ClauseId) (slicesMut : List String) : Build ClauseId := do
-  let b ← get
-  let ⟨pats, body⟩ := b.clause c
-  let body := body.toList
-  let held := ((pats.flatMap patternNames).eraseDups).filter fun x =>
-    let u := b.nameUseStmts false x body
-    slicesMut.contains x && u.changed && !u.valued && !u.valuedInside && !u.rebound
-  if held.isEmpty then return c
-  pushClause ⟨pats, ((← heldStmts held body) ++ body).toArray⟩
-
-/-- A clause made so (`Syntax.promoteClause`). -/
-def promoteClause (c : ClauseId) (slicesMut : List String) : Build ClauseId := do
-  let ⟨pats, body⟩ := (← get).clause c
-  promoteHeld (← pushClause ⟨pats, body⟩) slicesMut
-
-/-- A clause of a function whose parameters are written with `annots`, made
-so (`promoteClause`). -/
-def promoteFnClause (annots : List (Option TypeExpr)) (c : ClauseId) : Build ClauseId := do
-  let pats := ((← get).clause c).pats
-  let slicesMut := (pats.zip annots).filterMap fun
-    | (.var x, some (.ref true (.name n _) _)) => if n == sliceMark then some x else none
-    | (.var x, some (.name n _)) => if n.endsWith "SliceMut" then some x else none
-    | _ => none
-  promoteClause (← nameBorrowsClause c) slicesMut
 
 /-- Each name a pattern binds with `mut` a variable of the same name where
 what the pattern is of starts: `Some(mut n) => n = n + 1` as `Some(n) => let
