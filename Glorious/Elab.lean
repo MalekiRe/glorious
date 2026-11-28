@@ -744,6 +744,9 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Flat.ExprId) 
   let g ← read
   let st ← epushS (.expr subject)
   let thunk ← elabClosure scope #[← epushC ⟨[], #[st]⟩]
+  if let .var i := thunk then
+    if (← get).ownBody then
+      modify fun s => { s with b := { s.b with nodes := s.b.nodes.push (i, Flat.thunkNode (s.body.idOf subject)) } }
   let b := (← get).body
   let captures := captureNames scope (b.fvClauses arms)
   let mut completions : Array (Pattern × List Flat.StmtId) := #[]

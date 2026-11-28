@@ -1575,7 +1575,10 @@ partial def Ty.writtenRigid : Ty → Option Syntax.TypeExpr
     if n.startsWith "'" then none
     else (args.mapM Ty.writtenRigid).map (Syntax.TypeExpr.name n)
   | .tuple args => (args.mapM Ty.writtenRigid).map .tuple
-  | .fn ps r _ _ _ => do pure (.fn (← ps.mapM Ty.writtenRigid) (← r.writtenRigid))
+  -- (With what it performs, each effect at its arguments.)
+  | .fn ps r effs _ _ => do
+    let effs ← effs.mapM fun (e, args) => do pure (e, ← args.mapM Ty.writtenRigid)
+    pure (.fn (← ps.mapM Ty.writtenRigid) (.performs (← r.writtenRigid) effs))
   | .ref how t _ =>
     match how with
     | .con "&mut" [] => t.writtenRigid.map (.ref true · none)

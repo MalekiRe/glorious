@@ -87,7 +87,13 @@ partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr
   | .ref _ t _ => do pure (.ref (← tyOf d vars t))
   | .performs r _ => tyOf d vars r
   | .never => some .never
-  -- (What it performs and was made with are not written: found apart.)
+  -- (What it performs, each operation of each effect at the effect's
+  -- arguments; what it was made with is not written, found apart.)
+  | .fn ps (.performs r effs) => do
+    let eff ← effs.flatMapM fun (e, args) => do
+      let targs ← args.mapM (tyOf d vars)
+      pure (((d.effectOps[e]?).getD []).map (·, targs))
+    pure (.fn (← ps.mapM (tyOf d vars)) (← tyOf d vars r) eff false none)
   | .fn ps r => do pure (.fn (← ps.mapM (tyOf d vars)) (← tyOf d vars r) [] false none)
   | _ => none
 where
@@ -222,7 +228,7 @@ def rhsTy (env : Env) (binds : List (String × Ty)) (Γ : Array (Option Ty)) (sa
     pure t
   | .closure _ caps => do
     match ← said.bind (tyOf env.decls binds) with
-    | .fn ps r _ _ _ => pure (.fn ps r [] false (some (← caps.mapM (atomTy Γ))))
+    | .fn ps r eff _ _ => pure (.fn ps r eff false (some (← caps.mapM (atomTy Γ))))
     | _ => none
 where
   atomTy (Γ : Array (Option Ty)) : Atom → Option Ty
@@ -322,14 +328,17 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
   | .tail g _ => (w, (w.atomTy g).bind retOf)
   | .raise .. => (w, some .never)
   | .labelTail thunk | .guardTail _ thunk | .cellTail _ thunk | .cellTailL _ _ thunk => (w, (w.atomTy thunk).bind retOf)
-  | .handleTail ret ops caps _ =>
+  | .handleTail ret ops caps thunk =>
     let w := match caps.mapM w.atomTy with
       | some capTys => if w.binds.isEmpty then w else
           { w with made := (ret :: ops.map (fun (p : Nat × Nat) => p.2)).foldl (fun (m : Array ((Nat × List Ty) × List (String × Ty))) g => m.push ((g, capTys), w.binds)) w.made }
       | none => w
     let H : Option Row := ops.mapM fun (op, _) => do
       let (ps, _, _) ← env.decls.ops[op]?
-      if ps.isEmpty then pure (op, []) else none
+      if ps.isEmpty then pure (op, []) else
+        match w.atomTy thunk with
+        | some (.fn _ _ eff _ _) => (eff.lookup op).map (op, ·)
+        | _ => none
     -- (What it gives is what the clause gives: found by its callers.)
     ({ w with hints := w.hints.push (H.map (.handler .never ·)) }, none)
   | .let_ rhs body =>
@@ -361,7 +370,7 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
     match (w.atomTy g).bind retOf with
     | some .never => go env depth f c (w.bind ((said w.Γ.size).bind (tyOf env.decls w.binds)) true) body
     | r => go env depth f c (w.bind r false) body
-  | .handle ret ops caps _ body =>
+  | .handle ret ops caps thunk body =>
     -- (Its functions are of this one's type parameters.)
     let w := match caps.mapM w.atomTy with
       | some capTys => if w.binds.isEmpty then w else
@@ -372,7 +381,11 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
     let ρ := (said w.Γ.size).bind (tyOf env.decls w.binds)
     let H : Option Row := ops.mapM fun (op, _) => do
       let (ps, _, _) ← env.decls.ops[op]?
-      if ps.isEmpty then pure (op, []) else none
+      if ps.isEmpty then pure (op, []) else
+        -- (Else at what the handled computation performs it at.)
+        match w.atomTy thunk with
+        | some (.fn _ _ eff _ _) => (eff.lookup op).map (op, ·)
+        | _ => none
     let w := { w with hints := w.hints.push (do pure (.handler (← ρ) (← H))) }
     go env depth f c (w.bind ρ false) body
   | .perform _ _ body => go env depth f c (w.bind none false) body
