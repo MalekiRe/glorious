@@ -605,12 +605,24 @@ def refPatsNode (id : Nat) (clauses : List Clause) (b : Flat.Body) : Option Flat
   let ids := (List.range' start (b.exprs.size - start)).foldl (fun ids k => ids.set! k (space + (k - start))) b.ids
   pure { b with exprs := b.exprs.set! e (.closure id cs), ids }
 
+/-- What a message the checker stops with is of, where what says it more
+reads that: a type that would contain itself, an effect not handled there,
+lifetimes that do not fit, a mismatch (`unifyAt`), a function used in its
+group at another type, a field a type does not have. -/
+inductive SaidKind where
+  | occurs | unhandled | lifetime | mismatch | recursiveUse | noField
+  deriving BEq
+
 /-- What the checker says where it stops: why, and what it found to decide,
-where it stops for that; `result`
-where what does not fit is a clause's result. -/
+where it stops for that; `result` where what does not fit is a clause's
+result; what it is of (`kinds`), and of a mismatch the types expected and
+found, as said. -/
 structure Said where
   msg : String
   result : Bool := false
+  kinds : List SaidKind := []
+  expected : String := ""
+  found : String := ""
 
 instance : Coe String Said := ⟨fun msg => { msg }⟩
 

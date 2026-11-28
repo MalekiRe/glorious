@@ -915,7 +915,7 @@ partial def inferPlace (scope : Scope) (amb : Row) (e : Flat.ExprId) : M Ty := d
 
 /-- Check one argument. Gives the mismatch if it does not fit. -/
 partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : Flat.ExprId)
-    (site : Option Elab.Site) : M (Option String) := do
+    (site : Option Elab.Site) : M (Option Elab.Said) := do
   let b := (← get).body
   -- A whole number written where a type of whole numbers is wanted is of it.
   if let .int n := b.expr a then
@@ -925,7 +925,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
     if let .var v ← find p then
       for bd in (← get).bounds do
         if ← defaultTraitArgs bd.trait bd.ty bd.args (known := true) (only := some v) then break
-    if let some fits ← literalAt p n a then return fits.map fun e => s!"{what}: {e}"
+    if let some fits ← literalAt p n a then return fits.map fun e => (s!"{what}: {e}" : Elab.Said)
   -- (Wanted where a trait's argument is, of a known type that has one
   -- implementation of the trait: that implementation's, `owned + "more"`.)
   if let .var v ← find p then
@@ -1382,7 +1382,7 @@ partial def receiverByType (scope : Scope) (p : Ty) (a : Flat.ExprId) : M Unit :
 
 /-- Check arguments in the given order. Gives the first that does not fit. -/
 partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : List Ty)
-    (args : Array Flat.ExprId) (call : Nat) (order : List Nat) : M (Option (Nat × String)) := do
+    (args : Array Flat.ExprId) (call : Nat) (order : List Nat) : M (Option (Nat × Elab.Said)) := do
   for i in order do
     match params[i]?, args[i]? with
     | some p, some a =>
@@ -1538,14 +1538,14 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               | _ => false
             | none => false
           | _ => false
-        if blocky && (e.splitOn "fn() ->").length > 1 then
-          return some (i, e ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
+        if blocky && (e.expected.startsWith "fn() ->" || e.found.startsWith "fn() ->") then
+          return some (i, e.map (· ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`"))
         -- (`a + if(c) { x } else { y }` is `(a + if(c) { x }) else { y }`:
         -- `else` binds loosest of all.)
         if let .call _ f _ := b.expr a then
           if (b.name? f).map (·.2) == some "if" then
-            if (e.splitOn "found `Result<").length > 1 then
-              return some (i, e ++ ". `else` binds more loosely than any other operator: `a + if(c) { x } else { y }` is `(a + if(c) { x }) else { y }`; write the conditional in parentheses")
+            if e.found.startsWith "Result<" then
+              return some (i, e.map (· ++ ". `else` binds more loosely than any other operator: `a + if(c) { x } else { y }` is `(a + if(c) { x }) else { y }`; write the conditional in parentheses"))
         return some (i, e)
       pushTemp p
       pushAnon a p
@@ -1572,7 +1572,7 @@ partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List
   -- (Each read once: what does not fit is said where it is found.)
   match ← checkArgsIn scope amb what params args call later with
   | none => pure ()
-  | some (_, e) => throw e
+  | some (_, e) => throwThe Elab.Said e
 
 /-- A call of a constructor, an operation, a primitive, what an `is` found, a
 cast or a host function (`inferCall`). -/
@@ -2035,7 +2035,7 @@ partial def inferMarkedCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
         | _, _ => inferExpr scope amb value
       match ← fitAt scope amb "the value of a `let` with a type" none expected found with
       | none => return some expected
-      | some e => throw e
+      | some e => throwThe Elab.Said e
   pure none
 
 /-- A dot call of a reference to a value of the function's type, where the
@@ -2316,7 +2316,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
       match b.expr f with
       | .fieldOf _ _ name =>
         let theirs := (((← get).fns.toList.filter fun (fn, _) => fn.endsWith s!"::{name}").map (·.1)).mergeSort (· ≤ ·)
-        if (e.splitOn "has no field").length > 1 && theirs.length > 1 then
+        if said.kinds.contains .noField && theirs.length > 1 then
           throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun fn => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
         else throwThe Elab.Said said
       | _ => throwThe Elab.Said said
@@ -2623,7 +2623,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
       modify fun s => { s with givingBack := before }
       match fitted with
       | none => pure expected
-      | some e => throwThe Elab.Said { msg := e, result := true } : M Ty)
+      | some e => throwThe Elab.Said { e with result := true } : M Ty)
   match stmts with
   | [] => finish .unit false
   | s0 :: rest => do

@@ -895,7 +895,7 @@ def outlivesReq (long short : Nat) : M Unit := do
   match s.rigidCaps.lookup rl, s.rigidCaps.lookup rs with
   | some x, some y =>
     unless ← outlasts rl rs do
-      throw s!"lifetime `{x}` is not known to last as long as `{y}`: say `{x}: {y}`"
+      throwThe Elab.Said { msg := s!"lifetime `{x}` is not known to last as long as `{y}`: say `{x}: {y}`", kinds := [.lifetime] }
   | some _, none =>
     -- (`short` is the declared one here only where `long` is not.)
     captures short (.ty (Ty.life long))
@@ -962,12 +962,9 @@ partial def fitLifetimes (pos : Variance) (expected actual : Ty) (whole : Bool :
   | _, _ => unify e a
 
 /-- Try that, changing nothing if it does not work: then why not. -/
-def tryLifetimes (expected actual : Ty) (whole : Bool := false) : M (Option String) := do
+def tryLifetimes (expected actual : Ty) (whole : Bool := false) : M (Option Elab.Said) := do
   let saved ← get
-  try
-    fitLifetimes .co expected actual whole
-    pure none
-  catch e =>
+  tryCatchThe Elab.Said (do fitLifetimes .co expected actual whole; pure none) fun e => do
     set saved
     pure (some e)
 
@@ -1153,7 +1150,7 @@ def capsReached (t : Ty) : M (List Nat) := do
 /-- Make what was found the type expected, by a declared coercion at `site` if
 the two differ. Gives the mismatch if neither works. -/
 def fitAtCore (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
-    (expected actual : Ty) : M (Option String) := do
+    (expected actual : Ty) : M (Option Elab.Said) := do
   -- Where references meet, their lifetimes are related as the position asks,
   -- not made one: a reference given where a shorter one will do is not
   -- thereby taken to borrow what the other one borrows.
@@ -1175,17 +1172,14 @@ def fitAtCore (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Si
           return none
         catch _ => set saved
     if (← tryLifetimes expected actual true).isNone then return none
-  try
-    unifyAt what expected actual
-    pure none
-  catch e =>
+  tryCatchThe Elab.Said (do unifyAt what expected actual; pure none) fun e => do
     -- The same type but for lifetimes will do if each lifetime is related as
     -- its position asks.
     let lifetimes ← tryLifetimes expected actual
     if lifetimes.isNone then return none
     if ← shareRef scope expected actual then return none
     let e := match lifetimes with
-      | some why => if why.startsWith "lifetime" then s!"{what}: {why}" else e
+      | some why => if why.kinds.contains .lifetime then { why with msg := s!"{what}: {why.msg}" } else e
       | none => e
     match site with
     | none => pure (some e)
@@ -1197,7 +1191,7 @@ def fitAtCore (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Si
       | [] => pure (some e)
       | several =>
         let names := ", ".intercalate (several.map fun name => s!"`{name}`")
-        pure (some s!"{e} (the coercions {names} all apply here, so none is chosen)")
+        pure (some (e.map (· ++ s!" (the coercions {names} all apply here, so none is chosen)")))
 
 /-- Make what was found the type expected. Where a callable for every lifetime
 is wanted, what is given must do for any: it is fitted at lifetimes that are
@@ -1205,7 +1199,7 @@ each itself, and nothing in scope may come to hold one of them, since a
 reference the callable is given later would then be kept. A callable for
 every lifetime that is given is given at lifetimes of its own. -/
 def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
-    (expected actual : Ty) : M (Option String) := do
+    (expected actual : Ty) : M (Option Elab.Said) := do
   let (expected, held) ← openRanked expected true
   let (actual, _) ← openRanked actual
   let found ← fitAtCore scope amb what site expected actual

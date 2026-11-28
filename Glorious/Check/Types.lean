@@ -1203,6 +1203,12 @@ instance : MonadExceptOf String M where
   throw msg := throwThe Elab.Said { msg }
   tryCatch act handle := tryCatchThe Elab.Said act fun e => handle e.msg
 
+/-- `onError`, changing what the error says of itself too. -/
+@[inline] def onSaid {α : Type} (act : M α) (f : Elab.Said → Elab.Said) : M α := fun s =>
+  match act s with
+  | .ok a s => .ok a s
+  | .error e s => .error (f e) s
+
 /-- Run `act`, and change an error it ends in with `f`. Unlike `try`, which
 keeps the state from before to go back to, nothing holds that state while
 `act` runs: so what `act` changes is changed in place, and not copied. -/
@@ -1300,7 +1306,7 @@ def unifyCap (a b : Nat) : M Unit := do
     -- unknown one turns out to be, but not another declared one.
     match s.rigidCaps.lookup ra, s.rigidCaps.lookup rb with
     | some x, some y =>
-      throw s!"lifetime `{x}` is not `{y}`: a reference that lasts for one is used where one that lasts for the other is wanted"
+      throwThe Elab.Said { msg := s!"lifetime `{x}` is not `{y}`: a reference that lasts for one is used where one that lasts for the other is wanted", kinds := [.lifetime] }
     -- (What the one that gives way captured is the other's from now on.)
     -- (Each array is taken out before the store is written, so that the
     -- store is the only holder of itself and is changed where it is.)

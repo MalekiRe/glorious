@@ -129,7 +129,7 @@ partial def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
   | .tuple ts =>
     match ts[idx]? with
     | some t => pure (some t)
-    | none => throw s!"a tuple of {ts.length} values has no field {idx}"
+    | none => throwThe Elab.Said { msg := s!"a tuple of {ts.length} values has no field {idx}", kinds := [.noField] }
   -- (A tuple's first and the rest, `(H, ..R)`: the first, or of the rest.)
   | .con name [h, rest] =>
     if name == Traits.consHead then
@@ -152,8 +152,8 @@ where
               throw s!"this field of `{Syntax.lastSegment name}` is not `pub`: only the module that declares `{Syntax.lastSegment name}` can read or borrow it"
       match (sig.fieldsAt args)[idx]? with
       | some t => pure (some t)
-      | none => throw s!"`{name}` has no field {idx}"
-    | none => throw s!"`{bareName name}` has no fields to read with `.{idx}`"
+      | none => throwThe Elab.Said { msg := s!"`{name}` has no field {idx}", kinds := [.noField] }
+    | none => throwThe Elab.Said { msg := s!"`{bareName name}` has no fields to read with `.{idx}`", kinds := [.noField] }
 
 /-- Which field of a value of type `t` a step is: its number, or the place of
 its name among the fields of the type's one constructor. None if the type is
@@ -172,11 +172,11 @@ def fieldIndex (t : Ty) (step : String) : M (Option Nat) := do
     | some names =>
       match names.idxOf? step with
       | some i => pure (some i)
-      | none => throw s!"`{showTy (← zonk t)}` has no field `{step}`"
-    | none => throw s!"`{showTy (← zonk t)}` has no field `{step}`: its fields have no names"
+      | none => throwThe Elab.Said { msg := s!"`{showTy (← zonk t)}` has no field `{step}`", kinds := [.noField] }
+    | none => throwThe Elab.Said { msg := s!"`{showTy (← zonk t)}` has no field `{step}`: its fields have no names", kinds := [.noField] }
   | .var _ =>
     throw s!"the field `{step}` is read from a value whose type is not known here; annotate it"
-  | t => throw s!"`{showTy (← zonk t)}` has no field `{step}`"
+  | t => throwThe Elab.Said { msg := s!"`{showTy (← zonk t)}` has no field `{step}`", kinds := [.noField] }
 
 /-- What a field is read through: a reference to a reference is read
 through both, the read noted so (`Syntax.derefTwice`). -/

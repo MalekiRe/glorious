@@ -12,7 +12,7 @@ open Syntax
 
 def bindTy (id : Nat) (t : Ty) : M Unit := do
   if (freeTys (← zonk t)).contains id then
-    throw "this would need a type that contains itself"
+    throwThe Elab.Said { msg := "this would need a type that contains itself", kinds := [.occurs] }
   modify fun s => { s with tys := s.tys.set! id (some t) }
 
 def bindRow (id : Nat) (r : Row) : M Unit :=
@@ -171,7 +171,7 @@ partial def unifyRow (r1 r2 : Row) : M Unit := do
     | none => only1 := only1 ++ [(n, args)]
   let only2 := e2.zipIdx.filterMap fun (e, i) => if taken.contains i then none else some e
   let unhandled := fun (e : String × List Ty) =>
-    (throw s!"effect `{e.1}` is not handled here" : M Unit)
+    (throwThe Elab.Said { msg := s!"effect `{e.1}` is not handled here", kinds := [.unhandled] } : M Unit)
   match r1.tail, r2.tail with
   | none, none =>
     match only1 ++ only2 with
@@ -218,11 +218,11 @@ end
 
 /-- Unify, reporting a failure as a mismatch between what was expected and found. -/
 def unifyAt (what : String) (expected actual : Ty) : M Unit := do
-  try unify expected actual
-  catch e =>
-    let detail := if e.startsWith "effect" || e.startsWith "this would" || e.startsWith "lifetime"
-      then s!" ({e})" else ""
-    throw s!"{what}: expected `{showTy (← zonk expected)}`, found `{showTy (← zonk actual)}`{detail}"
+  tryCatchThe Elab.Said (unify expected actual) fun e => do
+    let detail := if e.kinds.any ([.occurs, .unhandled, .lifetime].contains ·) then s!" ({e.msg})" else ""
+    let (wanted, given) := (showTy (← zonk expected), showTy (← zonk actual))
+    throwThe Elab.Said { msg := s!"{what}: expected `{wanted}`, found `{given}`{detail}"
+                         kinds := .mismatch :: e.kinds, expected := wanted, found := given }
 
 /-! ## The effects of a callee
 

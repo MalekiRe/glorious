@@ -579,7 +579,8 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
   let used := (group.lookup d.name).getD t
   if let .var _ ← find used then unify used t
   else
-    unifyAt s!"`{d.name}` is used recursively at a different type" (← freshenCaps used) t
+    onSaid (unifyAt s!"`{d.name}` is used recursively at a different type" (← freshenCaps used) t)
+      fun e => { e with kinds := .recursiveUse :: e.kinds }
     reused := (d.name, used) :: reused
   defs := (d.name, t) :: defs
   afterGroupFn t
@@ -681,12 +682,11 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
       if called && signed.contains d.name then
         tryCatch (discard (checkGroupFn decls signature group d [] [] (announce := true))) fun _ => pure ()
   for d in decls do
-    let (defs', reused') ← onError (checkGroupFn decls signature group d defs reused)
-      fun e =>
+    let (defs', reused') ← onSaid (checkGroupFn decls signature group d defs reused)
+      fun said => said.map fun e =>
         -- The usual cause: the body ends in an expression run only for its effect,
         -- whose value has become the function's result.
-        let recursive := (e.splitOn "is used recursively").length > 1
-          && (e.splitOn "contains itself").length > 1
+        let recursive := said.kinds.contains .recursiveUse && said.kinds.contains .occurs
         let hint := if recursive then
           "; if the last expression of the body is not meant as the result, end it with `;`"
           else ""
@@ -696,7 +696,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
         let other := decls.find? fun o => o.name != d.name && o.impl.isNone && named o != named d
         let hint := match other with
           | some o =>
-            if d.impl.isNone && !(named d).isEmpty && !(named o).isEmpty && (e.splitOn "expected `").length > 1 then
+            if d.impl.isNone && !(named d).isEmpty && !(named o).isEmpty && said.kinds.contains .mismatch then
               hint ++ s!" (`{d.name}` and `{o.name}` call each other: a type parameter is one type to both only where both give it the same name)"
             else hint
           | none => hint
