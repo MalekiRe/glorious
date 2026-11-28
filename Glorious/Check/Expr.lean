@@ -1667,6 +1667,16 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           modify fun s => { s with lateReceivers := s.lateReceivers.push (call, given, p) }
           pure given
         else pure p
+      -- (A name that holds a value given first where the function takes a
+      -- reference to it: borrowed where it is before it is read, as Rust
+      -- borrows it. For writing, a value cannot be: said below.)
+      if i == 0 && call != 0 then
+        if let some x := (← get).body.bare? a then
+          if let some (.val t _) := scope.lookup x then
+            if let .ref how _ _ ← find p then
+              match ← find t, ← find how with
+              | .ref .., _ | .var _, _ | _, .con "&mut" [] => pure ()
+              | _, _ => modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a (.ref false x) } }
       -- (A dot call whose receiver is of a type with a function of its own of
       -- the name: that one, if the function in scope does not fit.)
       let before ← get
@@ -1710,7 +1720,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                     if let some alt := alt then
                       if (what.splitOn s!"`{alt}`").length == 1 then
                         throwThe Elab.Said { msg := e, decision := some (← receiverDecision call alt) }
-                  throwThe Elab.Said { msg := e, decision := some (.receiver call none (some uniq)) }
+                  throw e
         -- (Asked only once the function in scope does not fit: the program
         -- is read again, so what this finds on the way is not kept. The
         -- receiver's type is found as it was before it was made to fit.)
@@ -2393,11 +2403,13 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
                 -- (Else: the receiver borrowed where it is, as the resolver
                 -- borrows one, `g[0].push(5)`, `v[0].s.len()`, written so
                 -- before the call is read.)
-                if ← receiverHere scope call none (some alt) (← receiverTaken alt) then
-                  match (← get).body.expr (← callNode call) with
-                  | .call _ f' args' | .tailCall _ f' args' => return some (← inferCall scope amb f' args' call)
-                  | _ => pure ()
+                if let some t ← ownCall scope amb call alt then return some t
                 throwThe Elab.Said { msg := s!"the receiver of `{alt}` is borrowed", decision := some (← receiverDecision call alt) }
+            -- (Each takes it by a reference of its own kind, `&` and `&mut`:
+            -- the receiver given as the type's own one takes it.)
+            if let (some k, some k') := (mine, theirs) then
+              if k != 0 && k' != 0 then
+                if let some t ← ownCall scope amb call alt then return some t
   pure none
 
 /-- Apply a callee of a given type in the ambient effects. -/
