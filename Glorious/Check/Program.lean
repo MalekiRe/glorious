@@ -77,9 +77,10 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
                          ret, body, impl := some (im, sig), bounds := uses }]
   pure out
 
-/-- Each `let` of the group that is a place (`St.placedLets`) written `let
-mut` for the elaborator, as a variable the checker decided: what is
-checked already, not checked again. -/
+/-- Each `let` of the group that is a place (`St.placedLets`), and each name
+a clause binds that is one, said for the elaborator to make it a cell
+(`St.adjust`, `Elab.promote`): what is checked already, not checked
+again. -/
 def placeLets (decls : List FnDecl) : M Unit := do
   let s ← get
   let lets := s.placedLets.toList.filter fun p => decls.any (·.name == p.1)
@@ -90,13 +91,7 @@ def placeLets (decls : List FnDecl) : M Unit := do
   let mine := lets ++ params.eraseDups
   if mine.isEmpty then return
   let ds := mine.map fun (owner, l, c, x) => Elab.Adjust.place owner l c x
-  -- (Said, for the elaborator to make them cells, `Elab.promote`; and
-  -- written in the bodies the count of uses follows.)
-  modify fun s =>
-    { s with adjust := s.adjust ++ ds
-             runFns := decls.foldl (fun m d =>
-               let b := ds.foldl (fun b dec => Elab.decideBody dec d.name b) ((m[d.name]?).getD d.body)
-               m.insert d.name b) s.runFns }
+  modify fun s => { s with adjust := s.adjust ++ ds }
 
 /-- Check a group: what can be known only once types are is written where
 it is found (`Elab.Adjust`), and written in the bodies later checks
