@@ -662,3 +662,24 @@ What made a body be read again is gone (redesign step 7's slices):
 What the checker still tries and lets go (a receiver's type, a field's,
 `dotAltReading`) is put back as it was: a probe, as rustc's method probe is
 of types.
+
+## Step 4, as done: what the checker gives the elaborator
+
+The elaborator elaborates the checker's bodies (`Blocks.bodies`), with
+every adjustment the checker found written where it is: borrows and
+`&mut` borrows of receivers and operands (`receiverByName`,
+`writeFieldReceiver`, `writeElementReceiver`, `writeDotBorrows`,
+`compareNode`), dereferences through `Deref` (`derefNode`), reborrows
+(`reborrowNode`), patterns by reference (`refPatsNode`), functions named as
+values made blocks (`etaNode`), the function a dot call is of and the
+arguments it is given (`writeCall`), coercions as calls of them
+(`coerceFn`), literals of a scalar type and texts where `&str` is wanted
+(`scalarBody`), borrows of fields and fields read by name written out
+(`unfieldBody`), blocks that take an argument they do not name
+(`givenBody`). What it keeps by node beside the bodies, as rustc's
+`TypeckResults` beside HIR: which implementation each call of a trait's
+function is and what each function is given (`TraitInfo`, read by the
+copier, `Elab.Lower`), which instance of an effect each operation and
+handler is (`sites`), the places (`places`) and what destroys what
+(`drops`, `destroys`). A position is kept per statement (`located`), which
+is where every message is said.
