@@ -548,7 +548,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
         modify fun s => { s with nodeTys := #[] }
         let mut known : Array (Nat × Syntax.TypeExpr) := #[]
         for (e, t) in read do
-          if let some w := (← zonk t).written then known := known.push (e, w)
+          if let some w := (← zonk t).writtenRigid then known := known.push (e, w)
         modify fun s => { s with bodyTys := s.bodyTys.insert d.name known }
         -- (The body as read, with what was written where it was found: what
         -- the count of uses follows, `placeLets`.)

@@ -31,6 +31,9 @@ initialize groupsTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == 
 /-- `GLORIOUS_TRACE=types`: a program's Core and the signatures `Typer` found
 for it, on standard error. -/
 initialize typesTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "types")
+/-- `GLORIOUS_TRACE=hints`: how the types found forward from the checker's
+compare with `Typer`'s (`Hints.report`). -/
+initialize hintsTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "hints")
 
 initialize spans : IO.Ref (Array Span) ← IO.mkRef #[]
 initialize depth : IO.Ref Nat ← IO.mkRef 0

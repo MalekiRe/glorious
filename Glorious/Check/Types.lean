@@ -1561,6 +1561,22 @@ partial def Ty.written : Ty → Option Syntax.TypeExpr
     | .con "&mut" [] => t.written.map (.ref true · none)
     | _ => t.written.map (.ref false · none)
 
+/-- A type as `Ty.written` has it, a type parameter of the function written
+`%rigid:T`: what the elaborator's `let`s are of (`St.bodyTys`). -/
+partial def Ty.writtenRigid : Ty → Option Syntax.TypeExpr
+  | .var _ => none
+  | .rigid (.param name _) => some (.name s!"%rigid:{name}" [])
+  | .rigid _ => none
+  | .con n args =>
+    if n.startsWith "'" then none
+    else (args.mapM Ty.writtenRigid).map (Syntax.TypeExpr.name n)
+  | .tuple args => (args.mapM Ty.writtenRigid).map .tuple
+  | .fn ps r _ _ _ => do pure (.fn (← ps.mapM Ty.writtenRigid) (← r.writtenRigid))
+  | .ref how t _ =>
+    match how with
+    | .con "&mut" [] => t.writtenRigid.map (.ref true · none)
+    | _ => t.writtenRigid.map (.ref false · none)
+
 /-- A row with each instance of an effect once (of types filled in). -/
 def dedupe (effs : List (String × List Ty)) : List (String × List Ty) :=
   effs.foldl (fun acc e =>

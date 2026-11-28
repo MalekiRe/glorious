@@ -11,6 +11,7 @@ public import Glorious.Elab.Lower
 public import Glorious.Comptime
 public import Glorious.Check
 public import Glorious.Typer
+public import Glorious.Hints
 public import Glorious.Core.Show
 public import Glorious.Lower.Typed
 public import Glorious.Prelude
@@ -893,7 +894,9 @@ def compileSource (src : String) (check : Bool := true)
     let types : Except String (Option Lower.Types) := if !check then .ok none else
       match Trace.timed "types" fun _ => Typer.typesOf declared out ((blocks.map (·.nodeTys)).getD {}) with
       | .ok types =>
-        if Trace.typesTraced then dbgTrace (Core.showCore out.fnNames out.program ++ "\n" ++ Typer.showSigs types) fun _ => .ok (some types)
+        if Trace.hintsTraced then
+          dbgTrace (Hints.report declared out ((blocks.map (·.nodeTys)).getD {}) types) fun _ => .ok (some types)
+        else if Trace.typesTraced then dbgTrace (Core.showCore out.fnNames out.program ++ "\n" ++ Typer.showSigs types) fun _ => .ok (some types)
         else .ok (some types)
       | .error e =>
         -- (`GLORIOUS_TRACE`: why there are none.)
