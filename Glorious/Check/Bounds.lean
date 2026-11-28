@@ -499,12 +499,12 @@ def dotOwnInstead (call : Nat) (trait : Syntax.TraitKey) (ty : Ty) (said : Strin
 is (`lateReceivers`), once the bounds of types whose heads are known have
 decided what they do, `F: Runs<O>` of `O`: where it is a value that is
 copied, and the function takes a reference to read it, given a copy of it,
-borrowed (`Elab.Decision.receiverCopy`); one not copied refused, its type
+borrowed (`Elab.receiverCopyNode`); one not copied refused, its type
 asked for where it is bound, as Rust asks; else given as it is. -/
 def checkLateReceivers : M Unit := do
   let rs := (← get).lateReceivers
   modify fun s => { s with lateReceivers := #[] }
-  for (call, given, wanted) in rs do
+  for (owner, call, given, wanted) in rs do
     match ← find given, ← find wanted with
     | .var _, _ | .ref .., _ => unify given wanted
     | _, .ref how _ _ =>
@@ -519,7 +519,12 @@ def checkLateReceivers : M Unit := do
       unless copied do
         throw "the receiver's type is not known where the call is, and the function borrows it: say its type where the receiver is bound (`let x: Type = ..`)"
       if let .ref _ inner _ ← find wanted then unify given inner
-      modify fun s => { s with decided := s.decided ++ [.receiverCopy call] }
+      -- (Written where it is in the body as read, and in the one the count
+      -- of uses follows.)
+      let write := fun (m : Std.HashMap String Flat.Body) => match m[owner]? with
+        | some b => m.insert owner ((Elab.receiverCopyNode call b).getD b)
+        | none => m
+      modify fun s => { s with runFns := write s.runFns, decidedFns := write s.decidedFns }
     | _, _ => unify given wanted
 
 /-- A bound as its trait's implementations for the type it now has are told

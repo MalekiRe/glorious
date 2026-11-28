@@ -567,7 +567,7 @@ structure St where
   /-- Each dot call whose receiver, a name, was of a type not known where
   the function takes a reference: the type it is given as, and the type the
   function takes (`checkLateReceivers`). -/
-  lateReceivers : Array (Nat × Ty × Ty) := #[]
+  lateReceivers : Array (String × Nat × Ty × Ty) := #[]
   /-- Whether the types being read are a function's signature: a callable
   among them written without what it performs performs nothing, as in a
   declaration, so that its body decides nothing of the signature. -/

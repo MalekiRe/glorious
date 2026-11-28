@@ -80,18 +80,7 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
 /-- Each `let` of the group that is a place (`St.placedLets`) written `let
 mut` for the elaborator, as a variable the checker decided: what is
 checked already, not checked again. -/
-def placeLets (decls : List FnDecl) (from_ : Nat) : M Unit := do
-  -- (A receiver found to be copied only once the bounds were met, after the
-  -- body was read, `checkLateReceivers`: written in now.)
-  let late := ((← get).decided.drop from_).filter fun
-    | .receiverCopy .. => true
-    | _ => false
-  unless late.isEmpty do
-    let write := fun (m : Std.HashMap String Flat.Body) => decls.foldl (fun m d =>
-      match m[d.name]? with
-      | some b => m.insert d.name (late.foldl (fun b dec => Elab.decideBody dec d.name b) b)
-      | none => m) m
-    modify fun s => { s with runFns := write s.runFns, decidedFns := write s.decidedFns }
+def placeLets (decls : List FnDecl) : M Unit := do
   let s ← get
   let lets := s.placedLets.toList.filter fun p => decls.any (·.name == p.1)
   -- (A name a clause binds: kept in a variable where the clause starts,
@@ -115,8 +104,7 @@ follow (`placeLets`). Nothing is checked again. -/
 def checkWritten (decls : List FnDecl) : M Unit := do
   -- (Refused, said from the state the group began from: what it had
   -- recorded is not another's to meet.)
-  let from_ := (← get).decided.length
-  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls from_) fun e => throwThe Elab.Said e
+  tryCatchThe Elab.Said (do checkGroup decls; placeLets decls) fun e => throwThe Elab.Said e
 
 /-- `x`, or its refusal: what it did kept, the state not put
 back (which would hold it twice, and copy what it changes). -/

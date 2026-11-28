@@ -10,7 +10,7 @@ open Syntax
 
 delta_part StDelta1 diffPart1 applyPart1 fitsPart1 clearPart1 restorePart1 [
   lateDrops : ArrD (Ty × String),
-  lateReceivers : ArrD (Nat × Ty × Ty),
+  lateReceivers : ArrD (String × Nat × Ty × Ty),
   stays : ArrD (Ty × String),
   lateStays : ArrD (Ty × String),
   statics : ArrD (Ty × String),

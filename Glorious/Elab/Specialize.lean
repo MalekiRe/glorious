@@ -466,15 +466,13 @@ def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
   onExpr go b e :=
     if line != 0 || col != 0 then none else (heldFirst x).onExpr go b e
 
-/-- A function's body with one thing the checker decided after it read the
-body written in: a variable it made a place (`letMut`), a receiver found to
-be copied once the bounds were met (`receiverCopy`). What it decided while
-reading a body it wrote there itself (`Blocks.bodies`). `name` is the name
-the function is checked by. -/
+/-- A function's body with a variable the checker made a place written in
+(`letMut`): for the count of uses, which follows bodies so. What it decided
+while reading a body it wrote there itself (`Blocks.bodies`). `name` is the
+name the function is checked by. -/
 def decideBody (d : Decision) (name : String) (b : Flat.Body) : Flat.Body :=
   match d with
   | .letMut owner line col x => if name == owner then (letMutRewriteF line col x).body b else b
-  | .receiverCopy call => (receiverCopyNode call b).getD b
   | _ => b
 
 /-- Every function of an item with what the checker decided written in, each

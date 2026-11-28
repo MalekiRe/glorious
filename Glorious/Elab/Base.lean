@@ -250,9 +250,9 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
 knows types, written where it is found and read on: kept (`St.decided`),
 so that a node is decided once. The elaborator elaborates the bodies the
 checker read (`Blocks.bodies`), with these in them; what is decided once a
-body is read, a variable made a place (`letMut`) or a receiver found to be
-copied (`receiverCopy`), is written in after (`decideBody`). No body is
-read again for one. (`eta`, `refPats` and `receiver` are what the checker
+body is read, a variable made a place (`letMut`), is made a cell by the
+elaborator (`Elab.promote`). No body is read again for one. (`eta` and
+`refPats` are what the checker
 says to itself where it finds one, for whoever reads the call or the name
 to write it there: never kept.) -/
 inductive Decision where
@@ -273,10 +273,6 @@ inductive Decision where
   checker read it on, not read again (`receiverNode`): of `fn` where given,
   the name borrowed (`some uniq`) or given as it is. -/
   | receiverHere (call : Nat) (fn : Option String) (borrow : Option Bool)
-  /-- The dot call `call`, its receiver a value that is copied whose type
-  was known only after the call was read, the function taking it by
-  reference: given a copy of it, borrowed (`receiverCopyNode`). -/
-  | receiverCopy (call : Nat)
   /-- The dot call `call`, its receiver a field of a name (through a
   reference the name holds where `star`), borrowed where it is
   (`receiverFieldNode`). -/
@@ -420,7 +416,7 @@ def etaNode (node : Nat) (x : String) (arity : Nat) (id : Nat) (b : Flat.Body) :
 
 /-- The dot call `call`, its receiver a value that is copied, given a copy
 of it, borrowed: `{ let mut r = x; f(&r, ..) }`, written where it is
-(`Decision.receiverCopy`). For a receiver whose type was known only once
+(`Check.checkLateReceivers`). For a receiver whose type was known only once
 the call's function was (`Check.checkLateReceivers`): the copy is the
 value, as a borrow of it would read it. -/
 def receiverCopyNode (call : Nat) (b : Flat.Body) : Option Flat.Body := do
