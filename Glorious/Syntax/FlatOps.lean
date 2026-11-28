@@ -606,6 +606,21 @@ partial def Body.computes (b : Body) (e : ExprId) : Bool :=
   | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ => b.computes x
   | _ => false
 
+/-- Does `e` borrow one of the names the statements `before` bind (`&x`,
+`&x.f`)? -/
+partial def Body.borrowsNamed (b : Body) (before : Array StmtId) (e : ExprId) : Bool :=
+  let names := before.toList.filterMap fun s => match b.stmt s with
+    | .let_ (.var x) _ | .letMut x _ => some x
+    | _ => none
+  let rec go (fuel : Nat) (e : ExprId) : Bool :=
+    match fuel with
+    | 0 => true
+    | fuel + 1 =>
+      (match b.expr e with
+        | .ref _ x | .refField _ _ x _ _ => names.contains x
+        | _ => false) || (b.children e).any (go fuel)
+  !names.isEmpty && go 512 e
+
 mutual
 
 /-- A value that is borrowed where it is made, `&f(x)`, given a name first
@@ -692,9 +707,22 @@ partial def nameBorrowsClause (c : ClauseId) : Build ClauseId := do
 
 partial def nameBorrowsStmt (s : StmtId) : Build (List StmtId) := do
   let named := fun (e : ExprId) => ((nameBorrowsE e).run #[] : Build (ExprId × Array StmtId))
+  -- (Of a `let`, an assignment's value: the values named are let go where
+  -- the statement ends, as Rust's temporaries are, unless the value is a
+  -- borrow of one: then where the block does, as Rust extends one.)
+  let ended := fun (e : ExprId) (before : Array StmtId) => do
+    if before.isEmpty || (← get).borrowsNamed before e then return e
+    let last ← pushStmt (.expr e)
+    pushExpr (.labelScope "%block" (before.push last))
   match (← get).stmt s with
-  | .let_ pat e => let (e, before) ← named e; pure (before.toList ++ [← pushStmt (.let_ pat e)])
-  | .letMut x e => let (e, before) ← named e; pure (before.toList ++ [← pushStmt (.letMut x e)])
+  | .let_ pat e =>
+    let (e', before) ← named e
+    if (← get).borrowsNamed before e' then pure (before.toList ++ [← pushStmt (.let_ pat e')])
+    else pure [← pushStmt (.let_ pat (← ended e' before))]
+  | .letMut x e =>
+    let (e', before) ← named e
+    if (← get).borrowsNamed before e' then pure (before.toList ++ [← pushStmt (.letMut x e')])
+    else pure [← pushStmt (.letMut x (← ended e' before))]
   -- (Of a statement that is an expression, the values named are let go
   -- where it ends: a block of its own.)
   | .expr e =>
@@ -707,22 +735,33 @@ partial def nameBorrowsStmt (s : StmtId) : Build (List StmtId) := do
   | .assign target e =>
     let (target, first) ← named target
     let (e, second) ← named e
-    pure (first.toList ++ second.toList ++ [← pushStmt (.assign target e)])
+    if (← get).borrowsNamed second e then
+      pure (first.toList ++ second.toList ++ [← pushStmt (.assign target e)])
+    else pure (first.toList ++ [← pushStmt (.assign target (← ended e second))])
   | .located line col inner =>
     -- (Each `let` made where the statement is: what a value so named holds
     -- is let go where its block ends, found by that place.)
     let made ← nameBorrowsStmt inner
+    -- (And those of a block made for a statement's values, each where the
+    -- statement is.)
+    let placed := fun (e : ExprId) => do
+      let b ← get
+      match b.expr e with
+      | .labelScope "%block" body =>
+        let placed ← body.mapM fun s => pushStmt (.located line col s)
+        some <$> pushExpr (.labelScope "%block" placed)
+      | _ => pure none
     made.mapM fun s => do
       let b ← get
-      match b.stmt s with
-      | .expr e =>
-        match b.expr e with
-        | .labelScope "%block" body =>
-          let placed ← body.mapM fun s => pushStmt (.located line col s)
-          let scope ← pushExpr (.labelScope "%block" placed)
-          pushStmt (.located line col (← pushStmt (.expr scope)))
-        | _ => pushStmt (.located line col s)
-      | _ => pushStmt (.located line col s)
+      let again ← match b.stmt s with
+        | .expr e => (·.map FStmt.expr) <$> placed e
+        | .let_ pat e => (·.map (FStmt.let_ pat)) <$> placed e
+        | .letMut x e => (·.map (FStmt.letMut x)) <$> placed e
+        | .assign t e => (·.map (FStmt.assign t)) <$> placed e
+        | _ => pure none
+      match again with
+      | some st => pushStmt (.located line col (← pushStmt st))
+      | none => pushStmt (.located line col s)
 
 partial def nameBorrowsStmts (body : List StmtId) : Build (List StmtId) :=
   return (← body.mapM nameBorrowsStmt).flatten

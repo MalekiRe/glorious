@@ -33,7 +33,7 @@ def withLater {α : Type} (names : List String) (act : M α) : M α := do
   let outer := (← get).later
   -- (A name whose value has a `drop` to run where its block ends is used
   -- there: what it holds is held till then.)
-  modify fun s => { s with later := names ++ s.dropLive ++ outer }
+  modify fun s => { s with later := names ++ outer }
   let r ← act
   modify fun s => { s with later := outer }
   pure r
@@ -90,7 +90,7 @@ def abandons (waiting : List Ty) (what : String) (call : Nat := 0) : M Unit := d
 
 def use (scope : Scope) (kind : UseKind) : M Unit :=
   modify fun s =>
-    { s with uses := s.uses.push ⟨s.owner, s.pos, kind, scope, s.later, s.temps⟩ }
+    { s with uses := s.uses.push ⟨s.owner, s.pos, kind, scope, s.later, s.temps, s.dropLive⟩ }
 
 def freshLoan (root : Option Nat) (uniq : Bool) (parent : Option (Nat × Nat))
     (path : List Nat := []) : M Nat := do
@@ -247,7 +247,7 @@ whose lifetime a result written `-> &mut T` is), but its value was there
 first. -/
 def holderOf (loan : Nat) (u : Use) (byTime : Bool := false) : M (Option String) := do
   let s ← get
-  for name in u.later.eraseDups do
+  for name in (u.laterIn s.givenIds).eraseDups do
     if let some t := (u.scope.lookup name).bind Binding.held then
       let before := byTime && match u.scope.lookup name with
         | some (.val _ id) => (s.bindLoans[id]?).any (loan ≥ ·)
@@ -312,7 +312,7 @@ def checkLoans (loansAt cellsAt : Nat := 0) : M Unit := do
       if let some (_, _, t) := s.cells.toList.find? (·.1 == brand) then
         modify fun st => { st with seen := {} }
         if (← tyOwnsOnce [] t) || (← tyHasDrop [] t).isSome then
-          for name in u.later.eraseDups do
+          for name in (u.laterIn s.givenIds).eraseDups do
             if name != x then
               if let some held := (u.scope.lookup name).bind Binding.held then
                 modify fun st => { st with seen := {} }
@@ -785,6 +785,8 @@ def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : Stri
       if (← get).movedCells.contains brand && gives name then
         modify fun s => { s with givenEdges := s.givenEdges.insert s.capEdges.size, givers := (cap, brand) :: s.givers }
         captures cap (.ty t) (some (name, brand))
+      else if (← get).openCells.contains brand && gives name then
+        modify fun s => { s with cellCaptures := s.cellCaptures.push (brand, cap, t, name) }
     | some (.label _ brand) => captures cap (.brand brand)
     | some (.poly s) => captures cap (.ty s.ty) (some (name, 0))
     | none => pure ()

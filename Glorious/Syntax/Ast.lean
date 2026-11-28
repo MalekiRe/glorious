@@ -29,8 +29,9 @@ inductive Mark where
   /-- `&mut value` where the value has no name. -/
   | borrowMut
   /-- A value made where a dot call is made on it, `half(4).is_ok()`: given
-  a name of its own for the statement, a variable, and the name given, the
-  checker to say how the call takes it (`Check.variableReceivers`). -/
+  a name of its own for the statement, let go where the statement ends
+  (`Flat.nameBorrowsStmt`), and the name given, the checker to say how the
+  call takes it. -/
   | held
   /-- `subject is Pattern` leaves the parser as the call `%is(subject, { Pattern
   => })`. Where names are resolved, and so which names of the pattern are new,

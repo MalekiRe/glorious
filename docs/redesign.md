@@ -616,9 +616,9 @@ itself, with why:
   functions that take them (`pathUses`), as conditionals are functions
   here (`if`, `else`, `match` arms are callables given to them): Rust's MIR
   has the branches as its own control flow.
-- Before a binding's statements are read, whether it is given away or
-  only borrowed is read off them (`givenAway`, `variableReceivers`), as a
-  variable is a cell from where it is bound.
+- Whether a binding is given away or only borrowed is read off its
+  statements once they are read (`givenAway` of the body as read,
+  `closeCell`); nothing is read off statements ahead of reading them.
 
 They run on the checker's flat bodies, as each binding's statements are
 read, not on Core after the elaborator: their messages are of the text,

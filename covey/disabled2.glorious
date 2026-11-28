@@ -77,7 +77,8 @@ fn main() -> Int {
     say(world.query<(&Hp,)>().count());
     world.enable_subtree<ChildOf>(root);
     // What was hidden on its own stays hidden.
-    say(world.query<(&Hp,)>().count() + (if(is_some(world.get<Disabled>(closed))) { 1 } else { 0 }));
+    let shown = world.query<(&Hp,)>().count();
+    say(shown + (if(is_some(world.get<Disabled>(closed))) { 1 } else { 0 }));
     say("--");
 
     let mut app = App::new().register<Hp>().register<Disabled>().register<HiddenBy>().relation<ChildOf>().insert_resource(Seen(0))

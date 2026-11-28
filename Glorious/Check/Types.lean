@@ -312,6 +312,16 @@ structure Use where
   scope : Scope
   later : List String
   temps : List (Ty × Nat)
+  /-- Names whose value has a `drop` to run where their block ends, each
+  with its binding's id: used there, unless the binding is found to give
+  its value away (`St.givenIds`). -/
+  liveIf : List (String × Nat) := []
+
+/-- The names used later where `u` happens: those the rest mentions, and
+those whose value has a `drop` to run where their block ends, but for the
+bindings `gone` that give it away. -/
+def Use.laterIn (u : Use) (gone : List Nat) : List String :=
+  u.later ++ (u.liveIf.filter fun (_, id) => !gone.contains id).map (·.1)
 
 /-- A coverage check to run once the types involved are known. `what` names the
 clauses and ends with the verb of the message. -/
@@ -909,7 +919,22 @@ structure St where
   later : List String := []
   /-- Names bound in the blocks being read whose values have a `drop` to run
   where their block ends: what they hold is held till then. -/
-  dropLive : List String := []
+  dropLive : List (String × Nat) := []
+  /-- The bindings found, once their statements are read, to give their
+  value away: a name of one is not used where its block ends. -/
+  givenIds : List Nat := []
+  /-- The mutable variables whose statements are being read, whether they
+  give their value away found once they are (`closeCell`). -/
+  openCells : List Nat := []
+  /-- Each read of an open variable's value: the variable, its type, what
+  is said if it is not given away, and the use recorded. -/
+  cellTakes : Array (Nat × Ty × String × Nat) := #[]
+  /-- Each callable that uses an open variable's value: the variable, the
+  callable's capture, the type, the name. -/
+  cellCaptures : Array (Nat × Nat × Ty × String) := #[]
+  /-- Each callable that uses an open variable's value, as the move it is
+  if the variable gives its value away. -/
+  cellHeld : Array (Nat × Use) := #[]
   /-- The values the expression being checked has computed and not yet used,
   each with how many borrows had been made when it was computed. -/
   temps : List (Ty × Nat) := []

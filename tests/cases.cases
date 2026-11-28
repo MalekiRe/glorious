@@ -75,9 +75,31 @@ x
 0
 0
 #### case
+#### A value made for a dot call in a `let` is let go where the statement
+#### ends, as Rust's temporary is: its `drop` runs before what follows.
+struct W { n: Int }
+struct Q<'w> { w: &'w mut W }
+impl<'w> Drop for Q<'w> { fn drop(q: &mut Q<'w>) { q.w.n = q.w.n + 100; } }
+impl W { fn query(w: &mut W) -> Q<'_> { Q { w } } }
+impl<'w> Q<'w> { fn count(q: &mut Self) -> Int { q.w.n } }
+fn f(w: &mut W) -> Int { let c = w.query().count(); say(w.n); c }
+fn main() -> Int { let mut w = W { n: 1 }; let c = f(&mut w); say(w.n); c }
+#### expect
+101
+101
+1
+#### case
+#### And a reference into it is refused, as Rust refuses it.
+fn pair(what: &str, n: Int) -> Int { let parts = [what, n.to_string().as_str()]; parts[0].len() + parts[1].len() }
+fn main() -> Int { pair("x", 345) }
+#### expect
+error: 1:38: in `pair`: a value made for a dot call is let go where its statement ends, and what borrows it could be used after: name it with a `let` of its own: something that uses it is the block's result
+#### case
 #### Shared references of several lifetimes where one type is wanted, an
 #### array's elements, a branch's results: of a lifetime each outlives.
-fn pair(what: &str, n: Int) -> Int { let parts = [what, n.to_string().as_str()]; parts[0].len() + parts[1].len() }
+#### (`[what, n.to_string().as_str()]` is refused: the text made for the
+#### `let` is let go where the statement ends, as Rust's temporary is.)
+fn pair(what: &str, n: Int) -> Int { let s = n.to_string(); let parts = [what, s.as_str()]; parts[0].len() + parts[1].len() }
 fn pick(what: &str, n: Int) -> Int { let s = n.to_string(); let p = if(n > 2) { what } else { s.as_str() }; p.len() }
 fn main() -> Int { say(pair("x", 345)); say(pick("xy", 3)); say(pick("xy", 1)); 0 }
 #### expect

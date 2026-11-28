@@ -470,6 +470,11 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
       if (← get).movedCells.contains brand then
         modify fun s => { s with givenReads := s.givenReads.push (t, s.pos ++ readsCell x) }
         use scope (.var brand x .move)
+      else if (← get).openCells.contains brand then
+        -- (Of one whose statements are being read: a move or a copy as it
+        -- is found to give its value away or not, `closeCell`.)
+        modify fun s => { s with cellTakes := s.cellTakes.push (brand, t, s.pos ++ readsCell x, s.uses.size) }
+        use scope (.var brand x .read)
       else
         mustDup t (readsCell x)
         use scope (.var brand x .read)
@@ -1308,81 +1313,6 @@ partial def writeFieldReceiver (a : Flat.ExprId) (fx : String) (star : Bool) : M
     | some 0 | none => pure (b.expr r)
     | some k => pure (.refField fid (k == 2) x path star)
   modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a given } }
-
-/-- The dot calls on the variable `x` in `rest` (`f(%receiver(x), ..)`),
-each receiver borrowed as the function in scope takes it (`receiverKinds`),
-written where it is before the variable's uses are looked at: whether it
-gives its value away (`givenAway`) is seen of them so. One whose function
-says nothing is left for the parameter's type (`receiverByType`). -/
-partial def variableReceivers (x : String) (rest : List Flat.StmtId) : M Unit := do
-  let b := (← get).body
-  let rec calls (fuel : Nat) (e : Flat.ExprId) : List (Flat.ExprId × String) :=
-    match fuel with
-    | 0 => []
-    | fuel + 1 =>
-      let here := match b.expr e with
-        | .call _ f args | .tailCall _ f args =>
-          match b.bare? f, args[0]? with
-          | some fx, some a =>
-            match b.expr a with
-            | .call _ m #[r] => if b.mark? m == some .receiver && b.bare? r == some x then [(a, fx)] else []
-            | _ => []
-          | _, _ => []
-        | _ => []
-      here ++ (b.children e).flatMap (calls fuel)
-  let found := rest.flatMap fun s => (b.stmtExprs s).toList.flatMap (calls 256)
-  for (a, fx) in found do
-    let given : Option Flat.FExpr := match (← receiverKinds fx fx).1 with
-      | some 0 => some (.name none x)
-      | some k => some (.ref (k == 2) x)
-      | none => none
-    if let some n := given then
-      modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a n } }
-  -- (And a field of it, `v.items.len()`: borrowed where it is.)
-  let rec fields (fuel : Nat) (e : Flat.ExprId) : List (Flat.ExprId × String) :=
-    match fuel with
-    | 0 => []
-    | fuel + 1 =>
-      let here := match b.expr e with
-        | .call _ f args | .tailCall _ f args =>
-          match b.bare? f, args[0]? with
-          | some fx, some a =>
-            match b.expr a with
-            | .call _ m #[r] =>
-              if b.mark? m == some .receiver && ((fieldRoot b r).map (·.1)) == some x then [(a, fx)] else []
-            | _ => []
-          | _, _ => []
-        | _ => []
-      here ++ (b.children e).flatMap (fields fuel)
-  for (a, fx) in rest.flatMap fun s => (b.stmtExprs s).toList.flatMap (fields 256) do
-    writeFieldReceiver a fx false
-  -- (And an element of it, `v[i].push(..)`: its place, for writing.)
-  let rooted := fun (base : Flat.ExprId) => match b.expr base with
-    | .ref _ y => y == x
-    | .refField _ _ y _ _ => y == x
-    | _ => false
-  let rec elements (fuel : Nat) (e : Flat.ExprId) : List (Flat.ExprId × String) :=
-    match fuel with
-    | 0 => []
-    | fuel + 1 =>
-      let here := match b.expr e with
-        | .call _ f args | .tailCall _ f args =>
-          match b.bare? f, args[0]? with
-          | some fx, some a =>
-            match b.expr a with
-            | .call _ m #[r] =>
-              match b.mark? m == some .receiver, b.expr r with
-              | true, .deref inner =>
-                match b.expr inner with
-                | .call _ _ #[base, _] => if rooted base then [(a, fx)] else []
-                | _ => []
-              | _, _ => []
-            | _ => []
-          | _, _ => []
-        | _ => []
-      here ++ (b.children e).flatMap (elements fuel)
-  for (a, fx) in rest.flatMap fun s => (b.stmtExprs s).toList.flatMap (elements 256) do
-    writeElementReceiver a fx
 
 /-- A dot call `f(%receiver(x), ..)` of a function in scope `f`: the
 receiver borrowed as `f` takes it (`receiverKinds`), given as it is where
@@ -2368,6 +2298,14 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
       | _ => throwThe Elab.Said said
     applyTy scope amb "this callee" callee args call
 
+/-- What is said of a binding `x` that could be used after its block has
+ended: of a value made for a dot call, that it is let go where its
+statement ends. -/
+partial def endedSaid (x : String) : String :=
+  if x.startsWith "borrowed%" then
+    "a value made for a dot call is let go where its statement ends, and what borrows it could be used after: name it with a `let` of its own"
+  else s!"`{x}` could be used after its block has ended"
+
 /-- `let pattern = value` and the statements after it (`inferStmts`). -/
 partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     (want : Option (Ty × Option Elab.Site)) (pat : Pattern) (value : Flat.ExprId) : M Ty := do
@@ -2467,14 +2405,18 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
   modify fun s => { s with pending := s.pending.push check }
   -- (What has a `drop` to run where the block ends, and is not given away
   -- before, holds what it borrows till then.)
+  -- (Unless it is found to be given away once the statements are read.)
   let held ← binds.filterMapM fun (x, bd) => do
     match bd with
-    | .val tx _ => pure (if !b.givenAway x rest && (← hasDropOwn tx) then some x else none)
+    | .val tx id => pure (if ← hasDropOwn tx then some (x, id) else none)
     | _ => pure none
   let outerLive := (← get).dropLive
   modify fun s => { s with dropLive := held ++ s.dropLive }
   let result ← inferStmts (binds ++ scope) amb rest want
   modify fun s => { s with dropLive := outerLive }
+  let b := (← get).body
+  for (x, id) in held do
+    if b.givenAway x rest then modify fun s => { s with givenIds := id :: s.givenIds }
   usesLater pos scope binds rest
   -- A name borrowed (`placeVal`) is a place till its block ends: nothing
   -- borrowed of it may be left after, and the elaborator keeps it as a
@@ -2483,7 +2425,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     for (x, bd) in binds do
       if let .val _ bid := bd then
         if (← get).placedVals.contains bid then
-          checkEscape bid s!"`{x}` could be used after its block has ended"
+          checkEscape bid (endedSaid x)
             (("something that uses it is the block's result", result) :: scopeRoots scope) amb
           -- (Only borrowed, never given away, nor a part of it read, which
           -- may give that part away: destroyed where its block ends, as a
@@ -2502,7 +2444,6 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
 /-- `let mut x = value` and the statements after it (`inferStmts`). -/
 partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     (want : Option (Ty × Option Elab.Site)) (x : String) (value : Flat.ExprId) : M Ty := do
-  variableReceivers x rest
   let b := (← get).body
   let (at_, pos) := ((← get).at_, (← get).pos)
   let t ← withLater (b.fvStmts [x] rest) (inferRoot scope amb value)
@@ -2513,25 +2454,27 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
   -- again holds one value for as long as it lasts. Where that value is
   -- also used as it is, outside any callable, the variable is a name
   -- that can be borrowed: the value is given away by the use, counted as
-  -- a name's uses are, and is not the variable's to destroy.
-  -- (And is not borrowed again once it has been.)
+  -- a name's uses are, and is not the variable's to destroy. That is found
+  -- once its statements are read (`closeCell`): till then a read of it is
+  -- a move or a copy as it will be found.
   -- (A value made where a dot call is made on it, named to be borrowed for
   -- the function the resolver took, whose type's own function of the name
-  -- takes it whole: given to that one, `wholeReceiver`.)
+  -- takes it whole: given to that one from the first, `wholeReceiver`.)
   -- (Its dot calls the function of its type's own borrows it for are not
   -- uses that give it away, `dotBorrows`.)
   writeDotBorrows x (← dotBorrows b x t rest)
   let b := (← get).body
-  let given := b.givenAway x rest || (← wholeReceiver b x t rest)
+  let whole ← wholeReceiver b x t rest
+  -- A variable owns what it holds. One that gives it away owns it where it
+  -- has not: whether that is anywhere is seen once the uses are counted,
+  -- and its cleanup is put in then.
+  let cand : Elab.DropSite × Ty × String := (⟨(← get).owner, at_.1, at_.2, .name x, false⟩, t, pos)
   modify fun s =>
     { s with
       cells := s.cells.push (brand, x, t)
-      movedCells := if given then brand :: s.movedCells else s.movedCells
-      -- A variable owns what it holds. One that gives it away owns it
-      -- where it has not: whether that is anywhere is seen once the
-      -- uses are counted, and its cleanup is put in then.
-      dropCands := if given then s.dropCands
-        else s.dropCands.push (⟨s.owner, at_.1, at_.2, .name x, false⟩, t, pos) }
+      movedCells := if whole then brand :: s.movedCells else s.movedCells
+      openCells := if whole then s.openCells else brand :: s.openCells
+      dropCands := if whole then s.dropCands else s.dropCands.push cand }
   -- Nothing says the variable is empty when its block ends: what it holds
   -- then is let go. Unless the very next statement is a cleanup that takes
   -- it out, leaving something that holds nothing: that runs last of all
@@ -2542,25 +2485,63 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
       | some put => holdsNothing (Flat.treeExpr b put)
       | none => pure false
     | _ => pure false
-  unless finalised || given do
-    mustDrop t s!"the mutable variable `{x}` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`)"
   let here := (← get).pos
-  if given then
-    modify fun s =>
-      { s with
-        flagged := (s.owner, here) :: s.flagged
-        givenSites := (here, ⟨s.owner, at_.1, at_.2, .given x, false⟩, t, pos) :: s.givenSites }
+  -- (Said here, and let be if it is found to be given away.)
+  let dropAt := (← get).drops.size
+  unless finalised || whole do
+    mustDrop t s!"the mutable variable `{x}` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`)"
+  let dropSaid := (← get).drops.size > dropAt
   -- (What it holds has a `drop` to run where the block ends: what that
-  -- borrows is held till then.)
+  -- borrows is held till then, unless it is given away.)
   let outerLive := (← get).dropLive
-  if !given && (← hasDropOwn t) then modify fun s => { s with dropLive := x :: s.dropLive }
+  if (← hasDropOwn t) then modify fun s => { s with dropLive := (x, brand) :: s.dropLive }
   let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
   modify fun s => { s with dropLive := outerLive }
-  if given then
+  let gone ← if whole then pure true else closeCell brand x ((← get).body.givenAway x rest)
+  if gone then
+    modify fun s =>
+      { s with
+        givenIds := brand :: s.givenIds
+        dropCands := s.dropCands.filter (·.1 != cand.1)
+        flagged := (s.owner, here) :: s.flagged
+        givenSites := (here, ⟨s.owner, at_.1, at_.2, .given x, false⟩, t, pos) :: s.givenSites
+        drops := if dropSaid then s.drops.eraseIdx! dropAt else s.drops }
+  if gone then
     usesLater here scope [(x, .val t brand)] rest (.lessParts x)
-  checkEscape brand s!"`{x}` could be used after its block has ended"
+  checkEscape brand (endedSaid x)
     (("something that uses it is the block's result", result) :: scopeRoots scope) amb
   pure result
+
+/-- Whether the mutable variable `x` (`brand`), its statements read, gives
+its value away (`gone`): each read of it then a move, each callable that
+uses its value holding it; else each read a copy. -/
+partial def closeCell (brand : Nat) (x : String) (gone : Bool) : M Bool := do
+  let s ← get
+  let takes := s.cellTakes.filter (·.1 == brand)
+  let caps := s.cellCaptures.filter (·.1 == brand)
+  let held := s.cellHeld.filter (·.1 == brand)
+  modify fun s =>
+    { s with
+      openCells := s.openCells.erase brand
+      cellTakes := s.cellTakes.filter (·.1 != brand)
+      cellCaptures := s.cellCaptures.filter (·.1 != brand)
+      cellHeld := s.cellHeld.filter (·.1 != brand) }
+  if gone then
+    modify fun s => { s with movedCells := brand :: s.movedCells }
+    for (_, t, why, i) in takes do
+      modify fun s =>
+        { s with
+          givenReads := s.givenReads.push (t, why)
+          uses := s.uses.modify i fun u => { u with kind := .var brand x .move } }
+    for (_, cap, t, name) in caps do
+      modify fun s => { s with givenEdges := s.givenEdges.insert s.capEdges.size, givers := (cap, brand) :: s.givers }
+      captures cap (.ty t) (some (name, brand))
+    for (_, u) in held do
+      modify fun s => { s with heldMoves := s.heldMoves.push u }
+  else
+    for (_, t, why, _) in takes do
+      modify fun s => { s with dups := s.dups.push (t, why) }
+  pure gone
 
 /-- `target = value` and the statements after it (`inferStmts`). -/
 partial def inferAssignStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
@@ -2903,11 +2884,13 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   let free := (b.fvClauses clauses).eraseDups
   for x in free do
     if let some (.cell _ brand) := scope.lookup x then
-      if (← get).movedCells.contains brand then
+      let open_ := (← get).openCells.contains brand
+      if (← get).movedCells.contains brand || open_ then
         let u := b.nameUseClauses x clauses
         if u.valued || u.valuedInside then
-          modify fun s =>
-            { s with heldMoves := s.heldMoves.push ⟨s.owner, s.pos, .var brand x .move [], scope, s.later, s.temps⟩ }
+          let held : Use := ⟨(← get).owner, (← get).pos, .var brand x .move [], scope, (← get).later, (← get).temps, (← get).dropLive⟩
+          if open_ then modify fun s => { s with cellHeld := s.cellHeld.push (brand, held) }
+          else modify fun s => { s with heldMoves := s.heldMoves.push held }
   modify fun s =>
     { s with later := free, temps := [], anon := [] }
   -- What the callable captures from the scope it is written in.

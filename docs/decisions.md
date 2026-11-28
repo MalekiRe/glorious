@@ -8665,3 +8665,29 @@ it was read so and, where that did not fit, read again without them (the
 first refusal kept). A clause that does not fit is now said of the clause:
 `None => { say(1); 0 }` says its result is a callable where an `Int` is
 wanted, not that the callable given to `match` is of the wrong type.
+
+## A value made for a dot call in a `let` is let go where the statement ends
+
+**Decision (redesign section 5: nothing read off the text ahead).** A
+value made where a dot call is made on it, or computed first for the
+order of a call's arguments, named for its statement (`Flat.nameBorrowsStmt`),
+is let go where the statement ends in a `let`, `let mut` or assignment too,
+as it was in a statement that is an expression and as Rust's temporary is:
+`let c = w.query().count();` runs the query's `drop` before the next
+statement. A value borrowed where it is made (`&f(x)`) still lasts to the
+block's end, as Rust extends such a temporary. Before, it lasted to the
+block's end, and whether the dot call gave it away was read off the
+statements ahead before they were read (`variableReceivers`, `givenAway`
+of a mark not yet decided); a `drop` that held a borrow was then taken to
+be let go at the call, and `let c = w.query().count()` ran the `drop` never.
+A reference into such a value is refused, as Rust refuses it:
+`[what, n.to_string().as_str()]` says to name the text with a `let`; one
+case is written so. In covey, `say(world.query<..>().count() +
+world.get<..>(..))` holds the query, which borrows the world, while the
+world is read again: written as two statements (`disabled2.glorious`).
+
+Whether a `let mut` gives its value away is found once its statements are
+read (`closeCell`): a read of it is a move or a copy as it is found, what
+a callable does with it likewise, and a name whose value has a `drop` is
+taken to be used where its block ends unless it is found to be given away
+(`Use.liveIf`, `St.givenIds`).
