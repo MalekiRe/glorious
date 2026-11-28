@@ -636,7 +636,7 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
         | none => "construct not said"
       | .closure _ caps => if (caps.mapM w.atomTy).isNone then "closure caps unknown" else match said i with
         | some te => s!"closure said, not written: {(te.spell.take 120).toString} with {w.binds.map (·.1)}"
-        | none => s!"closure waits: {firstRef i body}"
+        | none => s!"closure waits: {firstRef i body} (with {w.binds.map (·.1)}, the use's said {((said (i + 1)).map fun te => (te.spell.take 80).toString).getD "none"})"
       | .atom _ => "atom of unknown"
       | .prim _ _ => "prim"
       ) }
@@ -807,6 +807,11 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
           t := t.add "handler" r ex
   pure t
 
+/-- The function a function the elaborator made is a copy of, by name:
+`f⟨..⟩'` for implementations, `f@<..>` for an effect's instance. -/
+def baseOf (owner : String) : String :=
+  (((owner.splitOn "⟨").headD owner).splitOn "@<").headD owner
+
 /-- The environment of a program for the forward typing. -/
 def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
     (nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option TypeExpr))) := {}) :
@@ -814,7 +819,7 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
   let g ← Elab.collectDeclared items
   let decls := Typer.declsOf items g
   let said := out.fnNodes.fold (fun m f (owner, clauses) =>
-    let base := (owner.splitOn "⟨").headD owner
+    let base := baseOf owner
     match nodeTys[owner]? <|> nodeTys[base]? with
     | none => m
     | some tys => clauses.zipIdx.foldl (fun m (locals, c) =>
@@ -823,12 +828,12 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
           | none => m) m) m) {}
   let selfTy := out.fnNodes.fold (fun m f (owner, _) =>
     if out.fnNames[f]? != some s!"`{owner}`" then m else
-    let base := (owner.splitOn "⟨").headD owner
+    let base := baseOf owner
     match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
     | some te => m.insert f te
     | none => m) {}
   let insts := out.fnNodes.fold (fun m f (owner, clauses) =>
-    let base := (owner.splitOn "⟨").headD owner
+    let base := baseOf owner
     match nodeInsts[owner]? <|> nodeInsts[base]? with
     | none => m
     | some is => clauses.zipIdx.foldl (fun m (locals, c) =>
@@ -837,13 +842,13 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
           | none => m) m) m) {}
   let implSelf := out.fnNodes.fold (fun m f (owner, _) =>
     if out.fnNames[f]? != some s!"`{owner}`" then m else
-    let base := (owner.splitOn "⟨").headD owner
+    let base := baseOf owner
     match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.implSelfNode]?) with
     | some te => m.insert f te
     | none => m) {}
   let general := fun (te : TypeExpr) => (te.spell.splitOn "%rigid:").length > 1
   let settled := out.fnNodes.fold (fun s f (owner, _) =>
-    let base := (owner.splitOn "⟨").headD owner
+    let base := baseOf owner
     match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
     | some te => if general te then s else s.insert f
     | none => s) {}
@@ -970,7 +975,7 @@ def report (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String
   let some g := (Elab.collectDeclared items).toOption | return "hints: no declarations"
   let decls := Typer.declsOf items g
   let said := out.fnNodes.fold (fun m f (owner, clauses) =>
-    let base := (owner.splitOn "⟨").headD owner
+    let base := baseOf owner
     match nodeTys[owner]? <|> nodeTys[base]? with
     | none => m
     | some tys => clauses.zipIdx.foldl (fun m (locals, c) =>
@@ -979,7 +984,7 @@ def report (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String
           | none => m) m) m) {}
   let selfTy := out.fnNodes.fold (fun m f (owner, _) =>
     if out.fnNames[f]? != some s!"`{owner}`" then m else
-    let base := (owner.splitOn "⟨").headD owner
+    let base := baseOf owner
     match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
     | some te => m.insert f te
     | none => m) {}
