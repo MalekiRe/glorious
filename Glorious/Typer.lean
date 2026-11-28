@@ -367,7 +367,22 @@ partial def writtenU (vars : List (String × U)) : TypeExpr → M U
     if isScalar x then return .scalar (scalarBits x)
     if x == "Fixed" then
       match args with
-      | [t, n] => return .data fixedName [← writtenU vars t, ← lengthU n]
+      | [t, n] =>
+        -- (A length that is a parameter: as it is, a length or the type
+        -- that counts it.)
+        let len ← match n with
+          | .name p [] => match vars.lookup p with
+            | some u => do
+              match ← find u with
+              | .data id args =>
+                if id ≥ lenBase then pure u
+                else match countU d (.data id args) with
+                  | some k => pure (.data (lenBase + k) [])
+                  | none => pure u
+              | other => pure other
+            | none => lengthU n
+          | _ => lengthU n
+        return .data fixedName [← writtenU vars t, len]
       | _ => return ← freshTy
     match d.typeIds[x]? with
     | some id =>
@@ -398,6 +413,18 @@ partial def writtenU (vars : List (String × U)) : TypeExpr → M U
   | .ref _ t _ => do pure (.ref (← writtenU vars t))
   | .never | .hole => freshTy
 where
+  /-- What a type counting a length (`B0<B1<Z>>`) counts. -/
+  countU (d : Decls) : U → Option Nat
+    | .data id args =>
+      let name := (d.typeNames[id]?).getD ""
+      match args with
+      | [] => if name == "Z" || name.endsWith "::Z" then some 0 else none
+      | [inner] =>
+        if name.endsWith "B0" then (countU d inner).map (2 * ·)
+        else if name.endsWith "B1" then (countU d inner).map (2 * · + 1)
+        else none
+      | _ => none
+    | _ => none
   /-- A `[T; N]`'s length, a type of its own. -/
   lengthU (n : TypeExpr) : M U := do
     let rec count : TypeExpr → Option Nat

@@ -38,6 +38,9 @@ structure Env where
   where the local is made for a call of it, as the checker found it there:
   by function, clause and local. -/
   insts : Std.HashMap (Nat × Nat × Nat) (List (String × Option TypeExpr)) := {}
+  /-- The functions of a top-level function that is general in nothing
+  (`%settled`). -/
+  settled : Std.HashSet Nat := {}
 
 /-- How the hints found compare, by what they are of. -/
 structure Tally where
@@ -60,13 +63,24 @@ def Tally.add (t : Tally) (kind : String) (r : Option Bool) (ex : Option String 
              | some e => if t.examples.size < 60 then t.examples.push e else t.examples
              | none => t.examples }
 
+/-- What a type counting a length (`B0<B1<Z>>`) counts. -/
+partial def countTy (d : Typer.Decls) : Ty → Option Nat
+  | .data id args =>
+    let name := (d.typeNames[id]?).getD ""
+    match args with
+    | [] => if name == "Z" || name.endsWith "::Z" then some 0 else none
+    | [inner] =>
+      if name.endsWith "B0" then (countTy d inner).map (2 * ·)
+      else if name.endsWith "B1" then (countTy d inner).map (2 * · + 1)
+      else none
+    | _ => none
+  | _ => none
+
 /-- A type written whole, as Core's types are: a callable's not (its
 effects and what it was made with are not written). -/
 partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr → Option Ty
   | .name x args =>
     if let (some t, []) := (vars.lookup x, args) then some t
-    -- (What the checker decided nothing of, as `Typer` has it: `()`.)
-    else if x.startsWith "%rigid:%" && args.isEmpty then some .unit
     -- (A callable for every lifetime, `%for<'a, fn(..)>`: the callable.)
     else if x == rankedMark then args.getLast?.bind (tyOf d vars)
     -- (What an `is` found, `%is:a,b<A, B>`: the values, a tuple.)
@@ -76,7 +90,18 @@ partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr
     else if isScalar x then some (.scalar (scalarBits x))
     else if x == "Fixed" then
       match args with
-      | [t, n] => do pure (.data fixedName [← tyOf d vars t, ← lengthOf n])
+      | [t, n] => do
+        -- (A length that is a parameter: as it is, a length or the type
+        -- that counts it.)
+        let len ← match n with
+          | .name p [] => match vars.lookup p with
+            | some (.data id args) =>
+              if id ≥ lenBase then some (.data id args)
+              else (countTy d (.data id args)).map fun k => .data (lenBase + k) []
+            | some _ => none
+            | none => lengthOf n
+          | _ => lengthOf n
+        pure (.data fixedName [← tyOf d vars t, len])
       | _ => none
 else match d.typeIds[x]? with
       | some id => do
@@ -800,7 +825,13 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
     match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.implSelfNode]?) with
     | some te => m.insert f te
     | none => m) {}
-  pure { decls, p := out.program, said, names := out.fnNames, selfTy, insts, implSelf }
+  let general := fun (te : TypeExpr) => (te.spell.splitOn "%rigid:").length > 1
+  let settled := out.fnNodes.fold (fun s f (owner, _) =>
+    let base := (owner.splitOn "⟨").headD owner
+    match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
+    | some te => if general te then s else s.insert f
+    | none => s) {}
+  pure { decls, p := out.program, said, names := out.fnNames, selfTy, insts, implSelf, settled }
 
 /-- A function's clause at a signature: its hints, the functions at the
 signatures its closures are made at, and what it was found to give; an
@@ -809,7 +840,7 @@ def clauseAt (env : Env) (made called : Std.HashMap (Nat × List Ty) (List (Stri
     (cl : Core.Clause) (sig : FnSig) :
     Except String (List Hint × Array (Nat × FnSig) × Array ((Nat × List Ty) × List (String × Ty)) × Array ((Nat × List Ty) × List (String × Ty))) := do
   let some bound := patsTysD env.decls cl.pats sig.params
-    | throw s!"function {fn}: what its patterns bind is not found"
+    | throw s!"function {fn}: what its patterns bind is not found, at {Typer.showSig sig}"
   let Γ : Array (Option Ty) := (sig.params ++ sig.caps ++ bound).toArray.map some
   let binds := match env.decls.fns[fn]? with
     | some (tparams, annots, _) =>
@@ -818,6 +849,7 @@ def clauseAt (env : Env) (made called : Std.HashMap (Nat × List Ty) (List (Stri
         | none => b) []
     | none => []
   let binds := binds ++ (made.getD (fn, sig.caps) []) ++ (called.getD (fn, sig.params) [])
+  let binds := if env.settled.contains fn then binds ++ [("%settled", .unit)] else binds
   let binds := match env.selfTy[fn]? with
     | some (.fn ps r) => matchTy env.decls ((ps.zip sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds) r sig.ret
     | _ => binds
@@ -842,7 +874,7 @@ def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap Strin
   let env ← envOf items out nodeTys nodeInsts
   let p := out.program
   -- (`main`: run with nothing, performing nothing.)
-  let (w, mainTy) := go env 0 p.fns.size 0 {} p.main
+  let (w, mainTy) := go env 0 p.fns.size 0 { binds := [("%settled", .unit)] } p.main
   let some mainTy := mainTy | throw "what `main` gives is not found"
   let localOf : Std.HashMap Nat Nat := w.hintAt.fold (fun m i h => m.insert h i) {}
   let mainHints ← w.hints.toList.zipIdx.mapM fun (h, k) => match h with
