@@ -59,6 +59,8 @@ partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr
     if let (some t, []) := (vars.lookup x, args) then some t
     -- (A callable for every lifetime, `%for<'a, fn(..)>`: the callable.)
     else if x == rankedMark then args.getLast?.bind (tyOf d vars)
+    -- (What an `is` found, `%is:a,b<A, B>`: the values, a tuple.)
+    else if (packNames x).isSome then do pure (.tuple (← args.mapM (tyOf d vars)))
     else if x.startsWith "'" then some (.ref .unit)
     else if x == "Int" then some .int
     else if isScalar x then some (.scalar (scalarBits x))
@@ -328,6 +330,9 @@ structure W where
   made : Array ((Nat × List Ty) × List (String × Ty)) := #[]
   /-- Why a local's type was not found, by local (`GLORIOUS_TRACE=hints`). -/
   why : Std.HashMap Nat String := {}
+  /-- What the clause gives, where that is known: what a scope it ends in
+  that does not return gives. -/
+  ret : Option Ty := none
 
 def W.atomTy (w : W) : Atom → Option Ty
   | .var i => w.Γ[i]?.join
@@ -402,8 +407,16 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
         | some te => matchTy env.decls b (rigidOf tparams te) p
         | none => b) []
       tyOf env.decls b (rigidOf tparams ret)
-    let ret := atUse <|> written <|> (match fnRet env (depth + 1) g w.binds params caps with
-      | some .never | none => none
+    -- (One that does not return gives what its place wants: the clause's
+    -- result where it ends the clause, else as the checker says it.)
+    let wanted := match at_ with
+      | .tail .. | .guardTail .. | .cellTail .. | .cellTailL .. | .labelTail _ | .handleTail .. => w.ret
+      | _ => (env.said[(f, c, w.Γ.size)]?).bind (tyOf env.decls w.binds)
+    -- (A function that says nothing of what it gives and does not return
+    -- gives what its place wants, not `()`.)
+    let ret := atUse <|> (match fnRet env (depth + 1) g w.binds params caps with
+      | some .never => wanted <|> written
+      | none => written <|> wanted
       | r => r)
     if let some r := ret then
       let σ : Ty := .fn params r [] false (some caps)
@@ -546,7 +559,7 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
       let binds := match env.selfTy[e.fn]? with
         | some (.fn ps r) => matchTy env.decls ((ps.zip e.sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds) r e.sig.ret
         | _ => binds
-      let (w, _) := go env 0 e.fn ci { Γ, binds } cl.body
+      let (w, _) := go env 0 e.fn ci { Γ, binds, ret := some e.sig.ret } cl.body
       t := { t with closureBinds := w.made.foldl (fun m (k, b) => m.insert k b) t.closureBinds }
       if w.hints.size != hs.length then
         t := { t with lost := t.lost + 1 }
