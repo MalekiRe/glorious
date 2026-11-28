@@ -542,6 +542,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
     else (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (do
         modify fun s => { s with body := d.body }
         let t ← inferCallable [] annots ret (some d.name) d.body.roots s!"the clauses of `{d.name}` do"
+        countUsesNow
         -- (The body as read, with what was written where it was found: what
         -- the count of uses follows, `placeLets`.)
         modify fun s => { s with runFns := s.runFns.insert d.name s.body, decidedFns := s.decidedFns.insert d.name s.body }

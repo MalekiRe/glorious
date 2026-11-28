@@ -1703,3 +1703,26 @@ partial def irrefutable : Pattern → M Bool
     return ((← get).aliases[x]?).isNone
 
 end Glorious.Check
+
+namespace Glorious.Check
+
+/-- The counts of uses of the function just read (`usesLater`), made of its
+body as read, every adjustment in it: once each, after it is read. -/
+def countUsesNow : M Unit := do
+  let later := (← get).usesLater
+  modify fun s => { s with usesLater := #[] }
+  for u in later do
+    let b := (← get).body
+    match u.kind with
+    | .plain => checkUses b u.pos u.outer u.binds u.body
+    | .lessParts x =>
+      let (lb, less) := Syntax.Flat.lessPartsStmts b x u.body
+      checkUses lb u.pos u.outer u.binds less
+    | .clause c site =>
+      let cs := Elab.firstOf (← get).coercions.toList
+      if cs.isEmpty then checkUses b u.pos u.outer u.binds u.body
+      else
+        let (c, coerced) := (Elab.coerceClause cs (site.bind (cs[·]?)) c).run b
+        checkUses coerced u.pos u.outer u.binds (coerced.clause c).body.toList
+
+end Glorious.Check

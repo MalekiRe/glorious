@@ -237,6 +237,15 @@ structure EffectDecl where
   ops : List String
   lifetimes : List Bool := []
 
+/-- What a count of uses is of (`Check.usesLater`): the statements as they
+are; those of a variable that gives its value away without what it holds
+read by parts (`Flat.lessPartsStmts` of the name); or a clause of a
+callable as it will be elaborated, with the coercions in it. -/
+inductive UsesKind where
+  | plain
+  | lessParts (x : String)
+  | clause (c : Flat.ClauseId) (site : Option Elab.Site)
+
 /-- What a local name stands for. -/
 inductive Binding where
   /-- A value. `id` tells this binding from any other of the same name. -/
@@ -249,6 +258,14 @@ inductive Binding where
   | poly (s : Scheme)
 
 abbrev Scope := List (String × Binding)
+
+/-- A count of uses to make once the function is read (`Check.usesLater`). -/
+structure UsesLater where
+  pos : String
+  outer : Scope
+  binds : Scope
+  body : List Flat.StmtId
+  kind : UsesKind
 
 /-- A borrow. `&x` and `&mut x` borrow a mutable variable; a `&mut` reference
 used as a value is not copied but lent, which borrows from the reference. -/
@@ -694,6 +711,9 @@ structure St where
   /-- A bound said of a type, not a type parameter (`Syntax.Bound.subjectTy`):
   the function, the bound's name, the type. -/
   writtenSubjects : List (String × String × Ty) := []
+  /-- The counts of uses of the function being read, made once it is
+  (`Check.usesLater`, `countUsesNow`). -/
+  usesLater : Array UsesLater := #[]
   /-- For each trait, the traits a type must have to have it. -/
   supers : List (String × List String) := []
   /-- Callable types that are for every lifetime: by the capture variable of

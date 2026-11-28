@@ -676,6 +676,12 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
       pure t
   | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
 
+/-- The count of uses of `binds` over `body` (`checkUses`), said at `pos`
+with the names of `outer` in scope: made once the function is read
+(`countUsesNow`), of its body as read, every adjustment in it. -/
+partial def usesLater (pos : String) (outer binds : Scope) (body : List Flat.StmtId) (kind : UsesKind := .plain) : M Unit :=
+  modify fun s => { s with usesLater := s.usesLater.push ⟨pos, outer, binds, body, kind⟩ }
+
 /-- The number of parameters of the function `x` (`q::x`) names, where it
 needs a trait of a type it is used at and so is named as a block that calls
 it (`Elab.etaNode`): known by what the name is, before it is read. -/
@@ -2458,7 +2464,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     let scheme := { scheme with quiets := quiets }
     let here := (← get).pos
     let result ← inferStmts ((x, .poly scheme) :: scope) amb rest want
-    checkUses (← get).body here scope [(x, .poly scheme)] rest
+    usesLater here scope [(x, .poly scheme)] rest
     pure result
   | none => do
   let (at_, pos) := ((← get).at_, (← get).pos)
@@ -2502,7 +2508,6 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
     writeDotBorrows x (← dotBorrows b x t rest)
   let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
   modify fun s => { s with pending := s.pending.push check }
-  let here := (← get).pos
   -- (What has a `drop` to run where the block ends, and is not given away
   -- before, holds what it borrows till then.)
   let held ← binds.filterMapM fun (x, bd) => do
@@ -2513,7 +2518,7 @@ partial def inferLetStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId)
   modify fun s => { s with dropLive := held ++ s.dropLive }
   let result ← inferStmts (binds ++ scope) amb rest want
   modify fun s => { s with dropLive := outerLive }
-  checkUses (← get).body here scope binds rest
+  usesLater pos scope binds rest
   -- A name borrowed (`placeVal`) is a place till its block ends: nothing
   -- borrowed of it may be left after, and the elaborator keeps it as a
   -- variable (`St.placedLets`).
@@ -2595,8 +2600,7 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
   let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
   modify fun s => { s with dropLive := outerLive }
   if given then
-    let (lb, less) := Flat.lessPartsStmts (← get).body x rest
-    checkUses lb here scope [(x, .val t brand)] less
+    usesLater here scope [(x, .val t brand)] rest (.lessParts x)
   checkEscape brand s!"`{x}` could be used after its block has ended"
     (("something that uses it is the block's result", result) :: scopeRoots scope) amb
   pure result
@@ -3024,11 +3028,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
       | some e => pure (some e)
       | none =>
         -- Uses are counted in the body as it will be elaborated.
-        let cs := Elab.firstOf (← get).coercions.toList
-        if cs.isEmpty then checkUses (← get).body here scope binds body
-        else
-          let (c, coerced) := (Elab.coerceClause cs ((site j).bind (cs[·]?)) clauses[j]!).run (← get).body
-          checkUses coerced here scope binds (coerced.clause c).body.toList
+        usesLater here scope binds body (.clause clauses[j]! (site j))
         pure none : M (Option String))
   -- (Each read once: a clause whose result does not fit is said so.)
   for j in List.range clauses.size do
@@ -3057,6 +3057,8 @@ an outer handler, so it must be permitted outside as well.
 -/
 partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId) (arms : Array Flat.ClauseId) :
     M Ty := do
+  -- (Where the handler is: what is said of an arm's names is said there.)
+  let handlerAt := (← get).pos
   let s ← get
   let b := s.body
   let mut completions : Array (Pattern × List Flat.StmtId) := #[]
@@ -3105,10 +3107,9 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
   else
     for (p, body) in completions do
       let binds ← clauseGiven body (inferPat p subjectTy)
-      let here := (← get).pos
       unifyAt "the result of a completion clause" result
         (← inferStmts (binds ++ scope) amb body)
-      checkUses (← get).body here scope binds body
+      usesLater handlerAt scope binds body
       placedParams binds body
     let check : Pending := ⟨(← get).pos, "the completion clauses of this handler do", [subjectTy],
       completions.toList.map fun (p, _) => [p]⟩
@@ -3137,9 +3138,8 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
       unless ps.length == payload.length do
         arityError s!"an arm for the operation `{x}`" payload.length ps.length
       let binds ← clauseGiven body (inferPats ps payload)
-      let here := (← get).pos
       unifyAt s!"the result of the arm for `{x}`" result (← inferStmts (binds ++ scope) amb body)
-      checkUses (← get).body here scope binds body
+      usesLater handlerAt scope binds body
       placedParams binds body
       if ← ps.allM irrefutable then covered := x :: covered
     | some o =>
@@ -3161,22 +3161,20 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
         let binds ← clauseGiven body patterns (match ps.getLast? with
           | some (.var k) => [k]
           | _ => [])
-        let here := (← get).pos
         unifyAt s!"the result of the arm for `{x}`" result
           (← inferStmts (binds ++ scope) amb body)
-        checkUses (← get).body here scope binds body
+        usesLater handlerAt scope binds body
         placedParams binds body
         if ← (ps.take payload.length).allM irrefutable then covered := x :: covered
       else if ps.length == payload.length then
         let binds ← clauseGiven body (inferPats ps payload)
-        let here := (← get).pos
         -- The arm resumes with what it gives: the computation is suspended,
         -- holding its borrows, for as long as the arm runs.
         let held ← suspended false
         let resumption := ("%resumed", Binding.val (.func [o] result amb held))
         unifyAt s!"the value the arm for `{x}` resumes with" o
           (← withLater ["%resumed"] (inferStmts (binds ++ resumption :: scope) amb body))
-        checkUses (← get).body here scope binds body
+        usesLater handlerAt scope binds body
         placedParams binds body
         if borrowed then
           checkEscape lent s!"what the operation `{x}` was given borrows from its performer and could be used after the arm" (scopeRoots scope) amb
