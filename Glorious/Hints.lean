@@ -49,7 +49,7 @@ def Tally.add (t : Tally) (kind : String) (r : Option Bool) (ex : Option String 
     | none => (a, d, u + 1)
   { t with counts := t.counts.insert kind c
            examples := match ex with
-             | some e => if t.examples.size < 40 then t.examples.push e else t.examples
+             | some e => if t.examples.size < 60 then t.examples.push e else t.examples
              | none => t.examples }
 
 /-- A type written whole, as Core's types are: a callable's not (its
@@ -278,9 +278,17 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
     | .cell a t _ | .cellTail a t => [(t, (w.atomTy a).map fun σ => [.ref σ])]
     | .lend _ r t pre post _ => [(t, do pure ((← pre.mapM w.atomTy) ++ [← w.atomTy r] ++ (← post.mapM w.atomTy)))]
     | .call h args _ | .tail h args => [(h, args.mapM w.atomTy)]
+    | .handle _ _ _ t _ | .handleTail _ _ _ t => [(t, some [])]
     | .label t _ | .labelTail t =>
+      -- (Given the label, whose result is the scope's: as the checker says
+      -- it, else as the scope's body gives it, `labelRet`.)
       [(t, do
-        let σ ← (env.said[(f, c, w.Γ.size)]?).bind (tyOf env.decls w.binds)
+        let σ ← ((env.said[(f, c, w.Γ.size)]?).bind (tyOf env.decls w.binds)).orElse fun _ =>
+          match t with
+          | .var i => do
+            let (g, caps) ← w.pend[i]?
+            labelRet env depth g w.binds caps
+          | _ => none
         pure [.fn [σ] .never [] false none])]
     | _ => []
   for (a, params) in uses do
@@ -314,7 +322,11 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
   | .tail g _ => (w, (w.atomTy g).bind retOf)
   | .raise .. => (w, some .never)
   | .labelTail thunk | .guardTail _ thunk | .cellTail _ thunk | .cellTailL _ _ thunk => (w, (w.atomTy thunk).bind retOf)
-  | .handleTail _ ops _ _ =>
+  | .handleTail ret ops caps _ =>
+    let w := match caps.mapM w.atomTy with
+      | some capTys => if w.binds.isEmpty then w else
+          { w with made := (ret :: ops.map (fun (p : Nat × Nat) => p.2)).foldl (fun (m : Array ((Nat × List Ty) × List (String × Ty))) g => m.push ((g, capTys), w.binds)) w.made }
+      | none => w
     let H : Option Row := ops.mapM fun (op, _) => do
       let (ps, _, _) ← env.decls.ops[op]?
       if ps.isEmpty then pure (op, []) else none
@@ -349,7 +361,12 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
     match (w.atomTy g).bind retOf with
     | some .never => go env depth f c (w.bind ((said w.Γ.size).bind (tyOf env.decls w.binds)) true) body
     | r => go env depth f c (w.bind r false) body
-  | .handle _ ops _ _ body =>
+  | .handle ret ops caps _ body =>
+    -- (Its functions are of this one's type parameters.)
+    let w := match caps.mapM w.atomTy with
+      | some capTys => if w.binds.isEmpty then w else
+          { w with made := (ret :: ops.map (fun (p : Nat × Nat) => p.2)).foldl (fun (m : Array ((Nat × List Ty) × List (String × Ty))) g => m.push ((g, capTys), w.binds)) w.made }
+      | none => w
     -- (What it gives, as the checker says it; the operations it serves,
     -- each at its effect's arguments: none, of an effect that takes none.)
     let ρ := (said w.Γ.size).bind (tyOf env.decls w.binds)
@@ -364,6 +381,13 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
   | .cancel _ body => go env depth f c (w.bind (some .unit) false) body
   | .mem op args body => go env depth f c (w.bind (memTy env w.Γ op args) false) body
   | .host id args body => go env depth f c (w.bind (hostTy id args) (2 ≤ id)) body
+
+/-- What a label's scope `g` gives, its body gone through with a label of a
+result not known: what it ends with where that returns. -/
+partial def labelRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × Ty)) (caps : List Ty) : Option Ty :=
+  match fnRet env (depth + 1) g binds [.fn [.never] .never [] false none] caps with
+  | some .never | none => none
+  | r => r
 
 /-- What `g` gives at what it is given and made with: its first clause's
 that says. -/
@@ -406,19 +430,23 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
       if w.hints.size != hs.length then
         t := { t with lost := t.lost + 1 }
         continue
-      for (mine, theirs) in w.hints.toList.zip hs do
+      let localOf : Std.HashMap Nat Nat := w.hintAt.fold (fun m i h => m.insert h i) {}
+      for ((mine, theirs), h) in (w.hints.toList.zip hs).zipIdx do
         match theirs with
         | .ty σ =>
           let r := mine.map fun | .ty m => shape m == shape σ | _ => false
           let ex := if r == some false then
               some s!"{env.names[e.fn]?.getD "?"}: here {(mine.map fun | .ty m => Typer.showTy m | _ => "?").getD "?"}, Typer {Typer.showTy σ}"
+            else if r.isNone && (t.counts.getD "nf" (0,0,0)).1 % 97 == 0 then
+              some s!"not found: {env.names[e.fn]?.getD "?"} local {(localOf[h]?).getD 0} ({env.said[(e.fn, ci, (localOf[h]?).getD 0)]?.isSome}): Typer {Typer.showTy σ}"
             else none
+          let t' := if r.isNone then t.add "nf" (some true) else t
           let kind := match σ with
             | .fn .. => "callable"
             | .data .. => "data"
             | .tuple _ => "tuple"
             | _ => "other"
-          t := t.add kind r ex
+          t := t'.add kind r ex
         | .handler ρ H =>
           let r := mine.map fun
             | .handler ρ' H' => (ρ' == .never || shape ρ' == shape ρ) && H' == H
