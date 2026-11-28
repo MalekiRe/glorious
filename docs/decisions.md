@@ -8635,3 +8635,22 @@ a call of the implementation's, a call of a function given implementations
 one of its copy for them (named once its copies for effects are made,
 `callsCopied`). Nothing takes implementations as parameters any more, so
 the arguments are where the checker counted them.
+
+## Coercions where the expected type is known as a value is read
+
+**Decision (redesign step 7: nothing is read again).** A declared coercion
+(`coerce option`) applies to a value where what is expected of it is known
+when the value is read: an argument whose parameter's type the arguments
+before it (or the function's signature) fix, a declared result, a `let`
+with a type. The arguments of a call are read once, in order (whole
+numbers written without a type last), and clauses likewise; where the
+expected type is known only from what is read after, the subject of a
+`match` from its clauses' patterns or a clause's result from a later
+clause's, the conversion is written: `match(option(if(c) { x })) { .. }`,
+`Ok(_) => option(if(c) { x })`. Before, a call was read a second time with
+the argument that did not fit read first (7 calls and 1 callable in the
+suite, and 420 second readings that ended in the same error). Rust applies
+coercions only at a site whose expected type is known.
+
+What a call's refusal says is of the argument read where it does not fit:
+`get(&p, 2) + true` says argument 2 of `+` expects an `Int`.

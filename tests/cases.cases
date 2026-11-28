@@ -245,9 +245,11 @@ effect Ask { ask() -> Int }
 3
 #### case
 #### Coercions. The prelude declares that any failure can be forgotten, so a
-#### `Result` fits where an `Option` is expected: here the subject of a `match`,
-#### an argument, a declared result, and the result of a clause.
-fn main() -> Int { match(if(2 < 1) { 10 }) { Some(n) => n, None => 0 } }
+#### `Result` fits where an `Option` is expected: an argument, a declared
+#### result. Where what is expected is known only from what is read after (the
+#### subject of a `match` its clauses' patterns say, a clause's result the next
+#### clause's), the conversion is written, `option(..)`: nothing is read again.
+fn main() -> Int { match(option(if(2 < 1) { 10 })) { Some(n) => n, None => 0 } }
 #### expect
 0
 #### case
@@ -264,7 +266,7 @@ fn bump<T, U>(flag: Result<T, U>) -> Result<(), ()> { let mut n = 0; if(flag) { 
 0
 #### case
 fn main() -> Int {
-      let r = match(2 < 1) { Ok(_) => if(2 < 1) { 2 }, Err(_) => None };
+      let r = match(2 < 1) { Ok(_) => option(if(2 < 1) { 2 }), Err(_) => None };
       match(r) { Some(n) => n, None => 5 }
     }
 #### expect
@@ -5104,7 +5106,7 @@ impl P { fn get(p: &Self, k: &Int) -> Int { p.x + *k } }
 fn get(p: &P, k: Int) -> Int { p.get(&k) }
 fn main() -> Int { let p = P { x: 1 }; get(&p, 2) + true }
 #### expect
-error: 4:40: in `main`: `Int` does not implement `Add<Result<(), ()>>`
+error: 4:40: in `main`: argument 2 of `+`: expected `Int`, found `Result<(), ()>`
 #### case
 #### `std::hash`: hashing, and a map that finds a key in a step or two.
 use std::hash::{HashMap};
@@ -11411,7 +11413,7 @@ error: in `A`: unknown type `Never`: what does not return is written `!`
 #### `else` binds loosest of all: the refusal says so.
 fn main() -> Int { let s = String::from("a") + if(1 < 2) { "b" } else { "c" }; s.len() }
 #### expect
-error: 1:20: in `main`: `Add` for `String`: expected `&str`, found `Result<&str, fn(()) -> &str>`
+error: 1:20: in `main`: argument 2 of `+`: expected `&str`, found `Result<&str, fn(()) -> &str>`. `else` binds more loosely than any other operator: `a + if(c) { x } else { y }` is `(a + if(c) { x }) else { y }`; write the conditional in parentheses
 #### case
 #### The map changed where it is, as the specification has it: what a key
 #### stands for may have a `drop`, and what `insert` replaces is given back.
