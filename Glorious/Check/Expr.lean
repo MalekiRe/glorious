@@ -199,65 +199,6 @@ def derefAssignHere (scope : Scope) (s : Flat.StmtId) : M Bool := do
   modify fun s => { s with body := b' }
   pure true
 
-/-- What a reading of a call records, by where each record stood before it
-(`Marks.of`): what a first reading recorded is taken back before the call
-is read again written otherwise (`Marks.undo`). Only sizes held, and the
-small lists that are put back whole: held, the state would be copied
-where the call grows it. Taken back: how names were read and what was
-asked of their types, of traits and of coverage; the values the call's
-surroundings held; and what the elaborator is told by the call
-(`argsChosen`, `dotChosen`, coercions, packs, field reads), of which it
-takes the first. Asked again of the same call, one kept would be met
-twice, once with what the first reading had. -/
-structure Marks where
-  valReads : Std.HashMap Nat (List (Ty × List (Nat × Nat)))
-  temps : List (Ty × Nat)
-  later : List String
-  anon : List Ty
-  uses : Nat
-  givenReads : Nat
-  heldMoves : Nat
-  dups : Nat
-  drops : Nat
-  bounds : Nat
-  pending : Nat
-  fieldSites : Nat
-  partReads : Nat
-  instSites : Nat
-  groupUses : Nat
-  dropCands : Nat
-  packs : Nat
-  derefReads : Nat
-  fieldReads : Nat
-  given : Nat
-  coercions : Nat
-  methodCalls : Nat
-
-/-- Where `s`'s records stand (`Marks`). -/
-def Marks.of (s : St) : Marks :=
-  { valReads := s.valReads, temps := s.temps, later := s.later, anon := s.anon, uses := s.uses.size,
-    givenReads := s.givenReads.size, heldMoves := s.heldMoves.size, dups := s.dups.size, drops := s.drops.size,
-    bounds := s.bounds.size, pending := s.pending.size,
-    fieldSites := s.fieldSites.size, partReads := s.partReads.size, instSites := s.instSites.size,
-    groupUses := s.groupUses.size, dropCands := s.dropCands.size,
-    packs := s.packs.size, derefReads := s.derefReads.size,
-    fieldReads := s.fieldReads.size, given := s.given.size, coercions := s.coercions.size,
-    methodCalls := s.methodCalls.size }
-
-/-- `s` with what was recorded since `m` taken back. -/
-def Marks.undo (m : Marks) (s : St) : St :=
-  { s with valReads := m.valReads, temps := m.temps, later := m.later, anon := m.anon,
-           uses := s.uses.shrink m.uses, givenReads := s.givenReads.shrink m.givenReads,
-           heldMoves := s.heldMoves.shrink m.heldMoves, dups := s.dups.shrink m.dups,
-           drops := s.drops.shrink m.drops, bounds := s.bounds.shrink m.bounds,
-           pending := s.pending.shrink m.pending,
-           fieldSites := s.fieldSites.shrink m.fieldSites, partReads := s.partReads.shrink m.partReads,
-           instSites := s.instSites.shrink m.instSites, groupUses := s.groupUses.shrink m.groupUses,
-           dropCands := s.dropCands.shrink m.dropCands,
-           packs := s.packs.shrink m.packs, derefReads := s.derefReads.shrink m.derefReads,
-           fieldReads := s.fieldReads.shrink m.fieldReads, given := s.given.shrink m.given,
-           coercions := s.coercions.shrink m.coercions, methodCalls := s.methodCalls.shrink m.methodCalls }
-
 /-- Can what was read in the arms `read` and what is in the arms `now` both
 run? Not where they are in two of a set of which one runs. -/
 def bothRun (read now : List (Nat × Nat)) : Bool :=
@@ -2397,8 +2338,31 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
     -- in place while it was read, which is of the program: read again, it
     -- would be decided again, and a chain of calls was read anew at each
     -- link, three times a link.)
+    -- (A field that holds no callable, `p.x()` where `x` is a field and the
+    -- type's own function: the function, known by a reading of the field
+    -- that is let go, before the call is read.)
+    if let .fieldOf _ recv name := b.expr f then
+      if call != 0 && ((← get).fns.toList.any fun (fn, _) => fn.endsWith s!"::{name}") then
+        let saved ← get
+        let found ← try some <$> inferExpr scope amb f catch _ => pure none
+        let callable ← match found with
+          | some t => do pure (match ← find t with | .fn .. | .var _ => true | _ => false)
+          | none => pure true
+        let recvTy ← if callable then pure none else try some <$> inferExpr scope amb recv catch _ => pure none
+        let rec headOf (fuel : Nat) (t : Ty) : M (Option String) := do
+          match fuel, ← find t with
+          | fuel + 1, .ref _ inner _ => headOf fuel inner
+          | _, .con n _ => pure (some n)
+          | _, _ => pure none
+        let h ← match recvTy with
+          | some ty => headOf 8 ty
+          | none => pure none
+        set saved
+        if let some h := h then
+          let own := s!"{h}::{name}"
+          if ((← get).fns[own]?).isSome then
+            if let some t ← ownCall scope amb call own then return t
     let before ← get
-    let marksBefore := Marks.of before
     let callee ← (fun s => match inferExpr scope amb f s with
       | .ok t s => .ok (Sum.inl t) s
       | .error e s => .ok (Sum.inr e) { before with body := s.body, adjust := s.adjust, altFound := s.altFound } : M (Ty ⊕ Elab.Said))
@@ -2439,30 +2403,6 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
           throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun fn => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
         else throwThe Elab.Said said
       | _ => throwThe Elab.Said said
-    -- (A field that holds no callable, `p.x()` where `x` is a field and the
-    -- type's own function: the function, the program read again so.)
-    if let .fieldOf _ recv name := b.expr f then
-      if call != 0 then
-        match ← find callee with
-        | .fn .. | .var _ => pure ()
-        | _ =>
-          let saved ← get
-          let found ← try some <$> inferExpr scope amb recv catch _ => pure none
-          let rec headOf (fuel : Nat) (t : Ty) : M (Option String) := do
-            match fuel, ← find t with
-            | fuel + 1, .ref _ inner _ => headOf fuel inner
-            | _, .con n _ => pure (some n)
-            | _, _ => pure none
-          let h ← match found with
-            | some ty => headOf 8 ty
-            | none => pure none
-          set saved
-          if let some h := h then
-            let own := s!"{h}::{name}"
-            if ((← get).fns[own]?).isSome then
-              -- (What was read of the field is taken back: it was not read.)
-              set { marksBefore.undo (← get) with body := (← get).body, adjust := (← get).adjust }
-              if let some t ← ownCall scope amb call own then return t
     applyTy scope amb "this callee" callee args call
 
 /-- `let pattern = value` and the statements after it (`inferStmts`). -/
