@@ -524,10 +524,18 @@ structure TraitKey where
   /-- The same as written, lifetimes and all: what an implementation gives
   its trait (not part of what the key is). -/
   written : List TypeExpr := []
+  /-- Its identity, a number of the trait, which and the arguments
+  (`TraitKey.idOf`): two keys are one where the numbers are. Made with the
+  key (`of`, `at`), so that no key is made without it. -/
+  id : UInt64
   deriving Inhabited
 
-instance : BEq TraitKey := ⟨fun a b => a.base == b.base && a.nth == b.nth && a.args == b.args⟩
-instance : Hashable TraitKey := ⟨fun k => hash (k.base, k.nth, k.args)⟩
+/-- The identity of the key of `base`'s `nth` at `args` (keyed). -/
+def TraitKey.idOf (base : String) (nth : Nat) (args : List TypeExpr) : UInt64 :=
+  mixHash (mixHash (hash base) (hash nth)) (hash args)
+
+instance : BEq TraitKey := ⟨fun a b => a.id == b.id⟩
+instance : Hashable TraitKey := ⟨(·.id)⟩
 
 /-- A type as it tells one key from another: what it is written as, without
 the lifetimes of its references and what its callables perform (what
@@ -538,11 +546,12 @@ partial def TypeExpr.keyed : TypeExpr → TypeExpr
   | t => t.mapParts TypeExpr.keyed
 
 /-- The trait itself, at no arguments. -/
-def TraitKey.of (base : String) : TraitKey := { base }
+def TraitKey.of (base : String) : TraitKey := { base, id := TraitKey.idOf base 0 [] }
 
 /-- The trait at arguments, the `nth` implementation written alike. -/
 def TraitKey.at (base : String) (nth : Nat) (args : List TypeExpr) : TraitKey :=
-  { base, nth, args := args.map TypeExpr.keyed, written := args }
+  let keyed := args.map TypeExpr.keyed
+  { base, nth, args := keyed, written := args, id := TraitKey.idOf base nth keyed }
 
 /-- The same trait at arguments written anew, each by `f`. -/
 def TraitKey.mapWritten (k : TraitKey) (f : TypeExpr → TypeExpr) : TraitKey :=
