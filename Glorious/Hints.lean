@@ -145,6 +145,49 @@ def retOf : Ty → Option Ty
   | .fn _ r _ _ _ => some r
   | _ => none
 
+/-- The type of what a memory operation gives. -/
+def memTy (env : Env) (Γ : Array (Option Ty)) (op : MemOp) (args : List Atom) : Option Ty :=
+  let atomTy := fun (a : Atom) => match a with
+    | .var i => Γ[i]?.join
+    | .int _ => some .int
+  match op, args with
+  | .load, [r] => match atomTy r with | some (.ref t) => some t | _ => none
+  | .store, _ | .free, _ | .writeBits, _ | .copy, _ => some .unit
+  | .swap, [_, v] => atomTy v
+  | .tag, _ | .readBits, _ => some .int
+  | .alloc, _ | .sizeOf, _ | .alignOf, _ | .staticAt, _ => some (.scalar (-64))
+  | .focus, [r, .int i] => match atomTy r with
+    | some (.ref t) => (fieldOf env.decls t i.toNat).map .ref
+    | _ => none
+  | _, _ => none
+
+/-- The type of what a host operation gives. -/
+def hostTy (id : Nat) (_args : List Atom) : Option Ty :=
+  match id with
+  | 0 | 8 | 21 | 22 => some .unit
+  | 1 | 10 => some (.tuple [.int, .int])
+  | 2 | 6 => some .int
+  | 5 => some (.scalar (-64))
+  | _ => none
+
+mutual
+/-- The types a pattern binds of a value of a type, the declarations read. -/
+partial def patTysD (d : Typer.Decls) : Pat → Ty → Option (List Ty)
+  | .wild, _ => some []
+  | .bind, τ => some [τ]
+  | .int _, _ => some []
+  | .ctor 0 ps, .tuple fs => patsTysD d ps fs
+  | .ctor tag ps, .data n args => do
+    let (_, fields) ← d.ctors[tag]?
+    let vars := ((d.typeParams[n]?).getD []).zip args
+    patsTysD d ps (← fields.mapM (tyOf d vars))
+  | _, _ => none
+partial def patsTysD (d : Typer.Decls) : List Pat → List Ty → Option (List Ty)
+  | [], [] => some []
+  | p :: ps, τ :: τs => do pure ((← patTysD d p τ) ++ (← patsTysD d ps τs))
+  | _, _ => none
+end
+
 /-- The type of a right-hand side, where its parts or the checker say it. -/
 def rhsTy (env : Env) (binds : List (String × Ty)) (Γ : Array (Option Ty)) (said : Option TypeExpr) : Rhs → Option Ty
   | .atom a => atomTy Γ a
@@ -172,6 +215,85 @@ where
     | .var i => Γ[i]?.join
     | .int _ => some .int
 
+mutual
+
+/-- The result of a clause of `f`, going through it forward from its
+locals' first types (`Γ`): of what it returns. -/
+partial def fwd (env : Env) (depth : Nat) (f c : Nat) (binds : List (String × Ty)) (Γ : Array (Option Ty)) (tm : Tm) : Option Ty :=
+  let said := fun (i : Nat) => env.said[(f, c, i)]?
+  let atomTy := fun (a : Atom) => match a with
+    | .var i => Γ[i]?.join
+    | .int _ => some .int
+  match tm with
+  | .ret a => atomTy a
+  | .tail g _ => (atomTy g).bind retOf
+  | .raise .. => some .never
+  | .labelTail thunk | .guardTail _ thunk | .cellTail _ thunk | .cellTailL _ _ thunk => (atomTy thunk).bind retOf
+  | .handleTail .. => none
+  | .let_ rhs body =>
+    let mine := match rhs with
+      | .closure g caps => (rhsTy env binds Γ (said Γ.size) rhs).orElse fun _ =>
+          closureTy env depth f c binds Γ g caps body
+      | _ => rhsTy env binds Γ (said Γ.size) rhs
+    let binds := match said Γ.size, mine with
+      | some te, some m => matchTy env.decls binds te m
+      | _, _ => binds
+    fwd env depth f c binds (Γ.push mine) body
+  | .call g _ body => fwd env depth f c binds (Γ.push ((atomTy g).bind retOf)) body
+  | .handle _ _ _ _ body => fwd env depth f c binds (Γ.push ((said Γ.size).bind (tyOf env.decls binds))) body
+  | .perform _ _ body => fwd env depth f c binds (Γ.push none) body
+  | .label thunk body | .guard _ thunk body | .cell _ thunk body | .cellL _ _ thunk body | .lend _ _ thunk _ _ body =>
+    fwd env depth f c binds (Γ.push ((atomTy thunk).bind retOf)) body
+  | .cancel _ body => fwd env depth f c binds (Γ.push (some .unit)) body
+  | .mem op args body => fwd env depth f c binds (Γ.push (memTy env Γ op args)) body
+  | .host id args body => fwd env depth f c binds (Γ.push (hostTy id args)) body
+
+/-- The type of a closure of `g` made with `caps`, where the checker did not
+say it: what it is given read off where it is used straight after (a cell's,
+a guard's, a borrow's or a label's scope, or a call), and what it gives off
+its body gone through at that. -/
+partial def closureTy (env : Env) (depth : Nat) (f c : Nat) (binds : List (String × Ty)) (Γ : Array (Option Ty))
+    (g : Nat) (caps : List Atom) (body : Tm) : Option Ty := do
+  if depth > 12 then none
+  let here := Γ.size
+  let atomTy := fun (a : Atom) => match a with
+    | .var i => Γ[i]?.join
+    | .int _ => some .int
+  let capTys ← caps.mapM atomTy
+  let isHere := fun (a : Atom) => a == .var here
+  let params : Option (List Ty) := match body with
+    | .cell a t _ | .cellTail a t => if isHere t then (atomTy a).map fun σ => [.ref σ] else none
+    | .guard _ t _ | .guardTail _ t => if isHere t then some [] else none
+    | .lend _ r t pre post _ =>
+      if isHere t then do pure ((← pre.mapM atomTy) ++ [← atomTy r] ++ (← post.mapM atomTy)) else none
+    | .call h args _ | .tail h args => if isHere h then args.mapM atomTy else none
+    | _ => none
+  -- (A label's: given the label, whose result is the scope's, as the
+  -- checker says it.)
+  let params ← params.orElse fun _ => match body with
+    | .label t _ | .labelTail t =>
+      if isHere t then do
+        let σ ← (env.said[(f, c, here + 1)]?).bind (tyOf env.decls binds)
+        pure [.fn [σ] .never [] false none]
+      else none
+    | _ => none
+  -- (One that does not return gives what the place it is used at wants,
+  -- as the checker says it.)
+  let ret ← match fnRet env (depth + 1) g binds params capTys with
+    | some .never | none => (env.said[(f, c, here + 1)]?).bind (tyOf env.decls binds)
+    | r => r
+  pure (.fn params ret [] false (some capTys))
+
+/-- What `g` gives at what it is given and made with: its first clause's
+that says. -/
+partial def fnRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × Ty)) (params caps : List Ty) : Option Ty := do
+  let fn ← env.p.fns[g]?
+  fn.clauses.zipIdx.findSome? fun (cl, ci) => do
+    let bound ← patsTysD env.decls cl.pats params
+    fwd env depth g ci binds ((params ++ caps ++ bound).toArray.map some) cl.body
+
+end
+
 /-- Go through a clause at its locals' first types, beside `Typer`'s hints:
 each compared, `Typer`'s gone on with. -/
 partial def walk (env : Env) (f c : Nat) (binds : List (String × Ty)) (Γ : Array (Option Ty)) (hints : List Hint) (tm : Tm) (t : Tally) : Tally :=
@@ -194,14 +316,17 @@ partial def walk (env : Env) (f c : Nat) (binds : List (String × Ty)) (Γ : Arr
     let kind := match rhs with
       | .atom _ => "atom" | .prim _ _ => "prim" | .construct 0 _ => "tuple" | .construct _ _ => "construct"
       | .place _ => "place" | .closure _ _ => "closure"
-    let mine := rhsTy env binds Γ (said Γ.size) rhs
+    let mine := match rhs with
+      | .closure g caps => (rhsTy env binds Γ (said Γ.size) rhs).orElse fun _ =>
+          closureTy env 0 f c binds Γ g caps body
+      | _ => rhsTy env binds Γ (said Γ.size) rhs
     -- (What it says of the type parameters, learned of what was found here.)
     let binds := match said Γ.size, mine with
       | some te, some m => matchTy env.decls binds te m
       | _, _ => binds
     let t1 := match rhs, mine with
       | .closure g _, none =>
-        if t.examples.size < 40 && (t.counts.getD "closure" (0,0,0)).2.2 % 997 == 0 then
+        if t.examples.size < 60 && (t.counts.getD "closure" (0,0,0)).2.2 % 401 == 0 then
           { t with examples := t.examples.push s!"not found: in {env.names[f]?.getD "?"}: closure of {env.names[g]?.getD "?"}, said {(said Γ.size).isSome}" }
         else t
       | _, _ => t
