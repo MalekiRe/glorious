@@ -2253,6 +2253,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
     -- (A dot call of a function in scope that cannot be called as written,
     -- `v.get<T>(..)` of one without type parameters, of a value whose type
     -- has a function of the name of its own: that one.)
+    modify fun s => { s with lastInst := [] }
     let head ← resolveName scope q x
     -- (The callee's type at this call, by its node: what the elaborator's
     -- closure of it is, `applyTy`.)
@@ -3053,9 +3054,10 @@ partial def inferHandle (scope : Scope) (amb : Row) (whole subject : Flat.ExprId
   modify fun st => { st with later := b.fvExpr [] whole ++ outerLater }
   let loansBefore := (← get).loans.size
   let subjectTy ← inferExpr scope ⟨insts ++ ambFlat.effs, ambFlat.tail⟩ subject
-  -- (What runs it, a callable of nothing that performs what is handled:
-  -- the elaborator's thunk of it, `Flat.thunkNode`.)
-  modify fun s => { s with nodeTys := s.nodeTys.push (Syntax.Flat.thunkNode (s.body.idOf subject), .fn [] subjectTy insts none 0) }
+  -- (What runs it, a callable of nothing that performs what is handled and
+  -- what the code around may: the elaborator's thunk of it,
+  -- `Flat.thunkNode`.)
+  modify fun s => { s with nodeTys := s.nodeTys.push (Syntax.Flat.thunkNode (s.body.idOf subject), .fn [] subjectTy (insts ++ ambFlat.effs) none 0) }
   -- The borrows the handled computation makes. While it is suspended in an
   -- arm, its resumption holds them: the arm must not use what they exclude.
   let suspendedLoans := List.range' loansBefore ((← get).loans.size - loansBefore)
