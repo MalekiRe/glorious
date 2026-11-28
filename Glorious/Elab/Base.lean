@@ -259,9 +259,6 @@ inductive Decision where
   /-- `..` in the tuple pattern `id` stands for `count` parts, written where
   it is (`restNode`). -/
   | restHere (id count : Nat)
-  /-- In `owner`, the function `x` named as a value is a block that calls it
-  (said to itself: `etaHere` is kept). -/
-  | eta (owner x : String) (arity : Nat)
   /-- In `owner`, what the `let` of `x` at `line:col` binds is kept in a
   variable. -/
   | letMut (owner : String) (line col : Nat) (x : String)
@@ -269,33 +266,6 @@ inductive Decision where
   given points to (`&Pattern`): as they are written out so
   (`Syntax.Flat.byReference`; said to itself: `refPatsHere` is kept). -/
   | refPats (id : Nat) (clauses : List Clause)
-  /-- The dot call `call`, its receiver a name, written where it is as the
-  checker read it on, not read again (`receiverNode`): of `fn` where given,
-  the name borrowed (`some uniq`) or given as it is. -/
-  | receiverHere (call : Nat) (fn : Option String) (borrow : Option Bool)
-  /-- The dot call `call`, its receiver a field of a name (through a
-  reference the name holds where `star`), borrowed where it is
-  (`receiverFieldNode`). -/
-  | receiverField (call : Nat) (fn : Option String) (uniq star : Bool)
-  /-- The field read `id` of a name, of what `Deref::deref` gives of it,
-  written where it is (`derefNode`): the name borrowed (`some false`) or
-  given as it is, a reference. -/
-  | derefHere (id : Nat) (borrow : Option Bool)
-  /-- The assignment through the field borrow `id`, `x.f = v` of what
-  `DerefMut::deref_mut` gives of `x`, written where it is
-  (`derefAssignNode`): `x` borrowed `&mut` (`some true`) or given as it is,
-  a reference. -/
-  | derefAssignHere (id : Nat) (borrow : Option Bool)
-  /-- The field borrow `id`, `&x.f` (`&mut` where `uniq`) of what `deref`
-  (`deref_mut`) gives of `x`, written where it is (`derefRefNode`). -/
-  | derefRefHere (id : Nat) (uniq : Bool) (borrow : Option Bool)
-  /-- In `owner`, `&mut x` of a name holding a `&mut`, at the node `node`
-  (its identity), written `&mut *x` where it is (`reborrowNode`). -/
-  | reborrowHere (owner : String) (node : Nat) (x : String)
-  /-- In `owner`, the function `x` named as a value at the node `node` (its
-  identity, `Flat.Body.idOf`), written where it is as a block that calls
-  it, the block numbered `id` (`etaNode`). -/
-  | etaHere (owner : String) (node : Nat) (x : String) (arity : Nat) (id : Nat)
   /-- The callable `id`'s clauses the checker's, `&Pattern` (`refPats`),
   written where it is (`refPatsNode`), not read again. -/
   | refPatsHere (id : Nat) (clauses : List Clause)

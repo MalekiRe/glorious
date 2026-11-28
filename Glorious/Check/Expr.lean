@@ -152,7 +152,7 @@ def derefHere (scope : Scope) (id : Nat) (x step : String) : M Bool := do
     | .ref .. => none
     | _ => some false
   let some b' := Elab.derefNode id borrow (← get).body | return false
-  modify fun s => { s with body := b', decided := s.decided ++ [.derefHere id borrow] }
+  modify fun s => { s with body := b' }
   pure true
 
 /-- The field borrow `id`, `&x.f` (`&mut` where `uniq`), where `f` is a
@@ -170,7 +170,7 @@ def derefRefHere (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M 
     | .ref .. => pure none
     | _ => if uniq && !cell then return false else pure (some uniq)
   let some b' := Elab.derefRefNode id uniq borrow (← get).body | return false
-  modify fun s => { s with body := b', decided := s.decided ++ [.derefRefHere id uniq borrow] }
+  modify fun s => { s with body := b' }
   pure true
 
 /-- The assignment `s`, `x.f = v` where `f` is a field `x` does not show and
@@ -196,7 +196,7 @@ def derefAssignHere (scope : Scope) (s : Flat.StmtId) : M Bool := do
     | .ref .. => pure none
     | _ => if cell then pure (some true) else return false
   let some b' := Elab.derefAssignNode id borrow b | return false
-  modify fun s => { s with body := b', decided := s.decided ++ [.derefAssignHere id borrow] }
+  modify fun s => { s with body := b' }
   pure true
 
 /-- What a reading of a call records, by where each record stood before it
@@ -362,7 +362,7 @@ def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option S
       -- (What is no name, given whole: as it is written, the node itself.)
       if borrow.isNone then
         let some b' := Elab.receiverNode call fn none b (some e0) | return false
-        modify fun s => { s with body := b', decided := s.decided ++ [.receiverHere call fn none] }
+        modify fun s => { s with body := b' }
         return true
       let some uniq := borrow | return false
       -- (Or of what a reference points to, `v[0].s`: through it.)
@@ -386,7 +386,7 @@ def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option S
             | _ => pure false
           | _ => return false
       let some b' := Elab.receiverFieldNode call fn uniq star b (some e0) | return false
-      modify fun s => { s with body := b', decided := s.decided ++ [.receiverField call fn uniq star] }
+      modify fun s => { s with body := b' }
       return true
   let holdsRef := fun (t : Ty) => do
     match ← find t with
@@ -399,7 +399,7 @@ def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option S
     | _, none => pure none
     | none, _ => return false
   let some b' := Elab.receiverNode call fn borrow b (some e0) | return false
-  modify fun s => { s with body := b', decided := s.decided ++ [.receiverHere call fn borrow] }
+  modify fun s => { s with body := b' }
   pure true
 
 mutual
@@ -447,22 +447,18 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
   | .int _ => pure .int
   | .mark m => throw s!"`{m.shown}` is the compiler's mark of a call, not a value; this is a compiler defect"
   | .type _ => throw "a type written among expressions is no value; this is a compiler defect"
-  | .name _ x =>
+  | .name q x =>
     -- (A function that needs a trait of a type it is used at, named as a
-    -- value: written where it is as a block that calls it, and read on,
-    -- `etaHere`. Nothing was read of it before.)
-    fun s => match inferExprNamed scope amb n s with
-    | .ok t s => .ok t s
-    | .error e s =>
-      match e.decision with
-      | some (.eta owner y arity) =>
-        if owner != s.owner || y != x then .error e s else
-        let node := s.body.idOf e0
-        let id := 700000000000000 + (hash (owner, node)).toNat % 100000000000000 * 2
-        match Elab.etaNode node x arity id s.body with
-        | some b' => inferExprAt scope amb e0 { s with body := b', decided := s.decided ++ [.etaHere owner node x arity id] }
-        | none => .error e s
-      | _ => .error e s
+    -- value: written where it is as a block that calls it, before it is
+    -- read, and read so.)
+    if let some arity ← (if q.isNone && (scope.lookup x).isSome then pure none else etaArity scope q x) then
+      let s ← get
+      let node := s.body.idOf e0
+      let id := 700000000000000 + (hash (s.owner, node)).toNat % 100000000000000 * 2
+      if let some b' := Elab.etaNode node x arity id s.body then
+        modify fun s => { s with body := b' }
+        return ← inferExprAt scope amb e0
+    inferExprNamed scope amb n
   | .label _ | .tuple _ => inferExprNamed scope amb n
   | .refField .. | .fieldOf .. | .proj .. => inferExprField scope amb e0 n
   | .call id f args =>
@@ -541,17 +537,10 @@ partial def inferExprNamed (scope : Scope) (amb : Row) (n : Flat.FExpr) : M Ty :
     | .local (.poly s) => instantiate s (some x)
     | .fn t bounds inGroup => do
       if Elab.isIntrinsic x then throw s!"intrinsic `{x}` must be called"
+      -- (One named where it is a block that calls it is so before it is
+      -- read, `etaArity`: this one cannot be.)
       unless bounds.isEmpty do
-        -- (Read again with the naming a block that calls it, whose type the
-        -- use decides, and so what the function needs.)
-        let arity := match ← find t with
-          | .fn ps _ _ _ _ => some ps.length
-          | _ => none
-        let owner := (← get).owner
-        let decision := match arity with
-          | some n => if inGroup then none else some (Elab.Decision.eta owner x n)
-          | none => none
-        throwThe Elab.Said { msg := s!"`{x}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it", decision }
+        throw s!"`{x}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it"
       if inGroup then
         modify fun s => { s with groupUses := s.groupUses.push ⟨0, x, s.owner, s.pos⟩ }
       else
@@ -746,6 +735,22 @@ partial def inferExprField (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : F
       pure t
   | _ => throw "an expression was taken for one of another kind; this is a compiler defect"
 
+/-- The number of parameters of the function `x` (`q::x`) names, where it
+needs a trait of a type it is used at and so is named as a block that calls
+it (`Elab.etaNode`): known by what the name is, before it is read. -/
+partial def etaArity (scope : Scope) (q : Option String) (x : String) : M (Option Nat) := do
+  let saved ← get
+  let found ← try (do
+      match ← resolveName scope q x with
+      | .fn t bounds inGroup =>
+        if bounds.isEmpty || inGroup then pure none else
+        match ← find t with
+        | .fn ps _ _ _ _ => pure (some ps.length)
+        | _ => pure none
+      | _ => pure none) catch _ => pure none
+  set saved
+  pure found
+
 /-- The call `id` at `e0`; where a dot call of a name is decided of a
 function only now, or taking its receiver otherwise than written: written
 where it is and read again (`receiverHere`, once a call). From the state
@@ -861,7 +866,7 @@ partial def inferExprRef (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Fla
             let node := (← get).body.idOf e0
             match Elab.reborrowNode node x (← get).body with
             | some b' =>
-              modify fun s => { s with body := b', decided := s.decided ++ [.reborrowHere s.owner node x] }
+              modify fun s => { s with body := b' }
               return ← inferExprAt scope amb e0
             | none =>
               let named ← pushE (.name none x)
@@ -1556,8 +1561,8 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       receiverByType scope p a
       let b := (← get).body
       -- Clauses that match what a reference points to with patterns of a
-      -- value: the program is read again with those patterns written
-      -- `&Pattern`, binding references, as Rust's binding modes have them.
+      -- value: written where they are with those patterns `&Pattern`,
+      -- binding references, as Rust's binding modes have them, and read so.
       if let .closure id clauseIds := b.expr a then
         let clauses := clauseIds.toList.map (Flat.treeClause b)
         -- (What the arguments before it leave to implementations is found
@@ -1617,7 +1622,10 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               let own := Flat.ofClauses wrapped
               let (ids, own) ← ((Syntax.Flat.byReference rn own.roots).run own).run' (500000000000000000 + id * 10000)
               let lowered := ids.toList.map (Flat.treeClause own)
-              throwThe Elab.Said { msg := s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)", decision := some (.refPats id lowered) }
+              -- (Written so where it is, before it is read, `refPatsNode`.)
+              match Elab.refPatsNode id lowered (← get).body with
+              | some b' => modify fun s => { s with body := b' }
+              | none => throw s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)"
       -- (A value made where a dot call is made on it, named and borrowed for
       -- the call (`Flat.receiverExpr`), that is a reference already: the
       -- reference is given.)
