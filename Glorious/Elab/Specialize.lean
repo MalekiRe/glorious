@@ -102,7 +102,7 @@ def foldRewrite (known : Std.HashMap String Int) : Flat.FRewrite where
             if b.mark? fe == some .inst then some (Flat.pushExpr (.int n))
             else some (do
               let v ← Flat.pushExpr (.int n)
-              Flat.pushExpr (.call id fe (#[v] ++ rest.toArray)))
+              Flat.pushExprAs (.call id fe (#[v] ++ rest.toArray)) (b.idOf e))
           | none => none
         | _ => none
       | _, _ => none
@@ -374,9 +374,9 @@ def heldFirst (x : String) (at_ : Option (Nat × Nat) := none) : Flat.FRewrite w
             let ⟨ps, body⟩ := b.clause c
             if !ps.isEmpty || tested[i]?.getD false then pure a else
             let made := ((← Flat.heldStmts [x] body.toList) ++ body.toList).toArray
-            Flat.pushExpr (.closure cid #[← Flat.pushClause ⟨[], made⟩])
+            Flat.pushExprAs (.closure cid #[← Flat.pushClause ⟨[], made⟩]) (b.idOf a)
           | _ => pure a
-        Flat.pushExpr (.call id (← go.ex f) args))
+        Flat.pushExprAs (.call id (← go.ex f) args) (b.idOf e))
     | _ => none
   onStmts go b ss :=
     match ss with
@@ -534,11 +534,11 @@ def unfieldRewrite (info : FieldInfo) : Flat.FRewrite where
           -- A block that is run where it is written.
           if names == [Syntax.nowMark] then
             let c ← Flat.pushClause ⟨[], body'⟩
-            let cl ← Flat.pushExpr (.closure id #[c])
+            let cl ← Flat.pushExprAs (.closure id #[c]) (b.idOf e)
             Flat.pushExpr (.call 0 cl #[])
           else
             let c ← Flat.pushClause ⟨[.tuple (names.map Pattern.var)], body'⟩
-            Flat.pushExpr (.closure id #[c])
+            Flat.pushExprAs (.closure id #[c]) (b.idOf e)
         | _ =>
           -- Clauses of one tuple given several arguments: the tuple's parts are
           -- the parameters.
@@ -547,12 +547,12 @@ def unfieldRewrite (info : FieldInfo) : Flat.FRewrite where
               match b.clause c with
               | ⟨[.tuple parts], body⟩ => Flat.pushClause ⟨parts, ← body.mapM go.st⟩
               | _ => go.clause c
-            Flat.pushExpr (.closure id cs')
+            Flat.pushExprAs (.closure id cs') (b.idOf e)
           -- A block that is run where it is written.
           else if names == [Syntax.nowMark] then
-            let cl ← Flat.pushExpr (.closure id (← clauses.mapM go.clause))
+            let cl ← Flat.pushExprAs (.closure id (← clauses.mapM go.clause)) (b.idOf e)
             Flat.pushExpr (.call 0 cl #[])
-          else Flat.pushExpr (.closure id (← clauses.mapM go.clause)))
+          else Flat.pushExprAs (.closure id (← clauses.mapM go.clause)) (b.idOf e))
     | .refField id uniq x _ _ =>
       match info.shapes[id]? with
       | none => none

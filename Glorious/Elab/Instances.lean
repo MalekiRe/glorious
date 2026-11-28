@@ -60,9 +60,9 @@ def copyRewrite (c : Copy) : Flat.FRewrite where
     let named := fun (id : Nat) (f : Flat.ExprId) (args : Array Flat.ExprId) (tail : Bool) =>
       match b.expr f with
       | .name q x => some (do
-        let f' ← Flat.pushExpr (.name q (c.callee id x))
+        let f' ← Flat.pushExprAs (.name q (c.callee id x)) (b.idOf f)
         let args' ← args.mapM go.ex
-        Flat.pushExpr (if tail then .tailCall id f' args' else .call id f' args'))
+        Flat.pushExprAs (if tail then .tailCall id f' args' else .call id f' args') (b.idOf e))
       | _ => none
     match b.expr e with
     | .call id f args => named id f args false
@@ -84,7 +84,7 @@ def copyRewrite (c : Copy) : Flat.FRewrite where
             let body' ← body.mapM go.st
             Flat.pushClause ⟨pats', body'⟩
           | _ => go.clause arm
-        Flat.pushExpr (.handle subject' arms'))
+        Flat.pushExprAs (.handle subject' arms') (b.idOf e))
     | _ => none
 
 /-- How each item is written for the instances of effects: worked out once

@@ -207,9 +207,19 @@ partial def matchTyOpt (d : Typer.Decls) (binds : List (String × Ty)) : TypeExp
   | .tuple _, _ => none
   | .ref _ a _, .ref t => matchTyOpt d binds a t
   | .ref _ _ _, _ => none
-  | .fn ps r, .fn ts s _ _ _ =>
+  | .fn ps r, .fn ts s eff _ _ =>
     if ps.length == ts.length then do
       let b ← (ps.zip ts).foldlM (fun b (a, t) => matchTyOpt d b a t) binds
+      -- (And what it performs: each effect's arguments, of the arguments
+      -- its operations are performed at.)
+      let b := match r with
+        | .performs _ effs => effs.foldl (fun b (e, args) =>
+            match ((d.effectOps[e]?).getD []).findSome? (eff.lookup ·) with
+            | some targs => if args.length == targs.length then
+                (args.zip targs).foldl (fun b (a, t) => (matchTyOpt d b a t).getD b) b
+              else b
+            | none => b) b
+        | _ => b
       matchTyOpt d b r s
     else none
   | .fn _ _, _ => none
@@ -525,8 +535,22 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
     | .var i => (w.pend[i]?).map (i, ·)
     | .int _ => none
   let mut w := w
-  -- (A closure given to a callable of a known type: of the type it takes
-  -- there, what it was made with its own.)
+  -- (A closure given to a named function that waits too: of the type the
+  -- function says it takes there, its type parameters learned of the
+  -- other arguments.)
+  match at_ with
+  | .call h args _ | .tail h args =>
+    if let some (_, (g, _)) := callee h then
+      if let some (.fn ps _) := env.selfTy[g]? then
+        let known := (ps.zip args).foldl (fun b (p, a) => match w.atomTy a with
+          | some t => matchTy env.decls b p t
+          | none => b) []
+        for (a, p) in args.zip ps do
+          if let some (i, (ga, caps)) := callee a then
+            if let some (.fn qs r eff once _) := tyOf env.decls known p then
+              w := w.found i (.fn qs r eff once (some caps))
+              w := { w with uses := w.uses.push (ga, { caps, params := qs, ret := r, eff }) }
+  | _ => pure ()
   match at_ with
   | .call h args _ | .tail h args =>
     if let some (.fn ps _ _ _ _) := w.atomTy h then
@@ -636,7 +660,13 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
         | none => "construct not said"
       | .closure _ caps => if (caps.mapM w.atomTy).isNone then "closure caps unknown" else match said i with
         | some te => s!"closure said, not written: {(te.spell.take 120).toString} with {w.binds.map (·.1)}"
-        | none => s!"closure waits: {firstRef i body} (with {w.binds.map (·.1)}, the use's said {((said (i + 1)).map fun te => (te.spell.take 80).toString).getD "none"})"
+        | none =>
+          let fnSaid : String := match rhs with
+            | .closure g _ => match env.selfTy[g]? with
+              | some te => (te.spell.take 200).toString
+              | none => "none"
+            | _ => ""
+          s!"closure waits: {firstRef i body} (with {w.binds.map (·.1)}, the use's said {((said (i + 1)).map fun te => (te.spell.take 80).toString).getD "none"}; the function {fnSaid})"
       | .atom _ => "atom of unknown"
       | .prim _ _ => "prim"
       ) }
