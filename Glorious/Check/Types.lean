@@ -1038,9 +1038,10 @@ structure St where
   dictTypes : Std.HashMap USize (List (String × Syntax.TypeExpr)) := {}
   /-- A type a function's body reads from what a trait leaves to the
   implementation of one of its bounds, by its variable: which of those the
-  function is given, and the name (`settleScheme`); written so in the body's
-  types (`Syntax.projAtName`). -/
-  projAt : Std.HashMap Nat (Nat × String) := {}
+  function is given, the name, and what it is asked at where it takes
+  types (`settleScheme`); written so in the body's types
+  (`Syntax.projAtName`). -/
+  projAt : Std.HashMap Nat (Nat × String × List Ty) := {}
   /-- The functions whose bodies a count of uses followed (`pathUses`), in
   the order followed, `*` where one was not finished: what a group's check
   read of bodies besides its own. -/
@@ -1590,9 +1591,9 @@ partial def Ty.written : Ty → Option Syntax.TypeExpr
 
 /-- A type with each variable that is a type read from the implementation of
 one of the function's bounds named so (`St.projAt`, `Syntax.projAtName`). -/
-partial def Ty.projsAt (m : Std.HashMap Nat (Nat × String)) : Ty → Ty
+partial def Ty.projsAt (m : Std.HashMap Nat (Nat × String × List Ty)) : Ty → Ty
   | .var n => match m[n]? with
-    | some (j, x) => .con (Syntax.projAtName j x) []
+    | some (j, x, asked) => .con (Syntax.projAtName j x) (asked.map (Ty.projsAt m))
     | none => .var n
   | .con n args => .con n (args.map (Ty.projsAt m))
   | .tuple args => .tuple (args.map (Ty.projsAt m))
@@ -1612,9 +1613,11 @@ partial def Ty.writtenRigid : Ty → Option Syntax.TypeExpr
     if n.startsWith "'" then some (.name "'" [])
     else (args.mapM Ty.writtenRigid).map (Syntax.TypeExpr.name n)
   | .tuple args => (args.mapM Ty.writtenRigid).map .tuple
-  -- (With what it performs, each effect at its arguments.)
-  | .fn ps r effs _ _ => do
+  -- (With what it performs, each effect at its arguments; and where more
+  -- is not known, `Syntax.openRowMark`, the code around's.)
+  | .fn ps r effs tail _ => do
     let effs ← effs.mapM fun (e, args) => do pure (e, ← args.mapM Ty.writtenRigid)
+    let effs := if tail.isSome then effs ++ [(Syntax.openRowMark, [])] else effs
     pure (.fn (← ps.mapM Ty.writtenRigid) (.performs (← r.writtenRigid) effs))
   | .ref how t _ =>
     match how with

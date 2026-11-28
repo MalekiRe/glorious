@@ -96,6 +96,14 @@ partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr
     -- (What an `is` found, `%is:a,b<A, B>`: the values, a tuple.)
     else if (packNames x).isSome then do pure (.tuple (← args.mapM (tyOf d vars)))
     else if x.startsWith "'" then some (.ref .unit)
+    -- (A tuple as an implementation for every length sees it, its first
+    -- and the rest, `Traits.consHead`.)
+    else if x == "%Cons" then match args with
+      | [h, r] => do
+        match ← tyOf d vars r with
+        | .tuple ts => pure (.tuple ((← tyOf d vars h) :: ts))
+        | _ => none
+      | _ => none
     else if x == "Int" then some .int
     else if isScalar x then some (.scalar (scalarBits x))
     else if x == "Fixed" then
@@ -515,6 +523,15 @@ def W.noteCalled (w : W) (env : Env) (f c i g : Nat) (params : List Ty) : W :=
         if p == "%Self" then match env.implSelf[g]? with
           | some self => matchTy env.decls [] self t
           | none => []
+        -- (A trait's function's own type parameter, where the
+        -- implementation's function has no parameter of its own so named.)
+        else if p.startsWith "%m:" then
+          let x := (p.drop 3).toString
+          let implOwn := (env.implTypes.getD g []).any (·.1 == x)
+            || (match env.implSelf[g]? with
+                | some (te : TypeExpr) => decide ((te.spell.splitOn s!"%rigid:{x}").length > 1)
+                | none => false)
+          if implOwn then [] else [(s!"%rigid:{x}", t)]
         else [(s!"%rigid:{p}", t)]
     if binds.isEmpty then w else { w with called := w.called.push ((g, params), binds) }
   | none => w
@@ -703,6 +720,15 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
   | .let_ rhs body =>
     let i := w.Γ.size
     let mine := rhsTy env w.binds w.Γ (said i) rhs
+    -- (A callable of which the checker leaves the rest of what it performs
+    -- to the code around: performing what that does too, as `Typer`'s one
+    -- row.)
+    let mine : Option Ty := match mine, said i with
+      | some (Ty.fn ps r eff once caps), some (TypeExpr.fn _ (.performs _ effs)) =>
+        if effs.any (·.1 == openRowMark) then
+          some (.fn ps r (eff ++ w.eff.filter fun (op, _) => !eff.any (·.1 == op)) once caps)
+        else mine
+      | _, _ => mine
     let w := if mine.isSome then w else { w with why := w.why.insert i (match rhs with
       | .place pl => match w.Γ[pl.var]?.join with
         | none => "place of unknown"
@@ -901,6 +927,36 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
 def baseOf (owner : String) : String :=
   (((owner.splitOn "⟨").headD owner).splitOn "@<").headD owner
 
+/-- A type with each it reads from what traits leave to the implementations
+the function is given (`Syntax.projAtName`) as those say it, at what it is
+asked at where it takes types (`%gat:i`). -/
+partial def expandProjs (tpl : List (String × TypeExpr)) : TypeExpr → TypeExpr
+  | .name x args =>
+    let args := args.map (expandProjs tpl)
+    if x.startsWith "%proj:" && !args.isEmpty then
+      match tpl.lookup x with
+      | some t => atGat args t
+      -- (Not found: one type for each it is asked at, learned as a type
+      -- parameter is.)
+      | none => .name s!"{x}<{", ".intercalate (args.map (·.spell))}>" []
+    else .name x args
+  | .tuple ts => .tuple (ts.map (expandProjs tpl))
+  | .fn ps r => .fn (ps.map (expandProjs tpl)) (expandProjs tpl r)
+  | .performs r effs => .performs (expandProjs tpl r) (effs.map fun (e, a) => (e, a.map (expandProjs tpl)))
+  | .ref u t l => .ref u (expandProjs tpl t) l
+  | t => t
+where
+  atGat (asked : List TypeExpr) : TypeExpr → TypeExpr
+    | .name x [] => match x.splitOn ":" with
+      | ["%gat", i] => ((i.toNat?).bind (asked[·]?)).getD (.name x [])
+      | _ => .name x []
+    | .name x as => .name x (as.map (atGat asked))
+    | .tuple ts => .tuple (ts.map (atGat asked))
+    | .fn ps r => .fn (ps.map (atGat asked)) (atGat asked r)
+    | .performs r effs => .performs (atGat asked r) (effs.map fun (e, a) => (e, a.map (atGat asked)))
+    | .ref u t l => .ref u (atGat asked t) l
+    | t => t
+
 /-- The environment of a program for the forward typing. -/
 def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
     (nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option TypeExpr))) := {})
@@ -908,19 +964,24 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
     Except String Env := do
   let g ← Elab.collectDeclared items
   let decls := Typer.declsOf items g
+  -- (Each copy's types with what it reads of its implementations' types
+  -- that take types written out, `expandProjs`.)
+  let ex := fun (owner : String) (te : TypeExpr) => match projTypes[owner]? with
+    | some tpl => expandProjs tpl te
+    | none => te
   let said := out.fnNodes.fold (fun m f (owner, clauses) =>
     let base := baseOf owner
     match nodeTys[owner]? <|> nodeTys[base]? with
     | none => m
     | some tys => clauses.zipIdx.foldl (fun m (locals, c) =>
         locals.foldl (fun m (i, n) => match tys[n]? with
-          | some te => m.insert (f, c, i) te
+          | some te => m.insert (f, c, i) (ex owner te)
           | none => m) m) m) {}
   let selfTy := out.fnNodes.fold (fun m f (owner, _) =>
     if out.fnNames[f]? != some s!"`{owner}`" then m else
     let base := baseOf owner
     match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
-    | some te => m.insert f te
+    | some te => m.insert f (ex owner te)
     | none => m) {}
   let insts := out.fnNodes.fold (fun m f (owner, clauses) =>
     let base := baseOf owner
@@ -928,7 +989,7 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
     | none => m
     | some is => clauses.zipIdx.foldl (fun m (locals, c) =>
         locals.foldl (fun m (i, n) => match is[n]? with
-          | some ps => m.insert (f, c, i) ps
+          | some ps => m.insert (f, c, i) (ps.map fun (p, t) => (p, t.map (ex owner)))
           | none => m) m) m) {}
   let implSelf := out.fnNodes.fold (fun m f (owner, _) =>
     if out.fnNames[f]? != some s!"`{owner}`" then m else
@@ -937,8 +998,14 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
     | some te => m.insert f te
     | none => m) {}
   let general := fun (te : TypeExpr) => (te.spell.splitOn "%rigid:").length > 1
+  -- (Not one general in a type its type does not name, `fill<S: Shelf>()`,
+  -- nor an implementation's function.)
   let settled := out.fnNodes.fold (fun s f (owner, _) =>
     let base := baseOf owner
+    let own := match decls.fns[f]? with
+      | some (tparams, _, _) => tparams.any (!·.startsWith "'")
+      | none => false
+    if own || owner != base || implSelf.contains f then s else
     match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
     | some te => if general te then s else s.insert f
     | none => s) {}

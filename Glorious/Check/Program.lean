@@ -1006,25 +1006,31 @@ partial def implAssocs (im : ImplDecl) : List (String × Syntax.TypeExpr) :=
     | .tuple args => s!"({",".intercalate (args.map key)})"
     | .ref _ t _ => s!"&{key t}"
     | .fn ps r _ _ _ => s!"fn({",".intercalate (ps.map key)})->{key r}"
-  let rec named : Ty → Ty
+  let rec named (takes : List (Bool × Nat)) : Ty → Ty
     | .var id => match im.pvars.find? (·.2 == id) with
       | some (x, _) => .con s!"%rigid:{x}" []
-      | none => .var id
+      | none => match takes.findIdx? (· == (false, id)) with
+        | some i => .con s!"%gat:{i}" []
+        | none => .var id
     | .con n [subject, .con tr [], .con x []] =>
       if n == Syntax.projMark then
+        -- (Asked at types, `H::Got<'a>`: the type and those.)
+        let (subject, asked) := match subject with
+          | .con m (s :: asked) => if m == Syntax.gatMark then (s, asked) else (subject, [])
+          | s => (s, [])
         let subject' := match subject with
           | .tuple _ => subject
           | t => .tuple [t]
         match subjects.findIdx? fun (tr', s) => tr' == base tr && key s == key subject' with
-        | some j => .con (Syntax.projAtName j x) []
-        | none => .con n [named subject, .con tr [], .con x []]
-      else .con n [named subject, .con tr [], .con x []]
-    | .con n args => .con n (args.map named)
-    | .tuple args => .tuple (args.map named)
-    | .fn ps r effs tail once => .fn (ps.map named) (named r) effs tail once
-    | .ref how t c => .ref how (named t) c
+        | some j => .con (Syntax.projAtName j x) (asked.map (named takes))
+        | none => .con n [named takes subject, .con tr [], .con x []]
+      else .con n [named takes subject, .con tr [], .con x []]
+    | .con n args => .con n (args.map (named takes))
+    | .tuple args => .tuple (args.map (named takes))
+    | .fn ps r effs tail once => .fn (ps.map (named takes)) (named takes r) effs tail once
+    | .ref how t c => .ref how (named takes t) c
     | t => t
-  im.assocs.filterMap fun (x, t) => ((named t).writtenRigid).map (x, ·)
+  im.assocs.filterMap fun (x, t) => ((named ((im.gatParams.lookup x).getD []) t).writtenRigid).map (x, ·)
 
 /-- What the checker tells the elaborator, once every item is checked. -/
 def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (show M Elab.Blocks from do
@@ -1146,16 +1152,23 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         derefs := .ofList s.derefReads.toList }
     let taking : Std.HashSet Nat := .ofList s.given.toList
     let bodies := s.decidedFns.fold (fun m n b =>
+      -- (What is made from here on known apart from what the checker made.)
+      let b := { b with idTop := max b.idTop Syntax.Flat.elabIdBase }
       let b := if owners.contains n then Elab.scalarBody lits n b else b
       let b := if cs.isEmpty then b else Elab.coerceFn cs n b
       m.insert n (Elab.givenBody taking (Elab.unfieldBody info b))) {}
     -- (Each expression's type as the program has it once checked: what a
     -- trait or a later group decided of it too.)
+    -- (What each type read from an implementation that takes types is
+    -- asked at, as the program has it once checked.)
+    let mut projAt : Std.HashMap Nat (Nat × String × List Ty) := {}
+    for (v, (j, x, asked)) in s.projAt.toList do
+      projAt := projAt.insert v (j, x, ← asked.mapM zonk)
     let mut nodeTys : Std.HashMap String (Std.HashMap Nat Syntax.TypeExpr) := {}
     for (n, tys) in s.bodyTys.toList do
       let mut m : Std.HashMap Nat Syntax.TypeExpr := {}
       for (e, t) in tys do
-        if let some w := ((← zonk t).projsAt s.projAt).writtenRigid then m := m.insert e w
+        if let some w := ((← zonk t).projsAt projAt).writtenRigid then m := m.insert e w
       nodeTys := nodeTys.insert n m
     let mut nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option Syntax.TypeExpr))) := {}
     for (n, is) in s.bodyInsts.toList do
@@ -1163,7 +1176,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
       for (e, ts) in is do
         m := m.insert e (← ts.mapM fun (p, t) => do
           match t with
-          | some t => pure (p, ((← zonk t).projsAt s.projAt).writtenRigid)
+          | some t => pure (p, ((← zonk t).projsAt projAt).writtenRigid)
           | none => pure (p, none))
       nodeInsts := nodeInsts.insert n m
     pure { bodies, places, nodeTys, nodeInsts

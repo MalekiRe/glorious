@@ -65,6 +65,9 @@ structure LowerKept where
   asked : Array ((String × List Nat × Bool) × String)
   /-- The spreads it asked written out (`Copies.spreads`). -/
   spreads : Array (String × String × Nat) := #[]
+  /-- What the type parameters of the implementations it numbered are,
+  where the checker found them (`Copies.types`). -/
+  types : Array (Nat × List (String × TypeExpr)) := #[]
   made : Nat
 
 /-- Each function's `LowerKept`, by its name once lowered. -/
@@ -209,6 +212,7 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
             { c with byKey := c.byKey.insert key name, byName := c.byName.insert name key
                      asked := c.asked.push (key, name) }) copies
           let copies := k.spreads.foldl (fun c (name, kind, n) => { c with spreads := c.spreads.insert name (kind, n) }) copies
+          let copies := k.types.foldl (fun c (n, ts) => { c with types := c.types.insert n ts }) copies
           let chain := k.asked.foldl (fun h e => mixHash h (hash e)) (k.pool.foldl (fun h e => mixHash h (hash e)) st.chain)
           st := { st with copies, made := st.made + k.made, chain, keptMade := st.keptMade.insert x k }
           if let some (.fn name ps annots ret b) := k.item then
@@ -244,7 +248,8 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
       | _ => none
     if key != 0 then
       let spreads := copies.spreads.fold (fun acc name v => if spreads0.contains name then acc else acc.push (name, v.1, v.2)) #[]
-      st := { st with keptMade := st.keptMade.insert x { key, item := lowered, pool, asked, spreads, made := madeHere } }
+      let types := copies.types.fold (fun acc n ts => if n ≥ pool0 then acc.push (n, ts) else acc) #[]
+      st := { st with keptMade := st.keptMade.insert x { key, item := lowered, pool, asked, spreads, types, made := madeHere } }
     if let some (.fn name ps annots ret b) := lowered then
       st := { st with done := st.done.push (.fn name ps annots ret b) }
       todo := todo ++ (b.fvClauses b.roots).reverse.toArray
@@ -272,12 +277,17 @@ partial def assocAt (tr : TraitInfo) (copies : Copies) (n : Nat) (name : String)
     let te ← (tr.assocs[dictFn]?).bind (·.lookup name)
     let params := (tr.knownTypes[n]? <|> copies.types[n]?).getD []
     let rec fill : TypeExpr → Option TypeExpr
-      | .name x [] =>
-        if x.startsWith "%rigid:" then params.lookup (x.drop 7).toString
+      | .name x args =>
+        -- (One read from an implementation not found here: none.)
+        if x == Syntax.projMark then none
+        else if x.startsWith "%rigid:" && args.isEmpty then params.lookup (x.drop 7).toString
         else match projAtOf x with
-          | some (j, y) => do assocAt tr copies (← subs[j]?) y fuel
-          | none => some (.name x [])
-      | .name x args => do pure (.name x (← args.mapM fill))
+          | some (j, y) => do
+            -- (One that takes types, at those asked: `%gat:i` each.)
+            let found ← assocAt tr copies (← subs[j]?) y fuel
+            let asked ← args.mapM fill
+            pure (atGat asked found)
+          | none => do pure (.name x (← args.mapM fill))
       | .tuple args => do pure (.tuple (← args.mapM fill))
       | .fn ps r => do pure (.fn (← ps.mapM fill) (← fill r))
       | .performs r effs => do pure (.performs (← fill r) (← effs.mapM fun (e, a) => do pure (e, ← a.mapM fill)))
@@ -285,6 +295,16 @@ partial def assocAt (tr : TraitInfo) (copies : Copies) (n : Nat) (name : String)
       | t => some t
     fill te
 where
+  atGat (asked : List TypeExpr) : TypeExpr → TypeExpr
+    | .name x [] => match x.splitOn ":" with
+      | ["%gat", i] => ((i.toNat?).bind (asked[·]?)).getD (.name x [])
+      | _ => .name x []
+    | .name x args => .name x (args.map (atGat asked))
+    | .tuple args => .tuple (args.map (atGat asked))
+    | .fn ps r => .fn (ps.map (atGat asked)) (atGat asked r)
+    | .performs r effs => .performs (atGat asked r) (effs.map fun (e, a) => (e, a.map (atGat asked)))
+    | .ref u t l => .ref u (atGat asked t) l
+    | t => t
   projAtOf (x : String) : Option (Nat × String) :=
     match x.splitOn ":" with
     | ["%proj", j, y] => j.toNat?.map (·, y)

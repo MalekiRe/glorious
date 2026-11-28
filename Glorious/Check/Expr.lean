@@ -1852,10 +1852,7 @@ partial def inferCallFn (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (
       throw s!"`{x}` is run when what holds a value ends; a program does not call it"
     -- A trait's function at the type it is used at, which must have the trait.
     let self ← freshTy
-    -- (What `Self` is at this call, by the callee's node: of the
-    -- implementation's function called, `Flat.implSelfNode`.)
-    if let some n := (← get).calleeAt then
-      modify fun s => { s with callInsts := s.callInsts.push (n, [("%Self", self)]) }
+    let calleeNode := (← get).calleeAt
     -- The trait's own arguments are found from how the function is used,
     -- and so is what each type it leaves to an implementation is.
     let targs ← sig.tparams.mapM fun _ => freshTy
@@ -1892,6 +1889,12 @@ partial def inferCallFn (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (
         modify fun s => { s with drops := s.drops.push (t, s!"{pos}`{x}` may leave a `{g}` unused") }
       if upper.isNone then
         modify fun s => { s with dups := s.dups.push (t, s!"{pos}`{x}` may use a `{g}` more than once") }
+    -- (What `Self` is at this call, by the callee's node: of the
+    -- implementation's function called, `Flat.implSelfNode`; and what its
+    -- own type parameters are, by their names, `%m:T`.)
+    if let some n := calleeNode then
+      let own := (sig.mparams.zip anew).map fun ((g, _), (_, t)) => (s!"%m:{g}", some t)
+      modify fun s => { s with callInsts := s.callInsts.push (n, ("%Self", some self) :: own) }
     for (_, _, id) in sig.gats do
       anew := anew ++ [(id, ← freshTy)]
     let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found ++ anew

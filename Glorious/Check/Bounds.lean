@@ -919,15 +919,27 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
   for (tr, subject, name, a, owner, _) in (← get).assocUses do
     if owner == d.name then
       if let .var v ← find a then
-        -- (Its subject is the type with the trait's arguments, `(X, E, S)`.)
+        -- (Its subject is the type with the trait's arguments, `(X, E, S)`;
+        -- or, asked at types, `S::Holding<Int>`, the type and those.)
+        let (subject, asked) ← match ← find subject with
+          | .con mark (self :: asked) =>
+            if mark == Syntax.gatMark then pure (self, asked) else pure (subject, [])
+          | t => pure (t, [])
         let subject ← match ← find subject with
           | .tuple (self :: _) => spellTy self
           | t => spellTy t
         let mut at_ : List Nat := []
         for ((key, _, ty), j) in mine.zipIdx do
           if key.base == tr && (← spellTy ty) == subject then at_ := at_ ++ [j]
+        -- (Of two questions with one answer, `S::Holding<T1>` given where
+        -- `S::Holding<Int>` is wanted, the one asked at what is known.)
         if let [j] := at_ then
-          modify fun s => { s with projAt := s.projAt.insert v (j, name) }
+          let asked ← asked.mapM zonk
+          let free := fun (ts : List Ty) => (ts.flatMap freeTys).length
+          let better ← match (← get).projAt[v]? with
+            | some (_, _, had) => do pure (decide (free asked < free (← had.mapM zonk)))
+            | none => pure true
+          if better then modify fun s => { s with projAt := s.projAt.insert v (j, name, asked) }
   -- The types left to implementations that the function's type mentions.
   let mut assocs : List (String × Ty × String × Ty) := []
   for (tr, subject, name, a, owner, _) in (← get).assocUses do

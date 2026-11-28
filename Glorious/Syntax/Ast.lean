@@ -409,6 +409,11 @@ types (`Check.St.projAt`): found from the implementation the function is
 given there. -/
 def projAtName (j : Nat) (name : String) : String := s!"%proj:{j}:{name}"
 
+/-- Among the effects of a callable's type as the checker writes it for the
+elaborator's `let`s: the rest of what it performs is not known there, as
+of a function whose type leaves it to the code around (`Check.Ty.writtenRigid`). -/
+def openRowMark : String := "%open"
+
 /-- The implementation, as a value, of a trait with no functions: `()`,
 whichever implementation it is. -/
 def markerDict : String := "%marker"
@@ -858,6 +863,12 @@ structure Body where
   idTop : Nat := 0
   deriving Hashable, BEq
 
+/-- Above the identities of the nodes the checker makes to read a body:
+those the elaborator makes, which the checker's types are not of, are
+known from here on (`Check.Blocks`), so that no node of the one is
+taken for one of the other's. -/
+def elabIdBase : Nat := 1 <<< 41
+
 /-- The identity under which the checker keeps a function's own type among
 its expressions' (`Check.St.bodyTys`): no node's. -/
 def selfNode : Nat := 1 <<< 62
@@ -881,7 +892,9 @@ def thunkNode (id : Nat) : Nat := selfNode + 1 + id
   let ids := if b.ids.size == e then b.ids else b.ids ++ (List.range' b.ids.size (e - b.ids.size)).toArray
   let top := max b.idTop e
   let i := id.getD top
-  (e, { b with exprs := b.exprs.push n, ids := ids.push i, idTop := max top (i + 1) })
+  -- (One known in a space of its own, from `selfNode` on, `Elab.refPatsNode`,
+  -- raises nothing: what is made anew is not known in that space.)
+  (e, { b with exprs := b.exprs.push n, ids := ids.push i, idTop := if i ≥ selfNode then top else max top (i + 1) })
 
 end Flat
 
