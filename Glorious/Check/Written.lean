@@ -83,7 +83,7 @@ partial def writeTy (t : Ty) : StateT Names M String := do
     if n == Syntax.projMark then
       -- (Of a trait with arguments, the subject is the type with them after
       -- it, as a tuple.)
-      let arity := ((← (get : M St)).traitShape[tr]?).map (·.1) |>.getD 0
+      let arity := ((← (get : M St)).traitShape[tr.name]?).map (·.1) |>.getD 0
       let (self, targs) ← match ← (find subject : M Ty) with
         | .tuple (self :: rest) => pure (if arity > 0 && rest.length == arity then (self, rest) else (subject, targs))
         | _ => pure (subject, targs)
@@ -119,8 +119,8 @@ partial def writeTy (t : Ty) : StateT Names M String := do
   | .ref how t _ =>
     match ← (find how : M Ty) with
     -- (A lifetime given to a type: written so where none is named.)
-    | .con "'" [] => pure "'_"
-    | .con "&mut" [] => pure s!"&mut {← writeTy t}"
+    | .con ⟨"'", _⟩ [] => pure "'_"
+    | .con ⟨"&mut", _⟩ [] => pure s!"&mut {← writeTy t}"
     | _ => pure s!"&{← writeTy t}"
 
 /-- What a callable performs, `{Log, Ask<Int> | e}`, or nothing where it

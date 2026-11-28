@@ -361,8 +361,8 @@ partial def shortenStatic (t : Ty) : M Ty := do
     match ← find t with
     | .ref how inner cap =>
       match ← find how with
-      | .con "'" [] => if cap == st then pure (.ref how inner (← freshCap)) else pure t
-      | .con "&" [] => pure (.ref how (← go inner fuel) cap)
+      | .con ⟨"'", _⟩ [] => if cap == st then pure (.ref how inner (← freshCap)) else pure t
+      | .con ⟨"&", _⟩ [] => pure (.ref how (← go inner fuel) cap)
       | _ => pure t
     | .con n args => pure (.con n (← args.mapM (go · fuel)))
     | .tuple args => pure (.tuple (← args.mapM (go · fuel)))
@@ -784,7 +784,7 @@ partial def inferExprRef (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Fla
     | some (.val t id) => do
       if uniq then
         if let Ty.ref how _ _ ← find t then
-          if let .con "&mut" [] ← find how then
+          if let .con ⟨"&mut", _⟩ [] ← find how then
             -- (Written so where it is, `&mut *x`, for the elaborator too:
             -- borrowed elsewhere, `x` may be a variable there, whose `&mut`
             -- would be of the variable, `Elab.reborrowNode`.)
@@ -1044,7 +1044,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
             | .tuple (_ :: _) => pure true
             | .con name _ =>
               let st ← get
-              pure (match st.types[name]? with
+              pure (match st.types[name.name]? with
                 | some decl => match decl.ctors with
                   | [c] => st.fieldNames.contains c
                   | _ => false
@@ -1140,7 +1140,7 @@ partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
         match sig.params.head? with
         | some (.ref how _ _) =>
           match how with
-          | .con "&mut" [] => pure (some 2)
+          | .con ⟨"&mut", _⟩ [] => pure (some 2)
           | _ => pure (some 1)
         | some _ => pure (some 0)
         | none => pure none
@@ -1151,7 +1151,7 @@ partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
         match ← find p with
         | .ref how _ _ =>
           match ← find how with
-          | .con "&mut" [] => pure (some 2)
+          | .con ⟨"&mut", _⟩ [] => pure (some 2)
           | _ => pure (some 1)
         | _ => pure (some 0)
       | _ => pure none : M (Option Nat))
@@ -1373,7 +1373,7 @@ partial def receiverByType (scope : Scope) (p : Ty) (a : Flat.ExprId) : M Unit :
     | .ref .., some (.ref ..) => pure (some (.name none x))
     | .ref how _ _, some _ => do
       let uniq := match ← find how with
-        | .con "&mut" [] => true
+        | .con ⟨"&mut", _⟩ [] => true
         | _ => false
       pure (some (.ref uniq x))
     | _, _ => pure (some (.name none x))
@@ -1424,7 +1424,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           if let .fn (first :: _) _ _ _ _ ← find p then
             if let .ref how _ _ ← find first then
               let uniq := match ← find how with
-                | .con "&mut" [] => true
+                | .con ⟨"&mut", _⟩ [] => true
                 | _ => false
               let shown := if uniq then "&mut " else "&"
               -- (Written `&Pattern` and written out as the resolver writes
@@ -1472,7 +1472,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               match ← find t, ← find wantInner with
               | .ref how _ _, .con .. =>
                 let holdsUniq := match ← find how with
-                  | .con "&mut" [] => true
+                  | .con ⟨"&mut", _⟩ [] => true
                   | _ => false
                 pure (i == 0 && call != 0 && (holdsUniq || !uniq))
               | _, _ => pure false
@@ -1519,7 +1519,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           if let some (.val t _) := scope.lookup x then
             if let .ref how _ _ ← find p then
               match ← find t, ← find how with
-              | .ref .., _ | .var _, _ | _, .con "&mut" [] => pure ()
+              | .ref .., _ | .var _, _ | _, .con ⟨"&mut", _⟩ [] => pure ()
               | _, _ => modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a (.ref false x) } }
       let checked ← checkArg scope amb s!"argument {i + 1} of {what}" p a site
       if let some e := checked then
@@ -1589,7 +1589,7 @@ partial def inferCallBuiltin (scope : Scope) (amb : Row) (args : Array Flat.Expr
     checkArgs scope amb s!"constructor `{x}`" fields args call
     -- What the type's declaration asks of its parameters.
     if let .con owner targs := result then
-      if let some asked := (← get).typeBounds.lookup owner then
+      if let some asked := (← get).typeBounds.lookup owner.name then
         -- (Asked, and not handed over: under a number no call has.)
         if call != 0 then
           needBounds (100000000000000000 + call) (asked.filterMap fun (tr, i) => targs[i]?.map (tr, ·))
@@ -1922,7 +1922,7 @@ partial def inferCallFn (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (
       let answer := subst tm [] [] (.var id)
       let use := (sig.trait, Ty.con Syntax.gatMark (self :: asked), name, answer, (← get).owner, (← get).pos)
       modify fun s => { s with assocUses := s.assocUses.push use }
-      let lives := asked.filterMap fun | .ref (.con "'" []) _ c => some c | _ => none
+      let lives := asked.filterMap fun | .ref (.con ⟨"'", _⟩ []) _ c => some c | _ => none
       if let .var v := answer then
         unless lives.isEmpty do modify fun s => { s with gatHolds := s.gatHolds.push (v, lives) }
     -- (A callable it is given may be called any number of times, or not
@@ -1959,7 +1959,7 @@ partial def inferCallFn (scope : Scope) (amb : Row) (args : Array Flat.ExprId) (
         for i in places do
           if let some a := targs[i]? then
             if let .con n [] ← find a then
-              if n == "Int" || (Syntax.scalars.lookup n).isSome then
+              if n == "Int" || (Syntax.scalars.lookup n.name).isSome then
                 unify self a
                 break
     -- (What the trait leaves to the implementation, there now if the
@@ -2825,7 +2825,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
         let s ← get
         if !ps.isEmpty && s.kimpls.has (.of "Drop") n then
           if let some here := s.modules.homes.lookup s.owner then
-            let home := "::".intercalate ((n.splitOn "::").dropLast)
+            let home := "::".intercalate ((n.name.splitOn "::").dropLast)
             unless here == home do
               throw s!"`{Syntax.lastSegment n}` has `Drop`, so only the module that declares it can take one apart with a pattern: what `drop` does would not be done"
       inferPats ps fields

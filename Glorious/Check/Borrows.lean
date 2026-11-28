@@ -123,7 +123,7 @@ partial def capHoldsLoan (loan : Nat) (cap : Nat) (suspended : Bool := false)
       -- thereby held by everything else of that lifetime: a parameter
       -- holds what it was given, and what is put into it.
       let given := match t with
-        | .ref (.con "'given" []) (.tuple []) _ => true
+        | .ref (.con ⟨"'given", _⟩ []) (.tuple []) _ => true
         | _ => false
       if !given then
         if ← tyHoldsLoan loan t suspended plain then return true
@@ -284,7 +284,7 @@ partial def bothAtOnce (loan brand : Nat) (write : Bool) (t : Ty) : M Bool := do
   match ← find t with
   | .tuple fields => together fields
   | .con name args =>
-    match (← get).types[name]? with
+    match (← get).types[name.name]? with
     | none => pure true
     | some decl =>
       for c in decl.ctors do
@@ -416,7 +416,7 @@ def lend (scope : Scope) (x : String) (t : Ty) : M Ty := do
   match ← find t with
   | .ref how inner cap =>
     match ← find how with
-    | .con "&mut" [] =>
+    | .con ⟨"&mut", _⟩ [] =>
       use scope (.through cap s!"`{x}`" true)
       let cap' ← freshCap
       captures cap' (.loan (← freshLoan none true (some (cap, cap'))))
@@ -864,7 +864,7 @@ def shareRef (scope : Scope) (expected actual : Ty) : M Bool := do
   match ← find expected, ← find actual with
   | .ref how inner cap, .ref how' inner' cap' =>
     match ← find how, ← find how' with
-    | .con "&" [], .con "&mut" [] =>
+    | .con ⟨"&", _⟩ [], .con ⟨"&mut", _⟩ [] =>
       let fits ← try (do unify inner inner'; pure true) catch _ => pure false
       unless fits do return false
       use scope (.through cap' "a reference" false)
@@ -935,8 +935,8 @@ partial def fitLifetimes (pos : Variance) (expected actual : Ty) (whole : Bool :
     unify how how'
     lifeFits pos cap cap'
     match ← find how with
-    | .con "&" [] => fitLifetimes pos t t' whole
-    | .con "'" [] => pure ()
+    | .con ⟨"&", _⟩ [] => fitLifetimes pos t t' whole
+    | .con ⟨"'", _⟩ [] => pure ()
     | _ => unify t t'
   | .tuple es, .tuple as =>
     if es.length != as.length then unify e a
@@ -946,7 +946,7 @@ partial def fitLifetimes (pos : Variance) (expected actual : Ty) (whole : Bool :
   | .con n es, .con m as =>
     if n != m || es.length != as.length then unify e a
     else
-      let variances := (((← get).types[n]?).map (·.variances)).getD []
+      let variances := (((← get).types[n.name]?).map (·.variances)).getD []
       for ((x, y), i) in (es.zip as).zipIdx do
         fitLifetimes (pos.through (variances.getD i .inv)) x y whole
   | .fn ps r effs tail cap, .fn ps' r' effs' tail' cap' =>
@@ -976,7 +976,7 @@ partial def mentionsRef (t : Ty) : M Bool := do
   match ← find t with
   | .ref _ _ _ => pure true
   | .tuple ts => ts.anyM mentionsRef
-  | .con "'" _ => pure true
+  | .con ⟨"'", _⟩ _ => pure true
   | .con _ args => args.anyM mentionsRef
   | _ => pure false
 
@@ -1021,14 +1021,14 @@ where
     | .tuple ts => ts.flatMap (occurrences s pos)
     | .ref how inner cap =>
       ((true, cap), pos) :: (match how with
-        | .con "&" [] => occurrences s pos inner
-        | .con "'" [] => []
+        | .con ⟨"&", _⟩ [] => occurrences s pos inner
+        | .con ⟨"'", _⟩ [] => []
         | _ => occurrences s (pos.through .inv) inner)
     | .fn ps r effs _ cap =>
       ((true, cap), pos) :: ps.flatMap (occurrences s pos.flip) ++ occurrences s pos r
         ++ effs.flatMap fun (_, args) => args.flatMap (occurrences s (pos.through .inv))
     | .con n args =>
-      let variances := ((s.types[n]?).map (·.variances)).getD []
+      let variances := ((s.types[n.name]?).map (·.variances)).getD []
       (args.zip (List.range args.length)).flatMap fun (arg, i) =>
         occurrences s (pos.through (variances.getD i .bi)) arg
 
@@ -1080,7 +1080,7 @@ number is an `Int`. -/
 def literalAt (t : Ty) (n : Int) (e : Option Nat := none) : M (Option (Option String)) := do
   match ← find t with
   | .con name [] =>
-    match Syntax.scalars.lookup name with
+    match Syntax.scalars.lookup name.name with
     | some (some width) =>
       if Glorious.fits n width then
         -- (Where it is written, `e`: made that scalar in Core.)
@@ -1255,7 +1255,7 @@ def receiverTaken (fn : String) : M (Option Bool) := do
     match ← find t with
     | .ref how _ _ =>
       match ← find how with
-      | .con "&mut" [] => pure (some true)
+      | .con ⟨"&mut", _⟩ [] => pure (some true)
       | _ => pure (some false)
     | _ => pure none : M (Option Bool))
   match (← get).fns[fn]? with

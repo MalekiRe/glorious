@@ -178,7 +178,7 @@ def schemeShape (s : Scheme) : String :=
     | 0 => []
     | fuel + 1 =>
       (s.edges.filter (·.1 == c)).flatMap fun (_, w) => match w with
-        | .ty (.ref (.con "'" []) (.tuple []) c') => match place c' with
+        | .ty (.ref (.con ⟨"'", _⟩ []) (.tuple []) c') => match place c' with
           | some k => [lifeAt k]
           | none => if seen.contains c' then [] else holds fuel (c' :: seen) c'
         -- (A value held whose type is a reference with a lifetime of the

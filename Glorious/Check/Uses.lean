@@ -91,7 +91,7 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty)
 What such a type is, is known only where the function is used. -/
 partial def hasParam : Ty → Bool
   | .rigid _ => true
-  | .con n [] => n.startsWith "'" && n.length > 1
+  | .con n [] => n.startsWith "'" && n.name.length > 1
   | .con _ args => args.any hasParam
   | .tuple args => args.any hasParam
   | .fn ps r _ _ _ => ps.any hasParam || hasParam r
@@ -109,7 +109,7 @@ def borrowsOnlyStatic (t : Ty) : M Bool := do
 /-- The type parameters a type mentions (`hasParam`'s). -/
 partial def paramNames : Ty → List String
   | .rigid r => [r.spelled]
-  | .con n [] => if n.startsWith "'" && n.length > 1 then [n] else []
+  | .con n [] => if n.startsWith "'" && n.name.length > 1 then [n] else []
   | .con _ args => args.flatMap paramNames
   | .tuple args => args.flatMap paramNames
   | .fn ps r _ _ _ => ps.flatMap paramNames ++ paramNames r
@@ -120,7 +120,7 @@ partial def paramNames : Ty → List String
 def mustDrop (t : Ty) (why : String) : M Unit := do
   unless (← get).anyMust do return
   match ← find t with
-  | .con "Int" [] => pure ()
+  | .con ⟨"Int", _⟩ [] => pure ()
   | .tuple [] => pure ()
   | .con name [] => unless Syntax.isScalar name do
       modify fun s => { s with drops := s.drops.push (t, s.pos ++ why) }
@@ -136,7 +136,7 @@ def checkAparts : M Unit := do
     if let .con n _ ← find t then
       if s.kimpls.has (.of "Drop") n then
         if let some here := s.modules.homes.lookup s.owner then
-          let home := "::".intercalate ((n.splitOn "::").dropLast)
+          let home := "::".intercalate ((n.name.splitOn "::").dropLast)
           unless here == home do
             throw s!"{pos}`{Syntax.lastSegment n}` has `Drop`, so only the module that declares it can take a field out of one: what `drop` does would not be done. Borrow the field, or ask the module for it"
 
@@ -1501,7 +1501,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
           | .param p _ => s.copyParams.contains p
           | .cond .. => false
         pure (named || (← usedAnyNumber r.spelled))
-      | .con n [] => pure (n.startsWith "'" && s.copyParams.contains (((n.drop 1).takeWhile (· != '@')).toString) || (← usedAnyNumber n))
+      | .con n [] => pure (n.startsWith "'" && s.copyParams.contains (((n.name.drop 1).takeWhile (· != '@')).toString) || (← usedAnyNumber n))
       | .con n _ => usedAnyNumber n
       | _ => pure false
     if free && !heldDrop && hasParam t && ownValue && s.ownItems && !library && !copied

@@ -220,7 +220,7 @@ def partsOf (t : Ty) : M (List Ty) := do
   match ← find t with
   | .tuple args => pure args
   | .con name args =>
-    match (← get).types[name]? with
+    match (← get).types[name.name]? with
     | none => pure []
     | some decl =>
       decl.ctors.flatMapM fun c => do
@@ -520,7 +520,7 @@ def checkLateReceivers : M Unit := do
     | .var _, _ | .ref .., _ => unify given wanted
     | _, .ref how _ _ =>
       let uniq := match ← find how with
-        | .con "&mut" [] => true
+        | .con ⟨"&mut", _⟩ [] => true
         | _ => false
       -- (Of what is copied, borrowed to be read: a copy of it, borrowed,
       -- written where it is, `Elab.receiverCopyNode`. Else its type is
@@ -1060,7 +1060,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         let ctor := match said with
           | some c => some c
           | none =>
-            match declared[n]? with
+            match declared[n.name]? with
             | some decl => match decl.ctors with
               | [c] => some c
               | _ => none
@@ -1071,7 +1071,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           let fields := sig.fieldsAt args
           -- `#` marks one of several constructors: its fields are taken by
           -- matching, since which a value has cannot be read off it.
-          let several := match declared[n]? with
+          let several := match declared[n.name]? with
             | some decl => decl.ctors.length != 1
             | none => true
           steps := steps.push (mark (some (if said.isSome && several then "#" ++ c else c)), fields.length)
@@ -1152,7 +1152,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       let goal ← zonk b.ty
       let fitting := (← get).patterned
       let named ← match goal with
-        | .con h args => pure (some (h, args))
+        | .con h args => pure (some (h.name, args))
         | .tuple _ => headFor b.trait.base goal
         | _ => pure (if fitting then goal.head else none)
       if let some (h, args) := named then

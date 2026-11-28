@@ -69,13 +69,13 @@ partial def uncovered (tys : List Ty) (rows : List (List NPat)) : M (Option (Lis
           | _ => none) with
       | some w => pure (some (s!"({", ".intercalate (w.take ts.length)})" :: w.drop ts.length))
       | none => pure none
-    | .con "Fixed" (elem :: _) =>
+    | .con ⟨"Fixed", _⟩ (elem :: _) =>
       -- (Taken apart as a tuple of its elements, `[a, b, c]`.)
       match rows.findSome? fun | .tuple ps :: _ => some ps.length | _ => none with
       | some n => uncovered (.tuple (List.replicate n elem) :: rest) rows
       | none => fallback
     | .con name args =>
-      match (← get).types[name]? with
+      match (← get).types[name.name]? with
       | some decl =>
         let tested := rows.any fun
           | .ctor _ _ :: _ => true
@@ -117,7 +117,7 @@ def otherFields (t : Ty) (idx : Nat) : M (Option (List Ty)) := do
   match ← find t with
   | .tuple ts => pure (some ((ts.zipIdx.filter (·.2 != idx)).map (·.1)))
   | .con name args =>
-    match (← get).ctors[name]? with
+    match (← get).ctors[name.name]? with
     | some sig => pure (some (((sig.fieldsAt args).zipIdx.filter (·.2 != idx)).map (·.1)))
     | none => pure none
   | _ => pure none
@@ -162,7 +162,7 @@ def fieldIndex (t : Ty) (step : String) : M (Option Nat) := do
   if let some n := step.toNat? then return some n
   match ← find t with
   | .con name _ =>
-    let ctor := match (← get).types[name]? with
+    let ctor := match (← get).types[name.name]? with
       | some decl => match decl.ctors with
         | [c] => some c
         | _ => none
@@ -300,7 +300,7 @@ partial def tyKey (t : Ty) (seen : List Nat := []) : M UInt64 := do
   | .fn ps r _ _ _ => do pure ((← ps.mapM (tyKey · seen)).foldl mixHash (mixHash 5 (← tyKey r seen)))
   | .ref how inner _ => do
     let uniq := match ← find how with
-      | .con "&mut" [] => true
+      | .con ⟨"&mut", _⟩ [] => true
       | _ => false
     pure (mixHash (if uniq then 6 else 7) (← tyKey inner seen))
 
@@ -332,7 +332,7 @@ def defaultTraitArgs (trait : Syntax.TraitKey) (subject : Ty) (keyed : List Ty :
   -- numbers, which it may then be.)
   if known then
     let scalar := fun (t : Ty) => match t with
-      | .con n [] => n == "Int" || (Syntax.scalars.lookup n).isSome
+      | .con n [] => n == "Int" || (Syntax.scalars.lookup n.name).isSome
       | _ => false
     let others ← (self :: places.filterMap (args[·]?)).mapM find
     unless others.any scalar do return false
@@ -383,7 +383,7 @@ partial def keyTy (t : Ty) (seen : List Nat := []) : M TypeExpr := do
   | .fn ps r _ _ _ => do pure (.fn (← ps.mapM (keyTy · seen)) (← keyTy r seen))
   | .ref how inner _ => do
     let uniq := match ← find how with
-      | .con "&mut" [] => true
+      | .con ⟨"&mut", _⟩ [] => true
       | _ => false
     pure (.ref uniq (← keyTy inner seen) none)
 
@@ -552,7 +552,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   let (self, args) ← subjectOf tr subject
   let known ← match ← find self with
     | .rigid _ => pure none
-    | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))
+    | .con n hargs => pure (if n.startsWith "'" then none else some (n.name, hargs))
     | other => headFor tr other
   let some (head, hargs) := known | return none
   let key ← try implKey tr self args catch _ => return none
@@ -594,7 +594,7 @@ def settleAssocs : M Unit := do
     let (self, args) ← subjectOf tr subject
     let known ← match ← find self with
       | .rigid _ => pure none
-      | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))
+      | .con n hargs => pure (if n.startsWith "'" then none else some (n.name, hargs))
       | other => headFor tr other
     let ground ← args.allM fun x => do pure (freeTys (← zonk x)).isEmpty
     let ground := ground || (← hasGenericImpl tr self)
@@ -650,7 +650,7 @@ def settleAssocs : M Unit := do
     | some (_, tr2, name2, asked2) =>
       if tr2 == tr && name2 == name then
         for (x, y) in asked.zip asked2 do
-          if let (.ref (.con "'" []) _ _, .ref (.con "'" []) _ _) := (← find x, ← find y) then unify x y
+          if let (.ref (.con ⟨"'", _⟩ []) _ _, .ref (.con ⟨"'", _⟩ []) _ _) := (← find x, ← find y) then unify x y
     | none => answers := (id, tr, name, asked) :: answers
   modify fun s => { s with assocUses := left ++ s.assocUses }
 
@@ -878,7 +878,7 @@ partial def walkTy {α : Type} (atCon : String → M (Option α)) (atFn : List S
     if ← stop name then return none
     if let some a ← args.findSomeM? (walkTy atCon atFn visiting · stop) then return some a
     if visiting.contains name then return none
-    match (← get).types[name]? with
+    match (← get).types[name.name]? with
     | none => pure none
     | some decl =>
       decl.ctors.findSomeM? fun c => do
@@ -939,12 +939,12 @@ partial def tyHoldsVar (visiting : List String) (id : Nat) (t : Ty) : M Bool := 
   | .tuple args => args.anyM (tyHoldsVar visiting id)
   | .fn _ _ _ _ _ | .ref _ _ _ => pure false
   -- (A `[T; 0]` holds no `T`.)
-  | .con "Fixed" [elem, len] => do
+  | .con ⟨"Fixed", _⟩ [elem, len] => do
     if numberOf (← zonk len) == some 0 then return false
     tyHoldsVar visiting id elem
   | .con name args => do
     if visiting.contains name then return false
-    match (← get).types[name]? with
+    match (← get).types[name.name]? with
     | none => args.anyM (tyHoldsVar visiting id)
     | some decl =>
       let s ← get

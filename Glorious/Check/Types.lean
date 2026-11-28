@@ -36,12 +36,30 @@ def Rigid.spelled : Rigid → String
   | .param name owner => s!"'{name}@{owner}"
   | .cond owner key ty => s!"'%condition:{owner}:{key}:{ty.spell}"
 
+/-- A type's head, as types are made of one: its name, for what is said,
+and its identity, a number (`TyHead.of`); two heads are one where the numbers
+are, so that telling heads apart is an integer's equality. -/
+structure TyHead where
+  name : String
+  key : UInt64
+  deriving Inhabited
+
+instance : BEq TyHead := ⟨fun a b => a.key == b.key⟩
+instance : Hashable TyHead := ⟨(·.key)⟩
+@[inline] def TyHead.of (n : String) : TyHead := ⟨n, hash n⟩
+instance : Coe String TyHead := ⟨TyHead.of⟩
+instance : CoeOut TyHead String := ⟨(·.name)⟩
+instance : ToString TyHead := ⟨(·.name)⟩
+-- (What is said of a head's name, as of its text.)
+@[inline] def TyHead.startsWith (h : TyHead) (s : String) : Bool := h.name.startsWith s
+@[inline] def TyHead.endsWith (h : TyHead) (s : String) : Bool := h.name.endsWith s
+
 inductive Ty where
   /-- A type not yet known. -/
   | var (id : Nat)
   /-- A named type: `Int`, a declared type applied to arguments, or a function's
   own type parameter. -/
-  | con (name : String) (args : List Ty)
+  | con (name : TyHead) (args : List Ty)
   | tuple (args : List Ty)
   /-- A callable, with the effects it may perform: the named effects and, if the
   row is open, a variable standing for any others. `cap` identifies what the
@@ -1405,7 +1423,7 @@ def Ty.head : Ty → Option (String × List Ty)
   | .con n args => some (n, args)
   | .tuple parts => some (s!"(tuple{parts.length})", parts)
   | .fn ps r _ _ _ => some (s!"(fn{ps.length})", ps ++ [r])
-  | .ref (.con "&mut" []) t _ => some ("(&mut)", [t])
+  | .ref (.con ⟨"&mut", _⟩ []) t _ => some ("(&mut)", [t])
   | .ref _ t _ => some ("(&)", [t])
   | .rigid r => some (r.spelled, [])
   | .var _ => none
@@ -1581,7 +1599,7 @@ partial def Ty.written : Ty → Option Syntax.TypeExpr
   | .fn ps r _ _ _ => do pure (.fn (← ps.mapM Ty.written) (← r.written))
   | .ref how t _ =>
     match how with
-    | .con "&mut" [] => t.written.map (.ref true · none)
+    | .con ⟨"&mut", _⟩ [] => t.written.map (.ref true · none)
     | _ => t.written.map (.ref false · none)
 
 /-- A type with each variable that is a type read from the implementation of
@@ -1616,7 +1634,7 @@ partial def Ty.writtenRigid : Ty → Option Syntax.TypeExpr
     pure (.fn (← ps.mapM Ty.writtenRigid) (.performs (← r.writtenRigid) effs))
   | .ref how t _ =>
     match how with
-    | .con "&mut" [] => t.writtenRigid.map (.ref true · none)
+    | .con ⟨"&mut", _⟩ [] => t.writtenRigid.map (.ref true · none)
     | _ => t.writtenRigid.map (.ref false · none)
 
 /-- A row with each instance of an effect once (of types filled in). -/
@@ -1654,9 +1672,9 @@ def bareName (n : String) : String :=
 /-- The whole number a type of the prelude stands for, if it is one of those:
 `B1<B0<B1<Z>>>` is five. -/
 partial def numberOf : Ty → Option Nat
-  | .con "Z" [] => some 0
-  | .con "B0" [n] => (numberOf n).map (2 * ·)
-  | .con "B1" [n] => (numberOf n).map (2 * · + 1)
+  | .con ⟨"Z", _⟩ [] => some 0
+  | .con ⟨"B0", _⟩ [n] => (numberOf n).map (2 * ·)
+  | .con ⟨"B1", _⟩ [n] => (numberOf n).map (2 * · + 1)
   | _ => none
 
 mutual
@@ -1667,7 +1685,7 @@ partial def showTy : Ty → String
   | .con n [] => if bareName n == Syntax.neverParam then "!" else if n == "Z" then "0" else bareName n
   | .con n args =>
     -- (A length is shown as the number, and an array with one as written.)
-    match numberOf (.con n args), n, args with
+    match numberOf (.con n args), n.name, args with
     | some k, _, _ => toString k
     | none, "Fixed", [element, length] => s!"[{showTy element}; {showTy length}]"
     -- (Borrowed text and elements as Rust writes them: `&str`, `&[T]`.)
@@ -1680,8 +1698,8 @@ partial def showTy : Ty → String
   | .fn ps r effs _ _ =>
     let sig := s!"fn({", ".intercalate (ps.map showTy)}) -> {showTy r}"
     if effs.isEmpty then sig else s!"{sig} / {showEffs effs}"
-  | .ref (.con "&mut" []) t _ => s!"&mut {showTy t}"
-  | .ref (.con "'" []) _ _ => "'_"
+  | .ref (.con ⟨"&mut", _⟩ []) t _ => s!"&mut {showTy t}"
+  | .ref (.con ⟨"'", _⟩ []) _ _ => "'_"
   | .ref _ t _ => s!"&{showTy t}"
 
 partial def showEffs (effs : List (String × List Ty)) : String :=
