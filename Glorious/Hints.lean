@@ -294,7 +294,11 @@ partial def patTysD (d : Typer.Decls) : Pat → Ty → Option (List Ty)
   | .bind, τ => some [τ]
   | .int _, _ => some []
   | .ctor 0 ps, .tuple fs => patsTysD d ps fs
-  | .ctor tag ps, .data n args => do
+  | .ctor tag ps, .data n args =>
+    if n == fixedName then match args with
+      | [t, _] => patsTysD d ps (List.replicate ps.length t)
+      | _ => none
+    else do
     let (_, fields) ← d.ctors[tag]?
     let vars := ((d.typeParams[n]?).getD []).zip args
     patsTysD d ps (← fields.mapM (tyOf d vars))
@@ -304,6 +308,32 @@ partial def patsTysD (d : Typer.Decls) : List Pat → List Ty → Option (List T
   | p :: ps, τ :: τs => do pure ((← patTysD d p τ) ++ (← patsTysD d ps τs))
   | _, _ => none
 end
+
+/-- What a constructor builds, its type's arguments read off what its
+fields are given (`[T; N]`'s too); one no field shows, of what the checker
+said of it. -/
+def constructOf (env : Env) (Γ : Array (Option Ty)) (binds : List (String × Ty)) (said : Option TypeExpr)
+    (tag : Nat) (args : List Atom) : Option Ty := do
+  let atomTy := fun (a : Atom) => match a with
+    | .var i => Γ[i]?.join
+    | .int _ => some .int
+  if fixedBase ≤ tag then
+    let n := tag - fixedBase
+    let elem ← match args.head? with
+      | some a => atomTy a
+      | none => (said.bind (tyOf env.decls binds)).bind fixedElem
+    return .data fixedName [elem, .data (lenBase + n) []]
+  let (owner, fields) ← env.decls.ctors[tag]?
+  let params := (env.decls.typeParams[owner]?).getD []
+  let tys ← args.mapM atomTy
+  let learned := (fields.zip tys).foldl (fun b (f, t) => matchTy env.decls b (rigidOf params f) t) []
+  let saidArgs : List (Option TypeExpr) := match said with
+    | some (.name _ as) => if as.length == params.length then as.map some else params.map fun _ => none
+    | _ => params.map fun _ => none
+  let targs ← (params.zip saidArgs).mapM fun (p, s) =>
+    if p.startsWith "'" then some (.ref .unit)
+    else (learned.lookup s!"%rigid:{p}").orElse fun _ => s.bind (tyOf env.decls binds)
+  pure (.data owner targs)
 
 /-- The type of a right-hand side, where its parts or the checker say it. -/
 def rhsTy (env : Env) (binds : List (String × Ty)) (Γ : Array (Option Ty)) (said : Option TypeExpr) : Rhs → Option Ty
@@ -318,7 +348,8 @@ def rhsTy (env : Env) (binds : List (String × Ty)) (Γ : Array (Option Ty)) (sa
     | .fixed _, _ => none
     | _, _ => some .int
   | .construct 0 args => do pure (.tuple (← args.mapM (atomTy Γ)))
-  | .construct _ _ => said.bind (tyOf env.decls binds)
+  | .construct tag args =>
+    (said.bind (tyOf env.decls binds)).orElse fun _ => constructOf env Γ binds said tag args
   | .place pl => do
     let mut t ← Γ[pl.var]?.join
     for i in pl.path do t ← fieldOf env.decls t i
@@ -474,14 +505,18 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
     let atUse := match at_ with
       | .call .. => (env.said[(f, c, w.Γ.size)]?).bind (tyOf env.decls w.binds)
       | _ => none
-    let written : Option Ty := do
+    let written : Option Ty := (do
       let (tparams, annots, ret) ← env.decls.fns[g]?
       -- (One that says nothing of it gives `()`.)
       let ret := ret.getD (.tuple [])
       let b := (annots.zip params).foldl (fun b (a, p) => match a with
         | some te => matchTy env.decls b (rigidOf tparams te) p
         | none => b) []
-      tyOf env.decls b (rigidOf tparams ret)
+      tyOf env.decls b (rigidOf tparams ret)).orElse fun _ => do
+      -- (Or what the checker found it to give, of what it is given.)
+      let .fn ps r ← env.selfTy[g]? | none
+      let b := (ps.zip params).foldl (fun b (a, p) => matchTy env.decls b a p) []
+      tyOf env.decls b r
     -- (One that does not return gives what its place wants: the clause's
     -- result where it ends the clause, else as the checker says it.)
     let wanted := match at_ with

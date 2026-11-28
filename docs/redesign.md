@@ -766,3 +766,21 @@ others, 290 handlers: effects with arguments), what callables perform
 (the checker's rows, as operations), each function at each signature from
 `main` (step 3), and the declared types and operations those use
 (`Typer.declsFor`, kept).
+
+2 and 3, as they stand: `Hints.typesOf` (on asking, `GLORIOUS_TYPES=hints`)
+gives Core's types as `Typer.typesOf` does, each function at each
+signature found from `main` (closures as they are made, handlers'
+functions, destroyers). With it the suite types 1,368 programs of the
+1,464 `Typer` types, and every hint it finds of covey/fleet agrees with
+`Typer`'s. What is left is one thing: a type parameter of a function that
+nothing it is given or gives shows (`World::query<Q>`, an implementation's
+`Q` of `Fetch for (Q, ..)` in its copy for a type), which `Typer` finds by
+unification over the body and the checker knows only where the function
+is called: the checker is to keep, at each call, what each type parameter
+of the callee is (in the caller's), so that from `main` each function's
+parameters are known. Then `Typer` goes.
+
+Found on the way: a program the lowering does not take runs on the
+unlowered machine, and some give other output there
+(`GLORIOUS_UNLOWERED=1`: `o == Some(p.name.clone())` of texts is false);
+the suite does not see it, as every program it has is lowered.
