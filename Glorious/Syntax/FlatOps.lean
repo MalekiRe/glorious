@@ -583,6 +583,29 @@ def mapTypesOf (f : TypeExpr → Except String TypeExpr) (b : Body) (e : ExprId)
   let (e, b) := ((← mapTypes.typesRewrite f b places).ex e).run b
   pure (b, e)
 
+/-- Does naming what is borrowed name something of this first, outside its
+blocks (`nameBorrowsE`)? -/
+partial def Body.hoists (b : Body) (e : ExprId) : Bool :=
+  match b.expr e with
+  | .call _ f args =>
+    (match b.mark? f with
+      | some .held | some .borrow | some .borrowMut | some .through => true
+      | _ => b.hoists f) || args.any b.hoists
+  | .tailCall _ f args => b.hoists f || args.any b.hoists
+  | .tuple args => args.any b.hoists
+  | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ => b.hoists x
+  | _ => false
+
+/-- Does this compute something where it is: a call, a handler or a block
+(not a name, a number, a borrow of a name or a callable)? -/
+partial def Body.computes (b : Body) (e : ExprId) : Bool :=
+  match b.expr e with
+  | .call _ f _ => (b.mark? f).isNone || (b.direct e).any b.computes
+  | .tailCall .. | .handle .. | .labelScope .. => true
+  | .tuple args => args.any b.computes
+  | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ => b.computes x
+  | _ => false
+
 mutual
 
 /-- A value that is borrowed where it is made, `&f(x)`, given a name first
@@ -630,13 +653,31 @@ partial def nameBorrowsE (e : ExprId) : StateT (Array StmtId) Build ExprId := do
     (pushExpr (.handle subject' arms') : Build ExprId)
   | _ => nameBorrowsChildren e
 
+/-- Arguments made so, in the order they are computed: one before another
+that names something first (`hoists`), that computes something (`computes`),
+is named first itself, so that what it computes is not computed after what
+the later one names. `key` tells the names made apart. -/
+partial def nameInOrder (key : Nat) (args : Array ExprId) : StateT (Array StmtId) Build (Array ExprId) := do
+  let b ← getThe Body
+  let last := ((List.range args.size).filter fun j => b.hoists args[j]!).getLast?
+  let mut out := #[]
+  for (a, j) in args.zipIdx do
+    if last.any (j < ·) && !b.hoists a && b.computes a then
+      let a' ← nameBorrowsE a
+      let name := s!"%ordered{key}_{j}"
+      let st ← (pushStmt (.let_ (.var name) a') : Build StmtId)
+      modify (·.push st)
+      out := out.push (← (pushExpr (.name none name) : Build ExprId))
+    else out := out.push (← nameBorrowsE a)
+  pure out
+
 /-- The parts directly inside, and the blocks inside, made so. -/
 partial def nameBorrowsChildren (e : ExprId) : StateT (Array StmtId) Build ExprId := do
   let b ← getThe Body
   match b.expr e with
-  | .call i g args => do (pushExpr (.call i (← nameBorrowsE g) (← args.mapM nameBorrowsE)) : Build _)
-  | .tailCall i g args => do (pushExpr (.tailCall i (← nameBorrowsE g) (← args.mapM nameBorrowsE)) : Build _)
-  | .tuple args => do (pushExpr (.tuple (← args.mapM nameBorrowsE)) : Build _)
+  | .call i g args => do (pushExpr (.call i (← nameBorrowsE g) (← nameInOrder i args)) : Build _)
+  | .tailCall i g args => do (pushExpr (.tailCall i (← nameBorrowsE g) (← nameInOrder i args)) : Build _)
+  | .tuple args => do (pushExpr (.tuple (← nameInOrder (b.idOf e + (1 <<< 40)) args)) : Build _)
   | .proj x n => do (pushExpr (.proj (← nameBorrowsE x) n) : Build _)
   | .deref x => do (pushExpr (.deref (← nameBorrowsE x)) : Build _)
   | .reborrow u x => do (pushExpr (.reborrow u (← nameBorrowsE x)) : Build _)
@@ -898,6 +939,34 @@ partial def receiverExpr (e : ExprId) : Build ExprId := do
       | some e => pure e
       | none => plain ()
     | .name q name, args0 =>
+      -- (A comparison: each operand that is no name nor a whole number
+      -- named first, so that the checker, which compares by reference what
+      -- is not copied, knows what it compares before it reads the
+      -- comparison, `Check.compareByType`.)
+      if let [l, r] := args0 then
+        if (compareOps.lookup name).isSome then
+          -- (A name, or a literal: a whole number, or one of a type made of
+          -- whole numbers, `'c'`, `"text"`, `5u8`.)
+          let named := fun (a : ExprId) => match b.expr a with
+            | .int _ => true
+            | .name none x => !(lastSegment x).front.isUpper
+            | .call _ g args => ((b.bare? g).any fun n => (lastSegment n).endsWith "_of") && args.all fun a => match b.expr a with
+              | .int _ => true
+              | _ => false
+            | _ => false
+          if named l && named r then return ← plain ()
+          -- (In a block of its own where the comparison is: computed where
+          -- it is, and let go once compared.)
+          let mut lets : Array StmtId := #[]
+          let mut operands : Array ExprId := #[]
+          for (a, k) in [(l, 0), (r, 1)] do
+            if named a then operands := operands.push a
+            else
+              let x := s!"%compared{id}_{k}"
+              lets := lets.push (← pushStmt (.let_ (.var x) a))
+              operands := operands.push (← pushExpr (.name none x))
+          let compared ← pushStmt (.expr (← pushExpr (.call id f operands)))
+          return ← pushExpr (.labelScope "%block" (lets.push compared))
       -- (Each argument marked `%receiver(..)`: a dot call's receiver, or each
       -- of a comparison's two (`Decision.compareByRef`), borrowed as `name`
       -- takes it.)

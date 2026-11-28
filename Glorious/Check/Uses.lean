@@ -728,6 +728,8 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String ×
         match v with
         | .gone t => if t == "@" ++ l then (AVal.unknown, n) else (v, n)
         | _ => (v, n))
+    -- (A block the front end makes, `%block`, is left through no label.)
+    else if l == "%block" then pure alts
     else
       -- Leaving through the label gives a value the count does not follow.
       pure (alts ++ [(.unknown, maxUses alts)])
@@ -1374,7 +1376,7 @@ def flagPlace (owner : String) (line col : Nat) (x : String) (t : Ty) (pos : Str
   let some (l, c) := at_ | return false
   modify fun st =>
     { st with dropCands := st.dropCands.push (⟨owner, l, c, .given x, false⟩, t, pos)
-              flagged := pos :: st.flagged }
+              flagged := (owner, pos) :: st.flagged }
   pure true
 /-- With the types of a function known: note which of its calls certainly come
 back, and look at each binding that may have to be used. `fnTy` is the
@@ -1505,7 +1507,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       | _ => pure false
     if free && !heldDrop && hasParam t && ownValue && s.ownItems && !library && !copied
         && (← tyMustUse roots [] t).isNone then
-      unless s.flagged.contains pos || usesStmts b resumptive x body == 0 || usedFirst b quiet x body do
+      unless s.flagged.contains (s.owner, pos) || usesStmts b resumptive x body == 0 || usedFirst b quiet x body do
         if (← pathUses { ctx with handed := true, capturesOwned := true } names x b body) == some 0 then
           let place := ((pos.splitOn ":").take 2).filterMap String.toNat?
           let (line, col) := match place with
@@ -1526,7 +1528,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       if let some name := named then
         -- (A variable that gives its value away asks, when its block ends,
         -- whether it did: it may on some paths and not on others.)
-        unless s.flagged.contains pos || usesStmts b resumptive x body == 0
+        unless s.flagged.contains (s.owner, pos) || usesStmts b resumptive x body == 0
             || (!heldDrop && usedFirst b quiet x body) do
           -- (A callable is counted as what has to be used is: handed to a
           -- function, it is used only if that function uses it, since one

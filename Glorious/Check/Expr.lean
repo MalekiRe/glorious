@@ -2701,7 +2701,7 @@ partial def inferLetMutStmt (scope : Scope) (amb : Row) (rest : List Flat.StmtId
   if given then
     modify fun s =>
       { s with
-        flagged := here :: s.flagged
+        flagged := (s.owner, here) :: s.flagged
         givenSites := (here, ⟨s.owner, at_.1, at_.2, .given x, false⟩, t, pos) :: s.givenSites }
   -- (What it holds has a `drop` to run where the block ends: what that
   -- borrows is held till then.)

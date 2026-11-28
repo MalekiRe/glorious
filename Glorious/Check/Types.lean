@@ -638,7 +638,7 @@ structure St where
   /-- Where such variables are, as the count of uses knows a binding: one of
   them may hold a value with `Drop` that some paths use and others do not,
   since its cleanup asks whether it was. -/
-  flagged : List String := []
+  flagged : List (String × String) := []
   /-- For each of them, where its cleanup would go: it is put there only if
   some path does not use the value, which is known once the function's
   uses are counted. -/

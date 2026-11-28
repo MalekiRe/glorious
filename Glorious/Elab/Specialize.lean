@@ -438,6 +438,9 @@ def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
         if l != line || c != col then none else
         match b.stmt inner with
         | .let_ pat value =>
+          -- (One that binds another, with a value that names `x` first
+          -- inside it, `{ let x = ..; .. }`: there.)
+          if !(patVars pat).contains x then some (do pure ((← (heldFirst x (some (l, c))).st s) :: (← go.stmts rest))) else
           some (do
             let value ← go.ex value
             let rest ← go.stmts rest
