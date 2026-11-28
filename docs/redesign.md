@@ -816,3 +816,18 @@ one in a space of its own raises nothing, `Body.add`). `Hints` takes what
 it used of `Typer`: the declarations (`Decls`, `declsOf`) and the declared
 types and operations the types use (`declsFor`, now without unification).
 
+## Section 6, layouts, as done
+
+Layouts follow from types (F1): `writeLayouts` and its `layoutOf`/`reprOf`
+are gone, with the `Layout` and `Repr` traits and every implementation
+written out for them; `size_of`, `align_of`, `repr_store` and `repr_load`
+are the prelude's functions over the lowering's layout (`size_of_at`,
+`ptr_ref_at`, `read_out`, `overwrite`). What made it possible: a function's
+signature carries the type arguments its values do not show
+(`FnSig.targs`, `Hint.inst`), found from each call's instantiation
+(`Hints.W.useAt`, `Env.phantoms`), so that `size_of<u8>` and
+`size_of<Shape>` are copies of their own; and the typed lowering makes a
+copy of each signature (`targetsOf`), the grouping of signatures into kinds
+(`settle`) gone. `NilRepresented`, a bound a program asks, is still written
+out for each type that is nothing (`writeNils`).
+

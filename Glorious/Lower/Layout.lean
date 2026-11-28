@@ -7,9 +7,10 @@ public import Glorious.Lower.Types
 # The layout of a Core type
 
 What a value of a type is in memory (`Lay`), from its type as the
-types have it: Rust's layout, as the library's `Layout` writes it out
-for a type from its declaration (`Syntax.Flat.writeLayouts`), so that the
-two say the same size of every type.
+types have it: Rust's layout. What a program asks of a type's size and
+alignment (`size_of<T>()`, `align_of<T>()`) and what it writes to memory
+and reads back (`repr_store`, `repr_load`) are this layout, of the type
+at each copy (`FnSig.targs`).
 
 - `Int` is 8 bytes with a sign, a scalar its bits' bytes (`Ty.scalar`).
 - A tuple, or a type of one constructor, is its fields one after another,

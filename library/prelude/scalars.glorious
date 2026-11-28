@@ -340,19 +340,19 @@ fn ptr_address<T>(p: *const T) -> usize { p.0 }
 fn ptr_mut_address<T>(p: *mut T) -> usize { p.0 }
 fn ptr_const<T>(p: *mut T) -> *const T { Ptr(p.0) }
 // The address so many `T`s on.
-fn ptr_offset<T>(p: *mut T, n: Int) -> *mut T where T: Layout { PtrMut(usize_of(int_add(usize_bits(p.0), int_mul(n, size_of<T>())))) }
+fn ptr_offset<T>(p: *mut T, n: Int) -> *mut T { PtrMut(usize_of(int_add(usize_bits(p.0), int_mul(n, size_of<T>())))) }
 // What is at the address, copied out; and what is put there, moved in, what
 // was there neither given back nor destroyed. The address is a `T`'s.
-unsafe fn ptr_load<T>(p: *const T) -> T where T: Repr { <T as Repr>::repr_load(p.0) }
-unsafe fn ptr_store<T>(p: *mut T, value: T) where T: Repr { <T as Repr>::repr_store(p.0, value) }
+unsafe fn ptr_load<T>(p: *const T) -> T { repr_load(p.0) }
+unsafe fn ptr_store<T>(p: *mut T, value: T) where T: Use<[1, 1]> { repr_store(p.0, value) }
 // Memory for so many `T`s, zeroed; and memory freed. Each is the memory's
 // owner's to get right.
-unsafe fn alloc_of<T>(count: Int) -> *mut T where T: Layout {
+unsafe fn alloc_of<T>(count: Int) -> *mut T {
     PtrMut(mem_alloc(usize_of(int_mul(count, size_of<T>())), usize_of(align_of<T>())))
 }
 unsafe fn free_of<T>(p: *mut T) { mem_free(p.0) }
 // So many `T`s copied from one place to another.
-unsafe fn copy_of<T>(to: *mut T, from: *const T, count: Int) where T: Layout {
+unsafe fn copy_of<T>(to: *mut T, from: *const T, count: Int) {
     mem_copy(to.0, from.0, usize_of(int_mul(count, size_of<T>())))
 }
 
@@ -394,37 +394,6 @@ impl<T, N> Index for Fixed<T, N> {
     fn index_set(a: Fixed<T, N>, i: Int, v: T) -> Fixed<T, N> { fixed_set(a, i, v) }
 }
 impl<T, N> Len for Fixed<T, N> where N: Known { fn len(a: Fixed<T, N>) -> Int { N::VALUE } }
-// In memory, its elements one after another, as Rust lays out `[T; N]`.
-impl<T, N> Layout for Fixed<T, N> where T: Layout, N: Known {
-    const SIZE: Int = int_mul(N::VALUE, size_of<T>());
-    const ALIGN: Int = align_of<T>();
-}
-// (Each element written where it goes; the array let go of, its elements
-// written out. Read back, the first fills it and each after is put in its
-// place.)
-impl<T, N> Repr for Fixed<T, N> where T: Repr, T: Layout, N: Known, T: Use<[0, *]> {
-    unsafe fn repr_store(at: usize, value: Fixed<T, N>) { fixed_store_from(at, value, 0, N::VALUE) }
-    unsafe fn repr_load(at: usize) -> Fixed<T, N> {
-        match(int_eq(N::VALUE, 0)) {
-            1 => unsafe { transmute(fixed_make()) },
-            _ =>
-                let mut out = fixed_fill(unsafe { <T as Repr>::repr_load(at) }, N::VALUE);
-                let mut i = 1;
-                while({ int_lt(i, N::VALUE) == 1 }) {
-                    out = fixed_set(out, i, unsafe { <T as Repr>::repr_load(repr_at(at, int_mul(i, size_of<T>()))) });
-                    i = int_add(i, 1)
-                };
-                out
-        }
-    }
-}
-// (Plain data, copied: each element written where it goes.)
-unsafe fn fixed_store_from<T, N>(at: usize, a: Fixed<T, N>, i: Int, n: Int) where T: Repr, T: Layout, T: Use<[0, *]> {
-    match(int_lt(i, n)) {
-        0 => (),
-        _ => <T as Repr>::repr_store(repr_at(at, int_mul(i, size_of<T>())), fixed_get(a, i)); tail fixed_store_from(at, a, int_add(i, 1), n)
-    }
-}
 // `N` of one value: `[x; N]`.
 fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { fixed_fill(x, N::VALUE) }
 // `[x; 4]`: four of `x`.

@@ -43,12 +43,15 @@ def Ty.unit : Ty := .tuple []
 arguments. -/
 abbrev Row := List (Nat × List Ty)
 
-/-- A function's signature: what it is made with, given, gives and performs. -/
+/-- A function's signature: what it is made with, given, gives and performs;
+and what each of its type parameters that none of those shows is
+(`size_of<T>()`'s `T`), as rustc's instance has its type arguments. -/
 structure FnSig where
   caps : List Ty
   params : List Ty
   ret : Ty
   eff : Row
+  targs : List Ty := []
   deriving BEq, Hashable, Inhabited
 
 /-- What the lowering is told rather than left to find. -/
@@ -59,6 +62,9 @@ inductive Hint where
   /-- What a handler yields, and the operations it serves, in the handler's
   order, each with the type arguments of its effect. -/
   | handler (ρ : Ty) (H : Row)
+  /-- A closure's type, and the type arguments of the signature of its
+  function it is made at (`FnSig.targs`). -/
+  | inst (σ : Ty) (targs : List Ty)
   deriving BEq, Hashable, Inhabited
 
 /-- One use of a declared data type: at these arguments, its constructors with

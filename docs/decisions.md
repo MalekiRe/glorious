@@ -8706,3 +8706,21 @@ first). An implementation refused is said so too, and what names its type
 is not read (`impl Make for A` and two more refused are said together).
 Six cases whose program had a second refusal after the declaration's
 (`fn main() { 0 }`) are written without it.
+
+## Layouts follow from types
+
+There is no `Layout` or `Repr` trait. Every type has a layout (Rust's
+`Sized`, implicit), worked out by the lowering from the type
+(`Lower.Layout`): `size_of<T>()` and `align_of<T>()` ask it of a `*mut T`
+(`size_of_at`), and `repr_store(at, value)` / `repr_load(at)` write a
+value's bytes to an address as its type lays them out and read them back,
+for any type, as Rust's `ptr::write` and `ptr::read` are. No bound is written
+for them (`T: Layout`, `T: Repr` are gone from programs). The type a copy of
+a function is at, where nothing it is given or gives shows it
+(`size_of<T>()`'s `T`), is part of the copy's signature (`FnSig.targs`), as
+rustc's instance has its type arguments; each signature of a function is a
+copy of its own. A program the lowering does not take cannot ask a size:
+the unlowered machine has no types (`size_of_at` there is 8).
+`NilRepresented` stays a trait, written out for each type that is nothing
+(`writeNils`), as a bound a program can ask.
+

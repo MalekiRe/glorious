@@ -124,6 +124,9 @@ structure Env where
   /-- A copy of an implementation's function: what the implementation's
   type parameters are (`Elab.Lowered.implTypes`). -/
   implTypes : Std.HashMap Nat (List (String × TypeExpr)) := {}
+  /-- Each function's type parameters none of what it is given or gives
+  shows (`size_of<T>()`'s `T`): its signatures say them (`FnSig.targs`). -/
+  phantoms : Std.HashMap Nat (List String) := {}
   /-- What a function in a copy reads from what traits leave to the
   implementations the copy is given (`Elab.Lowered.projTypes`). -/
   projTypes : Std.HashMap Nat (List (String × TypeExpr)) := {}
@@ -581,6 +584,22 @@ def W.noteCalled (w : W) (env : Env) (f c i g : Nat) (params : List Ty) : W :=
     if binds.isEmpty then w else { w with called := w.called.push ((g, params), binds) }
   | none => w
 
+/-- The local `i`, a closure of `g`, used at `sig`: what `g`'s type
+parameters are there noted (`noteCalled`); those of them nothing `g` is
+given or gives shows (`Env.phantoms`), as the checker found them at the
+call, in the signature and the local's hint (`FnSig.targs`, `Hint.inst`). -/
+def W.useAt (w : W) (env : Env) (f c i g : Nat) (sig : FnSig) : W :=
+  let w := w.noteCalled env f c i g sig.params
+  let ts : List Ty := match env.phantoms[g]?, env.insts[(f, c, i)]? with
+    | some ps, some insts =>
+      (ps.mapM fun p => ((insts.lookup p).join).bind (tyOf env.decls w.binds)).getD []
+    | _, _ => []
+  let w := { w with uses := w.uses.push (g, { sig with targs := ts }) }
+  if ts.isEmpty then w else
+  match w.hintAt[i]?, w.Γ[i]?.join with
+  | some h, some σ => { w with hints := w.hints.set! h (some (.inst σ ts)) }
+  | _, _ => w
+
 /-- A local and its hint. -/
 def W.bind (w : W) (σ : Option Ty) (hinted : Bool) : W :=
   let i := w.Γ.size
@@ -652,8 +671,7 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
                 b := matchTy env.decls b p σ
         if let some (.fn qs r eff once _) := tyOf env.decls b te then
           w := { w.found i (.fn qs r eff once (some caps)) with binds := b }
-          w := w.noteCalled env f c i g qs
-          w := { w with uses := w.uses.push (g, { caps, params := qs, ret := r, eff }) }
+          w := w.useAt env f c i g { caps, params := qs, ret := r, eff }
   | _ => pure ()
   -- (A closure given to a named function that waits too: of the type the
   -- function says it takes there, its type parameters learned of the
@@ -744,9 +762,8 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
     if let some r := ret then
       let σ : Ty := .fn params r w.eff false (some caps)
       w := w.found i σ
-      w := w.noteCalled env f c i g params
-      w := { w with uses := w.uses.push (g, { caps, params, ret := r, eff := w.eff })
-                    why := w.why.insert i s!"used at {firstRef i at_}, given {params.map showTy}, gives by {if atUse.isSome then "the use" else "its body or its place"}" }
+      w := w.useAt env f c i g { caps, params, ret := r, eff := w.eff }
+      w := { w with why := w.why.insert i s!"used at {firstRef i at_}, given {params.map showTy}, gives by {if atUse.isSome then "the use" else "its body or its place"}" }
       -- (What the checker said of it, a type parameter it names learned of
       -- what it was found to be.)
       if let some te := env.said[(f, c, i)]? then
@@ -839,9 +856,7 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
     | .closure g caps, some σ =>
       let w := w.bind (some σ) true
       let w := match σ with
-        | .fn ps r eff _ (some capTys) =>
-          let w := w.noteCalled env f c i g ps
-          { w with uses := w.uses.push (g, { caps := capTys, params := ps, ret := r, eff }) }
+        | .fn ps r eff _ (some capTys) => w.useAt env f c i g { caps := capTys, params := ps, ret := r, eff }
         | _ => w
       let w := match caps.mapM w.atomTy with
         | some capTys =>
@@ -955,6 +970,15 @@ where
     | .ref u t l => .ref u (atGat asked t) l
     | t => t
 
+/-- The type parameters a written type names (`%rigid:T`). -/
+partial def rigidsIn : TypeExpr → List String
+  | .name x args => (if x.startsWith "%rigid:" then [x] else []) ++ args.flatMap rigidsIn
+  | .tuple ts => ts.flatMap rigidsIn
+  | .fn ps r => ps.flatMap rigidsIn ++ rigidsIn r
+  | .performs r effs => rigidsIn r ++ effs.flatMap fun (_, a) => a.flatMap rigidsIn
+  | .ref _ t _ => rigidsIn t
+  | _ => []
+
 /-- The environment of a program for the forward typing. -/
 def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
     (nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option TypeExpr))) := {})
@@ -1014,7 +1038,14 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
     match projTypes[owner]? with
     | some ts => m.insert f ts
     | none => m) {}
-  pure { decls, p := out.program, said, names := out.fnNames, selfTy, insts, implSelf, implTypes, projTypes, settled }
+  let phantoms := selfTy.fold (fun m f te =>
+    match decls.fns[f]? with
+    | some (tparams, _, _) =>
+      let shown := rigidsIn te
+      let ps := tparams.filter fun p => !p.startsWith "'" && !shown.contains s!"%rigid:{p}"
+      if ps.isEmpty then m else m.insert f ps
+    | none => m) {}
+  pure { decls, p := out.program, said, names := out.fnNames, selfTy, insts, implSelf, implTypes, projTypes, phantoms, settled }
 
 /-- A function's clause at a signature: its hints, the functions at the
 signatures its closures are made at, and what it was found to give; an
@@ -1031,12 +1062,18 @@ def clauseAt (env : Env) (made called : Std.HashMap (Nat × List Ty) (List (Stri
         | some te => matchTy env.decls b (rigidOf tparams te) p
         | none => b) []
     | none => []
-  let binds := binds ++ (made.getD (fn, sig.caps) []) ++ (called.getD (fn, sig.params) [])
+  -- (What its signature says of the type parameters nothing else shows,
+  -- first.)
+  let given := ((env.phantoms.getD fn []).zip sig.targs).map fun (p, t) => (s!"%rigid:{p}", t)
+  -- (Then what its own type says of them at the signature, before what a
+  -- call said, which a call at other types with the same arguments says
+  -- too.)
+  let own := match env.selfTy[fn]? with
+    | some (.fn ps r) => matchTy env.decls ((ps.zip sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) []) r sig.ret
+    | _ => []
+  let binds := given ++ binds ++ own ++ (made.getD (fn, sig.caps) []) ++ (called.getD (fn, sig.params) [])
   let binds := binds ++ implBinds env fn
   let binds := if env.settled.contains fn then binds ++ [("%settled", .unit)] else binds
-  let binds := match env.selfTy[fn]? with
-    | some (.fn ps r) => matchTy env.decls ((ps.zip sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds) r sig.ret
-    | _ => binds
   let (w, _) := go env 0 fn ci { Γ, binds, ret := some sig.ret, eff := sig.eff } cl.body
   let localOf : Std.HashMap Nat Nat := w.hintAt.fold (fun m i h => m.insert h i) {}
   let hints ← w.hints.toList.zipIdx.mapM fun (h, k) => match h with
@@ -1153,6 +1190,7 @@ def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap Strin
 where
   hintTypes : Hint → List Ty
     | .ty t => [t]
+    | .inst t ts => t :: ts
     | .handler ρ H => ρ :: H.flatMap (·.2)
   hintOps : Hint → List (Nat × List Ty)
     | .handler _ H => H

@@ -86,7 +86,7 @@ def laidOp (C : Types) (Γ : Env) (op : MemOp) (args : List Atom) : L MemOp := d
 
 /-- Each function's uses as the lowering first writes them: at the `i`th
 of `fn`'s signatures `base[fn] + i`, and at none of them `total + fn`; which
-function each is comes once the signatures are split into kinds. -/
+function each is comes once every function is lowered. -/
 structure Uses where
   base : Array Nat
   total : Nat
@@ -103,9 +103,9 @@ def _root_.Glorious.Core.Tm.anyFn (p : Nat → Bool) : Tm → Bool
 /-- Which of `fn`'s signatures a use of it is at: the first whose captures are
 `Cs`, whose parameters begin with `Ps` and whose result is `ρ` (where
 given). -/
-def sigAt (C : Types) (fn : Nat) (Cs : List Ty) (Ps : List Ty) (ρ : Option Ty) : Option Nat :=
+def sigAt (C : Types) (fn : Nat) (Cs : List Ty) (Ps : List Ty) (ρ : Option Ty) (ts : List Ty := []) : Option Nat :=
   (C.sigsOf fn).findIdx? fun e =>
-    Cs == e.sig.caps && Ps == e.sig.params.take Ps.length && ρ.all (· == e.sig.ret)
+    Cs == e.sig.caps && Ps == e.sig.params.take Ps.length && ρ.all (· == e.sig.ret) && ts == e.sig.targs
 
 /-- A use of a function as a function's lowering finds it: at the signature
 its captures, parameters and result say (`sigAt`); or at none.
@@ -113,17 +113,17 @@ Which function that is, is worked out once every function is lowered
 (`Ask.target`): a lowering asks, and is kept with what it asked
 (`TypedKept`). -/
 inductive Ask where
-  | at (fn : Nat) (Cs Ps : List Ty) (ρ : Option Ty)
+  | at (fn : Nat) (Cs Ps : List Ty) (ρ : Option Ty) (ts : List Ty := [])
   | whole (fn : Nat)
 
 def Ask.mapFn (f : Nat → Nat) : Ask → Ask
-  | .at fn Cs Ps ρ => .at (f fn) Cs Ps ρ
+  | .at fn Cs Ps ρ ts => .at (f fn) Cs Ps ρ ts
   | .whole fn => .whole (f fn)
 
 /-- The use as the lowering first writes it (`Uses`). -/
 def Ask.target (C : Types) (U : Uses) : Ask → Nat
-  | .at fn Cs Ps ρ =>
-    match sigAt C fn Cs Ps ρ with
+  | .at fn Cs Ps ρ ts =>
+    match sigAt C fn Cs Ps ρ ts with
     | some i => U.base[fn]!+ i
     | none => U.total + fn
   | .whole fn => U.total + fn
@@ -156,11 +156,15 @@ def handlerFns (C : Types) (Γ : Env) (ret : Nat) (ops : List (Nat × Nat))
 the types have for it; each use of a function asked (`Ask`). -/
 partial def lowerTm (C : Types) (ε : Row) : Env → Tm → List Hint → LT Tm
   | _, .ret a, _ => pure (.ret a)
-  | Γ, .let_ rhs body, .ty σ :: hs => do
+  | Γ, .let_ rhs body, h :: hs => do
+    let (σ, ts) ← match h with
+      | .ty σ => pure (σ, [])
+      | .inst σ ts => pure (σ, ts)
+      | .handler .. => throw "a `let` without its type"
     let rhs ← match rhs, σ with
       | .closure fn captures, .fn Ps ρ .. => do
         let Cs ← need (asTy Γ captures) "a closure of what has no type"
-        pure (.closure (← ask (.at fn Cs Ps (some ρ))) captures)
+        pure (.closure (← ask (.at fn Cs Ps (some ρ) ts)) captures)
       -- (Made with what `a` was made with: its type says so.)
       | _, _ => pure rhs
     pure (.let_ rhs (← lowerTm C ε (Γ.push σ) body hs))
@@ -278,24 +282,21 @@ def Targets.several (T : Targets) (fn : Nat) : Bool :=
 /-- The function a use of `fn` at its signature `i` is. -/
 def Targets.at (T : Targets) (fn i : Nat) : Nat := ((T.ids[fn]?).bind (·[i]?)).getD fn
 
-/-- What a function is at each of its signatures, for a split of them into
-kinds (`kinds`, by function and signature): the functions each kind is, the
-first itself and each other a copy of it, put after the program's. -/
-def targetsOf (n : Nat) (kinds : Array (List Nat)) : Targets × List Nat := Id.run do
+/-- What a function is at each of its signatures (`counts`, by function):
+itself at the first, and at each other a copy of it, put after the
+program's. -/
+def targetsOf (n : Nat) (counts : Array Nat) : Targets × List Nat := Id.run do
   let mut next := n
   let mut copies : List Nat := []
   let mut ids : Array (Array Nat) := #[]
-  for (ks, fn) in kinds.toList.zipIdx do
-    let mut of : Array Nat := #[]
+  for (k, fn) in counts.toList.zipIdx do
     let mut row : Array Nat := #[]
-    for k in ks do
-      while of.size ≤ k do
-        if of.isEmpty then of := of.push fn
-        else
-          of := of.push next
-          copies := copies ++ [fn]
-          next := next + 1
-      row := row.push (of[k]?.getD fn)
+    for i in List.range k do
+      if i == 0 then row := row.push fn
+      else
+        row := row.push next
+        copies := copies ++ [fn]
+        next := next + 1
     ids := ids.push row
   pure (⟨ids⟩, copies)
 
@@ -311,8 +312,8 @@ is made of, the signature and its hints, and the types'. -/
 abbrev TypedMemo := Std.HashMap UInt64 TypedKept
 
 /-- The program lowered, if its types type all of it; or why not. A
-function is copied for each kind of layout its signatures need, each use of
-it made of the copy for its signature; one with no signature is never
+function is copied for each of its signatures, each use of it made of the
+copy for its signature; one with no signature is never
 called, and stays as it is. What each copy is a copy of comes with it; and
 what was lowered, for the next compile, which takes what `kept` has (none:
 nothing is kept, and nothing keyed). -/
@@ -358,26 +359,8 @@ def lowered (C : Types) (p : Program) (kept : Option TypedMemo := none) : L (Pro
   let all := lowers.toList
   let (main, asks) ← (lowerTm C [] #[] p.main C.mainHints).run #[]
   let main := main.mapFns fun k => (asks[k]?).map (·.target C U) |>.getD k
-  -- The signatures of a function split into kinds, one at first: a kind is
-  -- split where its signatures are lowered otherwise, each use taken as of
-  -- the kind its signature is, until none is.
-  let width := sigs.foldl (fun m es => max m es.length) 0 + 1
-  let rec settle (fuel : Nat) (kinds : Array (List Nat)) : L (Array (List Nat)) := do
-    let kindOf := fun (u : Nat) => match owner[u]? with
-      | some (fn, i) => fn * width + 1 + (((kinds[fn]?).bind (·[i]?)).getD 0)
-      | none => (u - U.total) * width
-    let kinds' := (kinds.toList.zip all).toArray.map fun (ks, ls) =>
-      -- (One signature is one kind: nothing to tell apart.)
-      if ls.length ≤ 1 then ks.map fun _ => 0 else
-      let keys := ks.zip (ls.map (·.map fun c => { c with body := c.body.mapFns kindOf }))
-      let firsts := keys.foldl (fun (acc : List (Nat × List Clause)) k =>
-        if acc.contains k then acc else acc ++ [k]) []
-      keys.map fun k => firsts.idxOf k
-    match fuel with
-    | 0 => throw "the functions' copies do not settle"
-    | fuel + 1 => if kinds' == kinds then pure kinds else settle fuel kinds'
-  let kinds ← settle 64 (sigs.map fun es => es.map fun _ => 0)
-  let (T, copies) := targetsOf p.fns.size kinds
+  -- Each signature of a function its own copy, as rustc's instance is.
+  let (T, copies) := targetsOf p.fns.size (sigs.map (·.length))
   -- (A use at none of its signatures, of a function lowered as more than one.)
   let unknown := fun (u : Nat) => U.total ≤ u && T.several (u - U.total)
   let used := main :: all.flatMap (·.flatMap (·.map (·.body)))
@@ -388,7 +371,7 @@ def lowered (C : Types) (p : Program) (kept : Option TypedMemo := none) : L (Pro
     | some (fn, i) => T.at fn i
     | none => u - U.total
   let all := (all.map (·.map (·.map fun c => { c with body := c.body.mapFns resolve }))).toArray
-  -- Each function, and each copy, as its first signature of its kind is.
+  -- Each function, and each copy, as its signature is.
   let lowerOf := fun (id : Nat) (fn : Nat) =>
     match ((T.ids[fn]?).getD #[]).toList.idxOf? id with
     | some i => ((all[fn]?).bind (·[i]?)).getD ((p.fns[fn]?).map (·.clauses) |>.getD [])

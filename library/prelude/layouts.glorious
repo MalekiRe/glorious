@@ -3,47 +3,23 @@
 // specification lays types out (4.4): its fields in their order, each at its
 // alignment; an enum a tag where it has more than one constructor, then the
 // widest of its constructors' fields. A type with no fields and one
-// constructor is nothing (`size_of<()>()` is 0). Written out for each type
-// from its structure (`Syntax.Flat.writeLayouts`).
-trait Layout { const SIZE: Int; const ALIGN: Int; }
+// constructor is nothing (`size_of<()>()` is 0). Every type has one: the
+// lowering lays it out from the type (`Lower.Layout`), as Rust's
+// `size_of::<T>()` is the compiler's, `T` known at each copy of what asks
+// (`FnSig.targs`).
+fn size_of<T>() -> Int { let p: *mut T = PtrMut(usize_of(0)); usize_bits(size_of_at(p)) }
+fn align_of<T>() -> Int { let p: *mut T = PtrMut(usize_of(0)); usize_bits(align_of_at(p)) }
 // A type with one value, which is nothing: no payload, no finalizer (the
 // specification's `nil_represented`, 4): `()`, a struct with no fields, a
 // tuple or struct of such. Each that is has it, and no other.
 trait NilRepresented {}
-fn size_of<T>() -> Int where T: Layout { <T as Layout>::SIZE }
-fn align_of<T>() -> Int where T: Layout { <T as Layout>::ALIGN }
-// (A layout so far, its size and alignment; a field put after it.)
-fn layout_add(at: (Int, Int), size: Int, align: Int) -> (Int, Int) {
-    let (s, a) = at;
-    let start = (s + align - 1) / align * align;
-    (start + size, if(align > a) { align } else { a })
-}
-fn layout_widest(x: (Int, Int), y: (Int, Int)) -> (Int, Int) {
-    let (s1, a1) = x;
-    let (s2, a2) = y;
-    (if(s1 > s2) { s1 } else { s2 }, if(a1 > a2) { a1 } else { a2 })
-}
-fn layout_size(at: (Int, Int)) -> Int { let (s, a) = at; (s + a - 1) / a * a }
-fn layout_align(at: (Int, Int)) -> Int { let (s, a) = at; a }
 
-// What a value of a type is in memory: its `Layout`'s bytes from an address,
-// written there and read back. Written out for each type made of plain data,
-// from its structure, as `Layout` is (`Syntax.Flat.writeLayouts`), and for
-// `Int` and each scalar type. Writing one moves it into memory, and reading
-// one copies what is there: which of them may be done when is the caller's
-// to get right (`std::ptr`).
-trait Repr {
-    unsafe fn repr_store(at: usize, value: Self);
-    unsafe fn repr_load(at: usize) -> Self;
-}
-// (Where a field put after a layout so far starts.)
-fn layout_start(at: (Int, Int), align: Int) -> Int { let (s, a) = at; (s + align - 1) / align * align }
+// What a value is in memory: its bytes from an address, as its type lays
+// them out, written there and read back. Writing one moves it into memory
+// (what was there neither given back nor destroyed), and reading one copies
+// what is there: which of them may be done when is the caller's to get right
+// (`std::ptr`).
+unsafe fn repr_store<T>(at: usize, value: T) where T: Use<[1, 1]> { let p: *mut T = PtrMut(at); overwrite(ptr_mut_ref_at(p, at), value) }
+unsafe fn repr_load<T>(at: usize) -> T { let p: *mut T = PtrMut(at); read_out(ptr_ref_at(p, at)) }
 // (An address so many bytes on.)
 fn repr_at(at: usize, offset: Int) -> usize { usize_of(int_add(usize_bits(at), offset)) }
-// (What a tag no constructor has gives: nothing, for memory that holds no
-// value of the type.)
-fn repr_bad<T>(at: usize) -> T where T: Use<[1, 1]> { match(int_div(1, 0)) { _ => tail repr_bad(at) } }
-impl Repr for Int {
-    unsafe fn repr_store(at: usize, value: Int) { ptr_write(at, 64, value) }
-    unsafe fn repr_load(at: usize) -> Int { ptr_read(at, 64) }
-}
