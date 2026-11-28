@@ -1290,7 +1290,7 @@ def callsCopied (calls : Std.HashMap Nat (List Nat)) : Syntax.Item → StateM Co
         if let some ids := calls[c]? then
           if let some g := b.bare? f then
             let copy ← askCopy g ids true
-            let (fe, b') := b.add (.name none copy)
+            let (fe, b') := b.add (.name none copy) (some (b.idOf f))
             b := { b' with exprs := b'.exprs.set! i (match b'.exprs[i]! with
               | .tailCall .. => .tailCall c fe args
               | _ => .call c fe args) }

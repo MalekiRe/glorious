@@ -35,6 +35,9 @@ structure Env where
 /-- How the hints found compare, by what they are of. -/
 structure Tally where
   counts : Std.HashMap String (Nat × Nat × Nat) := {}
+  /-- What a function's type parameters are where a closure of each callable
+  was made, learned there: where its body is gone through, they are. -/
+  closureBinds : Std.HashMap (Nat × List Ty) (List (String × Ty)) := {}
   lost : Nat := 0
   examples : Array String := #[]
 
@@ -277,17 +280,25 @@ partial def closureTy (env : Env) (depth : Nat) (f c : Nat) (binds : List (Strin
         pure [.fn [σ] .never [] false none]
       else none
     | _ => none
-  -- (One that does not return gives what the place it is used at wants,
-  -- as the checker says it.)
-  let ret ← match fnRet env (depth + 1) g binds params capTys with
-    | some .never | none => (env.said[(f, c, here + 1)]?).bind (tyOf env.decls binds)
-    | r => r
+  -- (What it gives is what the place it is used at gives, where the
+  -- checker says that; else its body's, and where that does not return,
+  -- what the place wants.)
+  let atUse := (env.said[(f, c, here + 1)]?).bind (tyOf env.decls binds)
+  let ret ← match atUse, body with
+    | some r, .call .. => some r
+    | _, _ => match fnRet env (depth + 1) g binds params capTys with
+      | some .never | none => atUse
+      | r => r
   pure (.fn params ret [] false (some capTys))
 
 /-- What `g` gives at what it is given and made with: its first clause's
 that says. -/
 partial def fnRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × Ty)) (params caps : List Ty) : Option Ty := do
   let fn ← env.p.fns[g]?
+  -- (A function of its own: its type parameters of what it is given.)
+  let binds := match env.selfTy[g]? with
+    | some (.fn ps _) => (ps.zip params).foldl (fun b (a, p) => matchTy env.decls b a p) []
+    | _ => binds
   fn.clauses.zipIdx.findSome? fun (cl, ci) => do
     let bound ← patsTysD env.decls cl.pats params
     fwd env depth g ci binds ((params ++ caps ++ bound).toArray.map some) cl.body
@@ -330,6 +341,15 @@ partial def walk (env : Env) (f c : Nat) (binds : List (String × Ty)) (Γ : Arr
           { t with examples := t.examples.push s!"not found: in {env.names[f]?.getD "?"}: closure of {env.names[g]?.getD "?"}, said {(said Γ.size).isSome}" }
         else t
       | _, _ => t
+    let t1 := match rhs with
+      | .closure g caps =>
+        match caps.mapM atomTy with
+        | some capTys =>
+          -- (Of a callable of this function's own, not of another function.)
+          if binds.isEmpty || (env.selfTy[g]?).isSome || (env.decls.fns[g]?).isSome then t1
+          else { t1 with closureBinds := t1.closureBinds.insert (g, capTys) binds }
+        | none => t1
+      | _ => t1
     take t1 kind mine fun σ rest t => walk env f c binds (Γ.push σ) rest body t
   | .call g _ body =>
     match (atomTy g).bind retOf with
@@ -394,9 +414,11 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
             | some te => matchTy env.decls b (rigidOf tparams te) p
             | none => b) []
         | none => []
-      -- (And of what the checker found the function to be.)
+      -- (And of what the checker found the function to be; a closure's, as
+      -- where it was made.)
+      let binds := binds ++ (t.closureBinds.getD (e.fn, e.sig.caps) [])
       let binds := match env.selfTy[e.fn]? with
-        | some (.fn ps _) => (ps.zip e.sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds
+        | some (.fn ps r) => matchTy env.decls ((ps.zip e.sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds) r e.sig.ret
         | _ => binds
       t := walk env e.fn ci binds Γ hs cl.body t
   pure t
