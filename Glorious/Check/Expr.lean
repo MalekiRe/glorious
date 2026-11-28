@@ -226,8 +226,6 @@ structure Marks where
   instSites : Nat
   groupUses : Nat
   dropCands : Nat
-  dotChosen : List (Nat × String × Nat)
-  argsChosen : List ((Nat × Nat) × Expr)
   packs : Nat
   derefReads : Nat
   fieldReads : Nat
@@ -241,8 +239,8 @@ def Marks.of (s : St) : Marks :=
     givenReads := s.givenReads.size, heldMoves := s.heldMoves.size, dups := s.dups.size, drops := s.drops.size,
     bounds := s.bounds.size, pending := s.pending.size,
     fieldSites := s.fieldSites.size, partReads := s.partReads.size, instSites := s.instSites.size,
-    groupUses := s.groupUses.size, dropCands := s.dropCands.size, dotChosen := s.dotChosen,
-    argsChosen := s.argsChosen, packs := s.packs.size, derefReads := s.derefReads.size,
+    groupUses := s.groupUses.size, dropCands := s.dropCands.size,
+    packs := s.packs.size, derefReads := s.derefReads.size,
     fieldReads := s.fieldReads.size, given := s.given.size, coercions := s.coercions.size,
     methodCalls := s.methodCalls.size }
 
@@ -255,7 +253,7 @@ def Marks.undo (m : Marks) (s : St) : St :=
            pending := s.pending.shrink m.pending,
            fieldSites := s.fieldSites.shrink m.fieldSites, partReads := s.partReads.shrink m.partReads,
            instSites := s.instSites.shrink m.instSites, groupUses := s.groupUses.shrink m.groupUses,
-           dropCands := s.dropCands.shrink m.dropCands, dotChosen := m.dotChosen, argsChosen := m.argsChosen,
+           dropCands := s.dropCands.shrink m.dropCands,
            packs := s.packs.shrink m.packs, derefReads := s.derefReads.shrink m.derefReads,
            fieldReads := s.fieldReads.shrink m.fieldReads, given := s.given.shrink m.given,
            coercions := s.coercions.shrink m.coercions, methodCalls := s.methodCalls.shrink m.methodCalls }
@@ -310,6 +308,19 @@ def compareByType (scope : Scope) (args : Array Flat.ExprId) : M Bool := do
   modify fun s => { s with seen := {} }
   if (← tyHasDrop [] t).isSome then return true
   tyOwnsOnce [] t
+
+/-- The call `call` written where it is of `f`, given `args`: what the
+checker chose of it, for the elaborator (a type's own function, an argument
+given as other than written). -/
+def writeCall (call : Nat) (f : Flat.ExprId) (args : Array Flat.ExprId) : M Unit := do
+  let b := (← get).body
+  let some e := (List.range b.exprs.size).reverse.find? (fun i => match b.exprs[i]! with
+    | .call i _ _ | .tailCall i _ _ => i == call
+    | _ => false) | return
+  let n := match b.exprs[e]! with
+    | .tailCall .. => Flat.FExpr.tailCall call f args
+    | _ => .call call f args
+  modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! e n } }
 
 /-- The last node of the call `call` (the nodes made to read it have its
 number too). -/
@@ -1627,9 +1638,9 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               | _, _ => pure false
             | _, _ => pure false
           if through then do
-            let given := Expr.reborrow uniq (.name none x)
-            modify fun s => { s with argsChosen := ((call, i), given) :: s.argsChosen }
-            flatIn given
+            let given ← flatIn (Expr.reborrow uniq (.name none x))
+            modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a (s.body.expr given) } }
+            pure a
           else if i == 0 && call != 0 && x == s!"borrowed%{call}" then do
             let held := match scope.lookup x with
               | some (.val t _) => some t
@@ -1639,8 +1650,8 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
             | some t => do
               match ← find t with
               | .ref .. =>
-                modify fun s => { s with argsChosen := ((call, i), .name none x) :: s.argsChosen }
-                pushE (.name none x)
+                modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a (.name none x) } }
+                pure a
               | _ => pure a
             | none => pure a
           else pure a
@@ -2227,11 +2238,8 @@ partial def derefReceiver (scope : Scope) (amb : Row) (args : Array Flat.ExprId)
       | _ => pure false
     | none => pure false
   unless through do return none
-  let given := Expr.deref (.name none v)
-  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
-                           argsChosen := ((call, 0), given) :: s.argsChosen }
-  let given ← flatIn given
-  return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+  let given ← flatIn (Expr.deref (.name none v))
+  chosenCall scope amb call alt (#[given] ++ args.extract 1 args.size)
 
 /-- A dot call of a field of what a name points to, where the function
 borrows its receiver (`k` of `receiverKinds`) and the resolver could not
@@ -2256,11 +2264,8 @@ partial def borrowFieldReceiver (scope : Scope) (amb : Row) (args : Array Flat.E
   unless ← pointee do
     unless (← get).assocUses.isEmpty do settleAssocsAll
     unless ← pointee do return none
-  let bt := Expr.refField fid (k == 2) v path true
-  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
-                           argsChosen := ((call, 0), bt) :: s.argsChosen }
-  let given ← flatIn bt
-  return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+  let given ← flatIn (Expr.refField fid (k == 2) v path true)
+  chosenCall scope amb call alt (#[given] ++ args.extract 1 args.size)
 
 /-- A dot call taken as the function of the value's type: its type; none
 where it is not taken so (`inferCall`). -/
@@ -2293,8 +2298,7 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
               if let some t ← derefReceiver scope amb args alt call then return some t
             if let some t ← borrowFieldReceiver scope amb args alt theirs call then return some t
             if mine.isSome && mine == theirs then
-              modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
-              return some (← inferCall scope amb (← pushE (.name none alt)) args call)
+              return ← chosenCall scope amb call alt args
             -- (The one in scope takes a reference, the type's own the value
             -- whole: the receiver, a name borrowed for the one in scope, is
             -- given as it is.)
@@ -2307,11 +2311,7 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
                 | some (.val ..) => true
                 | _ => false
               if k != 0 && (!v.startsWith "borrowed%" || held) then
-                let given := Expr.name none v
-                modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
-                                         argsChosen := ((call, 0), given) :: s.argsChosen }
-                let given ← flatIn given
-                return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+                return ← chosenCall scope amb call alt (#[← pushE (.name none v)] ++ args.extract 1 args.size)
             -- (The one in scope takes the value whole, the type's own a
             -- reference: a mutable variable is borrowed for it.)
             if let (some 0, some k, .name none v) := (mine, theirs, b.expr a) then
@@ -2319,11 +2319,8 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
                 if let some (.cell held _) := scope.lookup v then
                   -- (One that holds a reference already is given as it is.)
                   if let .ref .. ← find held then
-                    modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
-                    return some (← inferCall scope amb (← pushE (.name none alt)) args call)
-                  modify fun s => { s with dotChosen := (call, alt, k) :: s.dotChosen }
-                  let given ← pushE (.ref (k == 2) v)
-                  return some (← inferCall scope amb (← pushE (.name none alt)) (#[given] ++ args.extract 1 args.size) call)
+                    return ← chosenCall scope amb call alt args
+                  return ← chosenCall scope amb call alt (#[← pushE (.ref (k == 2) v)] ++ args.extract 1 args.size)
             if let (some 0, some k) := (mine, theirs) then
               if k != 0 then
                 -- (What is a reference already, a name that holds one or a
@@ -2335,8 +2332,7 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
                   | none => pure false
                 set saved
                 if isRef then
-                  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
-                  return some (← inferCall scope amb (← pushE (.name none alt)) args call)
+                  return ← chosenCall scope amb call alt args
                 -- (Else: the receiver borrowed where it is, as the resolver
                 -- borrows one, `g[0].push(5)`, `v[0].s.len()`, written so
                 -- before the call is read.)
@@ -2393,6 +2389,14 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
     use scope (.call what (callee :: argTys.toList))
     includeRow row amb what
     pure r
+
+/-- The dot call `call` of `alt`, the type's own function, given `args`:
+written where it is (`writeCall`) and read. -/
+partial def chosenCall (scope : Scope) (amb : Row) (call : Nat) (alt : String) (args : Array Flat.ExprId) :
+    M (Option Ty) := do
+  let f ← pushE (.name none alt)
+  writeCall call f args
+  some <$> inferCall scope amb f args call
 
 /-- The dot call `call` of `own`, a type's own function, its receiver given
 as `own` takes it, written where it is before the call is read

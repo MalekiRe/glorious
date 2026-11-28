@@ -491,53 +491,6 @@ partial def Item.decide (f : String → List (Option TypeExpr) → Flat.Body →
   | .pub parent item => .pub parent (Item.decide f item)
   | item => item
 
-/-- The calls the checker chose the function or an argument of
-(`chosenRewrite`). -/
-def chosenCalls (b : Blocks) : Std.HashSet Nat :=
-  b.argsChosen.fold (fun s (call, _) _ => s.insert call) (b.dotChosen.fold (fun s call _ => s.insert call) {})
-
-/-- Does an item have a call in it of `calls`? -/
-partial def hasCall (calls : Std.HashSet Nat) : Syntax.Item → Bool
-  | .fn _ _ _ _ b | .alias _ b _ => b.exprs.any fun
-    | .call i _ _ | .tailCall i _ _ => calls.contains i
-    | _ => false
-  | .impl { methods := methods, .. } => methods.any (hasCall calls)
-  | .traitInfo _ _ defaults _ _ => defaults.any (hasCall calls)
-  | .module _ (some body) => body.any (hasCall calls)
-  | .pub _ item => hasCall calls item
-  | _ => false
-
-/-- The function of each dot call the checker chose by the value's type,
-with the receiver, a variable, given as that one takes it (`0` as it was, `1`
-borrowed, `2` borrowed `&mut`), and each argument it chose to give as other
-than written: written into the call where it is. -/
-def chosenRewrite (b : Blocks) : Flat.FRewrite where
-  onExpr go body e :=
-    match body.expr e with
-    | .call i f args =>
-      if !(b.dotChosen.contains i || (List.range args.size).any fun k => b.argsChosen.contains (i, k)) then none
-      else some (do
-        let args ← args.mapM go.ex
-        let (f, args) ← match (← get).expr f, b.dotChosen[i]? with
-          | .name _ _, some (fn, how) => do
-            let f ← Flat.pushExpr (.name none fn)
-            let args ← match how, args.toList with
-              | 0, _ => pure args
-              | k, a :: rest =>
-                match (← get).bare? a with
-                | some v => pure (#[← Flat.pushExpr (.ref (k == 2) v)] ++ rest.toArray)
-                | none => pure args
-              | _, _ => pure args
-            pure (f, args)
-          | _, _ => do pure (← go.ex f, args)
-        let mut out : Array Flat.ExprId := #[]
-        for (a, k) in args.toList.zipIdx do
-          match b.argsChosen[(i, k)]? with
-          | some given => out := out.push (← Flat.flatExpr given)
-          | none => out := out.push a
-        Flat.pushExpr (.call i f out))
-    | _ => none
-
 /-- Each whole number the checker found to be of a scalar type made that
 scalar, `u8_of(200)`: Core's types say which whole numbers are what. -/
 def scalarLiterals (b : Blocks) (items : List Syntax.Item) : List Syntax.Item := Id.run do
@@ -567,15 +520,11 @@ def promote (b : Blocks) (name : String) (body : Flat.Body) : Flat.Body :=
   ((b.places[name]?).getD []).foldl (fun body (l, c, x) => (letMutRewriteF l c x).body body) body
 
 /-- A program as the checker read it: each function's body the checker's
-(`Blocks.bodies`), with what it found written where it found it; then the
-literals it found of a type (`scalarLiterals`), and the dot calls and
-arguments it chose, where they are (`chosenRewrite`). -/
+(`Blocks.bodies`), with what it found written where it found it, its places
+made cells (`promote`); then the literals it found of a type
+(`scalarLiterals`). -/
 def decidedProgram (b : Blocks) (items : List Syntax.Item) : List Syntax.Item :=
   let items := items.map (Item.decide fun name _ body => promote b name ((b.bodies[name]?).getD body))
-  let items := scalarLiterals b items
-  let calls := chosenCalls b
-  if calls.isEmpty then items else
-  let rw := chosenRewrite b
-  items.map fun item => if hasCall calls item then item.mapBodies rw.body else item
+  scalarLiterals b items
 
 end Glorious.Elab

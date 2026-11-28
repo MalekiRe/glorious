@@ -665,16 +665,10 @@ structure St where
   /-- The type parameters of the function being checked, each as what it
   stands for while it is. -/
   rigidParams : List (String × Ty) := []
-  /-- Dot calls of a type's own function chosen by the value's type. -/
-  dotChosen : List (Nat × String × Nat) := []
   /-- Each whole number written where a scalar type is wanted, by its
   function and its node's identity there (`Flat.Body.idOf`), with the type:
   made that scalar in Core. -/
   scalarLits : List (String × Nat × String) := []
-  /-- Receivers of dot calls the checker chose to give as other than written,
-  by the call and the argument's place: a field borrowed where it is, or a
-  reference made where the call is given as it is. -/
-  argsChosen : List ((Nat × Nat) × Expr) := []
   /-- What it decided of how the program is read, where it found it
   (`Elab.Decision`). -/
   decided : List Elab.Decision := []

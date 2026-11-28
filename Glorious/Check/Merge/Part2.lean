@@ -11,9 +11,7 @@ open Syntax
 delta_part StDelta2 diffPart2 applyPart2 fitsPart2 clearPart2 restorePart2 [
   aparts : ArrD (Ty × String × Option Nat),
   fieldNames : MapLD String String,
-  dotChosen : ListD (Nat × String × Nat),
   scalarLits : ListD (String × Nat × String),
-  argsChosen : ListD ((Nat × Nat) × Expr),
   decided : ListD Elab.Decision,
   traitShape : MapD String (Nat × List String),
   selfDefaults : MapLD String Nat,

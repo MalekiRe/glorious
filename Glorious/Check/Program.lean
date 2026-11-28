@@ -1078,7 +1078,6 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
            fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
            fieldReads := Elab.firstOf s.fieldReads.toList, packs := Elab.firstOf s.packs.toList
            derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes
-           dotChosen := Elab.firstOf s.dotChosen, argsChosen := Elab.firstOf s.argsChosen
            scalarLits := s.scalarLits.foldl (fun m (f, e, t) => m.insert (f, e) t) {} }).run st
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
