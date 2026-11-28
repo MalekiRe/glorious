@@ -2446,6 +2446,15 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
     includeRow row amb what
     pure r
 
+/-- The dot call `call` of `own`, a type's own function, its receiver given
+as `own` takes it, written where it is before the call is read
+(`receiverHere`), and read. None where it cannot be so written. -/
+partial def ownCall (scope : Scope) (amb : Row) (call : Nat) (own : String) : M (Option Ty) := do
+  unless ← receiverHere scope call none (some own) (← receiverTaken own) do return none
+  match (← get).body.expr (← callNode call) with
+  | .call _ f args | .tailCall _ f args => some <$> inferCall scope amb f args call
+  | _ => pure none
+
 partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Array Flat.ExprId)
     (call : Nat := 0) : M Ty := do
   if let some t ← inferMarkedCall scope amb f args then return t
@@ -2489,6 +2498,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
     -- would be decided again, and a chain of calls was read anew at each
     -- link, three times a link.)
     let before ← get
+    let marksBefore := Marks.of before
     let callee ← (fun s => match inferExpr scope amb f s with
       | .ok t s => .ok (Sum.inl t) s
       | .error e s => .ok (Sum.inr e) { before with body := s.body, decided := s.decided, altFound := s.altFound } : M (Ty ⊕ Elab.Said))
@@ -2521,6 +2531,10 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
           if let some h := head then
             let own := s!"{h}::{name}"
             if ((← get).fns[own]?).isSome then
+              -- (The call of the type's own function, written where it is
+              -- and read: of the call nothing was read but the field's
+              -- try, which is let go.)
+              if let some t ← ownCall scope amb call own then return t
               throwThe Elab.Said { said with decision := some (← receiverDecision call own) }
         if (e.splitOn "has no field").length > 1 && theirs.length > 1 then
           throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun fn => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
@@ -2547,6 +2561,9 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
           if let some h := h then
             let own := s!"{h}::{name}"
             if ((← get).fns[own]?).isSome then
+              -- (What was read of the field is taken back: it was not read.)
+              set { marksBefore.undo (← get) with body := (← get).body, decided := (← get).decided }
+              if let some t ← ownCall scope amb call own then return t
               throwThe Elab.Said { msg := s!"the field `{name}` is no callable", decision := some (← receiverDecision call own) }
     applyTy scope amb "this callee" callee args call
 
