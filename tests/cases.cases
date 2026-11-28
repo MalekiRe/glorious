@@ -75,6 +75,16 @@ x
 0
 0
 #### case
+#### Every refusal is said, in the order of where it is: a declaration's
+#### with a function's that does not name it; one that names it is not read.
+struct S { x: Nope }
+fn b() -> Int { "x" }
+fn c(s: S) -> Int { true }
+fn main() -> Int { 0 }
+#### expect
+error: in `S`: unknown type `Nope`
+error: 2:17: in `b`: the result of a clause: expected `Int`, found `&str`
+#### case
 #### A value made for a dot call in a `let` is let go where the statement
 #### ends, as Rust's temporary is: its `drop` runs before what follows.
 struct W { n: Int }
@@ -717,7 +727,7 @@ effect Choice { choose() -> Bool }
 #### expect
 error: 2:23: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once
 #### case
-effect Choice { [2, 2] choose() }  fn main() { 0 }
+effect Choice { [2, 2] choose() }  fn main() -> Int { 0 }
 #### expect
 error: in `Choice`: operation `choose`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`
 #### case
@@ -2317,7 +2327,7 @@ fn main() -> Int { let mut saved = None; handle (ask() + 1) { ask(k) => saved = 
 error: 2:20: in `main`: the mutable variable `saved` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`), but a resumption of an operation declared `[1, 1]` has to be used
 #### case
 effect Ask { [1, 1] ask() -> ! }
-fn main() { 0 }
+fn main() -> Int { 0 }
 #### expect
 error: in `Ask`: operation `ask` does not return, so it has no resumption to say this of
 #### case

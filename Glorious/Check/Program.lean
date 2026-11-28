@@ -474,6 +474,15 @@ def checkGroupKept (kept : Deltas) (pre : St) (key : UInt64) (i : Nat) (g : List
     if locals.contains f then reads := reads.push (s!"body {f}", ← bodyKey f)
   pure ((Trace.timed "group: delta" fun _ => diffStates st after).toArray.map fun d => (key, (d, reads)))
 
+/-- Every name a type mentions. -/
+partial def typeExprNames : TypeExpr → List String
+  | .name x args => x :: args.flatMap typeExprNames
+  | .tuple args => args.flatMap typeExprNames
+  | .fn ps r => ps.flatMap typeExprNames ++ typeExprNames r
+  | .performs r effs => typeExprNames r ++ effs.flatMap fun (e, args) => e :: args.flatMap typeExprNames
+  | .ref _ t _ => typeExprNames t
+  | _ => []
+
 /-- Errors said together: each once, in the order of where they are in the
 text (`line:col:` first; one that says no place, first of all), a line
 each (`errorLines` writes each as an error). -/
@@ -640,6 +649,28 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
       modify fun s =>
         { s with runFns := later.foldl (fun m d => m.erase d.name) s.runFns
                  declFns := later.foldl (fun m d => m.insert d.name d.body) s.declFns } : M Unit)
+    -- (What names a declaration refused, or a function that does, is not
+    -- checked: what it would say follows from that. Said with the rest.)
+    let failedDecls := (← get).declFailed
+    let declErrors := failedDecls.toList.map (·.2)
+    let decls := if failedDecls.isEmpty then decls else Id.run do
+      let bad : Std.HashSet String := .ofList (failedDecls.toList.flatMap (·.1))
+      let namesOf := fun (d : FnDecl) =>
+        (d.annots.filterMap id ++ d.ret.toList).flatMap typeExprNames
+          ++ d.body.fvClauses d.body.roots
+          ++ d.body.exprs.toList.flatMap fun | .type t => typeExprNames t | _ => []
+      let mut blocked : Std.HashSet String := {}
+      for d in decls do
+        if (namesOf d).any bad.contains then blocked := blocked.insert d.name
+      let mut grew := true
+      while grew do
+        grew := false
+        for d in decls do
+          unless blocked.contains d.name do
+            if (mentions d.name).any blocked.contains then
+              blocked := blocked.insert d.name
+              grew := true
+      pure (decls.filter (!blocked.contains ·.name))
     let declBy : Std.HashMap String FnDecl := decls.foldl (fun m d => if m.contains d.name then m else m.insert d.name d) {}
     let groups := Trace.timed "unit: order" fun _ => (components names deps).map fun comp => comp.filterMap fun n => declBy[n]?
     -- Each group's level: groups of one level use none of each other, so
@@ -820,7 +851,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
               unless schemeWithin (withoutLabelResults d b) (withoutLabelResults d a) do
                 beyond := beyond.push (beyondSignature d.name a b)
             | _, _ => beyond := beyond.push s!"in `{d.name}`: its signature says too little to check its callers with: write it whole"
-      unless beyond.isEmpty do throw (sortedErrors beyond.toList)
+      unless beyond.isEmpty do throw (sortedErrors (declErrors ++ beyond.toList))
       settled := true
       if firstRefused.isSome then
         -- A refusal where all before it are settled: from a group checked
@@ -854,7 +885,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
           errors := errors.push (match (said.drop failMark.length).toString.splitOn " " with
             | _ :: rest => " ".intercalate rest
             | [] => said)
-        throw (sortedErrors errors.toList)
+        throw (sortedErrors (declErrors ++ errors.toList))
       if deltas.isSome then
         match sigsKept with
         | some d => groupDeltas := groupDeltas.push (sigKey, (d, #[]))
@@ -864,6 +895,7 @@ def checkItems (fitems : List Syntax.Item) (seed : UInt64 := 0) (kept : Kept := 
       if let some (_, last) := rest.back? then
         unless reachOnly do made := (keys[last]!, forKeeping (← get)) :: made
     if let some k := keys.getLast? then key := k
+    unless declErrors.isEmpty do throw (sortedErrors declErrors)
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.
     -- (Those of one that leaves a type to be found were checked with the

@@ -945,6 +945,10 @@ def declare (items : List Item) : M Unit := do
       else unless names.isEmpty do
         modify fun s => { s with fieldNames := s.fieldNames.insert ctor names }
     | _ => pure ()
+  -- (A declaration refused is said with what else is refused, and what
+  -- names it is not checked: `St.declFailed`.)
+  let refused := fun (names : List String) (e : String) =>
+    (modify fun s => { s with declFailed := s.declFailed.push (names, e) } : M Unit)
   for item in items do
     match item with
     | .enum name params ctors =>
@@ -952,19 +956,24 @@ def declare (items : List Item) : M Unit := do
       let kinds := (genericParams params).map isLifetime
       let result := Ty.con name (pmap.map (·.2))
       for (c, fields) in ctors do
-        let fields ← tryCatch (fields.mapM (resolveType pmap true)) fun e => throw s!"in `{c}`: {e}"
-        modify fun s =>
-          { s with ctors := s.ctors.insert c ⟨name, ids, fields, result, caps, kinds⟩,
-                   runCtors := s.runCtors.insert c }
+        match ← (try some <$> fields.mapM (resolveType pmap true) catch e => do refused (name :: ctors.map (·.1)) s!"in `{c}`: {e}"; pure none) with
+        | some fields =>
+          modify fun s =>
+            { s with ctors := s.ctors.insert c ⟨name, ids, fields, result, caps, kinds⟩,
+                     runCtors := s.runCtors.insert c }
+        | none => pure ()
     | .struct name params fields =>
       let (pmap, ids, caps) ← freshParams params
       let kinds := (genericParams params).map isLifetime
-      let fields ← tryCatch (fields.mapM (resolveType pmap true)) fun e => throw s!"in `{name}`: {e}"
-      modify fun s =>
-        { s with ctors := s.ctors.insert name ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩,
-                 runCtors := s.runCtors.insert name }
+      match ← (try some <$> fields.mapM (resolveType pmap true) catch e => do refused [name] s!"in `{name}`: {e}"; pure none) with
+      | some fields =>
+        modify fun s =>
+          { s with ctors := s.ctors.insert name ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩,
+                   runCtors := s.runCtors.insert name }
+      | none => pure ()
     | .effect name params ops =>
-      tryCatch (declareEffect items name params ops) fun e => throw s!"in `{name}`: {e}"
+      try declareEffect items name params ops
+      catch e => refused (name :: ops.map (·.name)) s!"in `{name}`: {e}"
     | .use head lower upper =>
       unless ((← get).types[head]?).isSome do
         throw s!"`impl Use` for `{head}`: there is no such declared type"

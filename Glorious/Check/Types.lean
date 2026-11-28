@@ -724,6 +724,9 @@ structure St where
   /-- The counts of uses of the function being read, made once it is
   (`Check.usesLater`, `countUsesNow`). -/
   usesLater : Array UsesLater := #[]
+  /-- The declarations refused, each with the names it declares and what is
+  said: what names them is not checked (`Check.checkItems`). -/
+  declFailed : Array (List String × String) := #[]
   /-- The escapes to look for once the function is read (`checkEscape`):
   the brand, what is said, the roots, the effects, where. -/
   escapesLater : Array (Nat × String × List (String × Ty) × Row × String) := #[]

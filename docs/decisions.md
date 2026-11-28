@@ -8691,3 +8691,13 @@ read (`closeCell`): a read of it is a move or a copy as it is found, what
 a callable does with it likewise, and a name whose value has a `drop` is
 taken to be used where its block ends unless it is found to be given away
 (`Use.liveIf`, `St.givenIds`).
+
+## Every refusal said, a declaration's with the rest
+
+**Decision (redesign section 3: errors from every job, sorted).** A type
+or effect declaration refused (`struct S { x: Nope }`) no longer stops the
+check: what it says is kept (`St.declFailed`), a function that names it,
+or names one that does, is not read, and every other function is; all
+that is refused is said together, sorted by position (one without a place
+first). Two cases whose program had a second refusal after the
+declaration's (`fn main() { 0 }`) are written without it.
