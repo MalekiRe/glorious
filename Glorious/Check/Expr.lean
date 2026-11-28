@@ -958,6 +958,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
     let given ← build (Flat.pushClause ⟨[taken], body⟩)
     let t ← inferCallable scope [some input] none none #[given]
       "the clauses of this callable do" id
+    modify fun s => { s with nodeTys := s.nodeTys.push (s.body.idOf a, t) }
     let own := match t with
       | .fn _ _ _ _ c => c
       | _ => 0
@@ -1003,6 +1004,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
       if ps.length ≥ 2 && !clauses.isEmpty && spread.size == clauses.size then
         let spread ← spread.mapM fun c => build (Flat.pushClause c)
         let t ← inferCallable scope (ps.map some) none none spread "the clauses of this callable do" id
+        modify fun s => { s with nodeTys := s.nodeTys.push (s.body.idOf a, t) }
         if let .fn _ _ _ _ cap := t then
           modify fun s =>
             { s with blockCaps := s.blockCaps.push (id, cap)
@@ -1057,6 +1059,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
       let plain := fun (annots : List (Option Ty)) => do
         if arity == ps.length && annots.any (·.isSome) then
           let t ← inferCallable scope annots knownRet none clauses "the clauses of this callable do" id
+          modify fun s => { s with nodeTys := s.nodeTys.push (s.body.idOf a, t) }
           if let .fn _ _ _ _ cap := t then
             modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
           return ← fitAt scope amb what site p t
@@ -2162,6 +2165,8 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
 /-- Apply a callee of a given type in the ambient effects. -/
 partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (args : Array Flat.ExprId)
     (call : Nat := 0) : M Ty := do
+  if let some n := (← get).calleeAt then
+    modify fun s => { s with nodeTys := s.nodeTys.push (n, callee), calleeAt := none }
   abandons (← get).anon what call
   pushTemp callee
   -- A callable for every lifetime is called at lifetimes of this call's own.
@@ -2245,6 +2250,9 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
     -- `v.get<T>(..)` of one without type parameters, of a value whose type
     -- has a function of the name of its own: that one.)
     let head ← resolveName scope q x
+    -- (The callee's type at this call, by its node: what the elaborator's
+    -- closure of it is, `applyTy`.)
+    modify fun s => { s with calleeAt := some (s.body.idOf f) }
     match head with
     | .ctor .. | .op _ | .prim | .pack _ | .host _ => inferCallBuiltin scope amb args call x head
     | .fn .. | .method _ | .const _ => inferCallFn scope amb args call x head

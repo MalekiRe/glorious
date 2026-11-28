@@ -29,6 +29,8 @@ structure Env where
   function, clause and local, where it knows the type whole. -/
   said : Std.HashMap (Nat × Nat × Nat) TypeExpr := {}
   names : Array String := #[]
+  /-- Each top-level function's type as the checker found it. -/
+  selfTy : Std.HashMap Nat TypeExpr := {}
 
 /-- How the hints found compare, by what they are of. -/
 structure Tally where
@@ -182,7 +184,7 @@ partial def walk (env : Env) (f c : Nat) (binds : List (String × Ty)) (Γ : Arr
     match hints with
     | .ty σ :: rest =>
       let r := mine.map fun m => shape m == shape σ
-      let ex := if r == some false then some s!"fn{f} {kind} local {Γ.size}: here {repr mine}, Typer {repr σ}" else none
+      let ex := if r == some false then some s!"{env.names[f]?.getD "?"} {kind} local {Γ.size}: here {(mine.map Typer.showTy).getD "?"}, Typer {Typer.showTy σ}" else none
       k (some σ) rest (t.add kind r ex)
     | _ => { t with lost := t.lost + 1 }
   match tm with
@@ -267,6 +269,10 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
             | some te => matchTy env.decls b (rigidOf tparams te) p
             | none => b) []
         | none => []
+      -- (And of what the checker found the function to be.)
+      let binds := match env.selfTy[e.fn]? with
+        | some (.fn ps _) => (ps.zip e.sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds
+        | _ => binds
       t := walk env e.fn ci binds Γ hs cl.body t
   pure t
 
@@ -283,7 +289,13 @@ def report (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String
         locals.foldl (fun m (i, n) => match tys[n]? with
           | some te => m.insert (f, c, i) te
           | none => m) m) m) {}
-  let t := compare { decls, p := out.program, said, names := out.fnNames } C
+  let selfTy := out.fnNodes.fold (fun m f (owner, _) =>
+    if out.fnNames[f]? != some s!"`{owner}`" then m else
+    let base := (owner.splitOn "⟨").headD owner
+    match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
+    | some te => m.insert f te
+    | none => m) {}
+  let t := compare { decls, p := out.program, said, names := out.fnNames, selfTy } C
   let lines := t.counts.toList.map fun (k, (a, d, u)) => s!"  {k}: {a} agree, {d} not, {u} not found"
   "\n".intercalate ([s!"hints: {t.lost} clauses lost"] ++ lines ++ t.examples.toList.map ("  " ++ ·))
 

@@ -727,6 +727,9 @@ structure St where
   /-- The type of each expression of the function being read, by the
   node's identity (`Flat.Body.idOf`), as read (`inferExpr`). -/
   nodeTys : Array (Nat × Ty) := #[]
+  /-- The node of the callee named of the call being read, whose type at
+  the call `applyTy` keeps (`nodeTys`). -/
+  calleeAt : Option Nat := none
   /-- Of each function read, the type of each of its expressions whose type
   is known whole (`Ty.written`), by the node's identity: what the
   elaborator's `let`s are of. -/
@@ -1562,9 +1565,10 @@ partial def Ty.written : Ty → Option Syntax.TypeExpr
     | _ => t.written.map (.ref false · none)
 
 /-- A type as `Ty.written` has it, a type parameter of the function written
-`%rigid:T`: what the elaborator's `let`s are of (`St.bodyTys`). -/
+`%rigid:T` and one it was found general in `%rigid:%n`: what the
+elaborator's `let`s are of (`St.bodyTys`). -/
 partial def Ty.writtenRigid : Ty → Option Syntax.TypeExpr
-  | .var _ => none
+  | .var n => some (.name s!"%rigid:%{n}" [])
   | .rigid (.param name _) => some (.name s!"%rigid:{name}" [])
   | .rigid _ => none
   | .con n args =>

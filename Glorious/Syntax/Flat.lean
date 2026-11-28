@@ -309,7 +309,7 @@ end
 /-- The body with only what its roots reach. -/
 def Body.compact (b : Body) : Body :=
   let (roots, nb) := (b.roots.mapM (compactClause b)).run {}
-  { nb with roots }
+  { nb with roots, idTop := max nb.idTop (max b.idTop b.exprs.size) }
 
 /-- Do clauses come back as they were from their body? -/
 def roundTrips (clauses : List Clause) : Bool :=

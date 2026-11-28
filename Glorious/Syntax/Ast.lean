@@ -846,7 +846,15 @@ structure Body where
   by it (`Check.St.scalarLits`), so the elaborator, whose body has not the
   nodes the checker made to read it, finds it. -/
   ids : Array Nat := #[]
+  /-- Above every identity a node of the body has had: what a node made
+  without one is known by, so that no two are known alike, also once the
+  body is written again with fewer (`Flat.Body.compact`). -/
+  idTop : Nat := 0
   deriving Hashable, BEq
+
+/-- The identity under which the checker keeps a function's own type among
+its expressions' (`Check.St.bodyTys`): no node's. -/
+def selfNode : Nat := 1 <<< 62
 
 /-- The identity of the node `e` (`Body.ids`). -/
 @[inline] def Body.idOf (b : Body) (e : ExprId) : Nat := b.ids.getD e e
@@ -856,7 +864,9 @@ structure Body where
   let e := b.exprs.size
   -- (A body made without them, its nodes known by their places.)
   let ids := if b.ids.size == e then b.ids else b.ids ++ (List.range' b.ids.size (e - b.ids.size)).toArray
-  (e, { b with exprs := b.exprs.push n, ids := ids.push (id.getD e) })
+  let top := max b.idTop e
+  let i := id.getD top
+  (e, { b with exprs := b.exprs.push n, ids := ids.push i, idTop := max top (i + 1) })
 
 end Flat
 

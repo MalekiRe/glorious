@@ -157,6 +157,13 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
 
 /-! ## Expressions -/
 
+/-- The local `a` is made for the expression `e`, of the body's own: its
+type is the checker's of `e` (`Builder.nodes`). -/
+def noteNode (a : Atom) (e : Flat.ExprId) : M Unit := do
+  if let .var i := a then
+    if (← get).ownBody then
+      modify fun s => { s with b := { s.b with nodes := s.b.nodes.push (i, s.body.idOf e) } }
+
 mutual
 
 partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Atom := do
@@ -164,8 +171,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
   let a ← elabExprAt scope tailPos e0
   -- (The local made for the expression, of the body's own.)
   if let .var i := a then
-    if before ≤ i && (← get).ownBody then
-      modify fun s => { s with b := { s.b with nodes := s.b.nodes.push (i, s.body.idOf e0) } }
+    if before ≤ i then noteNode a e0
   pure a
 
 partial def elabExprAt (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Atom := do
@@ -219,7 +225,10 @@ partial def elabExprAt (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M A
     | some .destroyed, #[c, d] =>
       if let (.closure _ clauses, .closure _ #[dc]) := (b.expr c, b.expr d) then
         let ⟨dps, destroy⟩ := b.clause dc
-        if dps.isEmpty then return ← elabClosure scope clauses destroy.toList
+        if dps.isEmpty then
+          let a ← elabClosure scope clauses destroy.toList
+          noteNode a c
+          return a
     | _, _ => pure ()
     elabCall scope false f args
   | .tailCall _ f args => do
@@ -331,6 +340,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : A
         | some fb => givesOne fb
         | none => fun _ => false
       let callee ← emit (.let_ (.closure idx []))
+      noteNode callee f
       elabApply scope isTail callee args gives
     | .ctor info => do
       if isTail then throw s!"`tail` applies to calls, not to the constructor `{x}`"
@@ -1102,15 +1112,16 @@ private partial def untraitCall (tr : TraitInfo) (env : Array Nat) (owner : Stri
   | some [d], some idx =>
     -- A trait's function: the implementation's, called by name, for what the
     -- implementation's conditions are met by.
+    let callee := (← get).idOf f
     match ← (methodOf tr env d idx (some id) : StateM Copies _) with
-    | some fn => mk (← pushExpr (.name none fn)) args
-    | none => mk (← pushExpr (.name none "%unresolved")) args
+    | some fn => mk (← pushExprAs (.name none fn) callee) args
+    | none => mk (← pushExprAs (.name none "%unresolved") callee) args
   -- (A machine operation is given no implementation: it is no function.)
   | some ds, none =>
     match (← get).bare? f with
     | some g =>
       if isIntrinsic g then mk f args
-      else mk (← pushExpr (.name none (← (copyFor tr env id g ds : StateM Copies _)))) args
+      else mk (← pushExprAs (.name none (← (copyFor tr env id g ds : StateM Copies _))) ((← get).idOf f)) args
     | none => mk (← untraitExpr tr env owner f) args
   | _, _ => mk (← untraitExpr tr env owner f) args
 
