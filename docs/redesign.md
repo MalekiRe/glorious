@@ -725,7 +725,18 @@ So Core's types from the checker need, in order:
    found at each call (the callee's type there), by substitution from
    `main`, in place of `Typer.instAt`.
 
-Then `Typer` goes. Not done yet: 1 is the ids of section 1.
+Then `Typer` goes.
+
+1, done: every node has an identity (`Flat.Body.ids`, `idOf`, as rustc's
+`HirId`) that writing a body out again keeps: `compact` and the writing
+out of implementations (`untraitExpr`, `untraitCall`) now keep it, as
+`FRewrite` did (`Flat.pushExprAs`). The checker keeps the type of each
+expression whose type it knows whole by that identity (`St.nodeTys`,
+`bodyTys`, `Blocks.nodeTys`), and the elaborator notes, for each local, the
+identity of the expression it is made for (`Builder.nodes`,
+`Output.fnNodes`). `Typer` compares them (`GLORIOUS_TRACE`): of
+covey/fleet's Core, 27,148 locals have the checker's type, 6,662 of the
+`let`s it compares agreeing, 8 not, 146 not decided by it.
 
 ## Section 3, as done: results that do not depend on order
 

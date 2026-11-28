@@ -38,14 +38,14 @@ def epushC (c : Flat.FClause) : M Flat.ClauseId := ebuild (Flat.pushClause c)
 /-- `act` elaborated with another body (a constant's), the one being
 elaborated after as it was. -/
 def withElabBody {α : Type} (b : Flat.Body) (act : M α) : M α := do
-  let before := (← get).body
-  modify fun s => { s with body := b }
+  let (before, own) := ((← get).body, (← get).ownBody)
+  modify fun s => { s with body := b, ownBody := false }
   try
     let r ← act
-    modify fun s => { s with body := before }
+    modify fun s => { s with body := before, ownBody := own }
     pure r
   catch e =>
-    modify fun s => { s with body := before }
+    modify fun s => { s with body := before, ownBody := own }
     throw e
 
 /-- A borrow as it is written: of a variable, or of a part of one, which is
@@ -160,6 +160,15 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
 mutual
 
 partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Atom := do
+  let before := (← get).b.depth
+  let a ← elabExprAt scope tailPos e0
+  -- (The local made for the expression, of the body's own.)
+  if let .var i := a then
+    if before ≤ i && (← get).ownBody then
+      modify fun s => { s with b := { s.b with nodes := s.b.nodes.push (i, s.body.idOf e0) } }
+  pure a
+
+partial def elabExprAt (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Atom := do
   let b := (← get).body
   match b.expr e0 with
   | .int n =>
@@ -666,7 +675,9 @@ partial def mkClause (captures : List String) (pats : List Pattern) (body : Scop
   let tm ← withBuilder (bindBase + binders.length) do
     -- A callable's own body may end in a `tail` call, whatever surrounds it.
     let r ← withNoTail none (body scope)
-    finish r
+    let tm ← finish r
+    modify fun s => { s with clauseNodes := s.clauseNodes.push s.b.nodes }
+    pure tm
   pure ⟨corePats.toList, tm⟩
 
 /-- A callable literal: a new closed function and a closure over its captures. -/
@@ -826,6 +837,9 @@ structure Output where
   /-- What elaborating each top-level function made, where `kept` was given:
   for the next compile (`ElabKept`). -/
   made : ElabMemo := {}
+  /-- Of each function, the top-level function whose body its expressions
+  are of, and of each clause the locals made for them. -/
+  fnNodes : Std.HashMap Nat (String × List (Array (Nat × Nat))) := {}
 
 /-! ## Traits
 
@@ -1057,14 +1071,14 @@ mutual
 private partial def untraitExpr (tr : TraitInfo) (env : Array Nat) (owner : String) (e : ExprId) : UntraitM ExprId := do
   let b ← get
   match b.expr e with
-  | .call id f args => untraitCall tr env owner id f args false
-  | .tailCall id f args => untraitCall tr env owner id f args true
+  | .call id f args => untraitCall tr env owner e id f args false
+  | .tailCall id f args => untraitCall tr env owner e id f args true
   | .closure id clauses => do
     -- What the callable captures is destroyed if it is let go uncalled.
     let written := b.hashClosure id clauses
     let hooks ← (b.fvClauses clauses).eraseDups.filterMapM fun x =>
       (dropHook tr env (captureDropSite owner written x) : StateM Copies _)
-    let c ← pushExpr (.closure id (← clauses.mapM (untraitClause tr env owner)))
+    let c ← pushExprAs (.closure id (← clauses.mapM (untraitClause tr env owner))) (b.idOf e)
     if hooks.isEmpty then pure c
     else
       let mut stmts : Array StmtId := #[]
@@ -1076,13 +1090,14 @@ private partial def untraitExpr (tr : TraitInfo) (env : Array Nat) (owner : Stri
   | n => do
     let n' ← n.mapIds (untraitExpr tr env owner) (untraitClause tr env owner)
       fun body => do pure (← untraitStmts tr env owner (0, 0) body.toList).toArray
-    if n' == n then pure e else pushExpr n'
+    if n' == n then pure e else pushExprAs n' (b.idOf e)
 
-private partial def untraitCall (tr : TraitInfo) (env : Array Nat) (owner : String) (id : Nat) (f : ExprId)
+private partial def untraitCall (tr : TraitInfo) (env : Array Nat) (owner : String) (e : ExprId) (id : Nat) (f : ExprId)
     (args : Array ExprId) (isTail : Bool) : UntraitM ExprId := do
+  let at_ := (← get).idOf e
   let args ← args.mapM (untraitExpr tr env owner)
   let mk := fun (f : ExprId) (args : Array ExprId) =>
-    (pushExpr (if isTail then .tailCall id f args else .call id f args) : UntraitM ExprId)
+    (pushExprAs (if isTail then .tailCall id f args else .call id f args) at_ : UntraitM ExprId)
   match tr.dictsAt[id]?, tr.methodsAt[id]? with
   | some [d], some idx =>
     -- A trait's function: the implementation's, called by name, for what the
@@ -1566,7 +1581,12 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
         let coreClauses ← b.roots.toList.mapM fun c =>
           let ⟨pats, body⟩ := b.clause c
           mkClause [] pats (fun sc => elabStmts sc true body.toList)
-        modify fun s => { s with fns := s.fns.set! idx ⟨coreClauses⟩ }
+        modify fun s =>
+          let k := coreClauses.length
+          let made := s.clauseNodes.extract (s.clauseNodes.size - k) s.clauseNodes.size
+          { s with fns := s.fns.set! idx ⟨coreClauses⟩
+                   clauseNodes := s.clauseNodes.shrink (s.clauseNodes.size - k)
+                   fnNodes := s.fnNodes.insert idx (name, made.toList) }
         if memo.isSome then
           let s ← get
           if let some drops := prefixTo s.drops drops0 then
@@ -1589,6 +1609,6 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
       out := out.set! info.id name
     pure out
   pure ⟨⟨st.fns, .let_ (.closure mainIdx []) (.tail (.var 0) []), st.drops.reverse, fns.toArray.map (·.1), []⟩, names, st.names,
-    opNames, made⟩
+    opNames, made, st.fnNodes⟩
 
 end Glorious.Elab

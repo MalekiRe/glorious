@@ -12,6 +12,7 @@ delta_part StDelta5 diffPart5 applyPart5 fitsPart5 clearPart5 restorePart5 [
   runFns : MapD String Flat.Body,
   declFns : MapD String Flat.Body,
   decidedFns : MapD String Flat.Body,
+  bodyTys : MapD String (Array (Nat × TypeExpr)),
   runCtors : Array String,
   runAliases : MapD String Expr,
   runOps : MapD String Bool,

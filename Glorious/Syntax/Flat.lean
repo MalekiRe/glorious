@@ -171,6 +171,8 @@ end Body
 abbrev Build := StateM Body
 
 def pushExpr (e : FExpr) : Build ExprId := modifyGet fun b => b.add e
+/-- `e` written again: the node it was, known by its identity (`Body.ids`). -/
+def pushExprAs (e : FExpr) (id : Nat) : Build ExprId := modifyGet fun b => b.add e (some id)
 def pushStmt (s : FStmt) : Build StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push s })
 def pushClause (c : FClause) : Build ClauseId := modifyGet fun b => (b.clauses.size, { b with clauses := b.clauses.push c })
 
@@ -293,7 +295,7 @@ into a body of its own. -/
 mutual
 
 partial def compactExpr (src : Body) (e : ExprId) : Build ExprId := do
-  pushExpr (← (src.expr e).mapIds (compactExpr src) (compactClause src) (·.mapM (compactStmt src)))
+  pushExprAs (← (src.expr e).mapIds (compactExpr src) (compactClause src) (·.mapM (compactStmt src))) (src.idOf e)
 
 partial def compactStmt (src : Body) (s : StmtId) : Build StmtId := do
   pushStmt (← (src.stmt s).mapIds (compactExpr src) (compactStmt src))

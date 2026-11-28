@@ -614,6 +614,9 @@ structure Blocks where
   it found it (`Adjust`), by the name it is checked by: what is
   elaborated in place of the body as written. -/
   bodies : Std.HashMap String Flat.Body := {}
+  /-- Of each function, the type of each expression whose type the checker
+  knows whole, by the node's identity. -/
+  nodeTys : Std.HashMap String (Std.HashMap Nat Syntax.TypeExpr) := {}
   traits : TraitInfo := {}
   /-- For each function that performs or handles an operation of an effect
   with type parameters, or calls one that does: the places, by the number of
@@ -723,6 +726,9 @@ structure Builder where
   ops : Array (Core.Tm → Core.Tm)
   depth : Nat
   done : Option Core.Tm
+  /-- Each local made for an expression of the body, with the expression's
+  identity. -/
+  nodes : Array (Nat × Nat) := #[]
   /-- The locals that hold a callable literal: its function and what it captured. -/
   literals : List (Nat × Nat × List Atom) := []
   /-- Those of them no name has referred to yet. -/
@@ -740,6 +746,14 @@ structure St where
   /-- The top-level function being elaborated. -/
   owner : String
   b : Builder
+  /-- Of each clause made and not yet a function's, the locals made for
+  expressions of the body (`Builder.nodes`). -/
+  clauseNodes : Array (Array (Nat × Nat)) := #[]
+  /-- Of each function, the top-level function whose body its expressions
+  are of, and of each clause the locals made for them. -/
+  fnNodes : Std.HashMap Nat (String × List (Array (Nat × Nat))) := {}
+  /-- Whether the body elaborated is the top-level function's own. -/
+  ownBody : Bool := true
   /-- Why a `tail` call is not allowed at this point, if it is not: something
   still has to happen in this activation after the call returns. -/
   noTail : Option String
@@ -868,8 +882,12 @@ where
     | l@(x :: r), acc => if sameObj l before then some acc.reverse else go r (x :: acc)
 
 def addFn (f : Core.Fn) (name : String) : M Nat := do
+  let k := f.clauses.length
   modifyGet fun s =>
-    (s.fns.size, { s with fns := s.fns.push f, names := s.names.push name })
+    let made := s.clauseNodes.extract (s.clauseNodes.size - k) s.clauseNodes.size
+    (s.fns.size, { s with fns := s.fns.push f, names := s.names.push name
+                          clauseNodes := s.clauseNodes.shrink (s.clauseNodes.size - k)
+                          fnNodes := s.fnNodes.insert s.fns.size (s.owner, made.toList) })
 
 def indexed (names : List String) (base : Nat) : Scope :=
   (names.zip (List.range names.length)).map fun (x, k) => (x, .var (base + k))

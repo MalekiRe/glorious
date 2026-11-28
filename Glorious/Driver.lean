@@ -891,7 +891,7 @@ def compileSource (src : String) (check : Bool := true)
     -- Core's types, for the lowering (`Typer`). Where they are not found,
     -- the program runs as it is.
     let types : Except String (Option Lower.Types) := if !check then .ok none else
-      match Trace.timed "types" fun _ => Typer.typesOf declared out with
+      match Trace.timed "types" fun _ => Typer.typesOf declared out ((blocks.map (·.nodeTys)).getD {}) with
       | .ok types =>
         if Trace.typesTraced then dbgTrace (Core.showCore out.fnNames out.program ++ "\n" ++ Typer.showSigs types) fun _ => .ok (some types)
         else .ok (some types)

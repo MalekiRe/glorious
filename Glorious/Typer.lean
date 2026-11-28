@@ -197,12 +197,22 @@ structure St where
   foreign call's result): `anyName`'s if nothing says otherwise, held by the
   machine whatever it is. -/
   seenAs : Std.HashSet Nat := {}
+  /-- The function and clause being found. -/
+  at_ : Nat × Nat := (0, 0)
+  /-- Each local's type as found and as the checker said it. -/
+  saidPairs : Array (U × U × Nat × Nat) := #[]
+  agree : Nat := 0
+  disagree : Nat := 0
+  open_ : Nat := 0
 
 /-- Each function's captures' count, its group, and the declarations. -/
 structure Env where
   decls : Decls
   p : Program
   ncaps : Array Nat
+  /-- The checker's type of the expression each local is made for, by
+  function, clause and local, where it knows the type whole. -/
+  said : Std.HashMap (Nat × Nat × Nat) TypeExpr := {}
 
 
 /-- (`EStateM`, not `StateT` over `Except`: where a failure is caught, the
@@ -698,6 +708,10 @@ partial def inferTm' (amb : Nat) (τ : U) (Γ : Array U) : Tm → M Unit
   | .let_ rhs body => do
     let σ ← inferRhs Γ rhs
     hint (.ty σ)
+    let (f, c) := (← get).at_
+    if let some te := (← read).said[(f, c, Γ.size)]? then
+      let w ← writtenU [] te
+      modify fun s => { s with saidPairs := s.saidPairs.push (σ, w, f, Γ.size) }
     inferTm amb τ (Γ.push σ) body
   | .call f args body => do
     let r ← applied Γ amb f args
@@ -1161,8 +1175,8 @@ def inferGroups : M Unit := do
       let sig := cur[f]!
       modify fun s => { s with uses := #[] }
       let mut hints : List (Array UHint) := []
-      for c in ((fns[f]?).map (·.clauses)).getD [] do
-        modify fun s => { s with hints := #[] }
+      for (c, ci) in (((fns[f]?).map (·.clauses)).getD []).zipIdx do
+        modify fun s => { s with hints := #[], at_ := (f, ci) }
         try
           let binds ← inferPats c.pats sig.params
           inferTm sig.row sig.ret (sig.params ++ sig.caps ++ binds).toArray c.body
@@ -1170,6 +1184,18 @@ def inferGroups : M Unit := do
         hints := hints ++ [(← get).hints]
       members := members ++ [(f, { sig, hints, uses := (← get).uses })]
     tryCatch settle fun e => throw s!"{e} (in the group of function {grp.headD 0})"
+    -- (How the checker's types of the locals compare.)
+    let pairs := (← get).saidPairs
+    modify fun s => { s with saidPairs := #[] }
+    for (σ, w, f, i) in pairs do
+      match ← find σ with
+      | .var _ => modify fun s => { s with open_ := s.open_ + 1 }
+      | _ =>
+        if ← unifiable σ w then modify fun s => { s with agree := s.agree + 1 }
+        else
+          modify fun s => { s with disagree := s.disagree + 1 }
+          if Trace.enabled then
+            dbgTrace s!"said: fn{f} local {i}: found {← showU σ}, said {← showU w}" fun _ => pure ()
     -- (Labels' results are decided here: nothing outside the group can say
     -- more of them.)
     for ρ in (← get).nevers do
@@ -1293,13 +1319,24 @@ def showSigs (C : Types) : String :=
   "\n".intercalate (C.sigs.toList.map fun e => s!"fn{e.fn}: {showSig e.sig}")
 
 /-- The types of a program's Core, for the typed lowering. -/
-def typesOf (items : List Item) (out : Elab.Output) : Except String Types := do
+def typesOf (items : List Item) (out : Elab.Output)
+    (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr) := {}) : Except String Types := do
   let g ← Elab.collectDeclared items
   let decls := declsOf items g
   let p := out.program
   let counts := (p.main :: p.fns.toList.flatMap (·.clauses.map (·.body))).flatMap capsOf
   let ncaps := counts.foldl (fun (acc : Array Nat) (f, n) => acc.setIfInBounds f n) (Array.replicate p.fns.size 0)
-  let env : Env := { decls, p, ncaps }
+  let said := out.fnNodes.fold (fun m f (owner, clauses) =>
+    let base := (owner.splitOn "⟨").headD owner
+    match nodeTys[owner]? <|> nodeTys[base]? with
+    | none => m
+    | some tys => clauses.zipIdx.foldl (fun m (locals, c) =>
+        locals.foldl (fun m (i, n) => match tys[n]? with
+          | some te => m.insert (f, c, i) te
+          | none => m) m) m) {}
+  if Trace.enabled then
+    dbgTrace s!"said owners: {out.fnNodes.size} fns, {(out.fnNodes.toList.filter fun (_, (o, _)) => (nodeTys[o]? <|> nodeTys[(o.splitOn "⟨").headD o]?).isNone).length} unknown; e.g. {((out.fnNodes.toList.filterMap fun (_, (o, _)) => if (nodeTys[o]? <|> nodeTys[(o.splitOn "⟨").headD o]?).isNone then some o else none).eraseDups.take 12)}" fun _ => pure ()
+  let env : Env := { decls, p, ncaps, said }
   let action : M Types := do
     -- (`main`: run with nothing, performing nothing.)
     modify fun s => { s with places := #[], coerces := #[], nevers := #[], shows := #[], uses := #[], hints := #[] }
@@ -1353,6 +1390,8 @@ def typesOf (items : List Item) (out : Elab.Output) : Except String Types := do
   let st ← match Trace.timed "types: groups" fun _ => (inferGroups.run env).run {} with
     | .ok () st => pure st
     | .error e _ => throw e
+  if Trace.enabled then
+    dbgTrace s!"said: {said.size} locals, {st.agree} agree, {st.disagree} do not, {st.open_} open" fun _ => pure ()
   match Trace.timed "types: each function at its signatures" fun _ => (action.run env).run st with
   | .ok c _ => pure c
   | .error e _ => throw e

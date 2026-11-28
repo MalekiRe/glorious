@@ -215,7 +215,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
     (defs reused : List (String × Ty)) (announce : Bool := false) : M (List (String × Ty) × List (String × Ty)) := do
   let mut defs := defs
   let mut reused := reused
-  modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [], assocMemo := {},
+  modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [], assocMemo := {}, nodeTys := #[],
                            copyParams := d.bounds.filterMap fun b =>
                              if b.trait == "Use" && (b.quantity.any fun (_, hi) => hi.isNone) then some b.subject else none }
   -- The function's own type parameters stand for themselves while it is
@@ -543,6 +543,13 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
         modify fun s => { s with body := d.body }
         let t ← inferCallable [] annots ret (some d.name) d.body.roots s!"the clauses of `{d.name}` do"
         countUsesNow
+        -- (The type of each expression known whole, by node.)
+        let read := (← get).nodeTys
+        modify fun s => { s with nodeTys := #[] }
+        let mut known : Array (Nat × Syntax.TypeExpr) := #[]
+        for (e, t) in read do
+          if let some w := (← zonk t).written then known := known.push (e, w)
+        modify fun s => { s with bodyTys := s.bodyTys.insert d.name known }
         -- (The body as read, with what was written where it was found: what
         -- the count of uses follows, `placeLets`.)
         modify fun s => { s with runFns := s.runFns.insert d.name s.body, decidedFns := s.decidedFns.insert d.name s.body }
