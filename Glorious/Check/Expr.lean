@@ -311,6 +311,14 @@ def compareByType (scope : Scope) (args : Array Flat.ExprId) : M Bool := do
   if (← tyHasDrop [] t).isSome then return true
   tyOwnsOnce [] t
 
+/-- The last node of the call `call` (the nodes made to read it have its
+number too). -/
+def callNode (call : Nat) : M Flat.ExprId := do
+  let b := (← get).body
+  pure (((List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
+    | .call i _ _ | .tailCall i _ _ => i == call
+    | _ => false).getD 0)
+
 /-- The dot call `call`, its receiver a name, written where it is
 (`Elab.receiverNode`): the name borrowed as `fn` takes it, given as it is
 where it holds a reference. Said for the elaborator
@@ -319,7 +327,12 @@ name is a value borrowed for writing, which only a variable can be. -/
 def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option String)
     (borrow : Option Bool) : M Bool := do
   let b := (← get).body
-  let some e0 := node | return false
+  -- (Not said: the last node of the call, as the elaborator's node
+  -- functions find it.)
+  let found := (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
+    | .call i _ _ | .tailCall i _ _ => i == call
+    | _ => false
+  let some e0 := node.orElse fun _ => found | return false
   let recv := match b.expr e0 with
     | .call _ f args | .tailCall _ f args =>
       match b.expr f, fn with
@@ -2377,8 +2390,13 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
                 if isRef then
                   modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
                   return some (← inferCall scope amb (← pushE (.name none alt)) args call)
-                -- (Else: read again with the receiver borrowed where it is,
-                -- as the resolver borrows one, `g[0].push(5)`, `v[0].s.len()`.)
+                -- (Else: the receiver borrowed where it is, as the resolver
+                -- borrows one, `g[0].push(5)`, `v[0].s.len()`, written so
+                -- before the call is read.)
+                if ← receiverHere scope call none (some alt) (← receiverTaken alt) then
+                  match (← get).body.expr (← callNode call) with
+                  | .call _ f' args' | .tailCall _ f' args' => return some (← inferCall scope amb f' args' call)
+                  | _ => pure ()
                 throwThe Elab.Said { msg := s!"the receiver of `{alt}` is borrowed", decision := some (← receiverDecision call alt) }
   pure none
 
