@@ -298,10 +298,6 @@ inductive Decision where
   /-- The field borrow `id`, `&x.f` (`&mut` where `uniq`) of what `deref`
   (`deref_mut`) gives of `x`, written where it is (`derefRefNode`). -/
   | derefRefHere (id : Nat) (uniq : Bool) (borrow : Option Bool)
-  /-- The comparison `call`, written where it is by reference
-  (`compareNode`): `eq(&a, &b)`, an operand that is a name holding a
-  reference given as it is (`refs`). -/
-  | compareHere (call : Nat) (refs : List Bool)
   /-- In `owner`, `&mut x` of a name holding a `&mut`, at the node `node`
   (its identity), written `&mut *x` where it is (`reborrowNode`). -/
   | reborrowHere (owner : String) (node : Nat) (x : String)
@@ -594,7 +590,7 @@ def derefAssignNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option F
 compare; a name that holds a reference given as it is (`refs`); an
 operand that is no name kept in a variable of its own first, `{ let mut
 a' = f(); eq(&a', &b) }`. As the checker reads it on and the elaborator
-writes it (`Decision.compareHere`). -/
+reads on (`Check.compareByType`). -/
 def compareNode (call : Nat) (refs : List Bool) (b : Flat.Body) : Option Flat.Body := do
   let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .call i _ _ => i == call

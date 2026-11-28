@@ -221,7 +221,6 @@ structure Marks where
   drops : Nat
   bounds : Nat
   pending : Nat
-  compares : Nat
   fieldSites : Nat
   partReads : Nat
   instSites : Nat
@@ -240,7 +239,7 @@ structure Marks where
 def Marks.of (s : St) : Marks :=
   { valReads := s.valReads, temps := s.temps, later := s.later, anon := s.anon, uses := s.uses.size,
     givenReads := s.givenReads.size, heldMoves := s.heldMoves.size, dups := s.dups.size, drops := s.drops.size,
-    bounds := s.bounds.size, pending := s.pending.size, compares := s.compares.size,
+    bounds := s.bounds.size, pending := s.pending.size,
     fieldSites := s.fieldSites.size, partReads := s.partReads.size, instSites := s.instSites.size,
     groupUses := s.groupUses.size, dropCands := s.dropCands.size, dotChosen := s.dotChosen,
     argsChosen := s.argsChosen, packs := s.packs.size, derefReads := s.derefReads.size,
@@ -253,7 +252,7 @@ def Marks.undo (m : Marks) (s : St) : St :=
            uses := s.uses.shrink m.uses, givenReads := s.givenReads.shrink m.givenReads,
            heldMoves := s.heldMoves.shrink m.heldMoves, dups := s.dups.shrink m.dups,
            drops := s.drops.shrink m.drops, bounds := s.bounds.shrink m.bounds,
-           pending := s.pending.shrink m.pending, compares := s.compares.shrink m.compares,
+           pending := s.pending.shrink m.pending,
            fieldSites := s.fieldSites.shrink m.fieldSites, partReads := s.partReads.shrink m.partReads,
            instSites := s.instSites.shrink m.instSites, groupUses := s.groupUses.shrink m.groupUses,
            dropCands := s.dropCands.shrink m.dropCands, dotChosen := m.dotChosen, argsChosen := m.argsChosen,
@@ -283,14 +282,31 @@ def inArm {α : Type} (arm : Nat × Nat) (run : M α) : M α := do
   tryCatchThe Elab.Said (do let r ← run; modify fun s => { s with armPath := outer }; pure r)
     fun e => do modify fun s => { s with armPath := outer }; throwThe Elab.Said e
 
-/-- Whether the comparison `call` is of what is not copied, or of what is not
-known yet, as found once it is read: compared by reference, written where
-it is (`Elab.compareNode`, `Elab.Decision.compareHere`), as Rust's
-operators always compare. (One not known yet may be found copied later:
-by reference it compares the same.) -/
-def compareHere (call : Nat) : M Bool := do
-  let some (_, t) := (← get).compares.toList.reverse.find? (·.1 == call) | return false
-  if !(freeTys (← zonk t)).isEmpty then return true
+/-- Whether a comparison of `args` is of what is not copied, or of what is
+not known yet, by what its operands are before it is read (names, whose
+types are known, or literals, which are copied): compared by reference,
+written where it is (`Elab.compareNode`), as Rust's operators always
+compare. (One not known yet may be found copied later: by reference it
+compares the same.) -/
+def compareByType (scope : Scope) (args : Array Flat.ExprId) : M Bool := do
+  let b := (← get).body
+  let mut found : Option Ty := none
+  for a in args do
+    match b.expr a with
+    | .name none x =>
+      match scope.lookup x with
+      | none => return false
+      | some (.val t _) | some (.cell t _) =>
+        match found with
+        | none => found := some t
+        | some f => if !(freeTys (← zonk f)).isEmpty then found := some t
+      | _ => pure ()
+    -- (A literal is of a type that is copied; a constant, `true`, a value
+    -- made anew wherever it is named.)
+    | _ => return false
+  let some t := found | return true
+  let t ← zonk t
+  if !(freeTys t).isEmpty then return true
   modify fun s => { s with seen := {} }
   if (← tyHasDrop [] t).isSome then return true
   tyOwnsOnce [] t
@@ -434,13 +450,13 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
         if (b.name? g).map (·.2) == some "if" then
           if let (.closure a _, .closure o _) := (b.expr first, b.expr other) then
             modify fun s => { s with altArms := (s.altArms.insert (s.owner, a) (id, 0)).insert (s.owner, o) (id, 1) }
-    -- (A comparison of two names of a type that is not copied: read again
-    -- where it is by reference, `compareHere`.)
+    -- (A comparison of what is not copied, or of what is not known yet:
+    -- by reference, `eq(&a, &b)`, written where it is before it is read,
+    -- as Rust's operators compare. Its operands are names or literals, the
+    -- rest named first by the front end, so what it compares is known.)
     if args.size == 2 && (((← get).body.name? f).bind fun (_, op) => compareOps.lookup op).isSome then
-      let marks := Marks.of (← get)
-      let t ← receiverRetry scope amb e0 id n
-      let b := (← get).body
-      if ← compareHere id then
+      if ← compareByType scope args then
+        let b := (← get).body
         -- (A name that holds a reference is given as it is: `&T` compares
         -- as `T`.)
         let refs ← args.toList.mapM fun a => do
@@ -451,9 +467,9 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
             | _ => pure false
           | _ => pure false
         if let some b' := Elab.compareNode id refs b then
-          modify fun s => { marks.undo s with body := b', decided := s.decided ++ [Elab.Decision.compareHere id refs] }
+          modify fun s => { s with body := b' }
           return ← inferExprAt scope amb e0
-      return t
+      return ← receiverRetry scope amb e0 id n
     receiverRetry scope amb e0 id n
   | .tailCall id _ _ => receiverRetry scope amb e0 id n
   | .closure .. => inferExprCall scope amb n
@@ -1623,10 +1639,6 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
             | none => pure a
           else pure a
         | _ => pure a
-      -- (What a comparison compares, `a == b`: told of where its type is
-      -- known, `checkCompares`.)
-      if i == 0 && call != 0 && compareOps.any (what == s!"`{·.1}`") then
-        modify fun s => { s with compares := s.compares.push (call, p) }
       -- (A dot call's receiver, a name of a type not known yet, where the
       -- function takes a reference: given as what it is, and whether it is
       -- a reference told where its type is known, `checkLateReceivers`.)
