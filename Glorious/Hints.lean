@@ -734,7 +734,14 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
       | some ρ, some H, some capTys, some σ => handlerUses env w ret ops capTys σ ρ H
       | _, _, _, _ => w
     go env depth f c (w.bind ρ false) body
-  | .perform _ _ body => go env depth f c (w.bind none false) body
+  | .perform op _ body =>
+    -- (What it is resumed with: as the checker says it, else the
+    -- operation's, at what the code around performs it at.)
+    let σ := ((said w.Γ.size).bind (tyOf env.decls w.binds)).orElse fun _ => do
+      let (ps, _, result) ← env.decls.ops[op]?
+      let targs ← w.eff.lookup op
+      tyOf env.decls (ps.zip targs) (← result)
+    go env depth f c (w.bind σ false) body
   | .label thunk body | .guard _ thunk body | .cell _ thunk body | .cellL _ _ thunk body | .lend _ _ thunk _ _ body =>
     go env depth f c (w.bind ((w.atomTy thunk).bind retOf) false) body
   | .cancel _ body => go env depth f c (w.bind (some .unit) false) body

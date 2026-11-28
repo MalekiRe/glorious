@@ -784,3 +784,15 @@ Found on the way: a program the lowering does not take runs on the
 unlowered machine, and some give other output there
 (`GLORIOUS_UNLOWERED=1`: `o == Some(p.name.clone())` of texts is false);
 the suite does not see it, as every program it has is lowered.
+
+As it stands after the call-site instantiations, the copies' identities
+and operations' results: `GLORIOUS_TYPES=hints` types 1,403 programs of
+the suite's 1,464 (1,386 lowered); of the 1,959 cases run both ways, one
+gives other output (`each_mut` over two `Store` handlers: a text read back
+empty). What `Typer` has that the forward types do not: what each callable
+was made with (`env`) where the callable reaches a place by a declared
+type (a field, a parameter written `fn(..)`), and what each signature
+performs (`eff`, `Typer`'s one row for the code around), both found by
+unifying how a callable flows. Until those are written by the checker
+(each callable's captures and row at each place it flows to), `Typer`
+stays the default.
