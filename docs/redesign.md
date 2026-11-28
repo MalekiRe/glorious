@@ -609,9 +609,10 @@ where they are (`writeDotBorrows`; the copies of the body patched with them
 for each analysis, `St.dotRefs`, are gone). What each still works out
 itself, with why:
 
-- A field of a copied type read of a name, `x.f`, is no use of `x` (the
-  count reads it as a borrow, `looked`): a copy of a part, which Core has
-  no node for apart from a read.
+- A field of a copied type read of a name, `x.f`, is no use of `x`: where
+  every part of the name read is of a copied type, each read is written
+  `%copied(x.f)` in the body (`Flat.copiedReads`, `Mark.copied`), which the
+  count reads as taking nothing and the elaborator as the read.
 - Which of several callables runs is followed through the bodies of the
   functions that take them (`pathUses`), as conditionals are functions
   here (`if`, `else`, `match` arms are callables given to them): Rust's MIR

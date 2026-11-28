@@ -606,6 +606,47 @@ partial def Body.computes (b : Body) (e : ExprId) : Bool :=
   | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ => b.computes x
   | _ => false
 
+mutual
+
+/-- The reads of a part of `x` (`x.f`, `x.0`) in `e`, not where `x` is
+bound again, nor one written `%copied` already. -/
+partial def Body.partReadsE (b : Body) (x : String) (e : ExprId) : List ExprId :=
+  match b.expr e with
+  | .fieldOf _ r _ | .proj r _ => if b.bare? r == some x then [e] else b.partReadsE x r
+  | .call _ f #[_] => if b.mark? f == some .copied then [] else (b.direct e).toList.flatMap (b.partReadsE x)
+  | .closure _ cs => cs.toList.flatMap (b.partReadsC x)
+  | .handle s cs => b.partReadsE x s ++ cs.toList.flatMap (b.partReadsC x)
+  | .labelScope _ body => b.partReadsS x body.toList
+  | _ => (b.direct e).toList.flatMap (b.partReadsE x)
+
+partial def Body.partReadsC (b : Body) (x : String) (c : ClauseId) : List ExprId :=
+  let ⟨pats, body⟩ := b.clause c
+  if (pats.flatMap patternNames).contains x then [] else b.partReadsS x body.toList
+
+/-- Those of statements, up to where `x` is bound again. -/
+partial def Body.partReadsS (b : Body) (x : String) : List StmtId → List ExprId
+  | [] => []
+  | s :: rest =>
+    let s := b.unlocated s
+    let here := (b.stmtExprs s).toList.flatMap (b.partReadsE x)
+    let again := match b.stmt s with
+      | .let_ pat _ => (patternNames pat).contains x
+      | .letMut y _ => y == x
+      | _ => false
+    here ++ if again then [] else b.partReadsS x rest
+
+end
+
+/-- Each read of a part of `x` in `stmts` written `%copied(x.f)`
+(`Check.copiedReads`): the read itself made a node of its own. -/
+def copiedReads (x : String) (stmts : List StmtId) (b : Body) : Body := Id.run do
+  let mut b := b
+  for e in b.partReadsS x stmts do
+    let (read, b1) := b.add (b.expr e)
+    let (mark, b2) := b1.add (.mark .copied)
+    b := { b2 with exprs := b2.exprs.set! e (.call 0 mark #[read]) }
+  b
+
 /-- Does `e` borrow one of the names the statements `before` bind (`&x`,
 `&x.f`)? -/
 partial def Body.borrowsNamed (b : Body) (before : Array StmtId) (e : ExprId) : Bool :=

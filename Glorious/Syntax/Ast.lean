@@ -49,6 +49,11 @@ inductive Mark where
   | ascribe
   /-- `move x`: the value of `x`, which is then not to be used again. -/
   | move
+  /-- `%copied(x.f)`: a part of a name read by copying it, of a type that is
+  copied, written by the checker where it finds every part of the name read
+  so (`Check.copiedReads`): no use of the name, as Rust's copy of a `Copy`
+  field is not. -/
+  | copied
   /-- The statement a block written `unsafe { .. }` begins with: what follows
   it in the block may name what is unsafe. -/
   | unsafe_
@@ -117,6 +122,7 @@ def Mark.shown : Mark → String
   | .ctorIs => "%ctor_is"
   | .ascribe => "%as"
   | .move => "%move"
+  | .copied => "%copied"
   | .unsafe_ => "%unsafe"
   | .observed => "%observed"
   | .focus => "%focus"

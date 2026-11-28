@@ -836,6 +836,8 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String 
     match args with
     | value :: _ => runExpr ctx depth b env value
     | [] => pure [(.unknown, 0)]
+  -- (A part copied takes nothing out of what it is read of.)
+  | .mark .copied => pure [(.unknown, 0)]
   -- (Asking what a reference points to was built by only looks.)
   | .mark .ctorIs | .mark .shapes => if ctx.lower then handedOn fun n => [(.unknown, n)] else general
   | .name q x =>
@@ -1146,17 +1148,14 @@ def checkUsesOf (code : Flat.Body) (pos : String) (body : List Flat.StmtId) (s :
         pure ((freeTys ft).isEmpty && (← borrowsOnlyStatic ft) && !hasParam ft
           && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone)
       | none => pure false
-  let looked : Flat.Body := if !copiedParts then code else
-    (List.range code.exprs.size).foldl (fun (bb : Flat.Body) i =>
-      match bb.exprs[i]! with
-      | .fieldOf _ e _ | .proj e _ =>
-        if bb.bare? e == some x then { bb with exprs := bb.exprs.set! i (.ref false x) } else bb
-      | _ => bb) code
   let readAfter := (body.foldl (fun (seen, bad) s =>
-    let (seen', bad') := looked.borrowAfterValueStmt x seen s
+    let (seen', bad') := code.borrowAfterValueStmt x seen s
     (seen', bad || bad')) (false, false)).2
   let copiedParts := copiedParts && !readAfter
-  let code := if copiedParts then looked else code
+  -- (Written so where they are, of the body counted and of the function's.)
+  let code := if copiedParts then Flat.copiedReads x body code else code
+  if copiedParts then
+    modify fun st => { st with body := Flat.copiedReads x body st.body }
   -- A value with a `drop` to run, of which only parts that can be used
   -- any number of times are read: reading them takes nothing out of it.
   -- It stays whole, and is destroyed when its block is left, as a name

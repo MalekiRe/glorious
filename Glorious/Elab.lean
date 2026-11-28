@@ -204,7 +204,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Ato
   | .call _ f args => do
     -- A value written with its type is the value: the type was the checker's.
     match b.mark? f, args with
-    | some .ascribe, #[value, _] | some .inst, #[value, _] | some .move, #[value] | some .receiver, #[value] =>
+    | some .ascribe, #[value, _] | some .inst, #[value, _] | some .move, #[value] | some .copied, #[value] | some .receiver, #[value] =>
       return ← elabExpr scope tailPos value
     -- A callable with what destroys what it captured if it is let go.
     | some .destroyed, #[c, d] =>
