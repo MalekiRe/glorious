@@ -281,7 +281,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
   -- `F: Fn<(A, B), Output = R, Effects = {E}>` is `fn(A, B) -> R / {E}`.
   let callable := fun (b : Syntax.Bound) => b.trait == "Fn" || b.trait == "RunsIn" || b.trait == "Label"
   for b in d.bounds do
-    unless (genericParams d.params).contains b.subject do
+    unless b.subjectTy.isSome || (genericParams d.params).contains b.subject do
       throw s!"`{b.subject}: {b.trait}`: `{b.subject}` is not a type parameter of `{d.name}`"
     if callable b then
       let t ← freshTy
@@ -319,6 +319,9 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
         throw s!"`{b.subject}: {b.trait}`: `{b.trait}` takes {arity} type arguments, but is given {b.args.length}"
       let args ← b.args.mapM (resolveType rigid false)
       modify fun s => { s with writtenArgs := (d.name, b.subject, b.trait, args) :: s.writtenArgs }
+      if let some sty := b.subjectTy then
+        let t ← resolveType rigid false sty
+        modify fun s => { s with writtenSubjects := (d.name, b.subject, t) :: s.writtenSubjects }
   -- Callables that run in an environment the function is given whole.
   let environments := (d.bounds.filter (·.trait == "Environment")).map (·.subject)
   for b in d.bounds do

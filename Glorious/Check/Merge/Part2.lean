@@ -16,6 +16,7 @@ delta_part StDelta2 diffPart2 applyPart2 fitsPart2 clearPart2 restorePart2 [
   traitShape : MapD String (Nat × List String),
   selfDefaults : MapLD String Nat,
   writtenArgs : ListD (String × String × String × List Ty),
+  writtenSubjects : ListD (String × String × Ty),
   supers : ListD (String × List String),
   ranked : ListD (Nat × List (Nat × String)),
   packs : ArrD (Nat × List String),

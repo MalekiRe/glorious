@@ -691,6 +691,9 @@ structure St where
   traits, with the trait's arguments as types: the function, the type
   parameter, the trait, the arguments. -/
   writtenArgs : List (String × String × String × List Ty) := []
+  /-- A bound said of a type, not a type parameter (`Syntax.Bound.subjectTy`):
+  the function, the bound's name, the type. -/
+  writtenSubjects : List (String × String × Ty) := []
   /-- For each trait, the traits a type must have to have it. -/
   supers : List (String × List String) := []
   /-- Callable types that are for every lifetime: by the capture variable of

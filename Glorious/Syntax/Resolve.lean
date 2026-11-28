@@ -751,17 +751,20 @@ def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
           | .fn m _ _ _ _ => !written.contains m
           | (.typeAlias n _ _) => !said.contains n
           | _ => false
-        -- A default is written against `Self`; in the implementation its types
-        -- are the trait's at the implementing type. Each implementation has its
-        -- own copy: the calls in it are met by this implementation's types, and
-        -- are known by their identities. (`Self::f(..)` in it is this
-        -- implementation's `f`.)
         let self := selfTypeOf head (args.map (TypeExpr.name · []))
-        let missing := missing.map fun
+        -- (A function its trait gives a body: a call of the trait's, checked
+        -- once for every implementation, generic in `Self`, at this type.)
+        let decls := ((items.findSome? fun | .trait n ms => if n == tr.base then some ms else none | _ => none).getD [])
+        let missing := missing.zipIdx.map fun (item, k) => match item with
           | .fn m fps annots _ b =>
-            Item.fn m fps (annots.map fun _ => none) none
-              ((shiftRewrite (10000000000 * (index + 1))).body
-                ((selfRewrite head (some (tr.base, Expr.type (.tuple [self])))).body b))
+            match decls.find? (fun (md : MethodDecl) => md.name == m) with
+            | some md =>
+              let ps := (List.range md.params.length).map fun i => s!"%arg{i}"
+              let cid := 10000000000 * (index + 1) + 7000 + k
+              let call := Expr.call cid (.name none s!"%default:{tr.base}::{m}") (ps.map (Expr.name none))
+              let at_ := Expr.call 0 (.mark .inst) [call, .type (.tuple (self :: targs))]
+              Item.fn m fps (annots.map fun _ => none) none (Flat.ofClauses [.mk (ps.map Pattern.var) [.expr at_]])
+            | none => Item.fn m fps annots none b
           -- (A type's default is written against `Self` too.)
           | (.typeAlias n takes body) => (.typeAlias n takes (TypeExpr.withSelf self body))
           | item => item
@@ -777,6 +780,41 @@ def fillDefaults (items : List Item) (memo : FrontMemo := {}) : List Item × Fro
           | item => item
         [.impl { whole with trait := (TraitKey.at tr.base before targs), methods := all }]
       (seen.insert (tr.base, head, given) (before + 1), out ++ made.toArray, memo)
+    -- (Each of a trait's defaults a function of its own, after the trait:
+    -- generic in `Self`, with the trait's bound and what its signature
+    -- asks of types made of `Self`; checked once, as Rust checks a default,
+    -- and copied for each type as any generic function is.)
+    | item@(.traitInfo tr _ fns params _) =>
+      let decls := ((items.findSome? fun | .trait n ms => if n == tr then some ms else none | _ => none).getD [])
+      let generic := fns.filterMap fun
+        | .fn m _ _ _ b => do
+          let md ← decls.find? (·.name == m)
+          let name := s!"%default:{tr}::{m}"
+          -- (`Self::Components`: what the trait leaves, of `Self`.)
+          let ofSelf := selfAssocs (.name "Self" []) tr (params.map (TypeExpr.name · []))
+          let b := (selfRewrite "Self" (some (tr, Expr.type (.tuple [.name "Self" []])))).body b
+          let b := match mapTypes (fun t => pure (ofSelf t)) b with
+            | .ok b => b
+            | .error _ => b
+          let annots := md.params.map ofSelf
+          let ret := md.ret.map ofSelf
+          -- (And what its signature asks of types made of `Self`: of `X` in
+          -- `<X as Registers<S>>::Out`, `X: Registers<S>`, as Rust's
+          -- signatures imply.)
+          let rec projections (fuel : Nat) (t : TypeExpr) : List (TypeExpr × String × List TypeExpr) :=
+            match fuel, t with
+            | 0, _ => []
+            | fuel + 1, .name n [subj, .name tr' targs, _] =>
+              (if n == assocOfMark then [(subj, tr', targs)] else []) ++ projections fuel subj ++ targs.flatMap (projections fuel)
+            | fuel + 1, t => t.parts.flatMap (projections fuel)
+          let implied := ((annots ++ ret.toList).flatMap (projections 32)).filter fun (subj, tr', _) =>
+            !(subj == .name "Self" [] && tr' == tr)
+          let implied := implied.eraseDups.zipIdx.map fun ((subj, tr', targs), k) =>
+            ({ subject := s!"%where{k}", subjectTy := some subj, trait := tr', args := targs } : Bound)
+          some [Item.fn name ("Self" :: params ++ md.generics) (annots.map some) ret b,
+            .bounds name ({ subject := "Self", trait := tr, args := params.map (TypeExpr.name · []) } :: implied)]
+        | _ => none
+      (seen, (out.push item) ++ generic.flatten.toArray, memo)
     | item => (seen, out.push item, memo)
   (out.toList, memo)
 

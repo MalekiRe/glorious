@@ -761,6 +761,11 @@ the environment `Access` names (`E`, `&E` or `&mut E`), the access first among
 environment is used. -/
 structure Bound where
   subject : String
+  /-- Said of a type and not of a type parameter (`subject` then only tells
+  it from others): what a default's signature asks of a type made of
+  `Self`, `<Self::Components as Registers<S>>::Out` of
+  `Self::Components: Registers<S>`. -/
+  subjectTy : Option TypeExpr := none
   trait : String
   args : List TypeExpr := []
   assoc : List (String × TypeExpr) := []

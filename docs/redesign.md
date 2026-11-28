@@ -627,3 +627,38 @@ again in parts is four adjustments found once a type is (`compareHere`,
 1012 in the suite; `refPatsHere`, 800; `receiverHere`, 500; `etaHere`,
 66): each written where it is and the expression read on, what the first
 reading recorded taken back (`Marks`), never the function again.
+
+## Step 7, as done: nothing read again
+
+What made a body be read again is gone (redesign step 7's slices):
+
+- Comparisons are decided by what they compare before they are read
+  (`compareByType`; the front end names an operand that is no name or
+  literal first).
+- Receivers: the type's own function and how it takes the receiver are
+  decided before the call is read (`inferDotAltCall`, `ownCall`,
+  `chosenCall`, a first argument borrowed in `checkArgs`); what was chosen
+  is written into the call where it is (`writeCall`), not carried in side
+  tables (`dotChosen`, `argsChosen` gone).
+- A function named as a value is made a block that calls it before the
+  name is read (`etaArity`); patterns by reference are written before the
+  clauses are read (`checkArgsIn`); `..`, `Deref` fields and reborrows were
+  so already.
+- A call's arguments and a callable's clauses are read once: a coercion
+  applies where the expected type is known as the value is read
+  (decisions.md).
+- `Decision` is the table of adjustments by node, `St.adjust`
+  (`Elab.Adjust`: `..` and the places, which the elaborator makes cells,
+  `Elab.promote`); `receiverRetry`, `Marks`, `decideBody`,
+  `Said.decision` are gone. Values used on one path and not another get a
+  drop flag from the destroying pass (`Elab.flagged`), not a `let mut`.
+- A trait's default body is checked once, as a function of its own generic
+  in `Self` with the trait's bound and what its signature asks of types
+  made of `Self` (`%default:Trait::f`, a bound said of a type,
+  `Syntax.Bound.subjectTy`); an implementation that does not write the
+  function calls it at its type, and copies are made per type as for any
+  generic function.
+
+What the checker still tries and lets go (a receiver's type, a field's,
+`dotAltReading`) is put back as it was: a probe, as rustc's method probe is
+of types.

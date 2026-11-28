@@ -832,8 +832,11 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
         let mut written : List (Syntax.TraitKey × Nat × Ty) := []
         let mut fittedKeys : Array (Syntax.TraitKey × Nat) := #[]
         for (b, at_) in ordinary.zipIdx do
-          let t := Ty.rigid (.param b.subject (rigidOwner decls d))
-          if (seen.lookup (Rigid.param b.subject (rigidOwner decls d))).isSome then
+          -- (Said of a type made of the parameters, the type.)
+          let ofType := (← get).writtenSubjects.findSome? fun (f, n, t) =>
+            if f == d.name && n == b.subject then some t else none
+          let t := ofType.getD (Ty.rigid (.param b.subject (rigidOwner decls d)))
+          if ofType.isSome || (seen.lookup (Rigid.param b.subject (rigidOwner decls d))).isSome then
             let k := (← keyOf t).getD 0
             -- The trait at the arguments written, if it takes some: this
             -- bound's, where the trait is asked of the type more than
@@ -887,9 +890,9 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
   -- the type together with them, so that each use says them anew.
   let mut bounds : List (String × Ty) := []
   for (tr, _, k) in mine do
-    let self := match k with
-      | .rigid r => (seen.lookup r).getD k
-      | k => k
+    let self ← match k with
+      | .rigid r => pure ((seen.lookup r).getD k)
+      | k => do pure (← openParams seen (← zonk k)).1
     match keyed.find? (·.1 == tr) with
     | some (_, base, args) =>
       let args ← args.mapM fun a => do pure (← openParams seen (← zonk a)).1
