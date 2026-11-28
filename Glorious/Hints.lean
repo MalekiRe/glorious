@@ -57,6 +57,8 @@ effects and what it was made with are not written). -/
 partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr → Option Ty
   | .name x args =>
     if let (some t, []) := (vars.lookup x, args) then some t
+    -- (A callable for every lifetime, `%for<'a, fn(..)>`: the callable.)
+    else if x == rankedMark then args.getLast?.bind (tyOf d vars)
     else if x.startsWith "'" then some (.ref .unit)
     else if x == "Int" then some .int
     else if isScalar x then some (.scalar (scalarBits x))
@@ -235,6 +237,35 @@ where
     | .var i => Γ[i]?.join
     | .int _ => some .int
 
+/-- How the local `i` is first used in `tm` (`GLORIOUS_TRACE=hints`). -/
+partial def firstRef (i : Nat) (tm : Tm) : String :=
+  let is := fun (a : Atom) => a == .var i
+  let some_ := fun (as : List Atom) => as.any is
+  match tm with
+  | .ret a => if is a then "returned" else "unused"
+  | .let_ rhs b => match rhs with
+    | .atom a => if is a then "copied" else firstRef i b
+    | .construct _ as => if some_ as then "stored" else firstRef i b
+    | .closure _ as => if some_ as then "captured" else firstRef i b
+    | .prim _ as => if some_ as then "prim" else firstRef i b
+    | .place pl => if pl.var == i then "place" else firstRef i b
+  | .call h as b => if is h then "called" else if some_ as then "given" else firstRef i b
+  | .tail h as => if is h then "called" else if some_ as then "given to a tail call" else "unused"
+  | .mem _ as b => if some_ as then "memory" else firstRef i b
+  | .host _ as b => if some_ as then "host" else firstRef i b
+  | .handle _ _ cs t b => if is t then "handled" else if some_ cs then "handler captures" else firstRef i b
+  | .handleTail _ _ cs t => if is t then "handled" else if some_ cs then "handler captures" else "unused"
+  | .perform _ as b => if some_ as then "performed with" else firstRef i b
+  | .raise _ as => if some_ as then "raised with" else "unused"
+  | .label t b => if is t then "label" else firstRef i b
+  | .labelTail t => if is t then "label" else "unused"
+  | .guard c t b => if is c || is t then "guard" else firstRef i b
+  | .guardTail c t => if is c || is t then "guard" else "unused"
+  | .cancel k b => if is k then "cancelled" else firstRef i b
+  | .cell a t b | .cellL _ a t b => if is a then "cell init" else if is t then "cell" else firstRef i b
+  | .cellTail a t | .cellTailL _ a t => if is a then "cell init" else if is t then "cell" else "unused"
+  | .lend _ r t pre post b => if is r || is t || some_ pre || some_ post then "lend" else firstRef i b
+
 /-- A clause being gone through: each local's type found so far, the
 closures whose type waits on where they are used (by local: the function
 and what it was made with), the hints found in order (none where not, or
@@ -248,6 +279,8 @@ structure W where
   /-- The type parameters where a closure of each callable of the function's
   own was made (by the callable and what it was made with). -/
   made : Array ((Nat × List Ty) × List (String × Ty)) := #[]
+  /-- Why a local's type was not found, by local (`GLORIOUS_TRACE=hints`). -/
+  why : Std.HashMap Nat String := {}
 
 def W.atomTy (w : W) : Atom → Option Ty
   | .var i => w.Γ[i]?.join
@@ -278,6 +311,16 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
     | .var i => (w.pend[i]?).map (i, ·)
     | .int _ => none
   let mut w := w
+  -- (A closure given to a callable of a known type: of the type it takes
+  -- there, what it was made with its own.)
+  match at_ with
+  | .call h args _ | .tail h args =>
+    if let some (.fn ps _ _ _ _) := w.atomTy h then
+      for (a, p) in args.zip ps do
+        if let some (i, (_, caps)) := callee a then
+          if let .fn qs r eff once _ := p then
+            w := w.found i (.fn qs r eff once (some caps))
+  | _ => pure ()
   -- (The callable, what it is given, and the local the use binds, if any.)
   let uses : List (Atom × Option (List Ty)) := match at_ with
     | .guard cl t _ | .guardTail cl t => [(cl, some []), (t, some [])]
@@ -344,6 +387,17 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
   | .let_ rhs body =>
     let i := w.Γ.size
     let mine := rhsTy env w.binds w.Γ (said i) rhs
+    let w := if mine.isSome then w else { w with why := w.why.insert i (match rhs with
+      | .place pl => match w.Γ[pl.var]?.join with
+        | none => "place of unknown"
+        | some t => s!"place of {match t with | .data .. => "data" | .ref _ => "ref" | .tuple _ => "tuple" | _ => "other"}"
+      | .construct _ _ => match said i with
+        | some te => s!"construct said, not written: {(te.spell.take 80).toString} with {w.binds.map (·.1)}"
+        | none => "construct not said"
+      | .closure _ caps => if (caps.mapM w.atomTy).isNone then "closure caps unknown" else if (said i).isSome then "closure said, not written" else s!"closure waits: {firstRef i body}"
+      | .atom _ => "atom of unknown"
+      | .prim _ _ => "prim"
+      ) }
     let w := match said i, mine with
       | some te, some m => { w with binds := matchTy env.decls w.binds te m }
       | _, _ => w
@@ -444,6 +498,14 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
         t := { t with lost := t.lost + 1 }
         continue
       let localOf : Std.HashMap Nat Nat := w.hintAt.fold (fun m i h => m.insert h i) {}
+      for (mine, h) in w.hints.toList.zipIdx do
+        if mine.isNone then
+          let why := match localOf[h]? with
+            | some i => match w.why[i]? with
+              | some y => y
+              | none => "call or host"
+            | none => "handler"
+          t := t.add s!"why: {why}" none
       for ((mine, theirs), h) in (w.hints.toList.zip hs).zipIdx do
         match theirs with
         | .ty σ =>
