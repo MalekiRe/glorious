@@ -314,7 +314,12 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
   | .tail g _ => (w, (w.atomTy g).bind retOf)
   | .raise .. => (w, some .never)
   | .labelTail thunk | .guardTail _ thunk | .cellTail _ thunk | .cellTailL _ _ thunk => (w, (w.atomTy thunk).bind retOf)
-  | .handleTail .. => ({ w with hints := w.hints.push none }, none)
+  | .handleTail _ ops _ _ =>
+    let H : Option Row := ops.mapM fun (op, _) => do
+      let (ps, _, _) ← env.decls.ops[op]?
+      if ps.isEmpty then pure (op, []) else none
+    -- (What it gives is what the clause gives: found by its callers.)
+    ({ w with hints := w.hints.push (H.map (.handler .never ·)) }, none)
   | .let_ rhs body =>
     let i := w.Γ.size
     let mine := rhsTy env w.binds w.Γ (said i) rhs
@@ -344,9 +349,15 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
     match (w.atomTy g).bind retOf with
     | some .never => go env depth f c (w.bind ((said w.Γ.size).bind (tyOf env.decls w.binds)) true) body
     | r => go env depth f c (w.bind r false) body
-  | .handle _ _ _ _ body =>
-    let w := { w with hints := w.hints.push none }
-    go env depth f c (w.bind ((said w.Γ.size).bind (tyOf env.decls w.binds)) false) body
+  | .handle _ ops _ _ body =>
+    -- (What it gives, as the checker says it; the operations it serves,
+    -- each at its effect's arguments: none, of an effect that takes none.)
+    let ρ := (said w.Γ.size).bind (tyOf env.decls w.binds)
+    let H : Option Row := ops.mapM fun (op, _) => do
+      let (ps, _, _) ← env.decls.ops[op]?
+      if ps.isEmpty then pure (op, []) else none
+    let w := { w with hints := w.hints.push (do pure (.handler (← ρ) (← H))) }
+    go env depth f c (w.bind ρ false) body
   | .perform _ _ body => go env depth f c (w.bind none false) body
   | .label thunk body | .guard _ thunk body | .cell _ thunk body | .cellL _ _ thunk body | .lend _ _ thunk _ _ body =>
     go env depth f c (w.bind ((w.atomTy thunk).bind retOf) false) body
@@ -408,7 +419,15 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
             | .tuple _ => "tuple"
             | _ => "other"
           t := t.add kind r ex
-        | .handler .. => t := t.add "handler" none
+        | .handler ρ H =>
+          let r := mine.map fun
+            | .handler ρ' H' => (ρ' == .never || shape ρ' == shape ρ) && H' == H
+            | _ => false
+          let shown : Option String := mine.map fun
+            | .handler ρ' H' => s!"{Typer.showTy ρ'} {H'.map (·.1)}"
+            | _ => "?"
+          let ex := if r == some false then some s!"{env.names[e.fn]?.getD "?"}: handler here {shown.getD "?"}, Typer {Typer.showTy ρ} {H.map (·.1)}" else none
+          t := t.add "handler" r ex
   pure t
 
 /-- `compare`, said. -/
