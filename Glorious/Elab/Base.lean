@@ -639,9 +639,6 @@ structure Blocks where
   /-- Those types, each where it is known without knowing who calls the
   function. -/
   siteTypes : List (String × List (Option Syntax.TypeExpr)) := []
-  /-- Each whole number written where a scalar type is wanted, by its
-  function and its place there: the type's name. -/
-  scalarLits : Std.HashMap (String × Nat) String := {}
 
 structure Globals where
   ctors : Std.HashMap String CtorInfo := {}

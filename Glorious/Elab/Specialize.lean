@@ -480,26 +480,24 @@ partial def Item.decide (f : String → List (Option TypeExpr) → Flat.Body →
   | .pub parent item => .pub parent (Item.decide f item)
   | item => item
 
-/-- Each whole number the checker found to be of a scalar type made that
-scalar, `u8_of(200)`: Core's types say which whole numbers are what. -/
-def scalarLiterals (b : Blocks) (items : List Syntax.Item) : List Syntax.Item := Id.run do
-  if b.scalarLits.isEmpty then return items
-  let owners : Std.HashSet String := b.scalarLits.fold (fun s (f, _) _ => s.insert f) {}
-  items.map fun item => Item.decide (fun name _ body =>
-    if !owners.contains name then body else
-    let rw : Flat.FRewrite :=
-      { onExpr := fun _ body e => (b.scalarLits[(name, body.idOf e)]?).map fun t => do
-          -- (A text where `&str` is wanted: its UTF-8 bytes, from the
-          -- program's start, borrowed.)
-          if t == "%text" then
-            let bytes := (String.ofList (((body.textCodes e).getD []).map Char.ofNat)).toUTF8.toList
-            let at_ ← Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none "static_bytes"))
-              (← bytes.toArray.mapM fun b => Flat.pushExpr (.int b.toNat)))
-            return ← Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none "str_at"))
-              #[at_, ← Flat.pushExpr (.int bytes.length)])
-          let lit ← Flat.pushExpr (body.expr e)
-          Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none s!"{t}_of")) #[lit]) }
-    rw.body body) item
+/-- Each whole number the checker found to be of a scalar type in the body
+of `name` made that scalar, `u8_of(200)`, and each text where `&str` is
+wanted its bytes (`lits`, by the function and the node's identity): Core's
+types say which whole numbers are what. -/
+def scalarBody (lits : Std.HashMap (String × Nat) String) (name : String) (body : Flat.Body) : Flat.Body :=
+  let rw : Flat.FRewrite :=
+    { onExpr := fun _ body e => (lits[(name, body.idOf e)]?).map fun t => do
+        -- (A text where `&str` is wanted: its UTF-8 bytes, from the
+        -- program's start, borrowed.)
+        if t == "%text" then
+          let bytes := (String.ofList (((body.textCodes e).getD []).map Char.ofNat)).toUTF8.toList
+          let at_ ← Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none "static_bytes"))
+            (← bytes.toArray.mapM fun b => Flat.pushExpr (.int b.toNat)))
+          return ← Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none "str_at"))
+            #[at_, ← Flat.pushExpr (.int bytes.length)])
+        let lit ← Flat.pushExpr (body.expr e)
+        Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none s!"{t}_of")) #[lit]) }
+  rw.body body
 
 /-- A function's body with each local the checker found to be a place
 (`Blocks.places`) kept in a cell where it is bound: the `let` at its place
@@ -510,10 +508,8 @@ def promote (b : Blocks) (name : String) (body : Flat.Body) : Flat.Body :=
 
 /-- A program as the checker read it: each function's body the checker's
 (`Blocks.bodies`), with what it found written where it found it, its places
-made cells (`promote`); then the literals it found of a type
-(`scalarLiterals`). -/
+made cells (`promote`). -/
 def decidedProgram (b : Blocks) (items : List Syntax.Item) : List Syntax.Item :=
-  let items := items.map (Item.decide fun name _ body => promote b name ((b.bodies[name]?).getD body))
-  scalarLiterals b items
+  items.map (Item.decide fun name _ body => promote b name ((b.bodies[name]?).getD body))
 
 end Glorious.Elab

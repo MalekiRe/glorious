@@ -1058,14 +1058,18 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
       | _ => m) {}
     -- (Each body with the coercions applied in it written out where they
     -- are, as calls of them: some are found only once the bounds are met.)
+    -- (And each literal found of a type made of it, `u8_of(200)`.)
     let cs := Elab.firstOf s.coercions.toList
-    let bodies := if cs.isEmpty then s.decidedFns else s.decidedFns.fold (fun m n b => m.insert n (Elab.coerceFn cs n b)) {}
+    let lits : Std.HashMap (String × Nat) String := s.scalarLits.foldl (fun m (f, e, t) => m.insert (f, e) t) {}
+    let owners : Std.HashSet String := s.scalarLits.foldl (fun m (f, _, _) => m.insert f) {}
+    let bodies := s.decidedFns.fold (fun m n b =>
+      let b := if owners.contains n then Elab.scalarBody lits n b else b
+      m.insert n (if cs.isEmpty then b else Elab.coerceFn cs n b)) {}
     pure { given := .ofList s.given.toList, bodies, places
            traits := traitInfo.index
            fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
            fieldReads := Elab.firstOf s.fieldReads.toList, packs := Elab.firstOf s.packs.toList
-           derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes
-           scalarLits := s.scalarLits.foldl (fun m (f, e, t) => m.insert (f, e) t) {} }).run st
+           derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes }).run st
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a
