@@ -543,29 +543,18 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
         modify fun s => { s with body := d.body }
         let t ← inferCallable [] annots ret (some d.name) d.body.roots s!"the clauses of `{d.name}` do"
         countUsesNow
-        -- (The type of each expression known whole, by node.)
-        let read := (← get).nodeTys
-        modify fun s => { s with nodeTys := #[] }
-        let mut known : Array (Nat × Syntax.TypeExpr) := #[]
-        for (e, t) in read do
-          if let some w := (← zonk t).writtenRigid then known := known.push (e, w)
-        -- (And the function's own, by `Syntax.Flat.selfNode`.)
-        if let some w := (← zonk t).writtenRigid then known := known.push (Syntax.Flat.selfNode, w)
-        -- (And an implementation's function's `Self`, by `implSelfNode`.)
+        -- (The type of each expression, by node, the function's own
+        -- (`Syntax.Flat.selfNode`), an implementation's function's `Self`
+        -- (`implSelfNode`), and what each callee's type parameters are at
+        -- each call: written once the program is checked, `finish`.)
+        let mut read := (← get).nodeTys.push (Syntax.Flat.selfNode, t)
         if d.impl.isSome then
           if let some self := (← get).rigidParams.lookup "Self" then
-            if let some w := (← zonk self).writtenRigid then known := known.push (Syntax.Flat.implSelfNode, w)
-        modify fun s => { s with bodyTys := s.bodyTys.insert d.name known }
-        -- (What each callee's type parameters are at each call.)
+            read := read.push (Syntax.Flat.implSelfNode, self)
         let calls := (← get).callInsts
-        modify fun s => { s with callInsts := #[] }
-        let mut insts : Array (Nat × List (String × Option Syntax.TypeExpr)) := #[]
-        for (e, ts) in calls do
-          insts := insts.push (e, ← ts.mapM fun (p, t) => do
-            match t with
-            | some t => pure (p, (← zonk t).writtenRigid)
-            | none => pure (p, none))
-        modify fun s => { s with bodyInsts := s.bodyInsts.insert d.name insts }
+        modify fun s => { s with nodeTys := #[], callInsts := #[]
+                                 bodyTys := s.bodyTys.insert d.name read
+                                 bodyInsts := s.bodyInsts.insert d.name calls }
         -- (The body as read, with what was written where it was found: what
         -- the count of uses follows, `placeLets`.)
         modify fun s => { s with runFns := s.runFns.insert d.name s.body, decidedFns := s.decidedFns.insert d.name s.body }

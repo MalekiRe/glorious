@@ -738,11 +738,11 @@ structure St where
   the order it writes them (`typeParams`). -/
   callInsts : Array (Nat × List (String × Option Ty)) := #[]
   /-- Of each function read, `callInsts` written (`Ty.writtenRigid`). -/
-  bodyInsts : Std.HashMap String (Array (Nat × List (String × Option Syntax.TypeExpr))) := {}
+  bodyInsts : Std.HashMap String (Array (Nat × List (String × Option Ty))) := {}
   /-- Of each function read, the type of each of its expressions whose type
   is known whole (`Ty.written`), by the node's identity: what the
   elaborator's `let`s are of. -/
-  bodyTys : Std.HashMap String (Array (Nat × Syntax.TypeExpr)) := {}
+  bodyTys : Std.HashMap String (Array (Nat × Ty)) := {}
   /-- The declarations refused, each with the names it declares and what is
   said: what names them is not checked (`Check.checkItems`). -/
   declFailed : Array (List String × String) := #[]

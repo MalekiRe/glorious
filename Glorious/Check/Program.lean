@@ -1106,8 +1106,23 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
       let b := if owners.contains n then Elab.scalarBody lits n b else b
       let b := if cs.isEmpty then b else Elab.coerceFn cs n b
       m.insert n (Elab.givenBody taking (Elab.unfieldBody info b))) {}
-    let nodeTys := s.bodyTys.fold (fun m n tys => m.insert n (Std.HashMap.ofList tys.toList)) {}
-    let nodeInsts := s.bodyInsts.fold (fun m n is => m.insert n (Std.HashMap.ofList is.toList)) {}
+    -- (Each expression's type as the program has it once checked: what a
+    -- trait or a later group decided of it too.)
+    let mut nodeTys : Std.HashMap String (Std.HashMap Nat Syntax.TypeExpr) := {}
+    for (n, tys) in s.bodyTys.toList do
+      let mut m : Std.HashMap Nat Syntax.TypeExpr := {}
+      for (e, t) in tys do
+        if let some w := (← zonk t).writtenRigid then m := m.insert e w
+      nodeTys := nodeTys.insert n m
+    let mut nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option Syntax.TypeExpr))) := {}
+    for (n, is) in s.bodyInsts.toList do
+      let mut m : Std.HashMap Nat (List (String × Option Syntax.TypeExpr)) := {}
+      for (e, ts) in is do
+        m := m.insert e (← ts.mapM fun (p, t) => do
+          match t with
+          | some t => pure (p, (← zonk t).writtenRigid)
+          | none => pure (p, none))
+      nodeInsts := nodeInsts.insert n m
     pure { bodies, places, nodeTys, nodeInsts
            traits := traitInfo.index
            sites := s.siteTable, siteTypes := s.siteTypes }).run st

@@ -81,6 +81,10 @@ effects and what it was made with are not written). -/
 partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr → Option Ty
   | .name x args =>
     if let (some t, []) := (vars.lookup x, args) then some t
+    -- (What nothing decided in a function general in nothing, the program
+    -- checked whole, as `Typer` has it: `()`; `%settled` says it is such a
+    -- one.)
+    else if x.startsWith "%rigid:%" && args.isEmpty && (vars.lookup "%settled").isSome then some .unit
     -- (A callable for every lifetime, `%for<'a, fn(..)>`: the callable.)
     else if x == rankedMark then args.getLast?.bind (tyOf d vars)
     -- (What an `is` found, `%is:a,b<A, B>`: the values, a tuple.)
@@ -645,6 +649,18 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
       match caps.mapM w.atomTy with
       | some capTys =>
         let w := { w with pend := w.pend.insert i (g, capTys) }
+        -- (One of no parameters: given nothing, whatever it is used as;
+        -- what it gives its body's, found now where the body says.)
+        let w := match env.p.fns[g]? with
+          | some fn =>
+            if fn.clauses.all (·.pats.isEmpty) && !fn.clauses.isEmpty then
+              match fnRet env (depth + 1) g w.binds [] capTys w.stack with
+              | some .never | none => w
+              | some r =>
+                let w := w.found i (.fn [] r w.eff false (some capTys))
+                { w with uses := w.uses.push (g, { caps := capTys, params := [], ret := r, eff := w.eff }) }
+            else w
+          | none => w
         let w := if w.binds.isEmpty || (env.selfTy[g]?).isSome || (env.decls.fns[g]?).isSome then w
           else { w with made := w.made.push ((g, capTys), w.binds) }
         go env depth f c w body
