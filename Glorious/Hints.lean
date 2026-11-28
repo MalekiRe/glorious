@@ -57,6 +57,8 @@ effects and what it was made with are not written). -/
 partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr → Option Ty
   | .name x args =>
     if let (some t, []) := (vars.lookup x, args) then some t
+    -- (What the checker decided nothing of, as `Typer` has it: `()`.)
+    else if x.startsWith "%rigid:%" && args.isEmpty then some .unit
     -- (A callable for every lifetime, `%for<'a, fn(..)>`: the callable.)
     else if x == rankedMark then args.getLast?.bind (tyOf d vars)
     -- (What an `is` found, `%is:a,b<A, B>`: the values, a tuple.)
@@ -68,10 +70,13 @@ partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr
       match args with
       | [t, n] => do pure (.data fixedName [← tyOf d vars t, ← lengthOf n])
       | _ => none
-    else match d.typeIds[x]? with
+else match d.typeIds[x]? with
       | some id => do
-        let given ← args.mapM (tyOf d vars)
         let lifetimes := ((d.typeParams[id]?).getD []).map (·.startsWith "'")
+        -- (A lifetime given is a reference to nothing, whatever it is.)
+        let given ← if args.length == lifetimes.length then
+            (args.zip lifetimes).mapM fun (a, l) => if l then some (.ref .unit) else tyOf d vars a
+          else args.mapM (tyOf d vars)
         let mut missing := lifetimes.length - given.length
         let mut rest := given
         let mut out : Array Ty := #[]
@@ -97,10 +102,18 @@ partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr
     let eff ← effs.flatMapM fun (e, args) => do
       let targs ← args.mapM (tyOf d vars)
       pure (((d.effectOps[e]?).getD []).map (·, targs))
-    pure (.fn (← ps.mapM (tyOf d vars)) (← tyOf d vars r) eff false none)
-  | .fn ps r => do pure (.fn (← ps.mapM (tyOf d vars)) (← tyOf d vars r) [] false none)
+    pure (.fn (← spread ps) (← tyOf d vars r) eff false none)
+  | .fn ps r => do pure (.fn (← spread ps) (← tyOf d vars r) [] false none)
   | _ => none
 where
+  /-- A callable's parameters, `%Spread<P>` those of the tuple `P` is. -/
+  spread (ps : List TypeExpr) : Option (List Ty) :=
+    ps.flatMapM fun p => match p with
+      | .name x [a] => if x == spreadParams then match tyOf d vars a with
+          | some (.tuple ts) => some ts
+          | _ => none
+        else (tyOf d vars p).map ([·])
+      | _ => (tyOf d vars p).map ([·])
   lengthOf (n : TypeExpr) : Option Ty :=
     let rec count : TypeExpr → Option Nat
       | .name "Z" [] | .name "%prelude::Z" [] => some 0
@@ -189,11 +202,25 @@ def fieldOf (d : Typer.Decls) (t : Ty) (i : Nat) : Option Ty :=
 partial def fits (mine theirs : Ty) : Bool :=
   match mine, theirs with
   | _, .data n [] => n == anyName || mine == theirs
+  -- (What Typer decided nothing of it makes `()`.)
+  | _, .tuple [] => true
   | .tuple as, .tuple bs => as.length == bs.length && (as.zip bs).all fun (a, b) => fits a b
   | .data n as, .data m bs => n == m && as.length == bs.length && (as.zip bs).all fun (a, b) => fits a b
   | .ref a, .ref b => fits a b
   | .fn ps r _ _ _, .fn qs s _ _ _ => ps.length == qs.length && fits r s && (ps.zip qs).all fun (a, b) => fits a b
   | a, b => a == b
+
+/-- Where two types first differ, each there (`GLORIOUS_TRACE=hints`). -/
+partial def diffAt (a b : Ty) : Option (Ty × Ty) :=
+  if fits a b then none else
+  match a, b with
+  | .tuple as, .tuple bs => if as.length != bs.length then some (a, b) else (as.zip bs).findSome? fun (x, y) => diffAt x y
+  | .data n as, .data m bs => if n != m || as.length != bs.length then some (a, b) else (as.zip bs).findSome? fun (x, y) => diffAt x y
+  | .ref x, .ref y => diffAt x y
+  | .fn ps r _ _ _, .fn qs s _ _ _ =>
+    if ps.length != qs.length then some (a, b)
+    else ((ps.zip qs).findSome? fun (x, y) => diffAt x y) <|> diffAt r s
+  | _, _ => some (a, b)
 
 /-- The value a callable gives, of its type. -/
 def retOf : Ty → Option Ty
@@ -224,6 +251,25 @@ def memTy (env : Env) (Γ : Array (Option Ty)) (op : MemOp) (args : List Atom) :
   | .alloc, _ | .sizeOf, _ | .alignOf, _ | .staticAt, _ => some (.scalar (-64))
   | .focus, [r, .int i] => match atomTy r with
     | some (.ref t) => (fieldOf env.decls t i.toNat).map .ref
+    | _ => none
+  -- (An element of a `[T; N]` at a place.)
+  | .focus, [r, _, .int (-1)] => match atomTy r with
+    | some (.ref t) => (fixedElem t).map .ref
+    | _ => none
+  -- (A field of a constructor of several, the one that built it said.)
+  | .focus, [r, .int i, .int built] => match atomTy r with
+    | some (.ref (.data n args)) => do
+      let (_, fields) ← env.decls.ctors[built.toNat]?
+      let f ← fields[i.toNat]?
+      (tyOf env.decls (((env.decls.typeParams[n]?).getD []).zip args) f).map .ref
+    | _ => none
+  | .deref, [_, _, .int tag] => do
+    let (owner, _) ← env.decls.ctors[tag.toNat]?
+    match atomTy (args.headD (.int 0)) with
+    | some (.data n (t :: _)) => if n == owner then some (.ref t) else none
+    | _ => none
+  | .addressOf, [r, .int _] => match atomTy r with
+    | some (.ref (.data _ (_ :: _))) => none
     | _ => none
   | _, _ => none
 
@@ -333,6 +379,14 @@ structure W where
   /-- What the clause gives, where that is known: what a scope it ends in
   that does not return gives. -/
   ret : Option Ty := none
+  /-- What the function performs: what a callable it makes and the checker
+  says nothing of performs too, as `Typer`'s one row for the code around. -/
+  eff : Row := []
+  /-- Each function at each signature a closure of it is made at. -/
+  uses : Array (Nat × FnSig) := #[]
+  /-- The functions whose bodies are being gone through to find what they
+  give (`fnRet`): one that is reached again does not return there. -/
+  stack : List Nat := []
 
 def W.atomTy (w : W) : Atom → Option Ty
   | .var i => w.Γ[i]?.join
@@ -352,6 +406,25 @@ def W.bind (w : W) (σ : Option Ty) (hinted : Bool) : W :=
   if hinted then { w with hints := w.hints.push (σ.map .ty), hintAt := w.hintAt.insert i w.hints.size }
   else w
 
+/-- A handler's functions at their signatures: its completion given what
+the handled computation gives, each arm what its operation takes and the
+resumption, all made with the handler's captures, giving what the handler
+gives, performing what the code around does. -/
+def handlerUses (env : Env) (w : W) (ret : Nat) (ops : List (Nat × Nat)) (caps : List Ty) (σ ρ : Ty) (H : Row) : W := Id.run do
+  let mut w := { w with uses := w.uses.push (ret, { caps, params := [σ], ret := ρ, eff := w.eff }) }
+  for (op, arm) in ops do
+    let some (ps, payload, result) := env.decls.ops[op]? | continue
+    let some targs := H.lookup op | continue
+    let vars := ps.zip targs
+    let some payload := payload.mapM (tyOf env.decls vars) | continue
+    let params ← match result with
+      | some r => match tyOf env.decls vars r with
+        | some o => pure (payload ++ [.fn [o] ρ w.eff true none])
+        | none => continue
+      | none => pure payload
+    w := { w with uses := w.uses.push (arm, { caps, params, ret := ρ, eff := w.eff }) }
+  pure w
+
 mutual
 
 /-- The type of a closure that waited, at its first use as a callable, `at_`
@@ -369,9 +442,11 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
   | .call h args _ | .tail h args =>
     if let some (.fn ps _ _ _ _) := w.atomTy h then
       for (a, p) in args.zip ps do
-        if let some (i, (_, caps)) := callee a then
+        if let some (i, (g, caps)) := callee a then
           if let .fn qs r eff once _ := p then
             w := w.found i (.fn qs r eff once (some caps))
+            w := { w with uses := w.uses.push (g, { caps, params := qs, ret := r, eff })
+                          why := w.why.insert i "given where its type is known" }
   | _ => pure ()
   -- (The callable, what it is given, and the local the use binds, if any.)
   let uses : List (Atom × Option (List Ty)) := match at_ with
@@ -414,13 +489,15 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
       | _ => (env.said[(f, c, w.Γ.size)]?).bind (tyOf env.decls w.binds)
     -- (A function that says nothing of what it gives and does not return
     -- gives what its place wants, not `()`.)
-    let ret := atUse <|> (match fnRet env (depth + 1) g w.binds params caps with
-      | some .never => wanted <|> written
+    let ret := atUse <|> (match fnRet env (depth + 1) g w.binds params caps w.stack with
+      | some .never => wanted <|> some .never
       | none => written <|> wanted
       | r => r)
     if let some r := ret then
-      let σ : Ty := .fn params r [] false (some caps)
+      let σ : Ty := .fn params r w.eff false (some caps)
       w := w.found i σ
+      w := { w with uses := w.uses.push (g, { caps, params, ret := r, eff := w.eff })
+                    why := w.why.insert i s!"used at {firstRef i at_}, given {params.map Typer.showTy}, gives by {if atUse.isSome then "the use" else "its body or its place"}" }
       -- (What the checker said of it, a type parameter it names learned of
       -- what it was found to be.)
       if let some te := env.said[(f, c, i)]? then
@@ -448,7 +525,11 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
         | some (.fn _ _ eff _ _) => (eff.lookup op).map (op, ·)
         | _ => none
     -- (What it gives is what the clause gives: found by its callers.)
-    ({ w with hints := w.hints.push (H.map (.handler .never ·)) }, none)
+    let w := { w with hints := w.hints.push (H.map (.handler (w.ret.getD .never) ·)) }
+    let w := match w.ret, H, caps.mapM w.atomTy, (w.atomTy thunk).bind retOf with
+      | some ρ, some H, some capTys, some σ => handlerUses env w ret ops capTys σ ρ H
+      | _, _, _, _ => w
+    (w, none)
   | .let_ rhs body =>
     let i := w.Γ.size
     let mine := rhsTy env w.binds w.Γ (said i) rhs
@@ -459,7 +540,9 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
       | .construct _ _ => match said i with
         | some te => s!"construct said, not written: {(te.spell.take 80).toString} with {w.binds.map (·.1)}"
         | none => "construct not said"
-      | .closure _ caps => if (caps.mapM w.atomTy).isNone then "closure caps unknown" else if (said i).isSome then "closure said, not written" else s!"closure waits: {firstRef i body}"
+      | .closure _ caps => if (caps.mapM w.atomTy).isNone then "closure caps unknown" else match said i with
+        | some te => s!"closure said, not written: {(te.spell.take 120).toString} with {w.binds.map (·.1)}"
+        | none => s!"closure waits: {firstRef i body}"
       | .atom _ => "atom of unknown"
       | .prim _ _ => "prim"
       ) }
@@ -478,6 +561,9 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
       | none => go env depth f c w body
     | .closure g caps, some σ =>
       let w := w.bind (some σ) true
+      let w := match σ with
+        | .fn ps r eff _ (some capTys) => { w with uses := w.uses.push (g, { caps := capTys, params := ps, ret := r, eff }) }
+        | _ => w
       let w := match caps.mapM w.atomTy with
         | some capTys =>
           if w.binds.isEmpty || (env.selfTy[g]?).isSome || (env.decls.fns[g]?).isSome then w
@@ -506,6 +592,9 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
         | some (.fn _ _ eff _ _) => (eff.lookup op).map (op, ·)
         | _ => none
     let w := { w with hints := w.hints.push (do pure (.handler (← ρ) (← H))) }
+    let w := match ρ, H, caps.mapM w.atomTy, (w.atomTy thunk).bind retOf with
+      | some ρ, some H, some capTys, some σ => handlerUses env w ret ops capTys σ ρ H
+      | _, _, _, _ => w
     go env depth f c (w.bind ρ false) body
   | .perform _ _ body => go env depth f c (w.bind none false) body
   | .label thunk body | .guard _ thunk body | .cell _ thunk body | .cellL _ _ thunk body | .lend _ _ thunk _ _ body =>
@@ -525,8 +614,12 @@ partial def labelRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String �
 
 /-- What `g` gives at what it is given and made with: its first clause's
 that says. -/
-partial def fnRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × Ty)) (params caps : List Ty) : Option Ty := do
+partial def fnRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × Ty)) (params caps : List Ty)
+    (stack : List Nat := []) : Option Ty := do
   if depth > 12 then none
+  -- (Reached again while what it gives is being found: going on from here
+  -- it does not return.)
+  if stack.contains g then return .never
   let fn ← env.p.fns[g]?
   -- (A function of its own: its type parameters of what it is given.)
   let binds := match env.selfTy[g]? with
@@ -534,7 +627,7 @@ partial def fnRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × T
     | _ => binds
   fn.clauses.zipIdx.findSome? fun (cl, ci) => do
     let bound ← patsTysD env.decls cl.pats params
-    (go env depth g ci { Γ := (params ++ caps ++ bound).toArray.map some, binds } cl.body).2
+    (go env depth g ci { Γ := (params ++ caps ++ bound).toArray.map some, binds, stack := g :: stack } cl.body).2
 
 end
 
@@ -578,7 +671,12 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
         | .ty σ =>
           let r := mine.map fun | .ty m => fits (shape m) (shape σ) | _ => false
           let ex := if r == some false then
-              some s!"{env.names[e.fn]?.getD "?"}: here {(mine.map fun | .ty m => Typer.showTy m | _ => "?").getD "?"}, Typer {Typer.showTy σ}"
+              let d : String := match mine with
+                | some (.ty m) => match diffAt (shape m) (shape σ) with
+                  | some (x, y) => s!"here {Typer.showTy x}, Typer {Typer.showTy y}"
+                  | none => "?"
+                | _ => "?"
+              some s!"{env.names[e.fn]?.getD "?"} local {(localOf[h]?).getD 0} ({(w.why[(localOf[h]?).getD 0]?).getD ""}): {d}"
             else if r.isNone && (t.counts.getD "nf" (0,0,0)).1 % 97 == 0 then
               some s!"not found: {env.names[e.fn]?.getD "?"} local {(localOf[h]?).getD 0} ({env.said[(e.fn, ci, (localOf[h]?).getD 0)]?.isSome}): Typer {Typer.showTy σ}"
             else none
@@ -599,6 +697,136 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
           let ex := if r == some false then some s!"{env.names[e.fn]?.getD "?"}: handler here {shown.getD "?"}, Typer {Typer.showTy ρ} {H.map (·.1)}" else none
           t := t.add "handler" r ex
   pure t
+
+/-- The environment of a program for the forward typing. -/
+def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr)) :
+    Except String Env := do
+  let g ← Elab.collectDeclared items
+  let decls := Typer.declsOf items g
+  let said := out.fnNodes.fold (fun m f (owner, clauses) =>
+    let base := (owner.splitOn "⟨").headD owner
+    match nodeTys[owner]? <|> nodeTys[base]? with
+    | none => m
+    | some tys => clauses.zipIdx.foldl (fun m (locals, c) =>
+        locals.foldl (fun m (i, n) => match tys[n]? with
+          | some te => m.insert (f, c, i) te
+          | none => m) m) m) {}
+  let selfTy := out.fnNodes.fold (fun m f (owner, _) =>
+    if out.fnNames[f]? != some s!"`{owner}`" then m else
+    let base := (owner.splitOn "⟨").headD owner
+    match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
+    | some te => m.insert f te
+    | none => m) {}
+  pure { decls, p := out.program, said, names := out.fnNames, selfTy }
+
+/-- A function's clause at a signature: its hints, the functions at the
+signatures its closures are made at, and what it was found to give; an
+error where a hint is not found. -/
+def clauseAt (env : Env) (made : Std.HashMap (Nat × List Ty) (List (String × Ty))) (fn ci : Nat)
+    (cl : Core.Clause) (sig : FnSig) : Except String (List Hint × Array (Nat × FnSig) × Array ((Nat × List Ty) × List (String × Ty))) := do
+  let some bound := patsTysD env.decls cl.pats sig.params
+    | throw s!"function {fn}: what its patterns bind is not found"
+  let Γ : Array (Option Ty) := (sig.params ++ sig.caps ++ bound).toArray.map some
+  let binds := match env.decls.fns[fn]? with
+    | some (tparams, annots, _) =>
+      (annots.zip sig.params).foldl (fun b (a, p) => match a with
+        | some te => matchTy env.decls b (rigidOf tparams te) p
+        | none => b) []
+    | none => []
+  let binds := binds ++ (made.getD (fn, sig.caps) [])
+  let binds := match env.selfTy[fn]? with
+    | some (.fn ps r) => matchTy env.decls ((ps.zip sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds) r sig.ret
+    | _ => binds
+  let (w, _) := go env 0 fn ci { Γ, binds, ret := some sig.ret, eff := sig.eff } cl.body
+  let localOf : Std.HashMap Nat Nat := w.hintAt.fold (fun m i h => m.insert h i) {}
+  let hints ← w.hints.toList.zipIdx.mapM fun (h, k) => match h with
+    | some h => pure h
+    | none =>
+      let why := match localOf[k]? with
+        | some i => s!"local {i}: {(w.why[i]?).getD "a call that does not return, or a host operation"}"
+        | none => "a handler"
+      throw s!"function {fn} ({env.names[fn]?.getD "?"}): hint {k} not found ({why})"
+  pure (hints, w.uses, w.made)
+
+/-- Core's types, found forward from the checker's (`Hints`), as `Typer`'s
+are: each function at each signature a closure of it is made at, from
+`main`, with each clause's hints, and the declared types and operations
+those use. -/
+def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr)) :
+    Except String Types := do
+  let env ← envOf items out nodeTys
+  let p := out.program
+  -- (`main`: run with nothing, performing nothing.)
+  let (w, mainTy) := go env 0 p.fns.size 0 {} p.main
+  let some mainTy := mainTy | throw "what `main` gives is not found"
+  let localOf : Std.HashMap Nat Nat := w.hintAt.fold (fun m i h => m.insert h i) {}
+  let mainHints ← w.hints.toList.zipIdx.mapM fun (h, k) => match h with
+    | some h => pure h
+    | none => throw s!"a hint of `main` not found ({(localOf[k]?.bind (w.why[·]?)).getD "?"})"
+  let mut todo : List (Nat × FnSig) := w.uses.toList
+  let mut made : Std.HashMap (Nat × List Ty) (List (String × Ty)) := w.made.foldl (fun m (k, b) => m.insert k b) {}
+  let mut emitted : Std.HashMap Nat (List FnSig) := {}
+  let mut sigs : Array SigEntry := #[]
+  let mut fuel := 1000000
+  while !todo.isEmpty && fuel > 0 do
+    fuel := fuel - 1
+    match todo with
+    | (fn, sig) :: rest =>
+      todo := rest
+      let key := { sig with eff := [] }
+      if (emitted.getD fn []).contains key then continue
+      emitted := emitted.insert fn (key :: emitted.getD fn [])
+      let some f := p.fns[fn]? | throw s!"function {fn} does not exist"
+      let mut hints : List (List Hint) := []
+      let mut uses : Array (Nat × FnSig) := #[]
+      for (cl, ci) in f.clauses.zipIdx do
+        let (hs, us, ms) ← clauseAt env made fn ci cl sig
+        hints := hints ++ [hs]
+        uses := uses ++ us
+        made := ms.foldl (fun m (k, b) => m.insert k b) made
+      sigs := sigs.push ⟨fn, sig, hints⟩
+      todo := uses.toList ++ todo
+      -- (What destroys a closure of it, at what destroys one of these.)
+      if let some d := p.drops.lookup fn then
+        todo := todo ++ [(d, dropSig sig)]
+    | [] => pure ()
+  let types := mainTy :: mainHints.flatMap hintTypes ++ sigs.toList.flatMap fun e =>
+    e.sig.caps ++ e.sig.params ++ [e.sig.ret] ++ e.sig.eff.flatMap (·.2) ++ e.hints.flatMap (·.flatMap hintTypes)
+  let rows := sigs.toList.flatMap fun e => e.sig.eff ++ e.hints.flatMap (·.flatMap hintOps)
+  let tenv : Typer.Env := { decls := env.decls, p, ncaps := #[] }
+  let (datas, ops) ← match ((Typer.declsFor types (rows ++ mainHints.flatMap hintOps)).run tenv).run {} with
+    | .ok r _ => pure r
+    | .error e _ => throw e
+  pure (Types.withIndex ⟨sigs, datas, ops, mainTy, mainHints, #[]⟩)
+where
+  hintTypes : Hint → List Ty
+    | .ty t => [t]
+    | .handler ρ H => ρ :: H.flatMap (·.2)
+  hintOps : Hint → List (Nat × List Ty)
+    | .handler _ H => H
+    | _ => []
+
+/-- Typer's signatures and these, compared (`GLORIOUS_TRACE=hintsigs`). -/
+def compareSigs (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr)) (C : Types) : String :=
+  match typesOf items out nodeTys with
+  | .error e => s!"hintsigs: none: {e}"
+  | .ok D => Id.run do
+    let theirs : Std.HashMap Nat (List FnSig) := C.sigs.foldl (fun m e => m.insert e.fn (e.sig :: m.getD e.fn [])) {}
+    let mine : Std.HashMap Nat (List FnSig) := D.sigs.foldl (fun m e => m.insert e.fn (e.sig :: m.getD e.fn [])) {}
+    let mut lines : Array String := #[s!"hintsigs: Typer {C.sigs.size}, here {D.sigs.size}; main {Typer.showTy C.mainTy} / {Typer.showTy D.mainTy}"]
+    for (fn, ts) in theirs.toList do
+      let ms := mine.getD fn []
+      for t in ts do
+        unless ms.contains t do
+          if lines.size < 30 then
+            lines := lines.push s!"  {out.fnNames[fn]?.getD "?"}: Typer's {Typer.showSig t} not here; here {ms.map Typer.showSig}"
+    for (fn, ms) in mine.toList do
+      let ts := theirs.getD fn []
+      for m in ms do
+        unless ts.contains m do
+          if lines.size < 60 then
+            lines := lines.push s!"  {out.fnNames[fn]?.getD "?"}: here {Typer.showSig m} not Typer's"
+    "\n".intercalate lines.toList
 
 /-- `compare`, said. -/
 def report (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))

@@ -891,16 +891,25 @@ def compileSource (src : String) (check : Bool := true)
       | .error e => do aside.get; throw e
     -- Core's types, for the lowering (`Typer`). Where they are not found,
     -- the program runs as it is.
+    let nodeTys := (blocks.map (·.nodeTys)).getD {}
+    -- (`GLORIOUS_TYPES=hints`: found forward from the checker's, `Hints`,
+    -- in place of `Typer`.)
+    let found : Except String Lower.Types :=
+      if Trace.hintsOnly then Trace.timed "types" fun _ => Hints.typesOf declared out nodeTys
+      else Trace.timed "types" fun _ => Typer.typesOf declared out nodeTys
     let types : Except String (Option Lower.Types) := if !check then .ok none else
-      match Trace.timed "types" fun _ => Typer.typesOf declared out ((blocks.map (·.nodeTys)).getD {}) with
+      match found with
       | .ok types =>
         if Trace.hintsTraced then
           dbgTrace (Hints.report declared out ((blocks.map (·.nodeTys)).getD {}) types) fun _ => .ok (some types)
+        else if Trace.hintSigsTraced then
+          dbgTrace (Hints.compareSigs declared out nodeTys types) fun _ => .ok (some types)
         else if Trace.typesTraced then dbgTrace (Core.showCore out.fnNames out.program ++ "\n" ++ Typer.showSigs types) fun _ => .ok (some types)
         else .ok (some types)
       | .error e =>
         -- (`GLORIOUS_TRACE`: why there are none.)
-        if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => .ok none
+        if Trace.hintsOnly then dbgTrace s!"HINTS-NO: {withFnNames out.fnNames e}" fun _ => .ok none
+        else if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => .ok none
         else .ok none
     pure (compiled out (← types))
   build blocks
