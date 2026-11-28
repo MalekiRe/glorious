@@ -833,8 +833,12 @@ def declareTraits (items : List Item) : M Unit := do
         if s == name || (← supersAll s).contains name then
           throw s!"trait `{name}` would need a type to have `{name}` to have it, through `{s}`"
       modify fun st => { st with supers := (name, supers) :: st.supers }
+  -- (One refused is said with what else is refused, `St.declFailed`; what
+  -- names its type is not read.)
   for item in items do
-    if let .impl i := item then declareImpl i
+    if let .impl i := item then
+      try declareImpl i
+      catch e => modify fun s => { s with declFailed := s.declFailed.push ([i.head], e) }
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each
   -- type, on condition that each type parameter can be destroyed, and that

@@ -8699,5 +8699,7 @@ or effect declaration refused (`struct S { x: Nope }`) no longer stops the
 check: what it says is kept (`St.declFailed`), a function that names it,
 or names one that does, is not read, and every other function is; all
 that is refused is said together, sorted by position (one without a place
-first). Two cases whose program had a second refusal after the
-declaration's (`fn main() { 0 }`) are written without it.
+first). An implementation refused is said so too, and what names its type
+is not read (`impl Make for A` and two more refused are said together).
+Six cases whose program had a second refusal after the declaration's
+(`fn main() { 0 }`) are written without it.

@@ -1896,7 +1896,7 @@ error: 5:20: in `main`: `Default` is needed of a type that nothing here decides
 #### case
 trait Show { fn show(Self) -> Int }
 impl Show for Int { }
-fn main() { 0 }
+fn main() -> Int { 0 }
 #### expect
 error: `impl Show for Int` lacks the function `show`
 #### case
@@ -4397,13 +4397,13 @@ fn main() -> Int { let a: u8 = conv(9); int(a) }
 trait From<T> { fn from(T) -> Self }
 impl From<Int> for u8 { fn from(n: Int) -> u8 { u8(n) } }
 impl From<Int> for u8 { fn from(n: Int) -> u8 { u8(n) } }
-fn main() { 0 }
+fn main() -> Int { 0 }
 #### expect
 error: `From<Int>` is implemented twice for `u8`
 #### case
 trait From<T> { fn from(T) -> Self }
 impl From for u8 { fn from(n: Int) -> u8 { u8(n) } }
-fn main() { 0 }
+fn main() -> Int { 0 }
 #### expect
 error: `impl From for u8`: `From` takes 1 type arguments
 #### case
@@ -4436,7 +4436,7 @@ fn main() -> Int { twice(Wrap(21)) * 2 }
 trait Container { type Item; fn first(Self) -> Item }
 struct Ints(Int, Int)
 impl Container for Ints { fn first(c: Ints) -> Int { c.0 } }
-fn main() { 0 }
+fn main() -> Int { 0 }
 #### expect
 error: `impl Container for Ints` does not say what `Item` is: write `type Item = ..;`
 #### case
@@ -12289,6 +12289,8 @@ impl<S> Shout<S> for C { type Out = _; fn shout(c: C, s: S) -> _ { format(&s) + 
 fn main() -> Int { let (n, s) = A.make(); say(s); say(C.shout(7)); let xs = B.wrap(5); let ys = B.wrap("a"); n + len_at(&xs) + len_at(&ys) }
 #### expect
 error: `impl Make for A`: `type Out = _;`: an implementation says what each type it gives is: write it, `type Out = ..;`
+error: `impl Wrap<S> for B`: `type Out = _;`: an implementation says what each type it gives is: write it, `type Out = ..;`
+error: `impl Shout<S> for C`: `type Out = _;`: an implementation says what each type it gives is: write it, `type Out = ..;`
 #### case
 #### (A condition of a type a trait leaves to implementations,
 #### `<H as Touches>::List: Concat<..>`, of what it is at each use; and an
