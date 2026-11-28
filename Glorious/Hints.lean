@@ -31,6 +31,10 @@ structure Env where
   names : Array String := #[]
   /-- Each top-level function's type as the checker found it. -/
   selfTy : Std.HashMap Nat TypeExpr := {}
+  /-- What each type parameter of the function a local is a closure of is,
+  where the local is made for a call of it, as the checker found it there:
+  by function, clause and local. -/
+  insts : Std.HashMap (Nat × Nat × Nat) (List (String × Option TypeExpr)) := {}
 
 /-- How the hints found compare, by what they are of. -/
 structure Tally where
@@ -38,6 +42,7 @@ structure Tally where
   /-- What a function's type parameters are where a closure of each callable
   was made, learned there: where its body is gone through, they are. -/
   closureBinds : Std.HashMap (Nat × List Ty) (List (String × Ty)) := {}
+  calledBinds : Std.HashMap (Nat × List Ty) (List (String × Ty)) := {}
   lost : Nat := 0
   examples : Array String := #[]
 
@@ -405,6 +410,9 @@ structure W where
   /-- The type parameters where a closure of each callable of the function's
   own was made (by the callable and what it was made with). -/
   made : Array ((Nat × List Ty) × List (String × Ty)) := #[]
+  /-- What each type parameter of a function called is, at the signature it
+  is called at (by the function and what it is given). -/
+  called : Array ((Nat × List Ty) × List (String × Ty)) := #[]
   /-- Why a local's type was not found, by local (`GLORIOUS_TRACE=hints`). -/
   why : Std.HashMap Nat String := {}
   /-- What the clause gives, where that is known: what a scope it ends in
@@ -428,6 +436,16 @@ def W.found (w : W) (i : Nat) (σ : Ty) : W :=
   let w := { w with Γ := w.Γ.set! i (some σ), pend := w.pend.erase i }
   match w.hintAt[i]? with
   | some h => { w with hints := w.hints.set! h (some (.ty σ)) }
+  | none => w
+
+/-- What each type parameter of `g` is where the local `i` is a closure of
+it given `params`, as the checker found it at the call (`Env.insts`). -/
+def W.noteCalled (w : W) (env : Env) (f c i g : Nat) (params : List Ty) : W :=
+  match env.insts[(f, c, i)]? with
+  | some ps =>
+    let binds := ps.filterMap fun (p, te) => do
+      pure (s!"%rigid:{p}", ← te.bind (tyOf env.decls w.binds))
+    if binds.isEmpty then w else { w with called := w.called.push ((g, params), binds) }
   | none => w
 
 /-- A local and its hint. -/
@@ -531,6 +549,7 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
     if let some r := ret then
       let σ : Ty := .fn params r w.eff false (some caps)
       w := w.found i σ
+      w := w.noteCalled env f c i g params
       w := { w with uses := w.uses.push (g, { caps, params, ret := r, eff := w.eff })
                     why := w.why.insert i s!"used at {firstRef i at_}, given {params.map Typer.showTy}, gives by {if atUse.isSome then "the use" else "its body or its place"}" }
       -- (What the checker said of it, a type parameter it names learned of
@@ -597,7 +616,9 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
     | .closure g caps, some σ =>
       let w := w.bind (some σ) true
       let w := match σ with
-        | .fn ps r eff _ (some capTys) => { w with uses := w.uses.push (g, { caps := capTys, params := ps, ret := r, eff }) }
+        | .fn ps r eff _ (some capTys) =>
+          let w := w.noteCalled env f c i g ps
+          { w with uses := w.uses.push (g, { caps := capTys, params := ps, ret := r, eff }) }
         | _ => w
       let w := match caps.mapM w.atomTy with
         | some capTys =>
@@ -683,12 +704,13 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
         | none => []
       -- (And of what the checker found the function to be; a closure's, as
       -- where it was made.)
-      let binds := binds ++ (t.closureBinds.getD (e.fn, e.sig.caps) [])
+      let binds := binds ++ (t.closureBinds.getD (e.fn, e.sig.caps) []) ++ (t.calledBinds.getD (e.fn, e.sig.params) [])
       let binds := match env.selfTy[e.fn]? with
         | some (.fn ps r) => matchTy env.decls ((ps.zip e.sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds) r e.sig.ret
         | _ => binds
       let (w, _) := go env 0 e.fn ci { Γ, binds, ret := some e.sig.ret } cl.body
-      t := { t with closureBinds := w.made.foldl (fun m (k, b) => m.insert k b) t.closureBinds }
+      t := { t with closureBinds := w.made.foldl (fun m (k, b) => m.insert k b) t.closureBinds
+                    calledBinds := w.called.foldl (fun m (k, b) => m.insert k b) t.calledBinds }
       if w.hints.size != hs.length then
         t := { t with lost := t.lost + 1 }
         continue
@@ -734,7 +756,8 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
   pure t
 
 /-- The environment of a program for the forward typing. -/
-def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr)) :
+def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
+    (nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option TypeExpr))) := {}) :
     Except String Env := do
   let g ← Elab.collectDeclared items
   let decls := Typer.declsOf items g
@@ -752,13 +775,22 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
     match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
     | some te => m.insert f te
     | none => m) {}
-  pure { decls, p := out.program, said, names := out.fnNames, selfTy }
+  let insts := out.fnNodes.fold (fun m f (owner, clauses) =>
+    let base := (owner.splitOn "⟨").headD owner
+    match nodeInsts[owner]? <|> nodeInsts[base]? with
+    | none => m
+    | some is => clauses.zipIdx.foldl (fun m (locals, c) =>
+        locals.foldl (fun m (i, n) => match is[n]? with
+          | some ps => m.insert (f, c, i) ps
+          | none => m) m) m) {}
+  pure { decls, p := out.program, said, names := out.fnNames, selfTy, insts }
 
 /-- A function's clause at a signature: its hints, the functions at the
 signatures its closures are made at, and what it was found to give; an
 error where a hint is not found. -/
-def clauseAt (env : Env) (made : Std.HashMap (Nat × List Ty) (List (String × Ty))) (fn ci : Nat)
-    (cl : Core.Clause) (sig : FnSig) : Except String (List Hint × Array (Nat × FnSig) × Array ((Nat × List Ty) × List (String × Ty))) := do
+def clauseAt (env : Env) (made called : Std.HashMap (Nat × List Ty) (List (String × Ty))) (fn ci : Nat)
+    (cl : Core.Clause) (sig : FnSig) :
+    Except String (List Hint × Array (Nat × FnSig) × Array ((Nat × List Ty) × List (String × Ty)) × Array ((Nat × List Ty) × List (String × Ty))) := do
   let some bound := patsTysD env.decls cl.pats sig.params
     | throw s!"function {fn}: what its patterns bind is not found"
   let Γ : Array (Option Ty) := (sig.params ++ sig.caps ++ bound).toArray.map some
@@ -768,7 +800,7 @@ def clauseAt (env : Env) (made : Std.HashMap (Nat × List Ty) (List (String × T
         | some te => matchTy env.decls b (rigidOf tparams te) p
         | none => b) []
     | none => []
-  let binds := binds ++ (made.getD (fn, sig.caps) [])
+  let binds := binds ++ (made.getD (fn, sig.caps) []) ++ (called.getD (fn, sig.params) [])
   let binds := match env.selfTy[fn]? with
     | some (.fn ps r) => matchTy env.decls ((ps.zip sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds) r sig.ret
     | _ => binds
@@ -781,15 +813,16 @@ def clauseAt (env : Env) (made : Std.HashMap (Nat × List Ty) (List (String × T
         | some i => s!"local {i}: {(w.why[i]?).getD "a call that does not return, or a host operation"}"
         | none => "a handler"
       throw s!"function {fn} ({env.names[fn]?.getD "?"}): hint {k} not found ({why})"
-  pure (hints, w.uses, w.made)
+  pure (hints, w.uses, w.made, w.called)
 
 /-- Core's types, found forward from the checker's (`Hints`), as `Typer`'s
 are: each function at each signature a closure of it is made at, from
 `main`, with each clause's hints, and the declared types and operations
 those use. -/
-def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr)) :
+def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
+    (nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option TypeExpr))) := {}) :
     Except String Types := do
-  let env ← envOf items out nodeTys
+  let env ← envOf items out nodeTys nodeInsts
   let p := out.program
   -- (`main`: run with nothing, performing nothing.)
   let (w, mainTy) := go env 0 p.fns.size 0 {} p.main
@@ -800,6 +833,7 @@ def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap Strin
     | none => throw s!"a hint of `main` not found ({(localOf[k]?.bind (w.why[·]?)).getD "?"})"
   let mut todo : List (Nat × FnSig) := w.uses.toList
   let mut made : Std.HashMap (Nat × List Ty) (List (String × Ty)) := w.made.foldl (fun m (k, b) => m.insert k b) {}
+  let mut called : Std.HashMap (Nat × List Ty) (List (String × Ty)) := w.called.foldl (fun m (k, b) => m.insert k b) {}
   let mut emitted : Std.HashMap Nat (List FnSig) := {}
   let mut sigs : Array SigEntry := #[]
   let mut fuel := 1000000
@@ -815,10 +849,11 @@ def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap Strin
       let mut hints : List (List Hint) := []
       let mut uses : Array (Nat × FnSig) := #[]
       for (cl, ci) in f.clauses.zipIdx do
-        let (hs, us, ms) ← clauseAt env made fn ci cl sig
+        let (hs, us, ms, cs) ← clauseAt env made called fn ci cl sig
         hints := hints ++ [hs]
         uses := uses ++ us
         made := ms.foldl (fun m (k, b) => m.insert k b) made
+        called := cs.foldl (fun m (k, b) => m.insert k b) called
       sigs := sigs.push ⟨fn, sig, hints⟩
       todo := uses.toList ++ todo
       -- (What destroys a closure of it, at what destroys one of these.)
@@ -842,8 +877,9 @@ where
     | _ => []
 
 /-- Typer's signatures and these, compared (`GLORIOUS_TRACE=hintsigs`). -/
-def compareSigs (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr)) (C : Types) : String :=
-  match typesOf items out nodeTys with
+def compareSigs (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
+    (nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option TypeExpr)))) (C : Types) : String :=
+  match typesOf items out nodeTys nodeInsts with
   | .error e => s!"hintsigs: none: {e}"
   | .ok D => Id.run do
     let theirs : Std.HashMap Nat (List FnSig) := C.sigs.foldl (fun m e => m.insert e.fn (e.sig :: m.getD e.fn [])) {}

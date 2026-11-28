@@ -744,7 +744,8 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
     match seen.lookup (Rigid.param p (rigidOwner decls d)) with
     | some (.var id) => if scheme.tvars.contains id then some id else none
     | _ => none
-  modify fun s => { s with typeParams := (d.name, written) :: s.typeParams }
+  modify fun s => { s with typeParams := (d.name, written) :: s.typeParams
+                           typeParamNames := (d.name, d.params.filter fun p => !p.startsWith "'") :: s.typeParamNames }
   -- A type parameter may be in the function's type only as what a trait's
   -- type is said to be, `X: Graph<Node = N>`: it is one of the function's
   -- all the same, and what is written of it holds.

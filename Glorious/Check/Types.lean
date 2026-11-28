@@ -730,6 +730,15 @@ structure St where
   /-- The node of the callee named of the call being read, whose type at
   the call `applyTy` keeps (`nodeTys`). -/
   calleeAt : Option Nat := none
+  /-- What each type variable of the scheme last instantiated was made
+  (`instantiate`). -/
+  lastInst : List (Nat × Ty) := []
+  /-- At each call of a named function of the function being read, by the
+  callee's node: what each of the callee's type parameters is there, in
+  the order it writes them (`typeParams`). -/
+  callInsts : Array (Nat × List (String × Option Ty)) := #[]
+  /-- Of each function read, `callInsts` written (`Ty.writtenRigid`). -/
+  bodyInsts : Std.HashMap String (Array (Nat × List (String × Option Syntax.TypeExpr))) := {}
   /-- Of each function read, the type of each of its expressions whose type
   is known whole (`Ty.written`), by the node's identity: what the
   elaborator's `let`s are of. -/
@@ -804,6 +813,8 @@ structure St where
   /-- The type parameters each function of a module declares, in the order
   written, as its type has them; none for one its type does not mention. -/
   typeParams : List (String × List (Option Nat)) := []
+  /-- The names of those, in the same order. -/
+  typeParamNames : List (String × List String) := []
   /-- The types a call writes for the type parameters of the function it
   calls, `f<A, B>(..)`, until the function is found. -/
   instWith : Option (List Ty) := none
@@ -1755,6 +1766,7 @@ def instantiate (s : Scheme) (via : Option String := none) (fixed : List (Nat ×
     match fixed.lookup id with
     | some t => pure (id, t)
     | none => pure (id, ← freshTy)
+  modify fun st => { st with lastInst := tm }
   let rm ← s.rvars.mapM fun id => do
     pure (id, ← freshRowVar)
   if (← get).anyMust then

@@ -1107,7 +1107,8 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
       let b := if cs.isEmpty then b else Elab.coerceFn cs n b
       m.insert n (Elab.givenBody taking (Elab.unfieldBody info b))) {}
     let nodeTys := s.bodyTys.fold (fun m n tys => m.insert n (Std.HashMap.ofList tys.toList)) {}
-    pure { bodies, places, nodeTys
+    let nodeInsts := s.bodyInsts.fold (fun m n is => m.insert n (Std.HashMap.ofList is.toList)) {}
+    pure { bodies, places, nodeTys, nodeInsts
            traits := traitInfo.index
            sites := s.siteTable, siteTypes := s.siteTypes }).run st
 

@@ -617,6 +617,9 @@ structure Blocks where
   /-- Of each function, the type of each expression whose type the checker
   knows whole, by the node's identity. -/
   nodeTys : Std.HashMap String (Std.HashMap Nat Syntax.TypeExpr) := {}
+  /-- Of each function, at each call of a named function, by the callee's
+  node: what each of the callee's type parameters is there. -/
+  nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option Syntax.TypeExpr))) := {}
   traits : TraitInfo := {}
   /-- For each function that performs or handles an operation of an effect
   with type parameters, or calls one that does: the places, by the number of

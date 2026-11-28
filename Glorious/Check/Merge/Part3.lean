@@ -20,6 +20,7 @@ delta_part StDelta3 diffPart3 applyPart3 fitsPart3 clearPart3 restorePart3 [
   derefReads : ArrD Nat,
   rowChecks : ListD (String × List (String × Ty)),
   typeBounds : ListD (String × List (String × Nat)),
-  typeParams : ListD (String × List (Option Nat))]
+  typeParams : ListD (String × List (Option Nat)),
+  typeParamNames : ListD (String × List String)]
 
 end Glorious.Check

@@ -215,7 +215,7 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
     (defs reused : List (String × Ty)) (announce : Bool := false) : M (List (String × Ty) × List (String × Ty)) := do
   let mut defs := defs
   let mut reused := reused
-  modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [], assocMemo := {}, nodeTys := #[],
+  modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [], assocMemo := {}, nodeTys := #[], callInsts := #[],
                            copyParams := d.bounds.filterMap fun b =>
                              if b.trait == "Use" && (b.quantity.any fun (_, hi) => hi.isNone) then some b.subject else none }
   -- The function's own type parameters stand for themselves while it is
@@ -552,6 +552,16 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
         -- (And the function's own, by `Syntax.Flat.selfNode`.)
         if let some w := (← zonk t).writtenRigid then known := known.push (Syntax.Flat.selfNode, w)
         modify fun s => { s with bodyTys := s.bodyTys.insert d.name known }
+        -- (What each callee's type parameters are at each call.)
+        let calls := (← get).callInsts
+        modify fun s => { s with callInsts := #[] }
+        let mut insts : Array (Nat × List (String × Option Syntax.TypeExpr)) := #[]
+        for (e, ts) in calls do
+          insts := insts.push (e, ← ts.mapM fun (p, t) => do
+            match t with
+            | some t => pure (p, (← zonk t).writtenRigid)
+            | none => pure (p, none))
+        modify fun s => { s with bodyInsts := s.bodyInsts.insert d.name insts }
         -- (The body as read, with what was written where it was found: what
         -- the count of uses follows, `placeLets`.)
         modify fun s => { s with runFns := s.runFns.insert d.name s.body, decidedFns := s.decidedFns.insert d.name s.body }

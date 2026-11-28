@@ -892,10 +892,11 @@ def compileSource (src : String) (check : Bool := true)
     -- Core's types, for the lowering (`Typer`). Where they are not found,
     -- the program runs as it is.
     let nodeTys := (blocks.map (·.nodeTys)).getD {}
+    let nodeInsts := (blocks.map (·.nodeInsts)).getD {}
     -- (`GLORIOUS_TYPES=hints`: found forward from the checker's, `Hints`,
     -- in place of `Typer`.)
     let found : Except String Lower.Types :=
-      if Trace.hintsOnly then Trace.timed "types" fun _ => Hints.typesOf declared out nodeTys
+      if Trace.hintsOnly then Trace.timed "types" fun _ => Hints.typesOf declared out nodeTys nodeInsts
       else Trace.timed "types" fun _ => Typer.typesOf declared out nodeTys
     let types : Except String (Option Lower.Types) := if !check then .ok none else
       match found with
@@ -903,7 +904,7 @@ def compileSource (src : String) (check : Bool := true)
         if Trace.hintsTraced then
           dbgTrace (Hints.report declared out ((blocks.map (·.nodeTys)).getD {}) types) fun _ => .ok (some types)
         else if Trace.hintSigsTraced then
-          dbgTrace (Hints.compareSigs declared out nodeTys types) fun _ => .ok (some types)
+          dbgTrace (Hints.compareSigs declared out nodeTys nodeInsts types) fun _ => .ok (some types)
         else if Trace.typesTraced then dbgTrace (Core.showCore out.fnNames out.program ++ "\n" ++ Typer.showSigs types) fun _ => .ok (some types)
         else .ok (some types)
       | .error e =>

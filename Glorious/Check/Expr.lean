@@ -2253,6 +2253,12 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
     -- (The callee's type at this call, by its node: what the elaborator's
     -- closure of it is, `applyTy`.)
     modify fun s => { s with calleeAt := some (s.body.idOf f) }
+    -- (And what each of its type parameters is at this call.)
+    if let .fn .. := head then
+      let s ← get
+      if let (some ids, some names) := (s.typeParams.lookup x, s.typeParamNames.lookup x) then
+        let inst := names.zip (ids.map fun id => id.bind (s.lastInst.lookup ·))
+        modify fun s => { s with callInsts := s.callInsts.push (s.body.idOf f, inst) }
     match head with
     | .ctor .. | .op _ | .prim | .pack _ | .host _ => inferCallBuiltin scope amb args call x head
     | .fn .. | .method _ | .const _ => inferCallFn scope amb args call x head
