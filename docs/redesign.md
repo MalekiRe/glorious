@@ -699,3 +699,30 @@ at on a copy of what is known and let go, as rustc's method probing is
 made in `InferCtxt::probe`: a dot call's receiver's type (`dotAltReading`,
 the field callee's, a receiver that is a reference already), a coercion's
 fit, a lifetime's fit.
+
+## Step 4, Core's types: what writing them from the checker needs
+
+Measured (checker's type of each expression kept by node, `St.nodeTys`;
+the elaborator's local made for each expression noted; `Typer` comparing
+the two where the checker's type is whole): of covey/fleet's Core, 867
+locals were found an expression's type, 146 agreeing with `Typer`'s and 137
+not; of `b.glorious`, 9 and 9. They do not line up because writing out a
+function for its implementations (`Elab.untraitFn`) makes every node anew
+and numbers them again (`Flat.Body.compact`): a node's place in the body
+is not its identity past the checker. Only calls, closures and fields
+carry an identity of their own (`.call id ..`).
+
+So Core's types from the checker need, in order:
+
+1. every expression an identity that the elaborator's passes keep (writing
+   out implementations, effects' copies, destroyers, `compact`), as calls'
+   are: section 1's ids, of expressions;
+2. the elaborator typing what it writes itself as it writes it (cells,
+   labels, closures and what they capture, handlers and the operations
+   they serve, destroyers, drop flags, places): each local's type from its
+   parts', no unification;
+3. each function at each signature from the instantiation the checker
+   found at each call (the callee's type there), by substitution from
+   `main`, in place of `Typer.instAt`.
+
+Then `Typer` goes. Not done yet: 1 is the ids of section 1.
