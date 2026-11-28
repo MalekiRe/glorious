@@ -726,3 +726,17 @@ So Core's types from the checker need, in order:
    `main`, in place of `Typer.instAt`.
 
 Then `Typer` goes. Not done yet: 1 is the ids of section 1.
+
+## Section 3, as done: results that do not depend on order
+
+- A declaration is decided from its own text: a `let` item's type is its
+  value's, generic where the value is (`let XS = [];` used as `[Int; 0]`
+  and `[Bool; 0]` both); a `fn` field performs what it says, nothing where
+  it says nothing; a callable stored in a declaration's `fn` field holds
+  nothing borrowed unless the declaration has a type parameter for it (the
+  refusal says to give it one).
+- Each body is checked once from the signatures, side by side with the
+  others (`schemeWithin`): what one body leaves undecided no other reads.
+- Every refusal is said, sorted by where it is: bodies' (a group that calls
+  a refused one not read), and declarations' and implementations' (what
+  names one refused not read), `St.declFailed`, `sortedErrors`.
