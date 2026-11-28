@@ -597,6 +597,23 @@ def unfieldBody (info : FieldInfo) (body : Flat.Body) : Flat.Body :=
     | _ => false
   if body.roots.any (body.anyClause found) then (unfieldRewrite info).body body else body
 
+/-- Each block written without parameters where a callable taking one
+argument is expected (`taking`, by the block's number) written so: it takes
+the argument without naming it, `{ _ => .. }`, and lets it go. -/
+def givenBody (taking : Std.HashSet Nat) (body : Flat.Body) : Flat.Body :=
+  let rw : Flat.FRewrite :=
+    { onExpr := fun go b e => match b.expr e with
+        | .closure id #[c] =>
+          if !taking.contains id then none else
+          match b.clause c with
+          | ⟨[], stmts⟩ => some (do
+            let stmts ← stmts.mapM go.st
+            let c' ← Flat.pushClause ⟨[.wild], stmts⟩
+            modifyGet fun (bb : Flat.Body) => bb.add (.closure id #[c']) (some (b.idOf e)))
+          | _ => none
+        | _ => none }
+  if taking.isEmpty then body else rw.body body
+
 /-- Each whole number the checker found to be of a scalar type in the body
 of `name` made that scalar, `u8_of(200)`, and each text where `&str` is
 wanted its bytes (`lits`, by the function and the node's identity): Core's

@@ -1069,11 +1069,12 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         reads := Elab.firstOf s.fieldReads.toList
         packs := Elab.firstOf s.packs.toList
         derefs := .ofList s.derefReads.toList }
+    let taking : Std.HashSet Nat := .ofList s.given.toList
     let bodies := s.decidedFns.fold (fun m n b =>
       let b := if owners.contains n then Elab.scalarBody lits n b else b
       let b := if cs.isEmpty then b else Elab.coerceFn cs n b
-      m.insert n (Elab.unfieldBody info b)) {}
-    pure { given := .ofList s.given.toList, bodies, places
+      m.insert n (Elab.givenBody taking (Elab.unfieldBody info b))) {}
+    pure { bodies, places
            traits := traitInfo.index
            sites := s.siteTable, siteTypes := s.siteTypes }).run st
 

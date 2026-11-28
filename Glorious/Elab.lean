@@ -257,10 +257,10 @@ partial def elabArgs (scope : Scope) (args : Array Flat.ExprId) (gives : Nat →
   let blocks := (← read).blocks
   (args.toList.zip (List.range args.size)).mapM fun (a, i) => do
     match (← get).body.plainBlock a with
-    | some (id, body) =>
-      let given ← match blocks with
-        | some _ => givenAt id
-        | none => pure (gives i)
+    | some (_, body) =>
+      -- (Of a checked program, the checker wrote it so where it does,
+      -- `Elab.givenBody`.)
+      let given := blocks.isNone && gives i
       if given then elabGiven scope body.toList else elabExpr scope false a
     | none => elabExpr scope false a
 

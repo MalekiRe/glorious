@@ -610,9 +610,6 @@ def Said.map (s : Said) (f : String → String) : Said := { s with msg := f s.ms
 /-- What the checker tells the elaborator about the blocks of a program, each
 named by its identity. -/
 structure Blocks where
-  /-- Blocks written without parameters where a callable taking one argument is
-  expected: they take the argument without naming it. -/
-  given : Std.HashSet Nat := {}
   /-- The locals of each function the checker found to be places (borrowed
   where they are), by the `let` (`line:col`) or, at `0:0`, the clause that
   binds them: each made a cell where it is bound (`Elab.promote`). -/
@@ -738,7 +735,6 @@ structure Builder where
 /-- What elaborating one top-level function read that is not its own body:
 kept with what it made (`ElabKept`), and read again before that is taken. -/
 inductive ElabRead where
-  | given (id : Nat) (v : Bool)
   | fn (name : String) (v : Option Nat)
 
 structure St where
@@ -856,12 +852,6 @@ private unsafe def sameObjImpl {α : Type} (a b : α) : Bool := ptrAddrUnsafe a 
 
 def noteRead (r : ElabRead) : M Unit := modify fun s => { s with reads := s.reads.push r }
 
-/-- Whether the checker found block `id` takes the argument it does not name, noted. -/
-def givenAt (id : Nat) : M Bool := do
-  let v := ((← read).blocks.getD {}).given.contains id
-  noteRead (.given id v)
-  pure v
-
 /-- The number of the top-level function `x`, noted. -/
 def fnAt (x : String) : M (Option Nat) := do
   let v := (← read).fns[x]?
@@ -870,7 +860,6 @@ def fnAt (x : String) : M (Option Nat) := do
 
 /-- Is what `r` read still what it is? -/
 def readHolds : ElabRead → M Bool
-  | .given id v => do pure (((← read).blocks.getD {}).given.contains id == v)
   | .fn x v => do pure ((← read).fns[x]? == v)
 
 /-- What `after` has in front of `before`, where it is `before` with more in
