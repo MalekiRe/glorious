@@ -109,24 +109,64 @@ where
       | _ => none
     (count n).map fun k => .data (lenBase + k) []
 
+/-- The same, but for what callables perform and were made with, which are
+found apart. -/
+partial def shape : Ty → Ty
+  | .fn ps r _ _ _ => .fn (ps.map shape) (shape r) [] false none
+  | .tuple fs => .tuple (fs.map shape)
+  | .data n args => .data n (args.map shape)
+  | .ref t => .ref (shape t)
+  | t => t
+
 /-- What each type parameter (`%rigid:T`) a written type names is, where
-the type is `t`: added to `binds`. -/
-partial def matchTy (d : Typer.Decls) (binds : List (String × Ty)) : TypeExpr → Ty → List (String × Ty)
+the type is `t`: added to `binds`; where the two are not alike, nothing
+(none is learned of a type that does not fit what is written). -/
+partial def matchTyOpt (d : Typer.Decls) (binds : List (String × Ty)) : TypeExpr → Ty → Option (List (String × Ty))
   | .name x [], t =>
-    if x.startsWith "%rigid:" && (binds.lookup x).isNone then (x, t) :: binds else binds
-  | .name x args, .data n targs =>
-    if d.typeIds[x]? == some n then
-      let lifetimes := ((d.typeParams[n]?).getD []).map (·.startsWith "'")
-      let typed := (lifetimes.zip targs).filterMap fun (l, t) => if l then none else some t
-      if typed.length == args.length then
-        (args.zip typed).foldl (fun b (a, t) => matchTy d b a t) binds
-      else binds
-    else binds
-  | .tuple ps, .tuple ts => (ps.zip ts).foldl (fun b (a, t) => matchTy d b a t) binds
-  | .ref _ a _, .ref t => matchTy d binds a t
-  | .fn ps r, .fn ts s _ _ _ => matchTy d ((ps.zip ts).foldl (fun b (a, t) => matchTy d b a t) binds) r s
-  | .performs r _, t => matchTy d binds r t
-  | _, _ => binds
+    if x.startsWith "%rigid:" then
+      match binds.lookup x with
+      | some u => if shape u == shape t then some binds else none
+      | none => some ((x, t) :: binds)
+    else match tyOf d [] (.name x []) with
+      | some u => if shape u == shape t then some binds else none
+      | none => some binds
+  | .name x args, t =>
+    if x == rankedMark then match args.getLast? with
+      | some a => matchTyOpt d binds a t
+      | none => some binds
+    else match t with
+    | .data n targs =>
+      if d.typeIds[x]? == some n then
+        let lifetimes := ((d.typeParams[n]?).getD []).map (·.startsWith "'")
+        let typed := (lifetimes.zip targs).filterMap fun (l, t) => if l then none else some t
+        if typed.length == args.length then
+          (args.zip typed).foldlM (fun b (a, t) => matchTyOpt d b a t) binds
+        else some binds
+      else if x == "Fixed" && n == fixedName then
+        match args, targs with
+        | a :: _, t :: _ => matchTyOpt d binds a t
+        | _, _ => some binds
+      else none
+    | .int => if x == "Int" then some binds else none
+    | .scalar _ => if isScalar x then some binds else none
+    | _ => none
+  | .tuple ps, .tuple ts =>
+    if ps.length == ts.length then (ps.zip ts).foldlM (fun b (a, t) => matchTyOpt d b a t) binds else none
+  | .tuple _, _ => none
+  | .ref _ a _, .ref t => matchTyOpt d binds a t
+  | .ref _ _ _, _ => none
+  | .fn ps r, .fn ts s _ _ _ =>
+    if ps.length == ts.length then do
+      let b ← (ps.zip ts).foldlM (fun b (a, t) => matchTyOpt d b a t) binds
+      matchTyOpt d b r s
+    else none
+  | .fn _ _, _ => none
+  | .performs r _, t => matchTyOpt d binds r t
+  | _, _ => some binds
+
+/-- `matchTyOpt`, `binds` as they were where the two are not alike. -/
+def matchTy (d : Typer.Decls) (binds : List (String × Ty)) (te : TypeExpr) (t : Ty) : List (String × Ty) :=
+  (matchTyOpt d binds te t).getD binds
 
 /-- A field of a value of a type, where the type says it. -/
 def fieldOf (d : Typer.Decls) (t : Ty) (i : Nat) : Option Ty :=
@@ -142,14 +182,16 @@ def fieldOf (d : Typer.Decls) (t : Ty) (i : Nat) : Option Ty :=
       | _ => none
   | _ => none
 
-/-- The same, but for what callables perform and were made with, which are
-found apart. -/
-partial def shape : Ty → Ty
-  | .fn ps r _ _ _ => .fn (ps.map shape) (shape r) [] false none
-  | .tuple fs => .tuple (fs.map shape)
-  | .data n args => .data n (args.map shape)
-  | .ref t => .ref (shape t)
-  | t => t
+/-- Is `mine` what `theirs` is, but where `theirs` leaves it undecided
+(`anyName`, Typer's)? -/
+partial def fits (mine theirs : Ty) : Bool :=
+  match mine, theirs with
+  | _, .data n [] => n == anyName || mine == theirs
+  | .tuple as, .tuple bs => as.length == bs.length && (as.zip bs).all fun (a, b) => fits a b
+  | .data n as, .data m bs => n == m && as.length == bs.length && (as.zip bs).all fun (a, b) => fits a b
+  | .ref a, .ref b => fits a b
+  | .fn ps r _ _ _, .fn qs s _ _ _ => ps.length == qs.length && fits r s && (ps.zip qs).all fun (a, b) => fits a b
+  | a, b => a == b
 
 /-- The value a callable gives, of its type. -/
 def retOf : Ty → Option Ty
@@ -183,14 +225,19 @@ def memTy (env : Env) (Γ : Array (Option Ty)) (op : MemOp) (args : List Atom) :
     | _ => none
   | _, _ => none
 
-/-- The type of what a host operation gives. -/
-def hostTy (id : Nat) (_args : List Atom) : Option Ty :=
-  match id with
-  | 0 | 8 | 21 | 22 => some .unit
-  | 1 | 10 => some (.tuple [.int, .int])
-  | 2 | 6 => some .int
-  | 5 => some (.scalar (-64))
-  | _ => none
+/-- The type of what a host operation gives: of what it is given, or, of
+one that gives what the program sees as another type (14), as the checker
+says it (`said`). -/
+def hostTy (id : Nat) (args : List Atom) (atomTy : Atom → Option Ty) (said : Option Ty) : Option Ty :=
+  match id, args with
+  | 0, _ | 8, _ | 21, _ | 22, _ => some .unit
+  | 1, _ | 10, _ => some (.tuple [.int, .int])
+  | 2, _ | 6, _ => some .int
+  | 5, _ => some (.scalar (-64))
+  | 7, [_, of] => (atomTy of).bind fixedElem
+  | 9, [v, _] => (atomTy v).map fun t => .tuple [.int, t]
+  | 14, _ => said
+  | _, _ => none
 
 mutual
 /-- The types a pattern binds of a value of a type, the declarations read. -/
@@ -359,7 +406,12 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
       | some .never | none => none
       | r => r)
     if let some r := ret then
-      w := w.found i (.fn params r [] false (some caps))
+      let σ : Ty := .fn params r [] false (some caps)
+      w := w.found i σ
+      -- (What the checker said of it, a type parameter it names learned of
+      -- what it was found to be.)
+      if let some te := env.said[(f, c, i)]? then
+        w := { w with binds := matchTy env.decls w.binds te σ }
   pure w
 
 /-- Go through a clause: its hints and what it gives. -/
@@ -447,7 +499,9 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
     go env depth f c (w.bind ((w.atomTy thunk).bind retOf) false) body
   | .cancel _ body => go env depth f c (w.bind (some .unit) false) body
   | .mem op args body => go env depth f c (w.bind (memTy env w.Γ op args) false) body
-  | .host id args body => go env depth f c (w.bind (hostTy id args) (2 ≤ id)) body
+  | .host id args body =>
+    let σ := hostTy id args w.atomTy ((said w.Γ.size).bind (tyOf env.decls w.binds))
+    go env depth f c (w.bind σ (2 ≤ id)) body
 
 /-- What a label's scope `g` gives, its body gone through with a label of a
 result not known: what it ends with where that returns. -/
@@ -509,7 +563,7 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
       for ((mine, theirs), h) in (w.hints.toList.zip hs).zipIdx do
         match theirs with
         | .ty σ =>
-          let r := mine.map fun | .ty m => shape m == shape σ | _ => false
+          let r := mine.map fun | .ty m => fits (shape m) (shape σ) | _ => false
           let ex := if r == some false then
               some s!"{env.names[e.fn]?.getD "?"}: here {(mine.map fun | .ty m => Typer.showTy m | _ => "?").getD "?"}, Typer {Typer.showTy σ}"
             else if r.isNone && (t.counts.getD "nf" (0,0,0)).1 % 97 == 0 then
