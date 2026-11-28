@@ -985,6 +985,47 @@ partial def namedIn : Ty → List String
     params.flatMap namedIn ++ namedIn ret ++ effs.flatMap fun (_, args) => args.flatMap namedIn
   | .ref _ t _ => namedIn t
 
+
+/-- The types an implementation gives what its trait leaves to it, as
+written for the elaborator: its type parameters `%rigid:T`, and a type read
+from what a trait leaves to the implementation of one of its conditions
+by which of those it is (`Syntax.projAtName`, in the order its dictionary
+has them, `context` then `extra`). None where one is not so found. -/
+partial def implAssocs (im : ImplDecl) : List (String × Syntax.TypeExpr) :=
+  let base := fun (tr : String) => (tr.takeWhile (· != '<')).toString
+  -- (A projection's subject is the type with the trait's arguments,
+  -- `(L, E, S)` of `<L as Takes<E, S>>::Taken`: so each condition's.)
+  let subjects : List (String × Ty) :=
+    (im.context.map fun (tr, j) => (base tr, match (im.params[j]?).bind (fun p => im.pvars.lookup p) with
+      | some id => Ty.tuple [Ty.var id]
+      | none => .unit)) ++ im.extra.map fun (tr, cargs, subject) => (base tr, Ty.tuple (subject :: cargs))
+  let rec key : Ty → String
+    | .var id => s!"?{id}"
+    | .rigid r => r.spelled
+    | .con n args => s!"{n}<{",".intercalate (args.map key)}>"
+    | .tuple args => s!"({",".intercalate (args.map key)})"
+    | .ref _ t _ => s!"&{key t}"
+    | .fn ps r _ _ _ => s!"fn({",".intercalate (ps.map key)})->{key r}"
+  let rec named : Ty → Ty
+    | .var id => match im.pvars.find? (·.2 == id) with
+      | some (x, _) => .con s!"%rigid:{x}" []
+      | none => .var id
+    | .con n [subject, .con tr [], .con x []] =>
+      if n == Syntax.projMark then
+        let subject' := match subject with
+          | .tuple _ => subject
+          | t => .tuple [t]
+        match subjects.findIdx? fun (tr', s) => tr' == base tr && key s == key subject' with
+        | some j => .con (Syntax.projAtName j x) []
+        | none => .con n [named subject, .con tr [], .con x []]
+      else .con n [named subject, .con tr [], .con x []]
+    | .con n args => .con n (args.map named)
+    | .tuple args => .tuple (args.map named)
+    | .fn ps r effs tail once => .fn (ps.map named) (named r) effs tail once
+    | .ref how t c => .ref how (named t) c
+    | t => t
+  im.assocs.filterMap fun (x, t) => ((named t).writtenRigid).map (x, ·)
+
 /-- What the checker tells the elaborator, once every item is checked. -/
 def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (show M Elab.Blocks from do
     -- One who calls a `pub` function has to be able to write its type.
@@ -1085,7 +1126,8 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         impls := implEs
         drops := s.dropSites.toList
         destroys := destroys.toList
-        dictTypes := s.dictTypes }
+        dictTypes := s.dictTypes
+        assocs := s.impls.foldl (fun m im => m.insert im.dictFn (implAssocs im)) {} }
     let places := s.adjust.foldl (fun (m : Std.HashMap String (List (Nat × Nat × String))) d => match d with
       | .place owner l c x => m.insert owner ((m.getD owner []) ++ [(l, c, x)])
       | _ => m) {}
@@ -1113,7 +1155,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     for (n, tys) in s.bodyTys.toList do
       let mut m : Std.HashMap Nat Syntax.TypeExpr := {}
       for (e, t) in tys do
-        if let some w := (← zonk t).writtenRigid then m := m.insert e w
+        if let some w := ((← zonk t).projsAt s.projAt).writtenRigid then m := m.insert e w
       nodeTys := nodeTys.insert n m
     let mut nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option Syntax.TypeExpr))) := {}
     for (n, is) in s.bodyInsts.toList do
@@ -1121,7 +1163,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
       for (e, ts) in is do
         m := m.insert e (← ts.mapM fun (p, t) => do
           match t with
-          | some t => pure (p, (← zonk t).writtenRigid)
+          | some t => pure (p, ((← zonk t).projsAt s.projAt).writtenRigid)
           | none => pure (p, none))
       nodeInsts := nodeInsts.insert n m
     pure { bodies, places, nodeTys, nodeInsts

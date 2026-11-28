@@ -37,6 +37,9 @@ structure Env where
   /-- A copy of an implementation's function: what the implementation's
   type parameters are (`Elab.Lowered.implTypes`). -/
   implTypes : Std.HashMap Nat (List (String × TypeExpr)) := {}
+  /-- What a function in a copy reads from what traits leave to the
+  implementations the copy is given (`Elab.Lowered.projTypes`). -/
+  projTypes : Std.HashMap Nat (List (String × TypeExpr)) := {}
   /-- What each type parameter of the function a local is a closure of is,
   where the local is made for a call of it, as the checker found it there:
   by function, clause and local. -/
@@ -188,7 +191,9 @@ the type is `t`: added to `binds`; where the two are not alike, nothing
 (none is learned of a type that does not fit what is written). -/
 partial def matchTyOpt (d : Typer.Decls) (binds : List (String × Ty)) : TypeExpr → Ty → Option (List (String × Ty))
   | .name x [], t =>
-    if x.startsWith "%rigid:" then
+    -- (And a type read from what a trait leaves to an implementation the
+    -- function is given, `%proj:j:Item`.)
+    if x.startsWith "%rigid:" || x.startsWith "%proj:" then
       match binds.lookup x with
       | some u => if shape u == shape t then some binds else none
       | none => some ((x, t) :: binds)
@@ -543,7 +548,8 @@ def handlerUses (env : Env) (w : W) (ret : Nat) (ops : List (Nat × Nat)) (caps 
 /-- A copy of an implementation's function: its type parameters as the
 checker found them where the implementation was (`Env.implTypes`). -/
 def implBinds (env : Env) (fn : Nat) : List (String × Ty) :=
-  (env.implTypes.getD fn []).filterMap fun (x, te) => (tyOf env.decls [] te).map (s!"%rigid:{x}", ·)
+  (env.implTypes.getD fn []).filterMap (fun (x, te) => (tyOf env.decls [] te).map (s!"%rigid:{x}", ·))
+    ++ (env.projTypes.getD fn []).filterMap fun (x, te) => (tyOf env.decls [] te).map (x, ·)
 
 mutual
 
@@ -898,7 +904,7 @@ def baseOf (owner : String) : String :=
 /-- The environment of a program for the forward typing. -/
 def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
     (nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option TypeExpr))) := {})
-    (implTypes : Std.HashMap String (List (String × TypeExpr)) := {}) :
+    (implTypes projTypes : Std.HashMap String (List (String × TypeExpr)) := {}) :
     Except String Env := do
   let g ← Elab.collectDeclared items
   let decls := Typer.declsOf items g
@@ -941,7 +947,11 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
     match implTypes[owner]? with
     | some ts => m.insert f ts
     | none => m) {}
-  pure { decls, p := out.program, said, names := out.fnNames, selfTy, insts, implSelf, implTypes, settled }
+  let projTypes := out.fnNodes.fold (fun m f (owner, _) =>
+    match projTypes[owner]? with
+    | some ts => m.insert f ts
+    | none => m) {}
+  pure { decls, p := out.program, said, names := out.fnNames, selfTy, insts, implSelf, implTypes, projTypes, settled }
 
 /-- A function's clause at a signature: its hints, the functions at the
 signatures its closures are made at, and what it was found to give; an
@@ -981,9 +991,9 @@ are: each function at each signature a closure of it is made at, from
 those use. -/
 def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
     (nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option TypeExpr))) := {})
-    (implTypes : Std.HashMap String (List (String × TypeExpr)) := {}) :
+    (implTypes projTypes : Std.HashMap String (List (String × TypeExpr)) := {}) :
     Except String Types := do
-  let env ← envOf items out nodeTys nodeInsts implTypes
+  let env ← envOf items out nodeTys nodeInsts implTypes projTypes
   let p := out.program
   -- (`main`: run with nothing, performing nothing.)
   let (w, mainTy) := go env 0 p.fns.size 0 { binds := [("%settled", .unit)] } p.main

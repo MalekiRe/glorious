@@ -261,6 +261,46 @@ def Lowered.implTypes (tr : TraitInfo) (st : Lowered) : Std.HashMap String (List
     | some ts => m.insert name ts
     | none => m) {}
 
+/-- A type an implementation gives what its trait leaves to it, `name`, at
+the implementation numbered `n` (`TraitInfo.assocs`): its type parameters as
+the checker found them, and each it reads from what a condition's
+implementation gives, that (`Syntax.projAtName`). -/
+partial def assocAt (tr : TraitInfo) (copies : Copies) (n : Nat) (name : String) : Nat → Option TypeExpr
+  | 0 => none
+  | fuel + 1 => do
+    let (dictFn, subs) ← copies.byId[n]?
+    let te ← (tr.assocs[dictFn]?).bind (·.lookup name)
+    let params := (tr.knownTypes[n]? <|> copies.types[n]?).getD []
+    let rec fill : TypeExpr → Option TypeExpr
+      | .name x [] =>
+        if x.startsWith "%rigid:" then params.lookup (x.drop 7).toString
+        else match projAtOf x with
+          | some (j, y) => do assocAt tr copies (← subs[j]?) y fuel
+          | none => some (.name x [])
+      | .name x args => do pure (.name x (← args.mapM fill))
+      | .tuple args => do pure (.tuple (← args.mapM fill))
+      | .fn ps r => do pure (.fn (← ps.mapM fill) (← fill r))
+      | .performs r effs => do pure (.performs (← fill r) (← effs.mapM fun (e, a) => do pure (e, ← a.mapM fill)))
+      | .ref u t l => do pure (.ref u (← fill t) l)
+      | t => some t
+    fill te
+where
+  projAtOf (x : String) : Option (Nat × String) :=
+    match x.splitOn ":" with
+    | ["%proj", j, y] => j.toNat?.map (·, y)
+    | _ => none
+
+/-- What each copy of a function reads from what traits leave to the
+implementations it is given (`Syntax.projAtName`), where found: by the
+copy's name. -/
+def Lowered.projTypes (tr : TraitInfo) (st : Lowered) : Std.HashMap String (List (String × TypeExpr)) :=
+  st.copies.byName.fold (fun m name (_, ids, _) =>
+    let found := ids.zipIdx.flatMap fun (n, j) =>
+      match (st.copies.byId[n]?).bind fun (dictFn, _) => tr.assocs[dictFn]? with
+      | some assocs => assocs.filterMap fun (x, _) => (assocAt tr st.copies n x 64).map (Syntax.projAtName j x, ·)
+      | none => []
+    if found.isEmpty then m else m.insert name found) {}
+
 /-- Lowered on from `st`, through what `roots` reach. Refused where more
 copies would be made than `copyFuel`: a function that calls itself with an
 implementation made from the one it was given, as Rust refuses it (no

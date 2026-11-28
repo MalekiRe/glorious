@@ -1036,6 +1036,11 @@ structure St where
   its type parameters known where it was found, by name, written
   (`Elab.TraitInfo.dictTypes`). -/
   dictTypes : Std.HashMap USize (List (String × Syntax.TypeExpr)) := {}
+  /-- A type a function's body reads from what a trait leaves to the
+  implementation of one of its bounds, by its variable: which of those the
+  function is given, and the name (`settleScheme`); written so in the body's
+  types (`Syntax.projAtName`). -/
+  projAt : Std.HashMap Nat (Nat × String) := {}
   /-- The functions whose bodies a count of uses followed (`pathUses`), in
   the order followed, `*` where one was not finished: what a group's check
   read of bodies besides its own. -/
@@ -1582,6 +1587,18 @@ partial def Ty.written : Ty → Option Syntax.TypeExpr
     match how with
     | .con "&mut" [] => t.written.map (.ref true · none)
     | _ => t.written.map (.ref false · none)
+
+/-- A type with each variable that is a type read from the implementation of
+one of the function's bounds named so (`St.projAt`, `Syntax.projAtName`). -/
+partial def Ty.projsAt (m : Std.HashMap Nat (Nat × String)) : Ty → Ty
+  | .var n => match m[n]? with
+    | some (j, x) => .con (Syntax.projAtName j x) []
+    | none => .var n
+  | .con n args => .con n (args.map (Ty.projsAt m))
+  | .tuple args => .tuple (args.map (Ty.projsAt m))
+  | .fn ps r effs tail once => .fn (ps.map (Ty.projsAt m)) (r.projsAt m) (effs.map fun (e, a) => (e, a.map (Ty.projsAt m))) tail once
+  | .ref how t c => .ref (how.projsAt m) (t.projsAt m) c
+  | t => t
 
 /-- A type as `Ty.written` has it, a type parameter of the function written
 `%rigid:T` and one it was found general in `%rigid:%n`: what the

@@ -179,6 +179,9 @@ structure TraitInfo where
   number (`index`): what a copy of its functions is written out at. -/
   dictTypes : Std.HashMap USize (List (String × TypeExpr)) := {}
   knownTypes : Std.HashMap Nat (List (String × TypeExpr)) := {}
+  /-- What each implementation, by the function that makes it a value,
+  gives what its trait leaves to it (`Check.implAssocs`). -/
+  assocs : Std.HashMap String (List (String × TypeExpr)) := {}
 
 /-- Numbering the implementations with nothing left to be known: by object
 (none for one with a parameter left), by function and parts, and back. -/

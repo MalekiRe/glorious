@@ -403,6 +403,12 @@ its trait's types is, where `T` is one of its type parameters: answered at
 each use of the implementation, once `T` is known there. -/
 def projMark : String := "%proj"
 
+/-- A type a function's body reads from what a trait leaves to the
+implementation of its `j`th bound, as the checker writes it in the body's
+types (`Check.St.projAt`): found from the implementation the function is
+given there. -/
+def projAtName (j : Nat) (name : String) : String := s!"%proj:{j}:{name}"
+
 /-- The implementation, as a value, of a trait with no functions: `()`,
 whichever implementation it is. -/
 def markerDict : String := "%marker"

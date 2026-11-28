@@ -897,10 +897,10 @@ def compileSource (src : String) (check : Bool := true)
     -- in place of `Typer`.)
     let found : Except String Lower.Types :=
       if Trace.hintsOnly then
-        let implTypes := match lowering, lowered with
-          | some L, some st => st.implTypes L.blocks.traits
-          | _, _ => {}
-        Trace.timed "types" fun _ => Hints.typesOf declared out nodeTys nodeInsts implTypes
+        let (implTypes, projTypes) := match lowering, lowered with
+          | some L, some st => (st.implTypes L.blocks.traits, st.projTypes L.blocks.traits)
+          | _, _ => ({}, {})
+        Trace.timed "types" fun _ => Hints.typesOf declared out nodeTys nodeInsts implTypes projTypes
       else Trace.timed "types" fun _ => Typer.typesOf declared out nodeTys
     let types : Except String (Option Lower.Types) := if !check then .ok none else
       match found with

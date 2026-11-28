@@ -913,6 +913,21 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
       let args ← args.mapM fun a => do pure (← openParams seen (← zonk a)).1
       bounds := bounds ++ [(base.spelled, Ty.tuple (self :: args))]
     | none => bounds := bounds ++ [(tr.spelled, self)]
+  -- (Each type its body reads from what a trait leaves to an
+  -- implementation of one of its own bounds, `<X as System<E, S>>::Prepared`:
+  -- by which of the implementations it is given, `St.projAt`.)
+  for (tr, subject, name, a, owner, _) in (← get).assocUses do
+    if owner == d.name then
+      if let .var v ← find a then
+        -- (Its subject is the type with the trait's arguments, `(X, E, S)`.)
+        let subject ← match ← find subject with
+          | .tuple (self :: _) => spellTy self
+          | t => spellTy t
+        let mut at_ : List Nat := []
+        for ((key, _, ty), j) in mine.zipIdx do
+          if key.base == tr && (← spellTy ty) == subject then at_ := at_ ++ [j]
+        if let [j] := at_ then
+          modify fun s => { s with projAt := s.projAt.insert v (j, name) }
   -- The types left to implementations that the function's type mentions.
   let mut assocs : List (String × Ty × String × Ty) := []
   for (tr, subject, name, a, owner, _) in (← get).assocUses do
