@@ -8,7 +8,7 @@ public import Glorious.Elab.Specialize
 # Lowering what is reached
 
 Once a program is checked it is lowered for the elaborator: its traits made
-values (`untraitFn`), its fields written out (`unfieldItem`), each function
+values (`untraitFn`), each function
 about an effect's instance written for each (`instancesOf`), a copy of each
 function for each set of implementations it is given (`untraitFn` for them,
 `askCopy`), and its constants worked out (`foldConstants`). Of a program with its library,
@@ -114,7 +114,6 @@ effects with the types they declare). -/
 def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Except String Lowering := do
   let tr := b.traits
   let inst ← instancesOf b written
-  let info := fieldInfo b
   let mut others : Array Syntax.Item := #[]
   let mut fns : Std.HashMap String (Array Nat → String → StateM Copies (Option Syntax.Item)) := {}
   let mut twice : List (String × (Array Nat → String → StateM Copies (Option Syntax.Item))) := []
@@ -135,8 +134,7 @@ def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Exc
   -- whatever order it was gathered in.)
   let sum := fun {α : Type} [Hashable α] (xs : List α) => xs.foldl (fun h x => h + hash x) (0 : UInt64)
   let globalKey := hash [dictsKey tr.dicts, sum tr.methods, sum tr.bounded, sum tr.impls, sum tr.drops,
-    sum tr.destroys, hash tr.knownPool, sum b.fields.toList, sum b.fieldReads.toList, sum b.packs.toList,
-    sum b.derefReads.toList, sum b.sites, sum b.siteTypes, hash written]
+    sum tr.destroys, hash tr.knownPool, sum b.sites, sum b.siteTypes, hash written]
   for part in items.flatMap (untraitItem tr) ++ untraitExtra tr do
     match part with
     | .item item =>
@@ -153,7 +151,7 @@ def lowering (b : Blocks) (written : List Item) (items : List Syntax.Item) : Exc
           let item ← make env
           let calls := (← get).calls.foldl (fun m (c, ids) => m.insert c ids) ({} : Std.HashMap Nat (List Nat))
           modify fun c => { c with calls := #[] }
-          match (inst.fn (unfieldItem info item)).find? fun | .fn m .. => m == n | _ => false with
+          match (inst.fn item).find? fun | .fn m .. => m == n | _ => false with
           | some it => some <$> (renamed as <$> callsCopied calls it)
           | none => pure none : StateM Copies (Option Syntax.Item))
         if fns.contains n then twice := (n, get) :: twice else fns := fns.insert n get

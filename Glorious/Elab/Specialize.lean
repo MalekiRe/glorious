@@ -480,6 +480,123 @@ partial def Item.decide (f : String → List (Option TypeExpr) → Flat.Body →
   | .pub parent item => .pub parent (Item.decide f item)
   | item => item
 
+/-! ## Borrows of a field
+
+A reference can be to a part of what a variable holds: the machine narrows a
+reference to a field of what it points to (`focus`). So a borrow of a field,
+`&mut x.0`, is a borrow of `x` narrowed to the field, and one of a field of
+what a reference points to is that reference narrowed. The field stays where
+it is: nothing is copied out to be lent and put back after, so nothing reads
+an old copy. The checker says, for each borrow, what is gone through to
+reach the field, and writes it out (`unfieldBody`) in the bodies it gives
+the elaborator.
+-/
+
+/-- What the checker found about fields: for each borrow of one, whether it
+goes through a reference, the way to the field by number, and what is gone
+through; and for each field read by name, which field it is. -/
+structure FieldInfo where
+  shapes : Std.HashMap Nat (Bool × List Nat × List (Option String × Nat))
+  reads : Std.HashMap Nat Nat
+  /-- The blocks given what an `is` found, each with the names it then has. -/
+  packs : Std.HashMap Nat (List String) := {}
+  /-- The fields read by name of what a named reference points to. -/
+  derefs : Std.HashSet Nat := {}
+
+/-- The borrows of fields written out, and every field read by name: see
+above. What the checker found says how. -/
+def unfieldRewrite (info : FieldInfo) : Flat.FRewrite where
+  onExpr go b e :=
+    match b.expr e with
+    | .fieldOf id x _ =>
+      -- The checker said which field the name is.
+      match info.reads[id]? with
+      | some i => some (do
+        let x' ← go.ex x
+        -- (Known as the read was, `Body.idOf`: what is found of a read is
+        -- kept by it, `Elab.takenSite`.)
+        let same := fun (n : Flat.FExpr) => (modifyGet fun (bb : Flat.Body) => bb.add n (some (b.idOf e)) : Flat.Build Flat.ExprId)
+        -- Of what a reference points to, if the checker found it so.
+        if info.derefs.contains (id + Syntax.derefTwice) then
+          same (.proj (← Flat.pushExpr (.deref (← Flat.pushExpr (.deref x')))) i)
+        else if info.derefs.contains id then same (.proj (← Flat.pushExpr (.deref x')) i)
+        else same (.proj x' i))
+      | none => none
+    | .closure id clauses =>
+      -- A block given what an `is` found takes it apart under its names.
+      match info.packs[id]? with
+      | none => none
+      | some names => some (do
+        let cs := clauses.toList.map b.clause
+        match cs with
+        | [⟨[], body⟩] =>
+          let body' ← body.mapM go.st
+          -- A block that is run where it is written.
+          if names == [Syntax.nowMark] then
+            let c ← Flat.pushClause ⟨[], body'⟩
+            let cl ← Flat.pushExpr (.closure id #[c])
+            Flat.pushExpr (.call 0 cl #[])
+          else
+            let c ← Flat.pushClause ⟨[.tuple (names.map Pattern.var)], body'⟩
+            Flat.pushExpr (.closure id #[c])
+        | _ =>
+          -- Clauses of one tuple given several arguments: the tuple's parts are
+          -- the parameters.
+          if names == [Syntax.spreadMark] then
+            let cs' ← clauses.mapM fun c => do
+              match b.clause c with
+              | ⟨[.tuple parts], body⟩ => Flat.pushClause ⟨parts, ← body.mapM go.st⟩
+              | _ => go.clause c
+            Flat.pushExpr (.closure id cs')
+          -- A block that is run where it is written.
+          else if names == [Syntax.nowMark] then
+            let cl ← Flat.pushExpr (.closure id (← clauses.mapM go.clause))
+            Flat.pushExpr (.call 0 cl #[])
+          else Flat.pushExpr (.closure id (← clauses.mapM go.clause)))
+    | .refField id uniq x _ _ =>
+      match info.shapes[id]? with
+      | none => none
+      | some (viaRef, path, shape) =>
+        -- A step into one of a type's several constructors is followed by
+        -- the constructor's name.
+        let stepOf := fun (n : Nat) (c : Option String) =>
+          match c with
+          | some c =>
+            if c.startsWith "#" then [Expr.int (Int.ofNat n), .name none (c.drop 1).toString]
+            else [Expr.int (Int.ofNat n)]
+          | none => [Expr.int (Int.ofNat n)]
+        -- Of what a reference points to, that reference; of a variable, a
+        -- borrow of the variable.
+        let base := if viaRef then Expr.name none x else .ref uniq x
+        -- (A step marked `*` is past a reference the field before holds: what
+        -- is focused so far is read for that reference, and focused from.)
+        let (base, steps) := (path.zip (shape ++ path.map fun _ => (none, 0))).foldl
+          (fun (acc : Expr × List Expr) (n, c, _) =>
+            match c with
+            | some c =>
+              if c.startsWith "*" then
+                -- (One `*` for each reference gone through.)
+                let stars := (c.toList.takeWhile (· == '*')).length
+                let rest := (c.drop stars).toString
+                let first := Expr.deref (.call 0 (.mark .focus) (acc.1 :: acc.2))
+                ((List.range (stars - 1)).foldl (fun e _ => Expr.deref e) first,
+                  stepOf n (if rest.isEmpty then none else some rest))
+              else (acc.1, acc.2 ++ stepOf n (some c))
+            | none => (acc.1, acc.2 ++ stepOf n none)) (base, [])
+        some (Flat.flatExpr (.call 0 (.mark .focus) (base :: steps)))
+    | _ => none
+
+/-- A function's body with every borrow of a field, and every field read by
+name, written out: see above. What the checker found says how. -/
+def unfieldBody (info : FieldInfo) (body : Flat.Body) : Flat.Body :=
+  -- (Only a function with something in it the checker found of.)
+  let found := fun (n : Flat.FExpr) => match n with
+    | .fieldOf id _ _ => info.reads.contains id
+    | .refField id _ _ _ _ => info.shapes.contains id
+    | .closure id _ => info.packs.contains id
+    | _ => false
+  if body.roots.any (body.anyClause found) then (unfieldRewrite info).body body else body
+
 /-- Each whole number the checker found to be of a scalar type in the body
 of `name` made that scalar, `u8_of(200)`, and each text where `&str` is
 wanted its bytes (`lits`, by the function and the node's identity): Core's

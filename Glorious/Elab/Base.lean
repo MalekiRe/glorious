@@ -622,15 +622,6 @@ structure Blocks where
   elaborated in place of the body as written. -/
   bodies : Std.HashMap String Flat.Body := {}
   traits : TraitInfo := {}
-  /-- For each borrow of a field, what is gone through to reach the field: at
-  each step the constructor, or none for a tuple, and how many fields it has. -/
-  fields : Std.HashMap Nat (Bool × List Nat × List (Option String × Nat)) := {}
-  /-- For each field read by name, which field it is. -/
-  fieldReads : Std.HashMap Nat Nat := {}
-  /-- The blocks given what an `is` found, each with the names it then has. -/
-  packs : Std.HashMap Nat (List String) := {}
-  /-- The fields read by name of what a named reference points to. -/
-  derefReads : Std.HashSet Nat := {}
   /-- For each function that performs or handles an operation of an effect
   with type parameters, or calls one that does: the places, by the number of
   the call, with which of `op`, `handle`, `call`, `ref` each is, the effect or

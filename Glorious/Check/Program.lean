@@ -1062,14 +1062,20 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     let cs := Elab.firstOf s.coercions.toList
     let lits : Std.HashMap (String × Nat) String := s.scalarLits.foldl (fun m (f, e, t) => m.insert (f, e) t) {}
     let owners : Std.HashSet String := s.scalarLits.foldl (fun m (f, _, _) => m.insert f) {}
+    -- (And each borrow of a field and field read by name written out,
+    -- `Elab.unfieldBody`.)
+    let info : Elab.FieldInfo :=
+      { shapes := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
+        reads := Elab.firstOf s.fieldReads.toList
+        packs := Elab.firstOf s.packs.toList
+        derefs := .ofList s.derefReads.toList }
     let bodies := s.decidedFns.fold (fun m n b =>
       let b := if owners.contains n then Elab.scalarBody lits n b else b
-      m.insert n (if cs.isEmpty then b else Elab.coerceFn cs n b)) {}
+      let b := if cs.isEmpty then b else Elab.coerceFn cs n b
+      m.insert n (Elab.unfieldBody info b)) {}
     pure { given := .ofList s.given.toList, bodies, places
            traits := traitInfo.index
-           fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
-           fieldReads := Elab.firstOf s.fieldReads.toList, packs := Elab.firstOf s.packs.toList
-           derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes }).run st
+           sites := s.siteTable, siteTypes := s.siteTypes }).run st
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a
