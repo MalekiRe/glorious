@@ -140,7 +140,7 @@ def derefAt (scope : Scope) (x step : String) : M Unit := do
 `x` does not show and `x`'s type implements `Deref`: written where it is of
 what `deref` gives (`Elab.derefNode`), the name borrowed, given as it is
 where it holds a reference. Said for the elaborator
-(`Elab.Decision.derefHere`). -/
+(`Elab.derefNode`). -/
 def derefHere (scope : Scope) (id : Nat) (x step : String) : M Bool := do
   let t := match scope.lookup x with
     | some (.val t _) => some t
@@ -159,7 +159,7 @@ def derefHere (scope : Scope) (id : Nat) (x step : String) : M Bool := do
 field `x` does not show and `x`'s type implements `Deref`: written where it
 is of what `deref` (`deref_mut`) gives (`Elab.derefRefNode`), `x` a place
 borrowed, or a name holding a reference given as it is. Said for the
-elaborator (`Elab.Decision.derefRefHere`). -/
+elaborator (`Elab.derefRefNode`). -/
 def derefRefHere (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M Bool := do
   let (t, cell) ← match scope.lookup x with
     | some (.val t _) => pure (t, false)
@@ -177,7 +177,7 @@ def derefRefHere (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M 
 `x`'s type implements `Deref`: written where it is of what `deref_mut`
 gives (`Elab.derefAssignNode`), `x` a variable borrowed or a name holding
 a reference given as it is. Said for the elaborator
-(`Elab.Decision.derefAssignHere`). -/
+(`Elab.derefAssignNode`). -/
 def derefAssignHere (scope : Scope) (s : Flat.StmtId) : M Bool := do
   let b := (← get).body
   let some (id, x, step) := (match b.stmt s with
@@ -333,7 +333,7 @@ def callNode (call : Nat) : M Flat.ExprId := do
 /-- The dot call `call`, its receiver a name, written where it is
 (`Elab.receiverNode`): the name borrowed as `fn` takes it, given as it is
 where it holds a reference. Said for the elaborator
-(`Elab.Decision.receiverHere`). False where it is not such a call, or the
+(`Elab.receiverNode`). False where it is not such a call, or the
 name is a value borrowed for writing, which only a variable can be. -/
 def receiverHere (scope : Scope) (call : Nat) (node : Option Nat) (fn : Option String)
     (borrow : Option Bool) : M Bool := do
@@ -489,9 +489,9 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
         if let some b' := Elab.compareNode id refs b then
           modify fun s => { s with body := b' }
           return ← inferExprAt scope amb e0
-      return ← receiverRetry scope amb e0 n
-    receiverRetry scope amb e0 n
-  | .tailCall .. => receiverRetry scope amb e0 n
+      return ← inferExprCall scope amb n
+    inferExprCall scope amb n
+  | .tailCall .. => inferExprCall scope amb n
   | .closure .. => inferExprCall scope amb n
   | .handle subject arms => inferHandle scope amb e0 subject arms
   | .labelScope l body => do
@@ -751,35 +751,6 @@ partial def etaArity (scope : Scope) (q : Option String) (x : String) : M (Optio
   set saved
   pure found
 
-/-- The call `id` at `e0`; where a dot call of a name is decided of a
-function only now, or taking its receiver otherwise than written: written
-where it is and read again (`receiverHere`, once a call). From the state
-where it was found, not one held while the call is read: holding it, every
-array the call grew was copied (a quarter of covey/fleet's check of `main`).
-What the first reading recorded of how names were read is taken back; the
-rest is recorded again, which asks no less. -/
-partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Flat.FExpr) : M Ty := fun s =>
-  let undo := Marks.of s
-  match inferExprCall scope amb n s with
-  | .ok a s => .ok a s
-  | .error e s =>
-    match e.decision with
-    -- (A callable given here whose clauses match what a reference points
-    -- to: written so where it is, `refPatsHere`, once.)
-    | some (.refPats cid clauses) =>
-      let b := s.body
-      let isArg := match b.expr e0 with
-        | .call _ _ args | .tailCall _ _ args => args.any fun a => match b.expr a with
-          | .closure i _ => i == cid
-          | _ => false
-        | _ => false
-      if !isArg || s.decided.any (fun | .refPatsHere c' _ => c' == cid | _ => false) then .error e s else
-      match Elab.refPatsNode cid clauses b with
-      | none => .error e s
-      | some b' =>
-        inferExprAt scope amb e0 { undo.undo s with body := b', decided := s.decided ++ [Elab.Decision.refPatsHere cid clauses] }
-    | _ => .error e s
-
 /-- A statement's expression, `e`. -/
 partial def inferRoot (scope : Scope) (amb : Row) (e : Flat.ExprId) : M Ty := inferExpr scope amb e
 
@@ -862,7 +833,7 @@ partial def inferExprRef (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Fla
           if let .con "&mut" [] ← find how then
             -- (Written so where it is, `&mut *x`, for the elaborator too:
             -- borrowed elsewhere, `x` may be a variable there, whose `&mut`
-            -- would be of the variable, `Elab.Decision.reborrowHere`.)
+            -- would be of the variable, `Elab.reborrowNode`.)
             let node := (← get).body.idOf e0
             match Elab.reborrowNode node x (← get).body with
             | some b' =>
@@ -1143,9 +1114,6 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
         match tried with
         | none => return none
         | some found =>
-          -- (Found that a match is of a reference, or a dot call of a type's
-          -- own function, knowing the types: the program is read again so.)
-          if found.passOn then throwThe Elab.Said found
           let said := found.msg
           set saved
           -- What went wrong with the types known is what is said if the
@@ -1182,8 +1150,7 @@ partial def dotAltReading (scope : Scope) (amb : Row) (alts : List String) (a : 
     let a ← match ← node a with
       | .ref _ x => pushE (.name none x)
       | _ => pure a
-    let found ← tryCatchThe Elab.Said (some <$> inferExpr scope amb a) fun e =>
-      if e.passOn then throwThe Elab.Said e else pure none
+    let found ← tryCatchThe Elab.Said (some <$> inferExpr scope amb a) fun _ => pure none
     -- (Its head read before what was found on the way is let go; what a
     -- trait leaves to an implementation found first where it is one, the
     -- element of `g[0]`.)
@@ -2456,7 +2423,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
     let marksBefore := Marks.of before
     let callee ← (fun s => match inferExpr scope amb f s with
       | .ok t s => .ok (Sum.inl t) s
-      | .error e s => .ok (Sum.inr e) { before with body := s.body, decided := s.decided, altFound := s.altFound } : M (Ty ⊕ Elab.Said))
+      | .error e s => .ok (Sum.inr e) { before with body := s.body, adjust := s.adjust, altFound := s.altFound } : M (Ty ⊕ Elab.Said))
     let callee ← match callee with
       | .inl t => pure t
       | .inr said => do
@@ -2516,7 +2483,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
             let own := s!"{h}::{name}"
             if ((← get).fns[own]?).isSome then
               -- (What was read of the field is taken back: it was not read.)
-              set { marksBefore.undo (← get) with body := (← get).body, decided := (← get).decided }
+              set { marksBefore.undo (← get) with body := (← get).body, adjust := (← get).adjust }
               if let some t ← ownCall scope amb call own then return t
     applyTy scope amb "this callee" callee args call
 
@@ -2925,7 +2892,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
         let count := parts.length + 1 - ps.length
         match Elab.restNode id count (← get).body with
         | some b' =>
-          modify fun s => { s with body := b', decided := s.decided ++ [.restHere id count] }
+          modify fun s => { s with body := b', adjust := s.adjust ++ [.rest id count] }
           return ← inferPat (Elab.restPat id count (.tuple ps)) t
         | none => throw "`..` in a tuple pattern that is not where the program has it; this is a compiler defect"
       | _ => throw "`..` in a tuple pattern stands for the parts not written, and how many the tuple has is not known here: say its type"

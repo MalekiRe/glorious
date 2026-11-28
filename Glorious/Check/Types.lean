@@ -670,8 +670,8 @@ structure St where
   made that scalar in Core. -/
   scalarLits : List (String × Nat × String) := []
   /-- What it decided of how the program is read, where it found it
-  (`Elab.Decision`). -/
-  decided : List Elab.Decision := []
+  (`Elab.Adjust`). -/
+  adjust : List Elab.Adjust := []
   /-- The result a call is wanted to have, by the call (`applyTy`). -/
   wantResult : Option (Nat × Ty) := none
   /-- For each trait, how many type parameters it has and the names of the

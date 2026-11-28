@@ -246,34 +246,25 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
       | _, _ => m) {} }
 
 
-/-- Something the checker finds of how a program is to be read only once it
-knows types, written where it is found and read on: kept (`St.decided`),
-so that a node is decided once. The elaborator elaborates the bodies the
-checker read (`Blocks.bodies`), with these in them; what is decided once a
-body is read, a variable made a place (`letMut`), is made a cell by the
-elaborator (`Elab.promote`). No body is read again for one. (`eta` and
-`refPats` are what the checker
-says to itself where it finds one, for whoever reads the call or the name
-to write it there: never kept.) -/
-inductive Decision where
+/-- What the checker finds of how a program is to be read once it knows
+types, kept by the node it is at (`St.adjust`, as rustc's `TypeckResults`)
+where the elaborator or a later check needs to be told it: `..` in a
+tuple, and the locals that are places, which the elaborator makes cells
+(`Elab.promote`). Every other adjustment is written where it is found, in
+the body the checker reads on and the elaborator elaborates
+(`Blocks.bodies`): nothing is read again for one. -/
+inductive Adjust where
   /-- `..` in the tuple pattern `id` stands for `count` parts, written where
   it is (`restNode`). -/
-  | restHere (id count : Nat)
-  /-- In `owner`, what the `let` of `x` at `line:col` binds is kept in a
-  variable. -/
-  | letMut (owner : String) (line col : Nat) (x : String)
-  /-- The clauses of the callable `id` match what the reference they are
-  given points to (`&Pattern`): as they are written out so
-  (`Syntax.Flat.byReference`; said to itself: `refPatsHere` is kept). -/
-  | refPats (id : Nat) (clauses : List Clause)
-  /-- The callable `id`'s clauses the checker's, `&Pattern` (`refPats`),
-  written where it is (`refPatsNode`), not read again. -/
-  | refPatsHere (id : Nat) (clauses : List Clause)
+  | rest (id count : Nat)
+  /-- In `owner`, what the `let` of `x` at `line:col` binds (or, at `0:0`, a
+  clause binds) is a place: kept in a variable (`Elab.promote`). -/
+  | place (owner : String) (line col : Nat) (x : String)
 
 /-- `&mut x` of a name that holds a `&mut`, at the node whose identity is
 `node`, written as the borrow again through it that it is, `&mut *x`, as
 the checker reads it and the elaborator writes it
-(`Decision.reborrowHere`): where `x` is made a variable (borrowed
+(`Check.inferExprRef`): where `x` is made a variable (borrowed
 elsewhere), `&mut x` would be of the variable. -/
 def reborrowNode (node : Nat) (x : String) (b : Flat.Body) : Option Flat.Body := do
   let e ← (List.range b.exprs.size).reverse.find? fun i => b.idOf i == node && match b.exprs[i]! with
@@ -351,7 +342,7 @@ partial def restPat (id count : Nat) : Pattern → Pattern
 
 /-- Every pattern of the body with `..` of the tuple pattern `id` written as
 `count` parts, where it is: the patterns of `let`s and of clauses, in place,
-no node made anew (`Decision.restHere`). None where none has it. -/
+no node made anew (`Adjust.rest`). None where none has it. -/
 def restNode (id count : Nat) (b : Flat.Body) : Option Flat.Body := do
   let has := fun (p : Pattern) => restPat id count p != p
   let stmts := b.stmts.map fun s => match s with
@@ -365,7 +356,7 @@ def restNode (id count : Nat) (b : Flat.Body) : Option Flat.Body := do
 /-- The function `x` named as a value at the node whose identity is `node`,
 written where it is as a block that calls it, `{ (a, b) => x(a, b) }`, the
 block numbered `id` and its call `id + 1`: as the checker reads it on and
-the elaborator writes it (`Decision.etaHere`). -/
+the elaborator writes it (`Check.etaArity`). -/
 def etaNode (node : Nat) (x : String) (arity : Nat) (id : Nat) (b : Flat.Body) : Option Flat.Body := do
   let e ← (List.range b.exprs.size).reverse.find? fun i => b.idOf i == node && match b.exprs[i]! with
     | .name _ y => y == x
@@ -409,7 +400,7 @@ def receiverCopyNode (call : Nat) (b : Flat.Body) : Option Flat.Body := do
 /-- The dot call `call`, its receiver a field of a name, `p.x.len()`,
 borrowed where it is, `len(&p.x)` (through the reference the name holds
 where `star`), of `fn` where given: as the checker reads it on and the
-elaborator writes it (`Decision.receiverField`). None where the receiver
+elaborator writes it (`Check.receiverHere`). None where the receiver
 is not such a field. -/
 def receiverFieldNode (call : Nat) (fn : Option String) (uniq star : Bool) (b : Flat.Body)
     (at_ : Option Flat.ExprId := none) : Option Flat.Body := do
@@ -465,7 +456,7 @@ def receiverFieldNode (call : Nat) (fn : Option String) (uniq star : Bool) (b : 
 /-- The field read `id`, `x.f` of a name, written of what `deref` gives of
 it where it is: `deref(&x).f` (`borrow` is `some false`) or `deref(x).f`
 (`x` a reference), as the checker reads it on and the elaborator writes it
-(`Decision.derefHere`). -/
+(`Check.derefHere`). -/
 def derefNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
   let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .fieldOf i _ _ => i == id
@@ -484,7 +475,7 @@ def derefNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Bo
 /-- The field borrow `id`, `&x.f` of what `deref` gives of `x` (`deref_mut`
 where `uniq`), written where it is as a block: `{ let r = deref(&x); &(*r).f }`
 (`x` given as it is where `borrow` is none, a reference). As the checker
-reads it on and the elaborator writes it (`Decision.derefRefHere`). -/
+reads it on and the elaborator writes it (`Check.derefRefHere`). -/
 def derefRefNode (id : Nat) (uniq : Bool) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
   let e ← (List.range b.exprs.size).reverse.find? fun i => match b.exprs[i]! with
     | .refField i _ _ _ false => i == id
@@ -511,7 +502,7 @@ what `deref_mut` gives of `x`, written where it is as a block: `{ let v' =
 v; let r = deref_mut(&mut x); *(&mut r.path) = v' }` (`x` given as it is
 where `borrow` is none, a reference): the value computed first, so that
 reading it does not meet the borrow. As the checker reads it on and the
-elaborator writes it (`Decision.derefAssignHere`). -/
+elaborator writes it (`Check.derefAssignHere`). -/
 def derefAssignNode (id : Nat) (borrow : Option Bool) (b : Flat.Body) : Option Flat.Body := do
   let s ← (List.range b.stmts.size).reverse.find? fun i => match b.stmts[i]! with
     | .assign t _ => match b.expr t with
@@ -586,7 +577,7 @@ def compareNode (call : Nat) (refs : List Bool) (b : Flat.Body) : Option Flat.Bo
 
 /-- The callable `id` with `clauses` in place of its own, where it is, as
 the checker reads it on and the elaborator writes it
-(`Decision.refPatsHere`). The nodes the clauses are made of are known in a
+(`Check.checkArgsIn`). The nodes the clauses are made of are known in a
 space of the callable's own (`Flat.Body.ids`): the same in the checker's
 body as in the elaborator's, where what the checker found of a literal in
 them is looked for. -/
@@ -605,7 +596,6 @@ where it stops for that; `result`
 where what does not fit is a clause's result. -/
 structure Said where
   msg : String
-  decision : Option Decision := none
   result : Bool := false
   /-- Of "has no field": the head of the type it is not a field of (a dot
   call's receiver's, `value.name(..)`), so that whoever looks for the type's
@@ -616,14 +606,6 @@ instance : Coe String Said := ⟨fun msg => { msg }⟩
 
 /-- The same, said otherwise: what it found kept. -/
 def Said.map (s : Said) (f : String → String) : Said := { s with msg := f s.msg }
-
-/-- Is it what a speculative check passes on at once rather than trying
-otherwise: a match found to be of a reference, or a dot call's function or
-receiver found? -/
-def Said.passOn (s : Said) : Bool :=
-  match s.decision with
-  | some (.refPats ..) => true
-  | _ => false
 
 /-- What the checker tells the elaborator about the blocks of a program, each
 named by its identity. -/
@@ -636,7 +618,7 @@ structure Blocks where
   binds them: each made a cell where it is bound (`Elab.promote`). -/
   places : Std.HashMap String (List (Nat × Nat × String)) := {}
   /-- Each function's body as the checker read it, with what it wrote where
-  it found it (`Decision`), by the name it is checked by: what is
+  it found it (`Adjust`), by the name it is checked by: what is
   elaborated in place of the body as written. -/
   bodies : Std.HashMap String Flat.Body := {}
   /-- The coercions to apply, by the place each is applied at. -/

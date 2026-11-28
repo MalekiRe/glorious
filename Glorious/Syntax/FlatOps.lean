@@ -968,7 +968,7 @@ partial def receiverExpr (e : ExprId) : Build ExprId := do
           let compared ← pushStmt (.expr (← pushExpr (.call id f operands)))
           return ← pushExpr (.labelScope "%block" (lets.push compared))
       -- (Each argument marked `%receiver(..)`: a dot call's receiver, or each
-      -- of a comparison's two (`Decision.compareByRef`), borrowed as `name`
+      -- of a comparison's two (`Check.compareByType`), borrowed as `name`
       -- takes it.)
       let marked := fun (a : ExprId) => match b.expr a with
         | .call _ rm #[r] => if b.mark? rm == some .receiver then some r else none

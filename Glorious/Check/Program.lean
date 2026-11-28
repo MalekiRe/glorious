@@ -89,17 +89,17 @@ def placeLets (decls : List FnDecl) : M Unit := do
       decls.any (·.name == owner) && !s.placedLetIds.contains id).map (fun (owner, x, _) => (owner, 0, 0, x))
   let mine := lets ++ params.eraseDups
   if mine.isEmpty then return
-  let ds := mine.map fun (owner, l, c, x) => Elab.Decision.letMut owner l c x
+  let ds := mine.map fun (owner, l, c, x) => Elab.Adjust.place owner l c x
   -- (Said, for the elaborator to make them cells, `Elab.promote`; and
   -- written in the bodies the count of uses follows.)
   modify fun s =>
-    { s with decided := s.decided ++ ds
+    { s with adjust := s.adjust ++ ds
              runFns := decls.foldl (fun m d =>
                let b := ds.foldl (fun b dec => Elab.decideBody dec d.name b) ((m[d.name]?).getD d.body)
                m.insert d.name b) s.runFns }
 
 /-- Check a group: what can be known only once types are is written where
-it is found (`Elab.Decision`), and written in the bodies later checks
+it is found (`Elab.Adjust`), and written in the bodies later checks
 follow (`placeLets`). Nothing is checked again. -/
 def checkWritten (decls : List FnDecl) : M Unit := do
   -- (Refused, said from the state the group began from: what it had
@@ -1058,8 +1058,8 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         impls := implEs
         drops := s.dropSites.toList
         destroys := destroys.toList }
-    let places := s.decided.foldl (fun (m : Std.HashMap String (List (Nat × Nat × String))) d => match d with
-      | .letMut owner l c x => m.insert owner ((m.getD owner []) ++ [(l, c, x)])
+    let places := s.adjust.foldl (fun (m : Std.HashMap String (List (Nat × Nat × String))) d => match d with
+      | .place owner l c x => m.insert owner ((m.getD owner []) ++ [(l, c, x)])
       | _ => m) {}
     pure { given := .ofList s.given.toList, bodies := s.decidedFns, places
            coercions := Elab.firstOf s.coercions.toList, traits := traitInfo.index

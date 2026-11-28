@@ -707,9 +707,9 @@ def runPending : M Unit := do
   runProjections true
   settleRows (some fun _ => true) true
   -- (Each `..` of a tuple pattern written as the parts it stands for, as
-  -- found where it was read, `Elab.Decision.restHere`.)
-  let rests := (← get).decided.filterMap fun
-    | .restHere id count => some (id, count)
+  -- found where it was read, `Elab.Adjust.rest`.)
+  let rests := (← get).adjust.filterMap fun
+    | .rest id count => some (id, count)
     | _ => none
   let pending := (← get).pending.map fun p =>
     if rests.isEmpty then p

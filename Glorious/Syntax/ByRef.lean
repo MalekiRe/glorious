@@ -10,7 +10,7 @@ points to to choose a clause, and in the clause each name of the pattern is a
 borrow of the part it names. Written out here once for two readers: the
 resolver, for what a program writes, with names not yet resolved; and the
 checker, for patterns of a value it finds a match of a reference has
-(`Elab.Decision.refPats`), with names resolved, in a body of their own. What each knows of names is
+(`Check.checkArgsIn`), with names resolved, in a body of their own. What each knows of names is
 `RefNames`.
 -/
 

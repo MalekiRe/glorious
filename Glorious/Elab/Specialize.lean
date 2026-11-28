@@ -470,9 +470,9 @@ def letMutRewriteF (line col : Nat) (x : String) : Flat.FRewrite where
 (`letMut`): for the count of uses, which follows bodies so. What it decided
 while reading a body it wrote there itself (`Blocks.bodies`). `name` is the
 name the function is checked by. -/
-def decideBody (d : Decision) (name : String) (b : Flat.Body) : Flat.Body :=
+def decideBody (d : Adjust) (name : String) (b : Flat.Body) : Flat.Body :=
   match d with
-  | .letMut owner line col x => if name == owner then (letMutRewriteF line col x).body b else b
+  | .place owner line col x => if name == owner then (letMutRewriteF line col x).body b else b
   | _ => b
 
 /-- Every function of an item with what the checker decided written in, each

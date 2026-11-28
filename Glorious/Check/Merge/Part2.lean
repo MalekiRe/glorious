@@ -12,7 +12,7 @@ delta_part StDelta2 diffPart2 applyPart2 fitsPart2 clearPart2 restorePart2 [
   aparts : ArrD (Ty × String × Option Nat),
   fieldNames : MapLD String String,
   scalarLits : ListD (String × Nat × String),
-  decided : ListD Elab.Decision,
+  adjust : ListD Elab.Adjust,
   traitShape : MapD String (Nat × List String),
   selfDefaults : MapLD String Nat,
   writtenArgs : ListD (String × String × String × List Ty),
