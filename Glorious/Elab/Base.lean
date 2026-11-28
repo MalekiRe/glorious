@@ -674,6 +674,10 @@ structure Blocks where
   /-- Blocks written without parameters where a callable taking one argument is
   expected: they take the argument without naming it. -/
   given : Std.HashSet Nat := {}
+  /-- The locals of each function the checker found to be places (borrowed
+  where they are), by the `let` (`line:col`) or, at `0:0`, the clause that
+  binds them: each made a cell where it is bound (`Elab.promote`). -/
+  places : Std.HashMap String (List (Nat × Nat × String)) := {}
   /-- Each function's body as the checker read it, with what it wrote where
   it found it (`Decision`), by the name it is checked by: what is
   elaborated in place of the body as written. -/

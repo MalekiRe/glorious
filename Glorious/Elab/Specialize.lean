@@ -556,12 +556,19 @@ def scalarLiterals (b : Blocks) (items : List Syntax.Item) : List Syntax.Item :=
           Flat.pushExpr (.call 0 (← Flat.pushExpr (.name none s!"{t}_of")) #[lit]) }
     rw.body body) item
 
+/-- A function's body with each local the checker found to be a place
+(`Blocks.places`) kept in a cell where it is bound: the `let` at its place
+written `let mut` (`letMutRewriteF`), a name a clause binds kept in one
+where the clause starts (`heldFirst`). -/
+def promote (b : Blocks) (name : String) (body : Flat.Body) : Flat.Body :=
+  ((b.places[name]?).getD []).foldl (fun body (l, c, x) => (letMutRewriteF l c x).body body) body
+
 /-- A program as the checker read it: each function's body the checker's
 (`Blocks.bodies`), with what it found written where it found it; then the
 literals it found of a type (`scalarLiterals`), and the dot calls and
 arguments it chose, where they are (`chosenRewrite`). -/
 def decidedProgram (b : Blocks) (items : List Syntax.Item) : List Syntax.Item :=
-  let items := items.map (Item.decide fun name _ body => (b.bodies[name]?).getD body)
+  let items := items.map (Item.decide fun name _ body => promote b name ((b.bodies[name]?).getD body))
   let items := scalarLiterals b items
   let calls := chosenCalls b
   if calls.isEmpty then items else

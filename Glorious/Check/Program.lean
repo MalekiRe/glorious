@@ -101,16 +101,13 @@ def placeLets (decls : List FnDecl) (from_ : Nat) : M Unit := do
   let mine := lets ++ params.eraseDups
   if mine.isEmpty then return
   let ds := mine.map fun (owner, l, c, x) => Elab.Decision.letMut owner l c x
-  let place := fun (m : Std.HashMap String Flat.Body) => decls.foldl (fun m d =>
-    match m[d.name]? with
-    | some b => m.insert d.name (ds.foldl (fun b dec => Elab.decideBody dec d.name b) b)
-    | none => m) m
+  -- (Said, for the elaborator to make them cells, `Elab.promote`; and
+  -- written in the bodies the count of uses follows.)
   modify fun s =>
     { s with decided := s.decided ++ ds
              runFns := decls.foldl (fun m d =>
                let b := ds.foldl (fun b dec => Elab.decideBody dec d.name b) ((m[d.name]?).getD d.body)
-               m.insert d.name b) s.runFns
-             decidedFns := place s.decidedFns }
+               m.insert d.name b) s.runFns }
 
 /-- Check a group: what can be known only once types are is written where
 it is found (`Elab.Decision`), and written in the bodies later checks
@@ -1073,7 +1070,10 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         impls := implEs
         drops := s.dropSites.toList
         destroys := destroys.toList }
-    pure { given := .ofList s.given.toList, bodies := s.decidedFns
+    let places := s.decided.foldl (fun (m : Std.HashMap String (List (Nat × Nat × String))) d => match d with
+      | .letMut owner l c x => m.insert owner ((m.getD owner []) ++ [(l, c, x)])
+      | _ => m) {}
+    pure { given := .ofList s.given.toList, bodies := s.decidedFns, places
            coercions := Elab.firstOf s.coercions.toList, traits := traitInfo.index
            fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
            fieldReads := Elab.firstOf s.fieldReads.toList, packs := Elab.firstOf s.packs.toList
