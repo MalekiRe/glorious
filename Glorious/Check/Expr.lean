@@ -482,9 +482,9 @@ partial def inferExprAt (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty :=
         if let some b' := Elab.compareNode id refs b then
           modify fun s => { s with body := b' }
           return ← inferExprAt scope amb e0
-      return ← receiverRetry scope amb e0 id n
-    receiverRetry scope amb e0 id n
-  | .tailCall id _ _ => receiverRetry scope amb e0 id n
+      return ← receiverRetry scope amb e0 n
+    receiverRetry scope amb e0 n
+  | .tailCall .. => receiverRetry scope amb e0 n
   | .closure .. => inferExprCall scope amb n
   | .handle subject arms => inferHandle scope amb e0 subject arms
   | .labelScope l body => do
@@ -742,7 +742,7 @@ where it was found, not one held while the call is read: holding it, every
 array the call grew was copied (a quarter of covey/fleet's check of `main`).
 What the first reading recorded of how names were read is taken back; the
 rest is recorded again, which asks no less. -/
-partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : Nat) (n : Flat.FExpr) : M Ty := fun s =>
+partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (n : Flat.FExpr) : M Ty := fun s =>
   let undo := Marks.of s
   match inferExprCall scope amb n s with
   | .ok a s => .ok a s
@@ -762,13 +762,6 @@ partial def receiverRetry (scope : Scope) (amb : Row) (e0 : Flat.ExprId) (id : N
       | none => .error e s
       | some b' =>
         inferExprAt scope amb e0 { undo.undo s with body := b', decided := s.decided ++ [Elab.Decision.refPatsHere cid clauses] }
-    | some (.receiver c fn borrow) =>
-      if c != id || s.decided.any (fun | .receiverHere c' _ _ => c' == c | _ => false) then .error e s else
-      let s := undo.undo s
-      match receiverHere scope c (some e0) fn borrow s with
-      | .ok true s => inferExprAt scope amb e0 s
-      | .ok false s => .error e s
-      | .error e' s => .error e' s
     | _ => .error e s
 
 /-- A statement's expression, `e`. -/
@@ -1677,59 +1670,8 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               match ← find t, ← find how with
               | .ref .., _ | .var _, _ | _, .con "&mut" [] => pure ()
               | _, _ => modify fun s => { s with body := { s.body with exprs := s.body.exprs.set! a (.ref false x) } }
-      -- (A dot call whose receiver is of a type with a function of its own of
-      -- the name: that one, if the function in scope does not fit.)
-      let before ← get
-      -- (A receiver the function in scope borrows in a way it cannot be,
-      -- `&mut app` of an `app` that is not mutable, where its type has a
-      -- function of its own of the name that takes it otherwise: that one.)
-      let checked ← if i == 0 && call != 0 then
-          tryCatchThe Elab.Said (checkArg scope amb s!"argument {i + 1} of {what}" p a site) fun ex => do
-            if ex.passOn then throwThe Elab.Said ex
-            let failed ← get
-            set before
-            let alt ← dotAltFor scope amb call a
-            set failed
-            match alt with
-            | some alt =>
-              if (what.splitOn s!"`{alt}`").length > 1 then throwThe Elab.Said ex
-              else throwThe Elab.Said { ex with decision := some (← receiverDecision call alt) }
-            | none => throwThe Elab.Said ex
-        else checkArg scope amb s!"argument {i + 1} of {what}" p a site
+      let checked ← checkArg scope amb s!"argument {i + 1} of {what}" p a site
       if let some e := checked then
-        -- (A dot call's receiver, a name that holds a value, where the
-        -- function takes a reference to it: read again with it borrowed, as
-        -- Rust borrows it.)
-        if i == 0 && call != 0 then
-          if let some x := (← get).body.bare? a then
-            if let some (.val t _) := scope.lookup x then
-              if let .ref how _ _ ← find p then
-                match ← find t with
-                | .ref .. | .var _ => pure ()
-                | _ =>
-                  let uniq := match ← find how with
-                    | .con "&mut" [] => true
-                    | _ => false
-                  -- (A value, which only a variable lets be borrowed for
-                  -- writing: the type's own function of the name, where it
-                  -- has one, as the program was read before.)
-                  if uniq then
-                    let before ← get
-                    let alt ← dotAltFor scope amb call a
-                    set { before with body := (← get).body, decided := (← get).decided, altFound := (← get).altFound }
-                    if let some alt := alt then
-                      if (what.splitOn s!"`{alt}`").length == 1 then
-                        throwThe Elab.Said { msg := e, decision := some (← receiverDecision call alt) }
-                  throw e
-        -- (Asked only once the function in scope does not fit: the program
-        -- is read again, so what this finds on the way is not kept. The
-        -- receiver's type is found as it was before it was made to fit.)
-        if i == 0 then
-          let failed ← get
-          set before
-          let alt ← dotAltFor scope amb call a
-          set failed
-          if let some alt := alt then throwThe Elab.Said { msg := e, decision := some (← receiverDecision call alt) }
         -- (Clauses one of which ends with a braced block, which is a callable
         -- there: likely meant to be run.)
         let b := (← get).body
@@ -1767,11 +1709,6 @@ has to be converted. -/
 partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List Ty)
     (args : Array Flat.ExprId) (call : Nat := 0) : M Unit := do
   unless params.length == args.size do
-    -- (A dot call of a function in scope that takes another number of
-    -- arguments, of a value whose type has one of the name of its own.)
-    if let some a := args[0]? then
-      if let some alt ← dotAltFor scope amb call a then
-        throwThe Elab.Said { msg := s!"{what} takes {params.length} arguments", decision := some (← receiverDecision call alt) }
     arityError what params.length args.size
   -- Whole numbers written without a type are looked at last: by then what
   -- is wanted of them may be known from the other arguments.
@@ -2404,7 +2341,6 @@ partial def inferDotAltCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args 
                 -- borrows one, `g[0].push(5)`, `v[0].s.len()`, written so
                 -- before the call is read.)
                 if let some t ← ownCall scope amb call alt then return some t
-                throwThe Elab.Said { msg := s!"the receiver of `{alt}` is borrowed", decision := some (← receiverDecision call alt) }
             -- (Each takes it by a reference of its own kind, `&` and `&mut`:
             -- the receiver given as the type's own one takes it.)
             if let (some k, some k') := (mine, theirs) then
@@ -2489,12 +2425,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
     -- (A dot call of a function in scope that cannot be called as written,
     -- `v.get<T>(..)` of one without type parameters, of a value whose type
     -- has a function of the name of its own: that one.)
-    let head ← tryCatchThe Elab.Said (resolveName scope q x) fun e => do
-      if e.passOn || e.decision.isSome || call == 0 then throwThe Elab.Said e
-      if let some a := args[0]? then
-        if let some alt ← dotAltFor scope amb call a then
-          if alt != x then throwThe Elab.Said { e with decision := some (← receiverDecision call alt) }
-      throwThe Elab.Said e
+    let head ← resolveName scope q x
     match head with
     | .ctor .. | .op _ | .prim | .pack _ | .host _ => inferCallBuiltin scope amb args call x head
     | .fn .. | .method _ | .const _ => inferCallFn scope amb args call x head
@@ -2547,7 +2478,6 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
               -- and read: of the call nothing was read but the field's
               -- try, which is let go.)
               if let some t ← ownCall scope amb call own then return t
-              throwThe Elab.Said { said with decision := some (← receiverDecision call own) }
         if (e.splitOn "has no field").length > 1 && theirs.length > 1 then
           throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun fn => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
         else throwThe Elab.Said said
@@ -2576,7 +2506,6 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
               -- (What was read of the field is taken back: it was not read.)
               set { marksBefore.undo (← get) with body := (← get).body, decided := (← get).decided }
               if let some t ← ownCall scope amb call own then return t
-              throwThe Elab.Said { msg := s!"the field `{name}` is no callable", decision := some (← receiverDecision call own) }
     applyTy scope amb "this callee" callee args call
 
 /-- `let pattern = value` and the statements after it (`inferStmts`). -/

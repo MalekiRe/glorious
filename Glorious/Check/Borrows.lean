@@ -1269,9 +1269,4 @@ def receiverTaken (fn : String) : M (Option Bool) := do
     | some p => how p
     | none => pure none
 
-/-- The decision that a dot call is of `fn`, its receiver given as `fn`
-takes it. -/
-def receiverDecision (call : Nat) (fn : String) : M Elab.Decision := do
-  pure (.receiver call (some fn) (← receiverTaken fn))
-
 end Glorious.Check

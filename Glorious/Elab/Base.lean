@@ -269,11 +269,6 @@ inductive Decision where
   given points to (`&Pattern`): as they are written out so
   (`Syntax.Flat.byReference`; said to itself: `refPatsHere` is kept). -/
   | refPats (id : Nat) (clauses : List Clause)
-  /-- The dot call `call` is of `fn` (the type's own function of the name),
-  or of the function it is of, its receiver given as the function takes it,
-  borrowed (`&mut` where `some true`) or whole (said to itself: the
-  `receiver…` that says how it is written is kept). -/
-  | receiver (call : Nat) (fn : Option String) (borrow : Option Bool)
   /-- The dot call `call`, its receiver a name, written where it is as the
   checker read it on, not read again (`receiverNode`): of `fn` where given,
   the name borrowed (`some uniq`) or given as it is. -/
@@ -661,7 +656,7 @@ otherwise: a match found to be of a reference, or a dot call's function or
 receiver found? -/
 def Said.passOn (s : Said) : Bool :=
   match s.decision with
-  | some (.refPats ..) | some (.receiver ..) => true
+  | some (.refPats ..) => true
   | _ => false
 
 /-- What the checker tells the elaborator about the blocks of a program, each
