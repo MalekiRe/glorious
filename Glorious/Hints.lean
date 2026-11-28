@@ -148,6 +148,17 @@ def retOf : Ty → Option Ty
   | .fn _ r _ _ _ => some r
   | _ => none
 
+/-- A written type with the type parameters `ps` named as the checker's
+(`%rigid:T`). -/
+partial def rigidOf (ps : List String) : TypeExpr → TypeExpr
+  | .name x [] => if ps.contains x then .name s!"%rigid:{x}" [] else .name x []
+  | .name x args => .name x (args.map (rigidOf ps))
+  | .tuple ts => .tuple (ts.map (rigidOf ps))
+  | .fn as r => .fn (as.map (rigidOf ps)) (rigidOf ps r)
+  | .performs r effs => .performs (rigidOf ps r) effs
+  | .ref u t l => .ref u (rigidOf ps t) l
+  | t => t
+
 /-- The type of what a memory operation gives. -/
 def memTy (env : Env) (Γ : Array (Option Ty)) (op : MemOp) (args : List Atom) : Option Ty :=
   let atomTy := fun (a : Atom) => match a with
@@ -218,82 +229,135 @@ where
     | .var i => Γ[i]?.join
     | .int _ => some .int
 
+/-- A clause being gone through: each local's type found so far, the
+closures whose type waits on where they are used (by local: the function
+and what it was made with), the hints found in order (none where not, or
+not yet: by local, which), and the type parameters learned. -/
+structure W where
+  Γ : Array (Option Ty) := #[]
+  pend : Std.HashMap Nat (Nat × List Ty) := {}
+  hints : Array (Option Hint) := #[]
+  hintAt : Std.HashMap Nat Nat := {}
+  binds : List (String × Ty) := []
+  /-- The type parameters where a closure of each callable of the function's
+  own was made (by the callable and what it was made with). -/
+  made : Array ((Nat × List Ty) × List (String × Ty)) := #[]
+
+def W.atomTy (w : W) : Atom → Option Ty
+  | .var i => w.Γ[i]?.join
+  | .int _ => some .int
+
+/-- The local `i`'s type found: where it waited, its hint too. -/
+def W.found (w : W) (i : Nat) (σ : Ty) : W :=
+  let w := { w with Γ := w.Γ.set! i (some σ), pend := w.pend.erase i }
+  match w.hintAt[i]? with
+  | some h => { w with hints := w.hints.set! h (some (.ty σ)) }
+  | none => w
+
+/-- A local and its hint. -/
+def W.bind (w : W) (σ : Option Ty) (hinted : Bool) : W :=
+  let i := w.Γ.size
+  let w := { w with Γ := w.Γ.push σ }
+  if hinted then { w with hints := w.hints.push (σ.map .ty), hintAt := w.hintAt.insert i w.hints.size }
+  else w
+
 mutual
 
-/-- The result of a clause of `f`, going through it forward from its
-locals' first types (`Γ`): of what it returns. -/
-partial def fwd (env : Env) (depth : Nat) (f c : Nat) (binds : List (String × Ty)) (Γ : Array (Option Ty)) (tm : Tm) : Option Ty :=
-  let said := fun (i : Nat) => env.said[(f, c, i)]?
-  let atomTy := fun (a : Atom) => match a with
-    | .var i => Γ[i]?.join
-    | .int _ => some .int
-  match tm with
-  | .ret a => atomTy a
-  | .tail g _ => (atomTy g).bind retOf
-  | .raise .. => some .never
-  | .labelTail thunk | .guardTail _ thunk | .cellTail _ thunk | .cellTailL _ _ thunk => (atomTy thunk).bind retOf
-  | .handleTail .. => none
-  | .let_ rhs body =>
-    let mine := match rhs with
-      | .closure g caps => (rhsTy env binds Γ (said Γ.size) rhs).orElse fun _ =>
-          closureTy env depth f c binds Γ g caps body
-      | _ => rhsTy env binds Γ (said Γ.size) rhs
-    let binds := match said Γ.size, mine with
-      | some te, some m => matchTy env.decls binds te m
-      | _, _ => binds
-    fwd env depth f c binds (Γ.push mine) body
-  | .call g _ body => fwd env depth f c binds (Γ.push ((atomTy g).bind retOf)) body
-  | .handle _ _ _ _ body => fwd env depth f c binds (Γ.push ((said Γ.size).bind (tyOf env.decls binds))) body
-  | .perform _ _ body => fwd env depth f c binds (Γ.push none) body
-  | .label thunk body | .guard _ thunk body | .cell _ thunk body | .cellL _ _ thunk body | .lend _ _ thunk _ _ body =>
-    fwd env depth f c binds (Γ.push ((atomTy thunk).bind retOf)) body
-  | .cancel _ body => fwd env depth f c binds (Γ.push (some .unit)) body
-  | .mem op args body => fwd env depth f c binds (Γ.push (memTy env Γ op args)) body
-  | .host id args body => fwd env depth f c binds (Γ.push (hostTy id args)) body
-
-/-- The type of a closure of `g` made with `caps`, where the checker did not
-say it: what it is given read off where it is used straight after (a cell's,
-a guard's, a borrow's or a label's scope, or a call), and what it gives off
-its body gone through at that. -/
-partial def closureTy (env : Env) (depth : Nat) (f c : Nat) (binds : List (String × Ty)) (Γ : Array (Option Ty))
-    (g : Nat) (caps : List Atom) (body : Tm) : Option Ty := do
-  if depth > 12 then none
-  let here := Γ.size
-  let atomTy := fun (a : Atom) => match a with
-    | .var i => Γ[i]?.join
-    | .int _ => some .int
-  let capTys ← caps.mapM atomTy
-  let isHere := fun (a : Atom) => a == .var here
-  let params : Option (List Ty) := match body with
-    | .cell a t _ | .cellTail a t => if isHere t then (atomTy a).map fun σ => [.ref σ] else none
-    | .guard _ t _ | .guardTail _ t => if isHere t then some [] else none
-    | .lend _ r t pre post _ =>
-      if isHere t then do pure ((← pre.mapM atomTy) ++ [← atomTy r] ++ (← post.mapM atomTy)) else none
-    | .call h args _ | .tail h args => if isHere h then args.mapM atomTy else none
-    | _ => none
-  -- (A label's: given the label, whose result is the scope's, as the
-  -- checker says it.)
-  let params ← params.orElse fun _ => match body with
+/-- The type of a closure that waited, at its first use as a callable, `at_`
+(`pend`): what it is given read off that; what it gives what the place says
+it gives where the checker says that, else what the function says it
+gives, else its body's. -/
+partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W := Id.run do
+  let callee := fun (a : Atom) => match a with
+    | .var i => (w.pend[i]?).map (i, ·)
+    | .int _ => none
+  let mut w := w
+  -- (The callable, what it is given, and the local the use binds, if any.)
+  let uses : List (Atom × Option (List Ty)) := match at_ with
+    | .guard cl t _ | .guardTail cl t => [(cl, some []), (t, some [])]
+    | .cell a t _ | .cellTail a t => [(t, (w.atomTy a).map fun σ => [.ref σ])]
+    | .lend _ r t pre post _ => [(t, do pure ((← pre.mapM w.atomTy) ++ [← w.atomTy r] ++ (← post.mapM w.atomTy)))]
+    | .call h args _ | .tail h args => [(h, args.mapM w.atomTy)]
     | .label t _ | .labelTail t =>
-      if isHere t then do
-        let σ ← (env.said[(f, c, here + 1)]?).bind (tyOf env.decls binds)
-        pure [.fn [σ] .never [] false none]
-      else none
-    | _ => none
-  -- (What it gives is what the place it is used at gives, where the
-  -- checker says that; else its body's, and where that does not return,
-  -- what the place wants.)
-  let atUse := (env.said[(f, c, here + 1)]?).bind (tyOf env.decls binds)
-  let ret ← match atUse, body with
-    | some r, .call .. => some r
-    | _, _ => match fnRet env (depth + 1) g binds params capTys with
-      | some .never | none => atUse
-      | r => r
-  pure (.fn params ret [] false (some capTys))
+      [(t, do
+        let σ ← (env.said[(f, c, w.Γ.size)]?).bind (tyOf env.decls w.binds)
+        pure [.fn [σ] .never [] false none])]
+    | _ => []
+  for (a, params) in uses do
+    let some (i, (g, caps)) := callee a | continue
+    let some params := params | continue
+    -- (What the use gives, as the checker says it: a call's.)
+    let atUse := match at_ with
+      | .call .. => (env.said[(f, c, w.Γ.size)]?).bind (tyOf env.decls w.binds)
+      | _ => none
+    let written : Option Ty := do
+      let (tparams, annots, ret) ← env.decls.fns[g]?
+      -- (One that says nothing of it gives `()`.)
+      let ret := ret.getD (.tuple [])
+      let b := (annots.zip params).foldl (fun b (a, p) => match a with
+        | some te => matchTy env.decls b (rigidOf tparams te) p
+        | none => b) []
+      tyOf env.decls b (rigidOf tparams ret)
+    let ret := atUse <|> written <|> (match fnRet env (depth + 1) g w.binds params caps with
+      | some .never | none => none
+      | r => r)
+    if let some r := ret then
+      w := w.found i (.fn params r [] false (some caps))
+  pure w
+
+/-- Go through a clause: its hints and what it gives. -/
+partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Option Ty :=
+  let said := fun (i : Nat) => env.said[(f, c, i)]?
+  let w := if w.pend.isEmpty then w else useOf env depth f c w tm
+  match tm with
+  | .ret a => (w, w.atomTy a)
+  | .tail g _ => (w, (w.atomTy g).bind retOf)
+  | .raise .. => (w, some .never)
+  | .labelTail thunk | .guardTail _ thunk | .cellTail _ thunk | .cellTailL _ _ thunk => (w, (w.atomTy thunk).bind retOf)
+  | .handleTail .. => ({ w with hints := w.hints.push none }, none)
+  | .let_ rhs body =>
+    let i := w.Γ.size
+    let mine := rhsTy env w.binds w.Γ (said i) rhs
+    let w := match said i, mine with
+      | some te, some m => { w with binds := matchTy env.decls w.binds te m }
+      | _, _ => w
+    match rhs, mine with
+    | .closure g caps, none =>
+      let w := w.bind none true
+      match caps.mapM w.atomTy with
+      | some capTys =>
+        let w := { w with pend := w.pend.insert i (g, capTys) }
+        let w := if w.binds.isEmpty || (env.selfTy[g]?).isSome || (env.decls.fns[g]?).isSome then w
+          else { w with made := w.made.push ((g, capTys), w.binds) }
+        go env depth f c w body
+      | none => go env depth f c w body
+    | .closure g caps, some σ =>
+      let w := w.bind (some σ) true
+      let w := match caps.mapM w.atomTy with
+        | some capTys =>
+          if w.binds.isEmpty || (env.selfTy[g]?).isSome || (env.decls.fns[g]?).isSome then w
+          else { w with made := w.made.push ((g, capTys), w.binds) }
+        | none => w
+      go env depth f c w body
+    | _, _ => go env depth f c (w.bind mine true) body
+  | .call g _ body =>
+    match (w.atomTy g).bind retOf with
+    | some .never => go env depth f c (w.bind ((said w.Γ.size).bind (tyOf env.decls w.binds)) true) body
+    | r => go env depth f c (w.bind r false) body
+  | .handle _ _ _ _ body =>
+    let w := { w with hints := w.hints.push none }
+    go env depth f c (w.bind ((said w.Γ.size).bind (tyOf env.decls w.binds)) false) body
+  | .perform _ _ body => go env depth f c (w.bind none false) body
+  | .label thunk body | .guard _ thunk body | .cell _ thunk body | .cellL _ _ thunk body | .lend _ _ thunk _ _ body =>
+    go env depth f c (w.bind ((w.atomTy thunk).bind retOf) false) body
+  | .cancel _ body => go env depth f c (w.bind (some .unit) false) body
+  | .mem op args body => go env depth f c (w.bind (memTy env w.Γ op args) false) body
+  | .host id args body => go env depth f c (w.bind (hostTy id args) (2 ≤ id)) body
 
 /-- What `g` gives at what it is given and made with: its first clause's
 that says. -/
 partial def fnRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × Ty)) (params caps : List Ty) : Option Ty := do
+  if depth > 12 then none
   let fn ← env.p.fns[g]?
   -- (A function of its own: its type parameters of what it is given.)
   let binds := match env.selfTy[g]? with
@@ -301,103 +365,9 @@ partial def fnRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × T
     | _ => binds
   fn.clauses.zipIdx.findSome? fun (cl, ci) => do
     let bound ← patsTysD env.decls cl.pats params
-    fwd env depth g ci binds ((params ++ caps ++ bound).toArray.map some) cl.body
+    (go env depth g ci { Γ := (params ++ caps ++ bound).toArray.map some, binds } cl.body).2
 
 end
-
-/-- Go through a clause at its locals' first types, beside `Typer`'s hints:
-each compared, `Typer`'s gone on with. -/
-partial def walk (env : Env) (f c : Nat) (binds : List (String × Ty)) (Γ : Array (Option Ty)) (hints : List Hint) (tm : Tm) (t : Tally) : Tally :=
-  let said := fun (i : Nat) => env.said[(f, c, i)]?
-  let atomTy := fun (a : Atom) => match a with
-    | .var i => Γ[i]?.join
-    | .int _ => some .int
-  -- (Typer's next hint, of a type, compared with this one.)
-  let take := fun (t : Tally) (kind : String) (mine : Option Ty) (k : Option Ty → List Hint → Tally → Tally) =>
-    match hints with
-    | .ty σ :: rest =>
-      let r := mine.map fun m => shape m == shape σ
-      let ex := if r == some false then some s!"{env.names[f]?.getD "?"} {kind} local {Γ.size}: here {(mine.map Typer.showTy).getD "?"}, Typer {Typer.showTy σ}" else none
-      k (some σ) rest (t.add kind r ex)
-    | _ => { t with lost := t.lost + 1 }
-  match tm with
-  | .ret _ | .tail .. | .raise .. | .labelTail _ | .guardTail .. | .cellTail .. | .cellTailL .. => t
-  | .handleTail .. => t
-  | .let_ rhs body =>
-    let kind := match rhs with
-      | .atom _ => "atom" | .prim _ _ => "prim" | .construct 0 _ => "tuple" | .construct _ _ => "construct"
-      | .place _ => "place" | .closure _ _ => "closure"
-    let mine := match rhs with
-      | .closure g caps => (rhsTy env binds Γ (said Γ.size) rhs).orElse fun _ =>
-          closureTy env 0 f c binds Γ g caps body
-      | _ => rhsTy env binds Γ (said Γ.size) rhs
-    -- (What it says of the type parameters, learned of what was found here.)
-    let binds := match said Γ.size, mine with
-      | some te, some m => matchTy env.decls binds te m
-      | _, _ => binds
-    let t1 := match rhs, mine with
-      | .closure g _, none =>
-        if t.examples.size < 60 && (t.counts.getD "closure" (0,0,0)).2.2 % 401 == 0 then
-          { t with examples := t.examples.push s!"not found: in {env.names[f]?.getD "?"}: closure of {env.names[g]?.getD "?"}, said {(said Γ.size).isSome}" }
-        else t
-      | _, _ => t
-    let t1 := match rhs with
-      | .closure g caps =>
-        match caps.mapM atomTy with
-        | some capTys =>
-          -- (Of a callable of this function's own, not of another function.)
-          if binds.isEmpty || (env.selfTy[g]?).isSome || (env.decls.fns[g]?).isSome then t1
-          else { t1 with closureBinds := t1.closureBinds.insert (g, capTys) binds }
-        | none => t1
-      | _ => t1
-    take t1 kind mine fun σ rest t => walk env f c binds (Γ.push σ) rest body t
-  | .call g _ body =>
-    match (atomTy g).bind retOf with
-    | some .never => take t "never" (some .never) fun σ rest t => walk env f c binds (Γ.push σ) rest body t
-    | some r => walk env f c binds (Γ.push (some r)) hints body t
-    | none => { t with lost := t.lost + 1 }
-  | .handle _ _ _ _ body =>
-    match hints with
-    | .handler ρ _ :: rest => walk env f c binds (Γ.push (some ρ)) rest body t
-    | _ => { t with lost := t.lost + 1 }
-  | .perform _ _ body => walk env f c binds (Γ.push none) hints body t
-  | .label thunk body => walk env f c binds (Γ.push ((atomTy thunk).bind retOf)) hints body t
-  | .guard _ thunk body => walk env f c binds (Γ.push ((atomTy thunk).bind retOf)) hints body t
-  | .cancel _ body => walk env f c binds (Γ.push (some .unit)) hints body t
-  | .cell _ thunk body | .cellL _ _ thunk body => walk env f c binds (Γ.push ((atomTy thunk).bind retOf)) hints body t
-  | .lend _ _ thunk _ _ body => walk env f c binds (Γ.push ((atomTy thunk).bind retOf)) hints body t
-  | .mem op args body =>
-    let σ : Option Ty := match op, args with
-      | .load, [r] => match atomTy r with | some (.ref t) => some t | _ => none
-      | .store, _ | .free, _ | .writeBits, _ | .copy, _ => some .unit
-      | .swap, [_, v] => atomTy v
-      | .tag, _ | .readBits, _ => some .int
-      | .alloc, _ | .sizeOf, _ | .alignOf, _ | .staticAt, _ => some (.scalar (-64))
-      | .focus, [r, .int i] => match atomTy r with
-        | some (.ref t) => (fieldOf env.decls t i.toNat).map .ref
-        | _ => none
-      | _, _ => none
-    walk env f c binds (Γ.push σ) hints body t
-  | .host id args body =>
-    let σ : Option Ty := match id, args with
-      | 0, _ | 8, _ | 21, _ | 22, _ => some .unit
-      | 1, _ | 10, _ => some (.tuple [.int, .int])
-      | 2, _ | 6, _ => some .int
-      | 5, _ => some (.scalar (-64))
-      | _, _ => none
-    if 2 ≤ id then take t "host" σ fun σ rest t => walk env f c binds (Γ.push σ) rest body t
-    else walk env f c binds (Γ.push σ) hints body t
-
-/-- A written type with the type parameters `ps` named as the checker's
-(`%rigid:T`). -/
-partial def rigidOf (ps : List String) : TypeExpr → TypeExpr
-  | .name x [] => if ps.contains x then .name s!"%rigid:{x}" [] else .name x []
-  | .name x args => .name x (args.map (rigidOf ps))
-  | .tuple ts => .tuple (ts.map (rigidOf ps))
-  | .fn as r => .fn (as.map (rigidOf ps)) (rigidOf ps r)
-  | .performs r effs => .performs (rigidOf ps r) effs
-  | .ref u t l => .ref u (rigidOf ps t) l
-  | t => t
 
 /-- The hints of every function at every signature `Typer` found, compared. -/
 def compare (env : Env) (C : Types) : Tally := Id.run do
@@ -420,7 +390,25 @@ def compare (env : Env) (C : Types) : Tally := Id.run do
       let binds := match env.selfTy[e.fn]? with
         | some (.fn ps r) => matchTy env.decls ((ps.zip e.sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds) r e.sig.ret
         | _ => binds
-      t := walk env e.fn ci binds Γ hs cl.body t
+      let (w, _) := go env 0 e.fn ci { Γ, binds } cl.body
+      t := { t with closureBinds := w.made.foldl (fun m (k, b) => m.insert k b) t.closureBinds }
+      if w.hints.size != hs.length then
+        t := { t with lost := t.lost + 1 }
+        continue
+      for (mine, theirs) in w.hints.toList.zip hs do
+        match theirs with
+        | .ty σ =>
+          let r := mine.map fun | .ty m => shape m == shape σ | _ => false
+          let ex := if r == some false then
+              some s!"{env.names[e.fn]?.getD "?"}: here {(mine.map fun | .ty m => Typer.showTy m | _ => "?").getD "?"}, Typer {Typer.showTy σ}"
+            else none
+          let kind := match σ with
+            | .fn .. => "callable"
+            | .data .. => "data"
+            | .tuple _ => "tuple"
+            | _ => "other"
+          t := t.add kind r ex
+        | .handler .. => t := t.add "handler" none
   pure t
 
 /-- `compare`, said. -/
