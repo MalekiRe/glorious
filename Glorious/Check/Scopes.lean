@@ -788,12 +788,19 @@ partial def tyHolds (brand : Nat) (t : Ty) : M Bool := do
 end
 
 /-- Reject a scope whose label could still be reached after the scope has ended.
-`roots` are the types that outlive the scope, each with a description. -/
+`roots` are the types that outlive the scope, each with a description: what
+can be settled of the types now is, and the search made once the function is
+read (`escapeSearch`, `St.escapesLater`). -/
 def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb : Row) :
     M Unit := do
   runProjections false
   settleRows none false
   settleAssocs
+  modify fun s => { s with escapesLater := s.escapesLater.push (brand, what, roots, amb, s.within) }
+
+/-- What `checkEscape` asks, of the types as the function has them once read. -/
+def escapeSearch (brand : Nat) (what : String) (roots : List (String × Ty)) (amb : Row) :
+    M Unit := do
   -- (What was gone through without finding the brand does not hold it
   -- however it is reached again: gone through once for all the roots.)
   modify fun s => { s with seen := {} }

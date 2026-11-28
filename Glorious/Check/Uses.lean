@@ -1709,6 +1709,13 @@ namespace Glorious.Check
 /-- The counts of uses of the function just read (`usesLater`), made of its
 body as read, every adjustment in it: once each, after it is read. -/
 def countUsesNow : M Unit := do
+  -- (First what outlives each scope: `checkEscape`.)
+  let escapes := (← get).escapesLater
+  modify fun s => { s with escapesLater := #[] }
+  for (brand, what, roots, amb, pos) in escapes do
+    modify fun s => { s with pos := pos }
+    try escapeSearch brand what roots amb
+    catch e => throw s!"{pos}{e}"
   let later := (← get).usesLater
   modify fun s => { s with usesLater := #[] }
   for u in later do

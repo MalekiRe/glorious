@@ -1069,26 +1069,26 @@ fn main() -> Int { @a { @b { if(1 < 2) { @a(1) }; @b(2) } + 10 } }
 #### expect
 1
 #### case
-fn main() { let mut f = { x => 0 }; @out { f = { x => @out(x) }; 1 }; f(2) }
+fn main() { let mut f = { x => 0 }; @out { f = { x => @out(x) }; 1 }; f(2); }
 #### expect
 error: 1:37: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `f`, which outlives the scope, could hold it
 #### case
-fn main() { let got = @out { Some({ @out(None) }) }; match(got) { Some(f) => f(); 0, None => 1 } }
+fn main() { let got = @out { Some({ @out(None) }) }; match(got) { Some(f) => f(); 0, None => 1 }; }
 #### expect
 error: 1:13: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is the result of the scope
 #### case
 effect Emit<T> { emit(T) }
-  fn work() { @out { emit({ @out(1) }); 2 } }
+  fn work() { @out { emit({ @out(1) }); 2 }; }
   fn main() { handle work() { emit(f, k) => f() } }
 #### expect
 error: 2:15: in `work`: a callable that jumps to `@out` could be called after `@out` has ended: it is passed to a handler of `Emit` outside
 #### case
 fn compose<T, U, V, e: EffectRow>(f: fn(T) -> U / {| e}, g: fn(V) -> T / {| e}) -> fn(V) -> U / {| e} { { x => f(g(x)) } }
-  fn main() { let mut cell = { x => x }; @out { cell = compose({ v => @out(0) }, { v => v }); 0 }; cell(1) }
+  fn main() { let mut cell = { x => x }; @out { cell = compose({ v => @out(0) }, { v => v }); 0 }; cell(1); }
 #### expect
 error: 2:42: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `cell`, which outlives the scope, could hold it
 #### case
-fn main() { let mut cell = { v => 0 }; @out { let g = { v => @out(v) }; cell = g; 1 }; cell(2) }
+fn main() { let mut cell = { v => 0 }; @out { let g = { v => @out(v) }; cell = g; 1 }; cell(2); }
 #### expect
 error: 1:40: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `cell`, which outlives the scope, could hold it
 #### case
@@ -1098,7 +1098,7 @@ enum Box<T> { Box(T) }
 error: 2:43: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `kept`, which outlives the scope, could hold it
 #### case
 struct Callback(run: fn() -> Int)
-  fn main() { @out { let c = Callback({ @out(1) }); 0 } }
+  fn main() { @out { let c = Callback({ @out(1) }); 0 }; }
 #### expect
 error: 2:15: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is stored in a declaration's `fn` field; give that declaration a type parameter for the field
 #### case
@@ -1173,7 +1173,7 @@ fn mk() -> &mut Int { let mut n = 0; &mut n }
 #### expect
 error: 1:23: in `mk`: `n` could be used after its block has ended: something that uses it is the block's result
 #### case
-fn main() { let mut a = 1; let mut p = &mut a; { let mut b = 2; p = &mut b; }(); *p }
+fn main() { let mut a = 1; let mut p = &mut a; { let mut b = 2; p = &mut b; }(); *p; }
 #### expect
 error: 1:50: in `main`: `b` could be used after its block has ended: `p`, which outlives the scope, could hold it
 #### case
@@ -1197,12 +1197,12 @@ effect Tick { tick() }
 #### case
 effect Tick { tick() }
   fn work() -> Int / {Tick} { tick(); tick(); 0 }
-  fn main() { let mut saved = None; { let mut count = 0; handle work() { tick(k) => count = count + 1; saved = Some(k); 0 } }(); match(saved) { Some(k) => k(()), None => 0 } }
+  fn main() { let mut saved = None; { let mut count = 0; handle work() { tick(k) => count = count + 1; saved = Some(k); 0 } }(); match(saved) { Some(k) => k(()), None => 0 }; }
 #### expect
 error: 3:39: in `main`: `count` could be used after its block has ended: `saved`, which outlives the scope, could hold it
 #### case
 effect Tick { tick() }
-  fn main() { let mut saved = None; @out { handle { tick(); @out(1) }() { tick(k) => saved = Some(k); 0 } }; match(saved) { Some(k) => k(()), None => 0 } }
+  fn main() { let mut saved = None; @out { handle { tick(); @out(1) }() { tick(k) => saved = Some(k); 0 } }; match(saved) { Some(k) => k(()), None => 0 }; }
 #### expect
 error: 2:37: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `saved`, which outlives the scope, could hold it
 #### case

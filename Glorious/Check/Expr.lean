@@ -2675,7 +2675,11 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Flat.StmtId)
     for x in b.movedStmt s do
       if (b.fvStmts [] rest).contains x then
         throw (positioned line col s!"`{x}` is used after `move {x}` handed it on")
-    onError (inferStmts scope amb (s :: rest) want) (positioned line col)
+    let within := (← get).within
+    modify fun st => { st with within := s!"{line}:{col}: " }
+    let t ← onError (inferStmts scope amb (s :: rest) want) (positioned line col)
+    modify fun st => { st with within := within }
+    pure t
   | .expr e =>
     match b.mark? e with
     | some .observed => inferStmts scope amb rest want

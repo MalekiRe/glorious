@@ -714,6 +714,12 @@ structure St where
   /-- The counts of uses of the function being read, made once it is
   (`Check.usesLater`, `countUsesNow`). -/
   usesLater : Array UsesLater := #[]
+  /-- The escapes to look for once the function is read (`checkEscape`):
+  the brand, what is said, the roots, the effects, where. -/
+  escapesLater : Array (Nat × String × List (String × Ty) × Row × String) := #[]
+  /-- Where the innermost statement being read is, with what follows it:
+  where what is found of its scopes once the function is read is said. -/
+  within : String := ""
   /-- For each trait, the traits a type must have to have it. -/
   supers : List (String × List String) := []
   /-- Callable types that are for every lifetime: by the capture variable of
