@@ -957,7 +957,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   let uses := (← get).groupUses
   let cands := (← get).dropCands
   let instSites := (← get).instSites
-  modify fun s => { s with bounds := #[], groupUses := #[], dropCands := #[], firstSaid := none, instSites := #[] }
+  modify fun s => { s with bounds := #[], groupUses := #[], dropCands := #[], instSites := #[] }
   -- A variable whose value's type has `Drop` needs the implementation, to run
   -- its function when the value is destroyed.
   -- A value that is let go is destroyed by its type's function, if its type

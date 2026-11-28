@@ -683,3 +683,18 @@ copier, `Elab.Lower`), which instance of an effect each operation and
 handler is (`sites`), the places (`places`) and what destroys what
 (`drops`, `destroys`). A position is kept per statement (`located`), which
 is where every message is said.
+
+## Step 5, as done: ownership once per function
+
+Each count of uses (`checkUses`) and each search for what outlives a scope
+(`checkEscape`'s, `escapeSearch`) is recorded where its binding or scope
+is read and made once the function is read (`countUsesNow`), of the body
+as read with every adjustment in it; loans are checked once per group
+(`checkLoans`). Nothing is rewritten and read again: a callable argument is
+read once at the parameter types wanted, a dot call of a type's own
+function is decided before it is read, and the refusal kept from a first
+reading (`firstSaid`) is gone. What is looked at before reading is looked
+at on a copy of what is known and let go, as rustc's method probing is
+made in `InferCtxt::probe`: a dot call's receiver's type (`dotAltReading`,
+the field callee's, a receiver that is a reference already), a coercion's
+fit, a lifetime's fit.
