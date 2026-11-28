@@ -1056,8 +1056,12 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     let places := s.adjust.foldl (fun (m : Std.HashMap String (List (Nat × Nat × String))) d => match d with
       | .place owner l c x => m.insert owner ((m.getD owner []) ++ [(l, c, x)])
       | _ => m) {}
-    pure { given := .ofList s.given.toList, bodies := s.decidedFns, places
-           coercions := Elab.firstOf s.coercions.toList, traits := traitInfo.index
+    -- (Each body with the coercions applied in it written out where they
+    -- are, as calls of them: some are found only once the bounds are met.)
+    let cs := Elab.firstOf s.coercions.toList
+    let bodies := if cs.isEmpty then s.decidedFns else s.decidedFns.fold (fun m n b => m.insert n (Elab.coerceFn cs n b)) {}
+    pure { given := .ofList s.given.toList, bodies, places
+           traits := traitInfo.index
            fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
            fieldReads := Elab.firstOf s.fieldReads.toList, packs := Elab.firstOf s.packs.toList
            derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes

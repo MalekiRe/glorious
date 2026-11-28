@@ -621,8 +621,6 @@ structure Blocks where
   it found it (`Adjust`), by the name it is checked by: what is
   elaborated in place of the body as written. -/
   bodies : Std.HashMap String Flat.Body := {}
-  /-- The coercions to apply, by the place each is applied at. -/
-  coercions : Std.HashMap Site String := {}
   traits : TraitInfo := {}
   /-- For each borrow of a field, what is gone through to reach the field: at
   each step the constructor, or none for a tuple, and how many fields it has. -/
@@ -1175,13 +1173,16 @@ def coerceRewrite (cs : Std.HashMap Site String) : FRewrite where
       match cs[Site.arg call i]? with
       | some fn => pushExpr (.call 0 (← pushExpr (.name none fn)) #[a])
       | none => pure a : Build ExprId)
+    -- (Each node made again known as it was, `Body.idOf`: what is found of
+    -- a node is kept by it, `scalarLits`.)
+    let same := fun (n : FExpr) => (modifyGet fun (bb : Body) => bb.add n (some (b.idOf e)) : Build ExprId)
     match b.expr e with
-    | .call id f as => some (do pushExpr (.call id (← go.ex f) (← args id as)))
-    | .tailCall id f as => some (do pushExpr (.tailCall id (← go.ex f) (← args id as)))
+    | .call id f as => some (do same (.call id (← go.ex f) (← args id as)))
+    | .tailCall id f as => some (do same (.tailCall id (← go.ex f) (← args id as)))
     | .closure id clauses => some (do
       let cs' ← clauses.toList.zipIdx.toArray.mapM fun (c, j) => do
         coercedClause cs[Site.result id j]? (← go.clause c)
-      pushExpr (.closure id cs'))
+      same (.closure id cs'))
     | _ => none
 
 /-- A clause with the coercions in it written out, its value given to the

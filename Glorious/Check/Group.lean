@@ -741,11 +741,11 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   -- Later functions follow calls into these as they will be elaborated.
   let cs := Elab.firstOf (← get).coercions.toList
   unless cs.isEmpty do
-    modify fun s =>
-      { s with runFns := decls.foldl (fun m d =>
-                 match (m[d.name]?).orElse fun _ => s.declFns[d.name]? with
-                 | some fb => m.insert d.name (Elab.coerceFn cs d.name fb)
-                 | none => m) s.runFns }
+    let write := fun (m : Std.HashMap String Flat.Body) (alt : Std.HashMap String Flat.Body) => decls.foldl (fun m d =>
+      match (m[d.name]?).orElse fun _ => alt[d.name]? with
+      | some fb => m.insert d.name (Elab.coerceFn cs d.name fb)
+      | none => m) m
+    modify fun s => { s with runFns := write s.runFns s.declFns }
   -- A later function can still decide a requirement made here: of a type an
   -- implementation's condition says, at the type a later use gives it
   -- (`impl<T> Twice for W<T> where T: Use<[0, *]>`, used at a `Ticket`), so

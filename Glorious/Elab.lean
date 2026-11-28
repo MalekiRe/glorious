@@ -1635,8 +1635,6 @@ def elabProgram (items : List Syntax.Item) (blocks : Option Blocks := none)
     Except String Output := do
   let (g, fns, names) ← collect items
   let g := { g with blocks := blocks }
-  let coercions := (blocks.getD {}).coercions
-  let fns := fns.map fun (name, b) => (name, coerceFn coercions name b)
   let mainIdx ← match g.fns[root]? with
     | some idx => pure idx
     | none => throw s!"the program has no `{root}` function"

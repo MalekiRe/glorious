@@ -836,8 +836,7 @@ def compileSource (src : String) (check : Bool := true)
     | some L =>
       let st ← L.reach { L.start with kept := m.lower } roots
       -- (And the coercions applied in what they reach.)
-      let coerced : List String := L.blocks.coercions.fold (fun acc _ fn => if st.seen.contains fn then fn :: acc else acc) []
-      pure (Elab.reachable (roots ++ coerced.eraseDups) (L.items st), some st)
+      pure (Elab.reachable roots (L.items st), some st)
     | none => pure (Elab.reachable roots all, none)
   -- (Only they and what they reach: what `main` reaches is elaborated below.
   -- Taken from the first of them, as a program is from `main`; beside what
@@ -866,9 +865,9 @@ def compileSource (src : String) (check : Bool := true)
     match missing.isEmpty, lowering, lowered with
     | false, some L, some st => do
       let st' ← L.reach st missing
-      let coerced : List String := L.blocks.coercions.fold (fun acc _ fn => if st'.seen.contains fn then fn :: acc else acc) []
+
       match Trace.timed "elaborate what main does not reach" fun _ =>
-          elaborate (Elab.reachable (missing ++ coerced.eraseDups) (L.items st')) blocks
+          elaborate (Elab.reachable missing (L.items st')) blocks
             (root := missing.headD "main") with
       | .error e => .error e
       | .ok _ => .ok ()
