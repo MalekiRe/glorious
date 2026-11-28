@@ -10,7 +10,6 @@ public import Glorious.Elab.Specialize
 public import Glorious.Elab.Lower
 public import Glorious.Comptime
 public import Glorious.Check
-public import Glorious.Typer
 public import Glorious.Hints
 public import Glorious.Core.Show
 public import Glorious.Lower.Typed
@@ -85,7 +84,7 @@ structure Compiled where
   ctorNames : Array String
   fnNames : Array String
   opNames : Array String
-  /-- The types of `checked`'s functions (`Typer`): what the typed lowering
+  /-- The types of `checked`'s functions (`Hints`): what the typed lowering
   works from. -/
   types : Thunk (Option Lower.Types) := Thunk.pure none
   /-- What the checker kept, for a later compile of the program in the same
@@ -889,32 +888,23 @@ def compileSource (src : String) (check : Bool := true)
     let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks (kept := memos.map Memos.elaborated) with
       | .ok out => do aside.get; pure out
       | .error e => do aside.get; throw e
-    -- Core's types, for the lowering (`Typer`). Where they are not found,
-    -- the program runs as it is.
+    -- Core's types, for the lowering, found forward from the checker's
+    -- (`Hints`). Where they are not found, the program runs as it is.
     let nodeTys := (blocks.map (·.nodeTys)).getD {}
     let nodeInsts := (blocks.map (·.nodeInsts)).getD {}
-    -- (`GLORIOUS_TYPES=hints`: found forward from the checker's, `Hints`,
-    -- in place of `Typer`.)
+    let (implTypes, projTypes) := match lowering, lowered with
+      | some L, some st => (st.implTypes L.blocks.traits, st.projTypes L.blocks.traits)
+      | _, _ => ({}, {})
     let found : Except String Lower.Types :=
-      if Trace.hintsOnly then
-        let (implTypes, projTypes) := match lowering, lowered with
-          | some L, some st => (st.implTypes L.blocks.traits, st.projTypes L.blocks.traits)
-          | _, _ => ({}, {})
-        Trace.timed "types" fun _ => Hints.typesOf declared out nodeTys nodeInsts implTypes projTypes
-      else Trace.timed "types" fun _ => Typer.typesOf declared out nodeTys
+      Trace.timed "types" fun _ => Hints.typesOf declared out nodeTys nodeInsts implTypes projTypes
     let types : Except String (Option Lower.Types) := if !check then .ok none else
       match found with
       | .ok types =>
-        if Trace.hintsTraced then
-          dbgTrace (Hints.report declared out ((blocks.map (·.nodeTys)).getD {}) types) fun _ => .ok (some types)
-        else if Trace.hintSigsTraced then
-          dbgTrace (Hints.compareSigs declared out nodeTys nodeInsts types) fun _ => .ok (some types)
-        else if Trace.typesTraced then dbgTrace (Core.showCore out.fnNames out.program ++ "\n" ++ Typer.showSigs types) fun _ => .ok (some types)
+        if Trace.typesTraced then dbgTrace (Core.showCore out.fnNames out.program ++ "\n" ++ Hints.showSigs types) fun _ => .ok (some types)
         else .ok (some types)
       | .error e =>
         -- (`GLORIOUS_TRACE`: why there are none.)
-        if Trace.hintsOnly then dbgTrace s!"HINTS-NO: {withFnNames out.fnNames e}" fun _ => .ok none
-        else if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => .ok none
+        if Trace.enabled then dbgTrace s!"no types: {withFnNames out.fnNames e}" fun _ => .ok none
         else .ok none
     pure (compiled out (← types))
   build blocks

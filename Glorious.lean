@@ -13,7 +13,7 @@ public import Glorious.Bytecode.Semantics
 public import Glorious.Compile
 public import Glorious.Lower.Types
 public import Glorious.Lower.Layout
-public import Glorious.Typer
+public import Glorious.Hints
 import Glorious.Lower.Typed
 public import Glorious.Syntax.Ast
 public import Glorious.Syntax.Lexer

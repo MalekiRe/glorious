@@ -1,19 +1,26 @@
 module
 
-public import Glorious.Typer
+public import Glorious.Lower.Types
+public import Glorious.Trace
+public import Glorious.Elab
 
 /-!
-# Core's types from the checker's, forward
+# Core's types, found forward from the checker's
 
-Each function at a signature gone through once, each local's type found
-from its parts' and, for what its parts do not say, from the type the
-checker found of the expression it is made for (`Blocks.nodeTys`, by the
-node's identity; the elaborator notes which local is made for which,
-`Output.fnNodes`). Nothing is unified.
+What the typed lowering needs (`Lower.Typed`): each function at each
+signature a closure of it is used at, with the type of each of its `let`s;
+and the declared types and operations those use.
 
-For now beside `Typer`: each hint `Typer` found is compared with the one
-found here (`GLORIOUS_TRACE=hints`), and `Typer`'s is what the walk goes on
-with.
+From `main`, each function at a signature gone through once, each local's
+type found from its parts' and, for what its parts do not say, from the
+type the checker found of the expression it is made for (`Blocks.nodeTys`,
+by the node's identity; the elaborator notes which local is made for which,
+`Output.fnNodes`); what a function's type parameters are at each call
+(`Blocks.nodeInsts`), and in a copy of an implementation's function, what
+its implementation's are (`Elab.Lowered.implTypes`, `projTypes`). Nothing
+is unified. Nothing here is checked: the checker of the source text is
+what the program is held to; types this gets wrong only make the lowering
+refuse.
 -/
 
 @[expose] public section
@@ -22,8 +29,88 @@ namespace Glorious.Hints
 
 open Lower Core Syntax
 
+/-- What is declared, as Core's types are made of it. -/
+structure Decls where
+  /-- Each declared type's name, by its number in Core (`Ty.data`). -/
+  typeNames : Array String := #[]
+  typeIds : Std.HashMap String Nat := {}
+  /-- Each declared type's parameters, and which are lifetimes. -/
+  typeParams : Array (List String) := #[]
+  /-- Each constructor, by its tag: its type's number, and its fields as
+  written. -/
+  ctors : Std.HashMap Nat (Nat × List TypeExpr) := {}
+  /-- Each type's constructors' tags, in order. -/
+  tagsOf : Std.HashMap Nat (List Nat) := {}
+  /-- Each operation, by its identity: its effect's parameters, what it
+  takes and what it is resumed with (none: it is not). -/
+  ops : Std.HashMap Nat (List String × List TypeExpr × Option TypeExpr) := {}
+  /-- Each effect's operations, by the effect's name. -/
+  effectOps : Std.HashMap String (List Nat) := {}
+  /-- Each top-level function's type parameters and the types written of
+  its parameters and result, by its number. -/
+  fns : Std.HashMap Nat (List String × List (Option TypeExpr) × Option TypeExpr) := {}
+
+/-- The declarations of `items` (each a declared one, `Elab.declaredOf`), with
+the elaborator's numbers for constructors, operations and functions. -/
+partial def declsOf (items : List Item) (g : Elab.Globals) : Decls := Id.run do
+  let rec flat : List Item → List Item
+    | [] => []
+    | .pub _ i :: rest => flat (i :: rest)
+    | .module _ (some body) :: rest => flat body ++ flat rest
+    | i :: rest => i :: flat rest
+  let items := flat items
+  let mut d : Decls := {}
+  for item in items do
+    match item with
+    | .enum name ps _ | .struct name ps _ =>
+      d := { d with typeIds := d.typeIds.insert name d.typeNames.size, typeNames := d.typeNames.push name
+                    typeParams := d.typeParams.push (genericParams ps) }
+    | _ => pure ()
+  for item in items do
+    let add := fun (d : Decls) (name c : String) (fields : List TypeExpr) =>
+      match g.ctors[c]?, d.typeIds[name]? with
+      | some info, some owner =>
+        { d with ctors := d.ctors.insert info.tag (owner, fields)
+                 tagsOf := d.tagsOf.insert owner (d.tagsOf.getD owner [] ++ [info.tag]) }
+      | _, _ => d
+    match item with
+    | .enum name _ cs => for (c, fields) in cs do d := add d name c fields
+    | .struct name _ fields => d := add d name name fields
+    | .effect name ps ops =>
+      for op in ops do
+        if let some info := g.ops.lookup op.name then
+          d := { d with ops := d.ops.insert info.id (genericParams ps, op.payload,
+                          if op.terminal then none else some (op.result.getD (.tuple [])))
+                        effectOps := d.effectOps.insert name (d.effectOps.getD name [] ++ [info.id]) }
+    | .fn name ps annots ret _ =>
+      if let some f := g.fns[name]? then d := { d with fns := d.fns.insert f (genericParams ps, annots, ret) }
+    | _ => pure ()
+  pure d
+
+/-- A type of the certificate, as messages show it. -/
+partial def showTy : Ty → String
+  | .int => "Int"
+  | .scalar b => s!"s{b}"
+  | .tuple fs => "(" ++ ", ".intercalate (fs.map showTy) ++ ")"
+  | .data n args => (if n == anyName then "?" else s!"#{n}") ++ "<" ++ ", ".intercalate (args.map showTy) ++ ">"
+  | .fn ps r eff once env => "fn(" ++ ", ".intercalate (ps.map showTy) ++ s!") -> {showTy r}" ++
+      (if eff.isEmpty then "" else s!" / {eff.map (·.1)}") ++ (if once then " once" else "") ++
+      (match env with | some cs => " [" ++ ", ".intercalate (cs.map showTy) ++ "]" | none => "")
+  | .ref t => "&" ++ showTy t
+  | .never => "!"
+
+/-- A signature, as messages show it. -/
+def showSig (sig : FnSig) : String :=
+  s!"caps [{", ".intercalate (sig.caps.map showTy)}] ({", ".intercalate (sig.params.map showTy)}) -> {showTy sig.ret}" ++
+    (if sig.eff.isEmpty then "" else s!" / {sig.eff.map (·.1)}")
+
+/-- Each signature, as messages show them. -/
+def showSigs (C : Types) : String :=
+  "\n".intercalate (C.sigs.toList.map fun e => s!"fn{e.fn}: {showSig e.sig}")
+
+
 structure Env where
-  decls : Typer.Decls
+  decls : Decls
   p : Program
   /-- The checker's type of the expression each local is made for, by
   function, clause and local, where it knows the type whole. -/
@@ -48,29 +135,8 @@ structure Env where
   (`%settled`). -/
   settled : Std.HashSet Nat := {}
 
-/-- How the hints found compare, by what they are of. -/
-structure Tally where
-  counts : Std.HashMap String (Nat × Nat × Nat) := {}
-  /-- What a function's type parameters are where a closure of each callable
-  was made, learned there: where its body is gone through, they are. -/
-  closureBinds : Std.HashMap (Nat × List Ty) (List (String × Ty)) := {}
-  calledBinds : Std.HashMap (Nat × List Ty) (List (String × Ty)) := {}
-  lost : Nat := 0
-  examples : Array String := #[]
-
-def Tally.add (t : Tally) (kind : String) (r : Option Bool) (ex : Option String := none) : Tally :=
-  let (a, d, u) := t.counts.getD kind (0, 0, 0)
-  let c := match r with
-    | some true => (a + 1, d, u)
-    | some false => (a, d + 1, u)
-    | none => (a, d, u + 1)
-  { t with counts := t.counts.insert kind c
-           examples := match ex with
-             | some e => if t.examples.size < 60 then t.examples.push e else t.examples
-             | none => t.examples }
-
 /-- What a type counting a length (`B0<B1<Z>>`) counts. -/
-partial def countTy (d : Typer.Decls) : Ty → Option Nat
+partial def countTy (d : Decls) : Ty → Option Nat
   | .data id args =>
     let name := (d.typeNames[id]?).getD ""
     match args with
@@ -84,11 +150,11 @@ partial def countTy (d : Typer.Decls) : Ty → Option Nat
 
 /-- A type written whole, as Core's types are: a callable's not (its
 effects and what it was made with are not written). -/
-partial def tyOf (d : Typer.Decls) (vars : List (String × Ty) := []) : TypeExpr → Option Ty
+partial def tyOf (d : Decls) (vars : List (String × Ty) := []) : TypeExpr → Option Ty
   | .name x args =>
     if let (some t, []) := (vars.lookup x, args) then some t
     -- (What nothing decided in a function general in nothing, the program
-    -- checked whole, as `Typer` has it: `()`; `%settled` says it is such a
+    -- checked whole: `()`, as of what nothing decides; `%settled` says it is such a
     -- one.)
     else if x.startsWith "%rigid:%" && args.isEmpty && (vars.lookup "%settled").isSome then some .unit
     -- (A callable for every lifetime, `%for<'a, fn(..)>`: the callable.)
@@ -197,7 +263,7 @@ partial def shape : Ty → Ty
 /-- What each type parameter (`%rigid:T`) a written type names is, where
 the type is `t`: added to `binds`; where the two are not alike, nothing
 (none is learned of a type that does not fit what is written). -/
-partial def matchTyOpt (d : Typer.Decls) (binds : List (String × Ty)) : TypeExpr → Ty → Option (List (String × Ty))
+partial def matchTyOpt (d : Decls) (binds : List (String × Ty)) : TypeExpr → Ty → Option (List (String × Ty))
   | .name x [], t =>
     -- (And a type read from what a trait leaves to an implementation the
     -- function is given, `%proj:j:Item`.)
@@ -256,11 +322,11 @@ partial def matchTyOpt (d : Typer.Decls) (binds : List (String × Ty)) : TypeExp
   | _, _ => some binds
 
 /-- `matchTyOpt`, `binds` as they were where the two are not alike. -/
-def matchTy (d : Typer.Decls) (binds : List (String × Ty)) (te : TypeExpr) (t : Ty) : List (String × Ty) :=
+def matchTy (d : Decls) (binds : List (String × Ty)) (te : TypeExpr) (t : Ty) : List (String × Ty) :=
   (matchTyOpt d binds te t).getD binds
 
 /-- A field of a value of a type, where the type says it. -/
-def fieldOf (d : Typer.Decls) (t : Ty) (i : Nat) : Option Ty :=
+def fieldOf (d : Decls) (t : Ty) (i : Nat) : Option Ty :=
   match t with
   | .tuple fs => fs[i]?
   | .data n args =>
@@ -272,31 +338,6 @@ def fieldOf (d : Typer.Decls) (t : Ty) (i : Nat) : Option Ty :=
         tyOf d (((d.typeParams[n]?).getD []).zip args) f
       | _ => none
   | _ => none
-
-/-- Is `mine` what `theirs` is, but where `theirs` leaves it undecided
-(`anyName`, Typer's)? -/
-partial def fits (mine theirs : Ty) : Bool :=
-  match mine, theirs with
-  | _, .data n [] => n == anyName || mine == theirs
-  -- (What Typer decided nothing of it makes `()`.)
-  | _, .tuple [] => true
-  | .tuple as, .tuple bs => as.length == bs.length && (as.zip bs).all fun (a, b) => fits a b
-  | .data n as, .data m bs => n == m && as.length == bs.length && (as.zip bs).all fun (a, b) => fits a b
-  | .ref a, .ref b => fits a b
-  | .fn ps r _ _ _, .fn qs s _ _ _ => ps.length == qs.length && fits r s && (ps.zip qs).all fun (a, b) => fits a b
-  | a, b => a == b
-
-/-- Where two types first differ, each there (`GLORIOUS_TRACE=hints`). -/
-partial def diffAt (a b : Ty) : Option (Ty × Ty) :=
-  if fits a b then none else
-  match a, b with
-  | .tuple as, .tuple bs => if as.length != bs.length then some (a, b) else (as.zip bs).findSome? fun (x, y) => diffAt x y
-  | .data n as, .data m bs => if n != m || as.length != bs.length then some (a, b) else (as.zip bs).findSome? fun (x, y) => diffAt x y
-  | .ref x, .ref y => diffAt x y
-  | .fn ps r _ _ _, .fn qs s _ _ _ =>
-    if ps.length != qs.length then some (a, b)
-    else ((ps.zip qs).findSome? fun (x, y) => diffAt x y) <|> diffAt r s
-  | _, _ => some (a, b)
 
 /-- The value a callable gives, of its type. -/
 def retOf : Ty → Option Ty
@@ -365,7 +406,7 @@ def hostTy (id : Nat) (args : List Atom) (atomTy : Atom → Option Ty) (said : O
 
 mutual
 /-- The types a pattern binds of a value of a type, the declarations read. -/
-partial def patTysD (d : Typer.Decls) : Pat → Ty → Option (List Ty)
+partial def patTysD (d : Decls) : Pat → Ty → Option (List Ty)
   | .wild, _ => some []
   | .bind, τ => some [τ]
   | .int _, _ => some []
@@ -379,7 +420,7 @@ partial def patTysD (d : Typer.Decls) : Pat → Ty → Option (List Ty)
     let vars := ((d.typeParams[n]?).getD []).zip args
     patsTysD d ps (← fields.mapM (tyOf d vars))
   | _, _ => none
-partial def patsTysD (d : Typer.Decls) : List Pat → List Ty → Option (List Ty)
+partial def patsTysD (d : Decls) : List Pat → List Ty → Option (List Ty)
   | [], [] => some []
   | p :: ps, τ :: τs => do pure ((← patTysD d p τ) ++ (← patsTysD d ps τs))
   | _, _ => none
@@ -395,7 +436,7 @@ def constructOf (env : Env) (Γ : Array (Option Ty)) (binds : List (String × Ty
     | .int _ => some .int
   if fixedBase ≤ tag then
     let n := tag - fixedBase
-    -- (Of none, of what nothing else decides: `()`, as `Typer` leaves it.)
+    -- (Of none, of what nothing else decides: `()`.)
     let elem ← match args.head? with
       | some a => atomTy a
       | none => ((said.bind (tyOf env.decls binds)).bind fixedElem).orElse fun _ => some .unit
@@ -491,7 +532,7 @@ structure W where
   that does not return gives. -/
   ret : Option Ty := none
   /-- What the function performs: what a callable it makes and the checker
-  says nothing of performs too, as `Typer`'s one row for the code around. -/
+  says nothing of performs too: one row for the code around. -/
   eff : Row := []
   /-- Each function at each signature a closure of it is made at. -/
   uses : Array (Nat × FnSig) := #[]
@@ -499,7 +540,7 @@ structure W where
   give (`fnRet`): one that is reached again does not return there. -/
   stack : List Nat := []
   /-- The locals bound to a call that does not return, whose type nothing
-  decides (`()`, as `Typer` leaves it): what gives one gives nothing. -/
+  decides (`()`): what gives one gives nothing. -/
   nevers : Std.HashSet Nat := {}
 
 def W.atomTy (w : W) : Atom → Option Ty
@@ -572,7 +613,7 @@ def implBinds (env : Env) (fn : Nat) : List (String × Ty) :=
   (env.implTypes.getD fn []).filterMap (fun (x, te) => (tyOf env.decls [] te).map (s!"%rigid:{x}", ·))
     ++ (env.projTypes.getD fn []).filterMap (fun (x, te) => (tyOf env.decls [] te).map (x, ·))
     -- (`main` general in a type nothing gives it, `main<T>()`: `()`, as
-    -- `Typer` leaves what nothing decides.)
+    -- what nothing decides is.)
     ++ (if env.names[fn]? == some "`main`" then match env.decls.fns[fn]? with
         | some (tparams, _, _) => tparams.filterMap fun p => if p.startsWith "'" then none else some (s!"%rigid:{p}", .unit)
         | none => []
@@ -632,8 +673,7 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
               w := { w with uses := w.uses.push (ga, { caps, params := qs, ret := r, eff }) }
             | _ =>
               -- (What it is given known, what it gives not: its body's; of
-              -- one that does not return, nothing decides it: `()`, as
-              -- `Typer` leaves what nothing decides.)
+              -- one that does not return, nothing decides it: `()`.)
               if let .fn qs _ := p then
                 if let some qs := qs.mapM (tyOf env.decls known) then
                   match (fnRet env (depth + 1) ga w.binds qs caps w.stack).map fun r => if r == .never then .unit else r with
@@ -706,7 +746,7 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
       w := w.found i σ
       w := w.noteCalled env f c i g params
       w := { w with uses := w.uses.push (g, { caps, params, ret := r, eff := w.eff })
-                    why := w.why.insert i s!"used at {firstRef i at_}, given {params.map Typer.showTy}, gives by {if atUse.isSome then "the use" else "its body or its place"}" }
+                    why := w.why.insert i s!"used at {firstRef i at_}, given {params.map showTy}, gives by {if atUse.isSome then "the use" else "its body or its place"}" }
       -- (What the checker said of it, a type parameter it names learned of
       -- what it was found to be.)
       if let some te := env.said[(f, c, i)]? then
@@ -745,8 +785,7 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
     let i := w.Γ.size
     let mine := rhsTy env w.binds w.Γ (said i) rhs
     -- (A callable of which the checker leaves the rest of what it performs
-    -- to the code around: performing what that does too, as `Typer`'s one
-    -- row.)
+    -- to the code around: performing what that does too, one row.)
     let mine : Option Ty := match mine, said i with
       | some (Ty.fn ps r eff once caps), some (TypeExpr.fn _ (.performs _ effs)) =>
         if effs.any (·.1 == openRowMark) then
@@ -881,74 +920,6 @@ partial def fnRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × T
 
 end
 
-/-- The hints of every function at every signature `Typer` found, compared. -/
-def compare (env : Env) (C : Types) : Tally := Id.run do
-  let mut t : Tally := {}
-  for e in C.sigs do
-    let some fn := env.p.fns[e.fn]? | continue
-    for ((cl, hs), ci) in (fn.clauses.zip e.hints).zipIdx do
-      let bound := (patsTys C cl.pats e.sig.params).getD []
-      let Γ : Array (Option Ty) := (e.sig.params ++ e.sig.caps ++ bound).toArray.map some
-      -- (A function's type parameters, of what its parameters are said to be.)
-      let binds := match env.decls.fns[e.fn]? with
-        | some (tparams, annots, _) =>
-          (annots.zip e.sig.params).foldl (fun b (a, p) => match a with
-            | some te => matchTy env.decls b (rigidOf tparams te) p
-            | none => b) []
-        | none => []
-      -- (And of what the checker found the function to be; a closure's, as
-      -- where it was made.)
-      let binds := binds ++ (t.closureBinds.getD (e.fn, e.sig.caps) []) ++ (t.calledBinds.getD (e.fn, e.sig.params) [])
-      let binds := match env.selfTy[e.fn]? with
-        | some (.fn ps r) => matchTy env.decls ((ps.zip e.sig.params).foldl (fun b (a, p) => matchTy env.decls b a p) binds) r e.sig.ret
-        | _ => binds
-      let (w, _) := go env 0 e.fn ci { Γ, binds, ret := some e.sig.ret } cl.body
-      t := { t with closureBinds := w.made.foldl (fun m (k, b) => m.insert k b) t.closureBinds
-                    calledBinds := w.called.foldl (fun m (k, b) => m.insert k b) t.calledBinds }
-      if w.hints.size != hs.length then
-        t := { t with lost := t.lost + 1 }
-        continue
-      let localOf : Std.HashMap Nat Nat := w.hintAt.fold (fun m i h => m.insert h i) {}
-      for (mine, h) in w.hints.toList.zipIdx do
-        if mine.isNone then
-          let why := match localOf[h]? with
-            | some i => match w.why[i]? with
-              | some y => y
-              | none => "call or host"
-            | none => "handler"
-          t := t.add s!"why: {why}" none
-      for ((mine, theirs), h) in (w.hints.toList.zip hs).zipIdx do
-        match theirs with
-        | .ty σ =>
-          let r := mine.map fun | .ty m => fits (shape m) (shape σ) | _ => false
-          let ex := if r == some false then
-              let d : String := match mine with
-                | some (.ty m) => match diffAt (shape m) (shape σ) with
-                  | some (x, y) => s!"here {Typer.showTy x}, Typer {Typer.showTy y}"
-                  | none => "?"
-                | _ => "?"
-              some s!"{env.names[e.fn]?.getD "?"} local {(localOf[h]?).getD 0} ({(w.why[(localOf[h]?).getD 0]?).getD ""}): {d}"
-            else if r.isNone && (t.counts.getD "nf" (0,0,0)).1 % 97 == 0 then
-              some s!"not found: {env.names[e.fn]?.getD "?"} local {(localOf[h]?).getD 0} ({env.said[(e.fn, ci, (localOf[h]?).getD 0)]?.isSome}): Typer {Typer.showTy σ}"
-            else none
-          let t' := if r.isNone then t.add "nf" (some true) else t
-          let kind := match σ with
-            | .fn .. => "callable"
-            | .data .. => "data"
-            | .tuple _ => "tuple"
-            | _ => "other"
-          t := t'.add kind r ex
-        | .handler ρ H =>
-          let r := mine.map fun
-            | .handler ρ' H' => (ρ' == .never || shape ρ' == shape ρ) && H' == H
-            | _ => false
-          let shown : Option String := mine.map fun
-            | .handler ρ' H' => s!"{Typer.showTy ρ'} {H'.map (·.1)}"
-            | _ => "?"
-          let ex := if r == some false then some s!"{env.names[e.fn]?.getD "?"}: handler here {shown.getD "?"}, Typer {Typer.showTy ρ} {H.map (·.1)}" else none
-          t := t.add "handler" r ex
-  pure t
-
 /-- The function a function the elaborator made is a copy of, by name:
 `f⟨..⟩'` for implementations, `f@<..>` for an effect's instance. -/
 def baseOf (owner : String) : String :=
@@ -990,12 +961,10 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
     (implTypes projTypes : Std.HashMap String (List (String × TypeExpr)) := {}) :
     Except String Env := do
   let g ← Elab.collectDeclared items
-  let decls := Typer.declsOf items g
+  let decls := declsOf items g
   -- (Each copy's types with what it reads of its implementations' types
   -- that take types written out, `expandProjs`.)
-  let ex := fun (owner : String) (te : TypeExpr) => match projTypes[owner]? with
-    | some tpl => expandProjs tpl te
-    | none => te
+  let ex := fun (owner : String) (te : TypeExpr) => expandProjs (projTypes.getD owner []) te
   let said := out.fnNodes.fold (fun m f (owner, clauses) =>
     let base := baseOf owner
     match nodeTys[owner]? <|> nodeTys[base]? with
@@ -1054,7 +1023,7 @@ def clauseAt (env : Env) (made called : Std.HashMap (Nat × List Ty) (List (Stri
     (cl : Core.Clause) (sig : FnSig) :
     Except String (List Hint × Array (Nat × FnSig) × Array ((Nat × List Ty) × List (String × Ty)) × Array ((Nat × List Ty) × List (String × Ty))) := do
   let some bound := patsTysD env.decls cl.pats sig.params
-    | throw s!"function {fn}: what its patterns bind is not found, at {Typer.showSig sig}"
+    | throw s!"function {fn}: what its patterns bind is not found, at {showSig sig}"
   let Γ : Array (Option Ty) := (sig.params ++ sig.caps ++ bound).toArray.map some
   let binds := match env.decls.fns[fn]? with
     | some (tparams, annots, _) =>
@@ -1079,8 +1048,59 @@ def clauseAt (env : Env) (made called : Std.HashMap (Nat × List Ty) (List (Stri
       throw s!"function {fn} ({env.names[fn]?.getD "?"}): hint {k} not found ({why})"
   pure (hints, w.uses, w.made, w.called)
 
-/-- Core's types, found forward from the checker's (`Hints`), as `Typer`'s
-are: each function at each signature a closure of it is made at, from
+/-- Each declared type and operation the types use, as the certificate has
+them: each at its arguments, its fields' and what it takes and is resumed
+with written at those. -/
+partial def declsFor (d : Decls) (types : List Ty) (rows : List (Nat × List Ty)) : Except String (List DataInst × List OpInst) := do
+  let mut datas : Array DataInst := #[]
+  let mut seen : Std.HashSet (Nat × List Ty) := {}
+  let mut ops : Array OpInst := #[]
+  let mut seenOps : Std.HashSet (Nat × List Ty) := {}
+  let mut todo := types
+  let mut opsTodo := rows
+  let written := fun (vars : List (String × Ty)) (w : TypeExpr) =>
+    match tyOf d vars w with
+    | some t => Except.ok t
+    | none => Except.error s!"`{w.spell}` is not a type here"
+  while !todo.isEmpty || !opsTodo.isEmpty do
+    match opsTodo with
+    | (op, targs) :: rest =>
+      opsTodo := rest
+      unless seenOps.contains (op, targs) do
+        seenOps := seenOps.insert (op, targs)
+        let some (ps, payload, result) := d.ops[op]? | throw s!"operation {op} is not declared"
+        let vars := ps.zip targs
+        let payload ← payload.mapM (written vars)
+        let result ← result.mapM (written vars)
+        ops := ops.push ⟨op, targs, payload, result⟩
+        todo := payload ++ result.toList ++ targs ++ todo
+    | [] =>
+      match todo with
+      | t :: rest =>
+        todo := rest
+        match t with
+        | .data name args =>
+          todo := args ++ todo
+          if name < builtinNames && !seen.contains (name, args) then
+            seen := seen.insert (name, args)
+            let vars := ((d.typeParams[name]?).getD []).zip args
+            let mut ctors : List (Nat × List Ty) := []
+            for tag in d.tagsOf.getD name [] do
+              let some (_, fields) := d.ctors[tag]? | throw s!"constructor {tag} is not declared"
+              let fs ← fields.mapM (written vars)
+              ctors := ctors ++ [(tag, fs)]
+              todo := fs ++ todo
+            datas := datas.push ⟨name, args, ctors⟩
+        | .tuple fs => todo := fs ++ todo
+        | .fn ps r eff _ env =>
+          todo := ps ++ [r] ++ (env.getD []) ++ todo
+          opsTodo := eff ++ opsTodo
+        | .ref t => todo := t :: todo
+        | _ => pure ()
+      | [] => pure ()
+  pure (datas.toList, ops.toList)
+
+/-- Core's types, found forward from the checker's: each function at each signature a closure of it is made at, from
 `main`, with each clause's hints, and the declared types and operations
 those use. -/
 def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
@@ -1128,10 +1148,7 @@ def typesOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap Strin
   let types := mainTy :: mainHints.flatMap hintTypes ++ sigs.toList.flatMap fun e =>
     e.sig.caps ++ e.sig.params ++ [e.sig.ret] ++ e.sig.eff.flatMap (·.2) ++ e.hints.flatMap (·.flatMap hintTypes)
   let rows := sigs.toList.flatMap fun e => e.sig.eff ++ e.hints.flatMap (·.flatMap hintOps)
-  let tenv : Typer.Env := { decls := env.decls, p, ncaps := #[] }
-  let (datas, ops) ← match ((Typer.declsFor types (rows ++ mainHints.flatMap hintOps)).run tenv).run {} with
-    | .ok r _ => pure r
-    | .error e _ => throw e
+  let (datas, ops) ← declsFor env.decls types (rows ++ mainHints.flatMap hintOps)
   pure (Types.withIndex ⟨sigs, datas, ops, mainTy, mainHints, #[]⟩)
 where
   hintTypes : Hint → List Ty
@@ -1140,51 +1157,5 @@ where
   hintOps : Hint → List (Nat × List Ty)
     | .handler _ H => H
     | _ => []
-
-/-- Typer's signatures and these, compared (`GLORIOUS_TRACE=hintsigs`). -/
-def compareSigs (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
-    (nodeInsts : Std.HashMap String (Std.HashMap Nat (List (String × Option TypeExpr)))) (C : Types) : String :=
-  match typesOf items out nodeTys nodeInsts with
-  | .error e => s!"hintsigs: none: {e}"
-  | .ok D => Id.run do
-    let theirs : Std.HashMap Nat (List FnSig) := C.sigs.foldl (fun m e => m.insert e.fn (e.sig :: m.getD e.fn [])) {}
-    let mine : Std.HashMap Nat (List FnSig) := D.sigs.foldl (fun m e => m.insert e.fn (e.sig :: m.getD e.fn [])) {}
-    let mut lines : Array String := #[s!"hintsigs: Typer {C.sigs.size}, here {D.sigs.size}; main {Typer.showTy C.mainTy} / {Typer.showTy D.mainTy}"]
-    for (fn, ts) in theirs.toList do
-      let ms := mine.getD fn []
-      for t in ts do
-        unless ms.contains t do
-          if lines.size < 30 then
-            lines := lines.push s!"  {out.fnNames[fn]?.getD "?"}: Typer's {Typer.showSig t} not here; here {ms.map Typer.showSig}"
-    for (fn, ms) in mine.toList do
-      let ts := theirs.getD fn []
-      for m in ms do
-        unless ts.contains m do
-          if lines.size < 60 then
-            lines := lines.push s!"  {out.fnNames[fn]?.getD "?"}: here {Typer.showSig m} not Typer's"
-    "\n".intercalate lines.toList
-
-/-- `compare`, said. -/
-def report (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String (Std.HashMap Nat TypeExpr))
-    (C : Types) : String := Id.run do
-  let some g := (Elab.collectDeclared items).toOption | return "hints: no declarations"
-  let decls := Typer.declsOf items g
-  let said := out.fnNodes.fold (fun m f (owner, clauses) =>
-    let base := baseOf owner
-    match nodeTys[owner]? <|> nodeTys[base]? with
-    | none => m
-    | some tys => clauses.zipIdx.foldl (fun m (locals, c) =>
-        locals.foldl (fun m (i, n) => match tys[n]? with
-          | some te => m.insert (f, c, i) te
-          | none => m) m) m) {}
-  let selfTy := out.fnNodes.fold (fun m f (owner, _) =>
-    if out.fnNames[f]? != some s!"`{owner}`" then m else
-    let base := baseOf owner
-    match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.selfNode]?) with
-    | some te => m.insert f te
-    | none => m) {}
-  let t := compare { decls, p := out.program, said, names := out.fnNames, selfTy } C
-  let lines := t.counts.toList.map fun (k, (a, d, u)) => s!"  {k}: {a} agree, {d} not, {u} not found"
-  "\n".intercalate ([s!"hints: {t.lost} clauses lost"] ++ lines ++ t.examples.toList.map ("  " ++ ·))
 
 end Glorious.Hints

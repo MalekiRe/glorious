@@ -9,8 +9,11 @@ file is the current intent for this branch.
 
 The proved Core checker, the certificate it checked (`Infer`) and the proofs
 are gone. The checker of the source text is what a program is held to; the
-typed lowering's types are found from Core by `Typer` (docs/redesign.md, step
-2), and a program they do not type runs unlowered. Every borrow is the
+typed lowering's types are found forward from the checker's (`Hints`,
+docs/redesign.md, step 4), and a program they do not type runs unlowered.
+What nothing in a program decides, the element of an empty array, what a
+call that does not return gives, a type parameter of `main` nothing gives,
+is `()`. Every borrow is the
 reference it borrows in Core. What follows below about certificates,
 regions, loans and `glorious certify` is history.
 

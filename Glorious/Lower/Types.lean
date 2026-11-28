@@ -6,7 +6,7 @@ public import Glorious.Core.Ast
 # Core's types, as the typed lowering reads them
 
 Each function at each signature it is used at, with the type of each of its
-`let`s, and the declared types and operations those use: what `Typer` finds
+`let`s, and the declared types and operations those use: what `Hints` finds
 and `Lower.Typed` reads.
 -/
 

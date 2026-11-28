@@ -113,7 +113,7 @@ structure Outcome where
   error : Option String := none
   /-- Its bytecode file. -/
   bytes : Option ByteArray := none
-  /-- Whether its Core's types were found (`Typer`), and whether it is
+  /-- Whether its Core's types were found (`Hints`), and whether it is
   lowered by them (`Lower.program`). -/
   typed : Bool := false
   lowered : Bool := false
@@ -851,7 +851,7 @@ where
       match c.types.get with
       | some types =>
         for e in types.sigs do
-          IO.println s!"{c.fnNames[e.fn]?.getD ""} ({e.fn}): {Typer.showSig e.sig}"
+          IO.println s!"{c.fnNames[e.fn]?.getD ""} ({e.fn}): {Hints.showSig e.sig}"
         pure 0
       | none =>
         IO.println "no types"

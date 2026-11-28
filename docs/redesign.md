@@ -796,3 +796,23 @@ performs (`eff`, `Typer`'s one row for the code around), both found by
 unifying how a callable flows. Until those are written by the checker
 (each callable's captures and row at each place it flows to), `Typer`
 stays the default.
+
+2 and 3, done: `Typer` is gone. Core's types are found forward from the
+checker's (`Hints.typesOf`), from `main`. What the checker keeps for it,
+besides each expression's type by its node and each callee's type
+parameters at each call: what runs a handled computation performs (what is
+handled and what the code around may); a callable whose row it leaves open
+written so (`%open`, performing what the code around does, one row); for
+each implementation it fits to a bound, what its type parameters are there
+(`St.dictTypes`, by dictionary object; none where one object or number is
+found at others), so that a copy of an implementation's function is typed
+at them (`Elab.Lowered.implTypes`); and each type a body reads from what a
+trait leaves to the implementation of one of its bounds, by which bound
+and at what it is asked (`St.projAt`, `%proj:j:Name`), which the
+elaborator works out for each copy from the implementations it is given
+(`Elab.assocAt`, `Lowered.projTypes`, through their conditions'). A node
+the elaborator makes is known apart from the checker's (`Flat.elabIdBase`;
+one in a space of its own raises nothing, `Body.add`). `Hints` takes what
+it used of `Typer`: the declarations (`Decls`, `declsOf`) and the declared
+types and operations the types use (`declsFor`, now without unification).
+

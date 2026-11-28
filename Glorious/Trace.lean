@@ -28,18 +28,9 @@ initialize enabled : Bool ← do pure (← IO.getEnv "GLORIOUS_TRACE").isSome
 /-- `GLORIOUS_TRACE=groups`: each group of functions named on standard error as
 its check starts, to see where a compile that does not end is. -/
 initialize groupsTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "groups")
-/-- `GLORIOUS_TRACE=types`: a program's Core and the signatures `Typer` found
-for it, on standard error. -/
+/-- `GLORIOUS_TRACE=types`: a program's Core and the signatures found for it
+(`Hints`), on standard error. -/
 initialize typesTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "types")
-/-- `GLORIOUS_TRACE=hints`: how the types found forward from the checker's
-compare with `Typer`'s (`Hints.report`). -/
-initialize hintsTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "hints")
-/-- `GLORIOUS_TRACE=hintsigs`: the signatures `Hints.typesOf` finds against
-`Typer`'s. -/
-initialize hintSigsTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "hintsigs")
-/-- `GLORIOUS_TYPES=hints`: Core's types found forward from the checker's
-(`Hints.typesOf`), not by `Typer`. -/
-initialize hintsOnly : Bool ← do pure ((← IO.getEnv "GLORIOUS_TYPES") == some "hints")
 
 initialize spans : IO.Ref (Array Span) ← IO.mkRef #[]
 initialize depth : IO.Ref Nat ← IO.mkRef 0

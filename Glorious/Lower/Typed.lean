@@ -6,7 +6,7 @@ public import Glorious.Trace
 /-!
 # The typed lowering
 
-A program whose types (`Typer`) type it, with each cell made a cell of
+A program whose types (`Hints`) type it, with each cell made a cell of
 memory and each memory operation one of an address, of the layout of the
 type the reference is to (`Tm.cellL`, `MemOp.loadL` and the rest). Each
 local's type is found from the hints, the signatures and the types' data and
@@ -413,6 +413,6 @@ def lowered (C : Types) (p : Program) (kept : Option TypedMemo := none) : L (Pro
 def program (C : Types) (p : Program) (kept : Option TypedMemo := none) : Option (Program × List Nat × TypedMemo) :=
   match (lowered C p kept).run' {} with
   | .ok r => some r
-  | .error e => if Trace.enabled || Trace.hintsOnly then dbgTrace s!"NOT-LOWERED: {e}" fun _ => none else none
+  | .error e => if Trace.enabled then dbgTrace s!"not lowered: {e}" fun _ => none else none
 
 end Glorious.Lower
