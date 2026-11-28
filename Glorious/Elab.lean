@@ -883,7 +883,10 @@ partial def resolveDict (tr : TraitInfo) (env : Array Nat) (d : DictE) : StateM 
     for s in subs do
       let some n ← resolveDict tr env s | return none
       ids := ids.push n
-    some <$> internId fn ids.toList
+    let n ← internId fn ids.toList
+    if let some ts := tr.dictTypes[addrOf d]? then
+      unless (← get).types.contains n do modify fun c => { c with types := c.types.insert n ts }
+    pure (some n)
 
 /-- The call `call` of a function given the implementations `ids`: of its
 copy for them, once it is known which function it is of

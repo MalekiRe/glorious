@@ -1084,7 +1084,8 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         bounded := s.fnBounds
         impls := implEs
         drops := s.dropSites.toList
-        destroys := destroys.toList }
+        destroys := destroys.toList
+        dictTypes := s.dictTypes }
     let places := s.adjust.foldl (fun (m : Std.HashMap String (List (Nat × Nat × String))) d => match d with
       | .place owner l c x => m.insert owner ((m.getD owner []) ++ [(l, c, x)])
       | _ => m) {}

@@ -896,7 +896,11 @@ def compileSource (src : String) (check : Bool := true)
     -- (`GLORIOUS_TYPES=hints`: found forward from the checker's, `Hints`,
     -- in place of `Typer`.)
     let found : Except String Lower.Types :=
-      if Trace.hintsOnly then Trace.timed "types" fun _ => Hints.typesOf declared out nodeTys nodeInsts
+      if Trace.hintsOnly then
+        let implTypes := match lowering, lowered with
+          | some L, some st => st.implTypes L.blocks.traits
+          | _, _ => {}
+        Trace.timed "types" fun _ => Hints.typesOf declared out nodeTys nodeInsts implTypes
       else Trace.timed "types" fun _ => Typer.typesOf declared out nodeTys
     let types : Except String (Option Lower.Types) := if !check then .ok none else
       match found with

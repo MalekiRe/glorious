@@ -174,6 +174,11 @@ structure TraitInfo where
   knownPool : Array (String × List Nat) := #[]
   knownIds : Std.HashMap (String × List Nat) Nat := {}
   knownOf : Std.HashMap USize Nat := {}
+  /-- What the type parameters of an implementation are, by its dictionary
+  object, those the checker found (`Check.St.dictTypes`); and by its
+  number (`index`): what a copy of its functions is written out at. -/
+  dictTypes : Std.HashMap USize (List (String × TypeExpr)) := {}
+  knownTypes : Std.HashMap Nat (List (String × TypeExpr)) := {}
 
 /-- Numbering the implementations with nothing left to be known: by object
 (none for one with a parameter left), by function and parts, and back. -/
@@ -224,6 +229,9 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
     knownOf := numbered.byObject.fold (init := {}) fun m k (_, r) => match r with
       | some n => m.insert k n
       | none => m
+    knownTypes := numbered.byObject.fold (init := {}) fun m k (_, r) => match r, t.dictTypes[k]? with
+      | some n, some ts => if m.contains n then m else m.insert n ts
+      | _, _ => m
     dictsAt := firstOf t.dicts, methodsAt := firstOf t.methods
     -- (And each destroyer, given how its parts are destroyed: copied for
     -- those as any function for the implementations it is given.)
@@ -1249,6 +1257,10 @@ structure Copies where
   /-- The spreads written out for a length (`spreadItem`), by the name each
   is called by: which, and the length. -/
   spreads : Std.HashMap String (String × Nat) := {}
+  /-- What the type parameters of each implementation numbered here are,
+  of those made from what a function is given (`resolveDict`), where the
+  checker found them (`TraitInfo.dictTypes`). -/
+  types : Std.HashMap Nat (List (String × TypeExpr)) := {}
 
 def internId (f : String) (ids : List Nat) : StateM Copies Nat := do
   match (← get).pool[(f, ids)]? with

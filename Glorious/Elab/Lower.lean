@@ -250,6 +250,17 @@ def Lowering.reachWith (L : Lowering) (st : Lowered) (roots : List String) : Opt
       todo := todo ++ (b.fvClauses b.roots).reverse.toArray
   some st
 
+/-- What the type parameters of the implementation each copy of an
+implementation's function is written out for are, those the checker found
+(`TraitInfo.knownTypes`, `Copies.types`): by the copy's name. -/
+def Lowered.implTypes (tr : TraitInfo) (st : Lowered) : Std.HashMap String (List (String × TypeExpr)) :=
+  let implOf : Std.HashMap String (List String) := tr.impls.foldl (fun m im =>
+    im.methods.foldl (fun m (fn, _) => m.insert fn (im.dictFn :: m.getD fn [])) m) {}
+  st.copies.byName.fold (fun m name (fn, ids, _) =>
+    match (implOf.getD fn []).findSome? fun d => (st.copies.pool[(d, ids)]?).bind fun n => tr.knownTypes[n]? <|> st.copies.types[n]? with
+    | some ts => m.insert name ts
+    | none => m) {}
+
 /-- Lowered on from `st`, through what `roots` reach. Refused where more
 copies would be made than `copyFuel`: a function that calls itself with an
 implementation made from the one it was given, as Rust refuses it (no

@@ -1028,6 +1028,14 @@ structure St where
   tyMemo : Std.HashMap USize (Ty × Nat) := {}
   /-- Dictionaries made for a group's calls, by the object each was found as. -/
   dictShared : PMap USize (Traits.Dict × Elab.DictE) := {}
+  /-- Each implementation fitted in this group's bounds, by the dictionary
+  object found (`solveFittingNow`): what its type parameters are there, by
+  their numbers (`ImplDecl.pvars`). -/
+  fitParams : Std.HashMap USize (List (Nat × Ty)) := {}
+  /-- Each elaborator's dictionary object of an implementation: those of
+  its type parameters known where it was found, by name, written
+  (`Elab.TraitInfo.dictTypes`). -/
+  dictTypes : Std.HashMap USize (List (String × Syntax.TypeExpr)) := {}
   /-- The functions whose bodies a count of uses followed (`pathUses`), in
   the order followed, `*` where one was not finished: what a group's check
   read of bodies besides its own. -/

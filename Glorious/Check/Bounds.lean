@@ -178,6 +178,18 @@ partial def toDictEShared (impls : Array ImplDecl) (marker : String → Bool) (d
         let e := Elab.DictE.impl fn subs
         modify fun s => { s with dictByShape := s.dictByShape.insert key e }
         pure e
+  -- (What the implementation's type parameters are, where known: what its
+  -- functions are written out at.)
+  if let (.impl i _, some at_) := (d, (← get).fitParams[addrOf d]?) then
+    if let some im := impls[i]? then
+      unless (← get).dictTypes.contains (addrOf e) do
+        -- (Those known whatever the function it is found in is given.)
+        let written ← at_.filterMapM fun (k, t) => do
+          let t ← zonk t
+          if !(freeTys t).isEmpty || t.hasRigid then return none
+          pure ((im.pvars.find? (·.2 == k)).bind fun (x, _) => t.writtenRigid.map (x, ·))
+        unless written.isEmpty do
+          modify fun s => { s with dictTypes := s.dictTypes.insert (addrOf e) written }
   modify fun s => { s with dictShared := s.dictShared.insert (addrOf d) (d, e) }
   pure e
 
@@ -388,7 +400,9 @@ partial def solveFittingNow (givens : Traits.Givens Syntax.TraitKey) (fuel : Nat
     let some d ← solveFitting givens (fuel - 1) (← subKey tr subject cargs) subject cargs
       | return none
     subs := subs ++ [d]
-  pure (some (.impl i subs))
+  let d : Traits.Dict := .impl i subs
+  modify fun s => { s with fitParams := s.fitParams.insert (addrOf d) at_ }
+  pure (some d)
 
 end
 
@@ -925,7 +939,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
 def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
-  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {} }
+  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {}, fitParams := {} }
   -- A name of which parts were read before its type was known, which is now:
   -- if the type has a `drop` of its own and the parts read can be used any
   -- number of times, the value stayed whole and is destroyed when its block
