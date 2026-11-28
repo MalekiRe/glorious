@@ -164,6 +164,22 @@ def noteNode (a : Atom) (e : Flat.ExprId) : M Unit := do
     if (← get).ownBody then
       modify fun s => { s with b := { s.b with nodes := s.b.nodes.push (i, s.body.idOf e) } }
 
+/-- Is the expression the name `y`? -/
+def isName (y : String) : Flat.FExpr → Bool
+  | .name none x => x == y
+  | _ => false
+
+/-- `useLocal` of what a callable made here captures, each by its name:
+one made anew where it is captured known by the expression it is first
+named by there (`find`), as the checker typed it. -/
+def useCaptured (scope : Scope) (captures : List String) (find : String → Option Flat.ExprId) : M (List Atom) :=
+  (captures.filterMap fun y => (scope.lookup y).map (y, ·)).mapM fun (y, a) => do
+    let a' ← useLocal a
+    match a, a' with
+    | .var i, .var j => if i != j then if let some e := find y then noteNode a' e
+    | _, _ => pure ()
+    pure a'
+
 mutual
 
 partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Atom := do
@@ -520,7 +536,7 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Flat.StmtId → M 
     let body ← mkClause captures [.var (cellKey x)]
       (fun sc => withNoTail (some why) (elabStmts sc true rest))
     let idx ← addFn ⟨[body]⟩ s!"the scope of `{x}` in `{(← get).owner}`"
-    let captured ← (captures.filterMap (fun y => scope.lookup y)).mapM useLocal
+    let captured ← useCaptured scope captures fun y => rest.findSome? (b.findStmt (isName y))
     let thunk ← emit (.let_ (.closure idx captured))
     if tailPos then
       terminate (.cellTail a thunk)
@@ -592,7 +608,8 @@ partial def elabBorrowScope (scope : Scope) (tailPos : Bool) (p : String) (uniq 
   let captures := captureNames scope ((← get).body.fvStmts [p] inner)
   let body ← mkClause captures [.var p] (fun sc => withNoTail (some why) (elabStmts sc true inner))
   let idx ← addFn ⟨[body]⟩ s!"the scope of the borrow `{p}` in `{(← get).owner}`"
-  let captured ← (captures.filterMap (fun y => scope.lookup y)).mapM useLocal
+  let b := (← get).body
+  let captured ← useCaptured scope captures fun y => inner.findSome? (b.findStmt (isName y))
   let thunk ← emit (.let_ (.closure idx captured))
   let r ← emit (.lend uniq cell thunk [] [])
   match pat with
@@ -608,7 +625,8 @@ partial def elabGuarded (scope : Scope) (tailPos : Bool) (cleanup : Atom) (rest 
   let captures := captureNames scope ((← get).body.fvStmts [] rest)
   let body ← mkClause captures [] (fun sc => withNoTail (some why) (elabStmts sc true rest))
   let idx ← addFn ⟨[body]⟩ s!"a guarded block in `{(← get).owner}`"
-  let captured ← (captures.filterMap (fun x => scope.lookup x)).mapM useLocal
+  let b := (← get).body
+  let captured ← useCaptured scope captures fun y => rest.findSome? (b.findStmt (isName y))
   let thunk ← emit (.let_ (.closure idx captured))
   if tailPos then
     terminate (.guardTail cleanup thunk)
@@ -714,7 +732,7 @@ partial def elabClosure (scope : Scope) (clauses : Array Flat.ClauseId)
     let d ← addFn ⟨[clause]⟩ s!"what destroys a callable in `{(← get).owner}`"
     modify fun s => { s with drops := (idx, d) :: s.drops }
   -- Capturing a name is a use of it, like any other.
-  let captured ← (captures.filterMap (fun x => scope.lookup x)).mapM useLocal
+  let captured ← useCaptured scope captures fun y => clauses.toList.findSome? (b.findClause (isName y))
   bindLiteral idx captured
 
 /-- Build a closure and remember it as the literal it is. -/
@@ -829,7 +847,7 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Flat.ExprId) 
       let idx ← addFn ⟨if covered then clauses else clauses ++ [forward]⟩
         s!"the handler arm for `{opName}` in `{owner}`"
       table := table.push (id, idx)
-  let caps ← (captures.filterMap (fun x => scope.lookup x)).mapM useLocal
+  let caps ← useCaptured scope captures fun y => arms.toList.findSome? (b.findClause (isName y))
   if tailPos then
     terminate (.handleTail retIdx table.toList caps thunk)
     pure (.int 0)
@@ -885,7 +903,9 @@ partial def resolveDict (tr : TraitInfo) (env : Array Nat) (d : DictE) : StateM 
       ids := ids.push n
     let n ← internId fn ids.toList
     if let some ts := tr.dictTypes[addrOf d]? then
-      unless (← get).types.contains n do modify fun c => { c with types := c.types.insert n ts }
+      match (← get).types[n]? with
+      | some had => if had != ts then modify fun c => { c with types := c.types.insert n [] }
+      | none => modify fun c => { c with types := c.types.insert n ts }
     pure (some n)
 
 /-- The call `call` of a function given the implementations `ids`: of its

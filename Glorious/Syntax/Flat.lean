@@ -163,6 +163,26 @@ partial def anyStmt (b : Body) (p : FExpr → Bool) (s : StmtId) : Bool :=
 
 end
 
+mutual
+
+/-- The first expression `p` is true of, in an expression or inside it,
+blocks' too. -/
+partial def findExpr (b : Body) (p : FExpr → Bool) (e : ExprId) : Option ExprId :=
+  let n := b.expr e
+  if p n then some e else match n with
+    | .closure _ cs => cs.toList.findSome? (b.findClause p)
+    | .handle s cs => b.findExpr p s <|> cs.toList.findSome? (b.findClause p)
+    | .labelScope _ body => body.toList.findSome? (b.findStmt p)
+    | _ => b.foldDirect (fun a x => a <|> b.findExpr p x) none e
+
+partial def findClause (b : Body) (p : FExpr → Bool) (c : ClauseId) : Option ExprId :=
+  (b.clause c).body.toList.findSome? (b.findStmt p)
+
+partial def findStmt (b : Body) (p : FExpr → Bool) (s : StmtId) : Option ExprId :=
+  (b.stmtExprs s).toList.findSome? (b.findExpr p)
+
+end
+
 end Body
 
 /-! ## From trees -/

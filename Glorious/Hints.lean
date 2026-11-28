@@ -395,9 +395,10 @@ def constructOf (env : Env) (Γ : Array (Option Ty)) (binds : List (String × Ty
     | .int _ => some .int
   if fixedBase ≤ tag then
     let n := tag - fixedBase
+    -- (Of none, of what nothing else decides: `()`, as `Typer` leaves it.)
     let elem ← match args.head? with
       | some a => atomTy a
-      | none => (said.bind (tyOf env.decls binds)).bind fixedElem
+      | none => ((said.bind (tyOf env.decls binds)).bind fixedElem).orElse fun _ => some .unit
     return .data fixedName [elem, .data (lenBase + n) []]
   let (owner, fields) ← env.decls.ctors[tag]?
   let params := (env.decls.typeParams[owner]?).getD []
@@ -497,6 +498,9 @@ structure W where
   /-- The functions whose bodies are being gone through to find what they
   give (`fnRet`): one that is reached again does not return there. -/
   stack : List Nat := []
+  /-- The locals bound to a call that does not return, whose type nothing
+  decides (`()`, as `Typer` leaves it): what gives one gives nothing. -/
+  nevers : Std.HashSet Nat := {}
 
 def W.atomTy (w : W) : Atom → Option Ty
   | .var i => w.Γ[i]?.join
@@ -566,7 +570,13 @@ def handlerUses (env : Env) (w : W) (ret : Nat) (ops : List (Nat × Nat)) (caps 
 checker found them where the implementation was (`Env.implTypes`). -/
 def implBinds (env : Env) (fn : Nat) : List (String × Ty) :=
   (env.implTypes.getD fn []).filterMap (fun (x, te) => (tyOf env.decls [] te).map (s!"%rigid:{x}", ·))
-    ++ (env.projTypes.getD fn []).filterMap fun (x, te) => (tyOf env.decls [] te).map (x, ·)
+    ++ (env.projTypes.getD fn []).filterMap (fun (x, te) => (tyOf env.decls [] te).map (x, ·))
+    -- (`main` general in a type nothing gives it, `main<T>()`: `()`, as
+    -- `Typer` leaves what nothing decides.)
+    ++ (if env.names[fn]? == some "`main`" then match env.decls.fns[fn]? with
+        | some (tparams, _, _) => tparams.filterMap fun p => if p.startsWith "'" then none else some (s!"%rigid:{p}", .unit)
+        | none => []
+      else [])
 
 mutual
 
@@ -586,9 +596,19 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
   | .call (.var i) args _ | .tail (.var i) args =>
     if let (some (g, caps), some te) := (w.pend[i]?, env.said[(f, c, i)]?) then
       if let .fn ps _ := te then
-        let b := (ps.zip args).foldl (fun b (p, a) => match w.atomTy a with
+        let mut b := (ps.zip args).foldl (fun b (p, a) => match w.atomTy a with
           | some t => matchTy env.decls b p t
           | none => b) w.binds
+        -- (A callable it is given that waits too, of what it is given
+        -- there: what its body gives, `()` of one that does not return.)
+        for (p, a) in ps.zip args do
+          if let (.var k, .fn qs _) := (a, p) then
+            if let (some (ga, gcaps), some qs) := (w.pend[k]?, qs.mapM (tyOf env.decls b)) then
+              if let some r := (fnRet env (depth + 1) ga w.binds qs gcaps w.stack).map fun r => if r == .never then .unit else r then
+                let σ : Ty := .fn qs r w.eff false (some gcaps)
+                w := w.found k σ
+                w := { w with uses := w.uses.push (ga, { caps := gcaps, params := qs, ret := r, eff := w.eff }) }
+                b := matchTy env.decls b p σ
         if let some (.fn qs r eff once _) := tyOf env.decls b te then
           w := { w.found i (.fn qs r eff once (some caps)) with binds := b }
           w := w.noteCalled env f c i g qs
@@ -611,11 +631,13 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
               w := w.found i (.fn qs r eff once (some caps))
               w := { w with uses := w.uses.push (ga, { caps, params := qs, ret := r, eff }) }
             | _ =>
-              -- (What it is given known, what it gives not: its body's.)
+              -- (What it is given known, what it gives not: its body's; of
+              -- one that does not return, nothing decides it: `()`, as
+              -- `Typer` leaves what nothing decides.)
               if let .fn qs _ := p then
                 if let some qs := qs.mapM (tyOf env.decls known) then
-                  match fnRet env (depth + 1) ga w.binds qs caps w.stack with
-                  | some .never | none => pure ()
+                  match (fnRet env (depth + 1) ga w.binds qs caps w.stack).map fun r => if r == .never then .unit else r with
+                  | none => pure ()
                   | some r =>
                     w := w.found i (.fn qs r w.eff false (some caps))
                     w := { w with uses := w.uses.push (ga, { caps, params := qs, ret := r, eff := w.eff }) }
@@ -696,7 +718,9 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
   let said := fun (i : Nat) => env.said[(f, c, i)]?
   let w := if w.pend.isEmpty then w else useOf env depth f c w tm
   match tm with
-  | .ret a => (w, w.atomTy a)
+  | .ret a => (w, match a with
+    | .var i => if w.nevers.contains i then some .never else w.atomTy a
+    | _ => w.atomTy a)
   | .tail g _ => (w, (w.atomTy g).bind retOf)
   | .raise .. => (w, some .never)
   | .labelTail thunk | .guardTail _ thunk | .cellTail _ thunk | .cellTailL _ _ thunk => (w, (w.atomTy thunk).bind retOf)
@@ -789,7 +813,10 @@ partial def go (env : Env) (depth : Nat) (f c : Nat) (w : W) (tm : Tm) : W × Op
     | _, _ => go env depth f c (w.bind mine true) body
   | .call g _ body =>
     match (w.atomTy g).bind retOf with
-    | some .never => go env depth f c (w.bind ((said w.Γ.size).bind (tyOf env.decls w.binds)) true) body
+    | some .never =>
+      match (said w.Γ.size).bind (tyOf env.decls w.binds) with
+      | some σ => go env depth f c (w.bind (some σ) true) body
+      | none => go env depth f c { w.bind (some .unit) true with nevers := w.nevers.insert w.Γ.size } body
     | r => go env depth f c (w.bind r false) body
   | .handle ret ops caps thunk body =>
     -- (Its functions are of this one's type parameters.)
@@ -839,7 +866,7 @@ partial def labelRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String �
 that says. -/
 partial def fnRet (env : Env) (depth : Nat) (g : Nat) (binds : List (String × Ty)) (params caps : List Ty)
     (stack : List Nat := []) : Option Ty := do
-  if depth > 12 then none
+  if depth > 40 then none
   -- (Reached again while what it gives is being found: going on from here
   -- it does not return.)
   if stack.contains g then return .never

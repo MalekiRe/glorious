@@ -182,14 +182,16 @@ partial def toDictEShared (impls : Array ImplDecl) (marker : String → Bool) (d
   -- functions are written out at.)
   if let (.impl i _, some at_) := (d, (← get).fitParams[addrOf d]?) then
     if let some im := impls[i]? then
-      unless (← get).dictTypes.contains (addrOf e) do
-        -- (Those known whatever the function it is found in is given.)
-        let written ← at_.filterMapM fun (k, t) => do
-          let t ← zonk t
-          if !(freeTys t).isEmpty || t.hasRigid then return none
-          pure ((im.pvars.find? (·.2 == k)).bind fun (x, _) => t.writtenRigid.map (x, ·))
-        unless written.isEmpty do
-          modify fun s => { s with dictTypes := s.dictTypes.insert (addrOf e) written }
+      -- (Those known whatever the function it is found in is given; none
+      -- where the one object is found at others, `impl<B> Join<B> for ()` of
+      -- `B` two types: what its number does not tell apart.)
+      let written ← at_.filterMapM fun (k, t) => do
+        let t ← zonk t
+        if !(freeTys t).isEmpty || t.hasRigid then return none
+        pure ((im.pvars.find? (·.2 == k)).bind fun (x, _) => t.writtenRigid.map (x, ·))
+      match (← get).dictTypes[addrOf e]? with
+      | some had => if had != written then modify fun s => { s with dictTypes := s.dictTypes.insert (addrOf e) [] }
+      | none => modify fun s => { s with dictTypes := s.dictTypes.insert (addrOf e) written }
   modify fun s => { s with dictShared := s.dictShared.insert (addrOf d) (d, e) }
   pure e
 

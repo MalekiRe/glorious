@@ -232,8 +232,11 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
     knownOf := numbered.byObject.fold (init := {}) fun m k (_, r) => match r with
       | some n => m.insert k n
       | none => m
+    -- (None where two objects of one number say other types.)
     knownTypes := numbered.byObject.fold (init := {}) fun m k (_, r) => match r, t.dictTypes[k]? with
-      | some n, some ts => if m.contains n then m else m.insert n ts
+      | some n, some ts => match m[n]? with
+        | some had => if had == ts then m else m.insert n []
+        | none => m.insert n ts
       | _, _ => m
     dictsAt := firstOf t.dicts, methodsAt := firstOf t.methods
     -- (And each destroyer, given how its parts are destroyed: copied for
