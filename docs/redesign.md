@@ -751,3 +751,18 @@ covey/fleet's Core, 27,148 locals have the checker's type, 6,662 of the
 - Every refusal is said, sorted by where it is: bodies' (a group that calls
   a refused one not read), and declarations' and implementations' (what
   names one refused not read), `St.declFailed`, `sortedErrors`.
+
+2, as it stands (`Glorious/Hints.lean`, beside `Typer`, `GLORIOUS_TRACE=hints`):
+each clause of each function at each signature `Typer` found is gone
+through once, forward, on its own types: a local's type from its parts',
+the checker's type of the expression it is made for, a function's type
+parameters learned from what it is given and gives (`matchTy`), and a
+closure the checker said nothing of typed where it is first used as a
+callable (`useOf`, `fnRet`). Its hints line up with `Typer`'s in every
+clause of covey/fleet; what they are compared on is the types without what
+callables perform and were made with (`shape`). Left before `Typer` can
+go: the hints not found yet (about 2,300 callables, 170 declared types, 60
+others, 290 handlers: effects with arguments), what callables perform
+(the checker's rows, as operations), each function at each signature from
+`main` (step 3), and the declared types and operations those use
+(`Typer.declsFor`, kept).
