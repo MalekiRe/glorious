@@ -1582,8 +1582,9 @@ partial def Ty.writtenRigid : Ty → Option Syntax.TypeExpr
   | .var n => some (.name s!"%rigid:%{n}" [])
   | .rigid (.param name _) => some (.name s!"%rigid:{name}" [])
   | .rigid _ => none
+  -- (A lifetime as itself: what Core's types make of one.)
   | .con n args =>
-    if n.startsWith "'" then none
+    if n.startsWith "'" then some (.name "'" [])
     else (args.mapM Ty.writtenRigid).map (Syntax.TypeExpr.name n)
   | .tuple args => (args.mapM Ty.writtenRigid).map .tuple
   -- (With what it performs, each effect at its arguments.)

@@ -201,7 +201,10 @@ partial def matchTyOpt (d : Typer.Decls) (binds : List (String × Ty)) : TypeExp
       if d.typeIds[x]? == some n then
         let lifetimes := ((d.typeParams[n]?).getD []).map (·.startsWith "'")
         let typed := (lifetimes.zip targs).filterMap fun (l, t) => if l then none else some t
-        if typed.length == args.length then
+        -- (The lifetimes written too, or not: those are no types to learn.)
+        if args.length == targs.length then
+          ((args.zip targs).zip lifetimes).foldlM (fun b ((a, t), l) => if l then some b else matchTyOpt d b a t) binds
+        else if typed.length == args.length then
           (args.zip typed).foldlM (fun b (a, t) => matchTyOpt d b a t) binds
         else some binds
       else if x == "Fixed" && n == fixedName then
@@ -557,9 +560,19 @@ partial def useOf (env : Env) (depth : Nat) (f c : Nat) (w : W) (at_ : Tm) : W :
           | none => b) []
         for (a, p) in args.zip ps do
           if let some (i, (ga, caps)) := callee a then
-            if let some (.fn qs r eff once _) := tyOf env.decls known p then
+            match tyOf env.decls known p with
+            | some (.fn qs r eff once _) =>
               w := w.found i (.fn qs r eff once (some caps))
               w := { w with uses := w.uses.push (ga, { caps, params := qs, ret := r, eff }) }
+            | _ =>
+              -- (What it is given known, what it gives not: its body's.)
+              if let .fn qs _ := p then
+                if let some qs := qs.mapM (tyOf env.decls known) then
+                  match fnRet env (depth + 1) ga w.binds qs caps w.stack with
+                  | some .never | none => pure ()
+                  | some r =>
+                    w := w.found i (.fn qs r w.eff false (some caps))
+                    w := { w with uses := w.uses.push (ga, { caps, params := qs, ret := r, eff := w.eff }) }
   | _ => pure ()
   match at_ with
   | .call h args _ | .tail h args =>
