@@ -597,10 +597,6 @@ where what does not fit is a clause's result. -/
 structure Said where
   msg : String
   result : Bool := false
-  /-- Of "has no field": the head of the type it is not a field of (a dot
-  call's receiver's, `value.name(..)`), so that whoever looks for the type's
-  own function of the name need not read the receiver again. -/
-  subject : Option String := none
 
 instance : Coe String Said := ⟨fun msg => { msg }⟩
 

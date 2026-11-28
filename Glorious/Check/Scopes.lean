@@ -172,8 +172,8 @@ def fieldIndex (t : Ty) (step : String) : M (Option Nat) := do
     | some names =>
       match names.idxOf? step with
       | some i => pure (some i)
-      | none => throwThe Elab.Said { msg := s!"`{showTy (← zonk t)}` has no field `{step}`", subject := some name }
-    | none => throwThe Elab.Said { msg := s!"`{showTy (← zonk t)}` has no field `{step}`: its fields have no names", subject := some name }
+      | none => throw s!"`{showTy (← zonk t)}` has no field `{step}`"
+    | none => throw s!"`{showTy (← zonk t)}` has no field `{step}`: its fields have no names"
   | .var _ =>
     throw s!"the field `{step}` is read from a value whose type is not known here; annotate it"
   | t => throw s!"`{showTy (← zonk t)}` has no field `{step}`"

@@ -8654,3 +8654,14 @@ coercions only at a site whose expected type is known.
 
 What a call's refusal says is of the argument read where it does not fit:
 `get(&p, 2) + true` says argument 2 of `+` expects an `Int`.
+
+## A callable argument read once, at the parameter types wanted
+
+**Decision (redesign step 7: nothing is read again).** A callable written
+where one is wanted is read once, its parameters of the types the function
+it is given to wants where those are declared types, tuples or references
+to them, as Rust's closure takes the signature it is expected at. Before,
+it was read so and, where that did not fit, read again without them (the
+first refusal kept). A clause that does not fit is now said of the clause:
+`None => { say(1); 0 }` says its result is a callable where an `Int` is
+wanted, not that the callable given to `match` is of the wrong type.

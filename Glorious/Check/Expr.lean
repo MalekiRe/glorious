@@ -1018,8 +1018,8 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
       let mut annots : List (Option Ty) := []
       -- A parameter known to be of a declared type is said too, so that
       -- what the clauses do with it, a field read by name, is looked at
-      -- knowing it. That is tried, and given up where it does not fit:
-      -- what is given may yet be converted to what is wanted.
+      -- knowing it: the callable is read once, its parameters of the types
+      -- wanted, as Rust's closure is of the signature it is expected at.
       let mut wider : List (Option Ty) := []
       let mut widened := false
       for q in ps do
@@ -1054,24 +1054,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : F
             modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
           return ← fitAt scope amb what site p t
         fitAt scope amb what site p (← inferExpr scope amb a)
-      if arity == ps.length && widened then
-        let saved ← get
-        let tried ← tryCatchThe Elab.Said (do
-            pure (if (← plain wider).isNone then none else some ("" : Elab.Said))) fun e => pure (some e)
-        match tried with
-        | none => return none
-        | some found =>
-          let said := found.msg
-          set saved
-          -- What went wrong with the types known is what is said if the
-          -- callable is wrong without them too: it was read knowing more.
-          unless said.isEmpty do
-            -- (Where it was said, as the statement it is in would say it.)
-            let at_ := (← get).at_
-            let said := if at_.1 == 0 then said else Syntax.positioned at_.1 at_.2 said
-            modify fun s => { s with firstSaid := s.firstSaid <|> some { found with msg := said } }
-            try return ← plain annots
-            catch _ => throwThe Elab.Said { found with msg := said }
+      if arity == ps.length && widened then return ← plain wider
       return ← plain annots
     fitAt scope amb what site p (← inferExpr scope amb a)
 
@@ -2353,7 +2336,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
         let found ← try some <$> inferExpr scope amb f catch _ => pure none
         let callable ← match found with
           | some t => do pure (match ← find t with | .fn .. | .var _ => true | _ => false)
-          | none => pure true
+          | none => pure false
         let recvTy ← if callable then pure none else try some <$> inferExpr scope amb recv catch _ => pure none
         let rec headOf (fuel : Nat) (t : Ty) : M (Option String) := do
           match fuel, ← find t with
@@ -2377,34 +2360,8 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Flat.ExprId) (args : Arra
       | .inr said => do
       let e := said.msg
       match b.expr f with
-      | .fieldOf _ recv name =>
+      | .fieldOf _ _ name =>
         let theirs := (((← get).fns.toList.filter fun (fn, _) => fn.endsWith s!"::{name}").map (·.1)).mergeSort (· ≤ ·)
-        -- (Taken for a field because some type has a field of the name: the
-        -- function of the value's type's own, if it has one; the type said
-        -- where the field was not found, or the receiver read again.)
-        if call != 0 && (e.splitOn "has no field").length > 1 then
-          let saved ← get
-          let head ← match said.subject with
-            | some h => pure (some h)
-            | none => do
-              let found ← try some <$> inferExpr scope amb recv catch _ => pure none
-              match found with
-              | some ty => do
-                let rec go (fuel : Nat) (t : Ty) : M (Option String) := do
-                  match fuel, ← find t with
-                  | fuel + 1, .ref _ inner _ => go fuel inner
-                  | _, .con n _ => pure (some n)
-                  | _, _ => pure none
-                go 8 ty
-              | none => pure none
-          set saved
-          if let some h := head then
-            let own := s!"{h}::{name}"
-            if ((← get).fns[own]?).isSome then
-              -- (The call of the type's own function, written where it is
-              -- and read: of the call nothing was read but the field's
-              -- try, which is let go.)
-              if let some t ← ownCall scope amb call own then return t
         if (e.splitOn "has no field").length > 1 && theirs.length > 1 then
           throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun fn => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
         else throwThe Elab.Said said
