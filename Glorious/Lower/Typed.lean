@@ -413,6 +413,6 @@ def lowered (C : Types) (p : Program) (kept : Option TypedMemo := none) : L (Pro
 def program (C : Types) (p : Program) (kept : Option TypedMemo := none) : Option (Program × List Nat × TypedMemo) :=
   match (lowered C p kept).run' {} with
   | .ok r => some r
-  | .error e => if Trace.enabled then dbgTrace s!"not lowered: {e}" fun _ => none else none
+  | .error e => if Trace.enabled || Trace.hintsOnly then dbgTrace s!"NOT-LOWERED: {e}" fun _ => none else none
 
 end Glorious.Lower

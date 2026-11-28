@@ -137,8 +137,18 @@ else match d.typeIds[x]? with
   -- arguments; what it was made with is not written, found apart.)
   | .fn ps (.performs r effs) => do
     let eff ← effs.flatMapM fun (e, args) => do
-      let targs ← args.mapM (tyOf d vars)
-      pure (((d.effectOps[e]?).getD []).map (·, targs))
+      match d.effectOps[e]? with
+      | some ops =>
+        let targs ← args.mapM (tyOf d vars)
+        pure (ops.map (·, targs))
+      | none =>
+        -- (An effect of several instances is one effect for each, named by
+        -- its types, `Store@<Int>`: its operations take only lifetimes.)
+        let key := ", ".intercalate (args.map (·.spell))
+        match d.effectOps[s!"{e}@<{key}>"]? with
+        | some ops => pure (ops.map fun op =>
+            (op, (((d.ops[op]?).map (·.1)).getD []).map fun _ => Ty.ref .unit))
+        | none => pure []
     pure (.fn (← spread ps) (← tyOf d vars r) eff false none)
   | .fn ps r => do pure (.fn (← spread ps) (← tyOf d vars r) [] false none)
   | _ => none
