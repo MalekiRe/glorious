@@ -31,6 +31,9 @@ structure Env where
   names : Array String := #[]
   /-- Each top-level function's type as the checker found it. -/
   selfTy : Std.HashMap Nat TypeExpr := {}
+  /-- Each implementation's function's `Self`, of the implementation's type
+  parameters. -/
+  implSelf : Std.HashMap Nat TypeExpr := {}
   /-- What each type parameter of the function a local is a closure of is,
   where the local is made for a call of it, as the checker found it there:
   by function, clause and local. -/
@@ -443,8 +446,16 @@ it given `params`, as the checker found it at the call (`Env.insts`). -/
 def W.noteCalled (w : W) (env : Env) (f c i g : Nat) (params : List Ty) : W :=
   match env.insts[(f, c, i)]? with
   | some ps =>
-    let binds := ps.filterMap fun (p, te) => do
-      pure (s!"%rigid:{p}", ← te.bind (tyOf env.decls w.binds))
+    let binds := ps.flatMap fun (p, te) =>
+      match te.bind (tyOf env.decls w.binds) with
+      | none => []
+      | some t =>
+        -- (`Self` at a call of a trait's function: the implementation's
+        -- type parameters, of its `Self`.)
+        if p == "%Self" then match env.implSelf[g]? with
+          | some self => matchTy env.decls [] self t
+          | none => []
+        else [(s!"%rigid:{p}", t)]
     if binds.isEmpty then w else { w with called := w.called.push ((g, params), binds) }
   | none => w
 
@@ -783,7 +794,13 @@ def envOf (items : List Item) (out : Elab.Output) (nodeTys : Std.HashMap String 
         locals.foldl (fun m (i, n) => match is[n]? with
           | some ps => m.insert (f, c, i) ps
           | none => m) m) m) {}
-  pure { decls, p := out.program, said, names := out.fnNames, selfTy, insts }
+  let implSelf := out.fnNodes.fold (fun m f (owner, _) =>
+    if out.fnNames[f]? != some s!"`{owner}`" then m else
+    let base := (owner.splitOn "⟨").headD owner
+    match (nodeTys[owner]? <|> nodeTys[base]?).bind (·[Flat.implSelfNode]?) with
+    | some te => m.insert f te
+    | none => m) {}
+  pure { decls, p := out.program, said, names := out.fnNames, selfTy, insts, implSelf }
 
 /-- A function's clause at a signature: its hints, the functions at the
 signatures its closures are made at, and what it was found to give; an

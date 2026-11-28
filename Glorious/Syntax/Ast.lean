@@ -856,6 +856,10 @@ structure Body where
 its expressions' (`Check.St.bodyTys`): no node's. -/
 def selfNode : Nat := 1 <<< 62
 
+/-- The identity under which the checker keeps an implementation's
+function's `Self`, of the implementation's type parameters: no node's. -/
+def implSelfNode : Nat := selfNode - 1
+
 /-- The identity under which the checker keeps the type of what runs a
 handled computation (a callable of nothing that performs what is handled),
 the node `id` being the computation: no node's. -/

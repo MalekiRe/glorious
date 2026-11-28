@@ -551,6 +551,10 @@ def checkGroupFn (decls : List FnDecl) (signature : Bool) (group : List (String 
           if let some w := (← zonk t).writtenRigid then known := known.push (e, w)
         -- (And the function's own, by `Syntax.Flat.selfNode`.)
         if let some w := (← zonk t).writtenRigid then known := known.push (Syntax.Flat.selfNode, w)
+        -- (And an implementation's function's `Self`, by `implSelfNode`.)
+        if d.impl.isSome then
+          if let some self := (← get).rigidParams.lookup "Self" then
+            if let some w := (← zonk self).writtenRigid then known := known.push (Syntax.Flat.implSelfNode, w)
         modify fun s => { s with bodyTys := s.bodyTys.insert d.name known }
         -- (What each callee's type parameters are at each call.)
         let calls := (← get).callInsts
