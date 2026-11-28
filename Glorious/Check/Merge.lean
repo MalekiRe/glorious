@@ -42,7 +42,7 @@ def diffStates (p b : St) : Option StDelta := do
   pure {
     rest := clearPart9 <| clearPart8 <| clearPart7 <| clearPart6 <| clearPart5 <| clearPart4 <| clearPart3 <| clearPart2 <| clearPart1 <| clearPart0 <| { b with
       assocUses := #[],
-      solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0,
+      solvedFit := {}, leavesFit := {}, leavesAt := {}, 
       tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {}, fitParams := {}, modules := {}, body := {}, blockRoots := {}, blockRootsAt := 0,
       -- (Of where implementations are, only those it declared.)
       implsByBase := ownImpls p.impls.size b.implsByBase, implsByHead := ownImpls p.impls.size b.implsByHead }

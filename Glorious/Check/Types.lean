@@ -1004,28 +1004,23 @@ structure St where
   alone, while one group's bounds are settled: by the function, the trait,
   the type and arguments spelled, and what the function is given
   (`solveFitting`, `leavesFitting`). -/
-  solvedFit : PMap (String × Syntax.TraitKey × List Nat × Traits.Givens Syntax.TraitKey) (Option Traits.Dict) := {}
+  solvedFit : PMap (String × Syntax.TraitKey × List UInt64 × Traits.Givens Syntax.TraitKey) (Option Traits.Dict) := {}
   /-- How each type's values are destroyed, as found in a group: by the type
   as the solver has it and what the function is given. -/
   destroyFit : Std.HashMap (Traits.STy × Traits.Givens Syntax.TraitKey) (Option Traits.Dict) := {}
-  leavesFit : PMap (String × Syntax.TraitKey × List Nat) (List (Syntax.TraitKey × Nat × Ty × List Ty)) := {}
-  /-- Types all known, each a number: its head and its parts' numbers (see
-  `internTy`). Made anew for each group's bounds, as the caches keyed by
-  them are. -/
-  tyIds : PMap (String × List Nat) Nat := {}
-  tyIdCount : Nat := 0
+  leavesFit : PMap (String × Syntax.TraitKey × List UInt64) (List (Syntax.TraitKey × Nat × Ty × List Ty)) := {}
   /-- What the implementation whose function is being checked says of types
   made of its type parameters, `(..R): Registers<S>`: the trait at its
   arguments and the type, spelled, as this function names them. -/
-  implConds : List (Syntax.TraitKey × String) := []
+  implConds : List (Syntax.TraitKey × UInt64) := []
   /-- What a trait leaves to the implementation for a type all known, by the
   trait, the name and the type spelled: found once in a function's check
   (`settleAssocs`), not again for each question that comes to it (a list of
   sixteen's each made of the rest's). -/
-  assocMemo : Std.HashMap String Ty := {}
+  assocMemo : Std.HashMap (String × String × UInt64) Ty := {}
   /-- The number of each type object numbered already (`internTy`), kept with
   it: a type all known stays so, so the same object is the same number. -/
-  tyMemo : Std.HashMap USize (Ty × Nat) := {}
+  tyMemo : Std.HashMap USize (Ty × UInt64) := {}
   /-- Dictionaries made for a group's calls, by the object each was found as. -/
   dictShared : PMap USize (Traits.Dict × Elab.DictE) := {}
   /-- Each implementation fitted in this group's bounds, by the dictionary

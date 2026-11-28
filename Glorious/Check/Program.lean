@@ -18,7 +18,7 @@ abbrev Kept := List (UInt64 × St)
 /-- A state as it is kept: without what a group's bounds found, which the
 next group's start anew (`settleBounds`). -/
 def forKeeping (st : St) : St :=
-  { st with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {},
+  { st with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {},
             body := {}, fnBodies := {} }
 
 /-- A state to keep, without the bodies of the functions: those are the

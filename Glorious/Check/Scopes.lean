@@ -281,30 +281,28 @@ def projectionOf (t : Ty) : M (Option Ty) := do
       if w == v then return some (.con Syntax.projMark [← zonk self, .con tr [], .con name []])
   return none
 
-/-- A type as it is written in the name of a trait at its arguments: the
-spelling `TypeExpr.spell` gives the type an implementation writes. A type not
-yet known is spelt by its variable. -/
-partial def spellTy (t : Ty) (seen : List Nat := []) : M String := do
+/-- A type's identity, what it performs and holds not part of it (one not
+known yet by its variable, or by what a trait leaves it to be, as a
+condition of that is written): a number, the same for a type made twice,
+made of its head and its parts' (as rustc's types are one interned pointer
+each). Not a pointer into a table but a hash of the structure: two compiles,
+and two checks of a program put together, give a type the same one. -/
+partial def tyKey (t : Ty) (seen : List Nat := []) : M UInt64 := do
   match ← find t with
-  -- (One read from what a trait leaves to an implementation, not known
-  -- yet: as that is written, as a condition of it is. One that is part of
-  -- what it is asked of, `Output` of `Add` for `(?a, ?b)` that is `?a`, is
-  -- spelt by its variable.)
   | .var id => do
-    if seen.contains id then return s!"?{id}"
+    if seen.contains id then return mixHash 1 (hash id)
     match ← projectionOf (.var id) with
-    | some p => spellTy p (id :: seen)
-    | none => pure s!"?{id}"
-  | .rigid r => pure r.spelled
-  | .con n [] => pure n
-  | .con n args => do pure s!"{n}<{", ".intercalate (← args.mapM (spellTy · seen))}>"
-  | .tuple args => do pure s!"({", ".intercalate (← args.mapM (spellTy · seen))})"
-  | .fn ps r _ _ _ => do pure s!"fn({", ".intercalate (← ps.mapM (spellTy · seen))}) -> {← spellTy r seen}"
+    | some p => tyKey p (id :: seen)
+    | none => pure (mixHash 1 (hash id))
+  | .rigid r => pure (mixHash 2 (hash r.spelled))
+  | .con n args => do pure ((← args.mapM (tyKey · seen)).foldl mixHash (mixHash 3 (hash n)))
+  | .tuple args => do pure ((← args.mapM (tyKey · seen)).foldl mixHash (mixHash 4 (hash args.length)))
+  | .fn ps r _ _ _ => do pure ((← ps.mapM (tyKey · seen)).foldl mixHash (mixHash 5 (← tyKey r seen)))
   | .ref how inner _ => do
     let uniq := match ← find how with
       | .con "&mut" [] => true
       | _ => false
-    pure ((if uniq then "&mut " else "&") ++ (← spellTy inner seen))
+    pure (mixHash (if uniq then 6 else 7) (← tyKey inner seen))
 
 /-- What a trait is asked of, taken apart: the type, and the trait's own
 arguments if it has some. -/
@@ -371,7 +369,7 @@ def fixedAt (at_ : List (Nat × Ty)) (want : Ty) : M Ty := do
   pure (subst at_ [] cm want)
 
 /-- A type as a key's argument is written (`Syntax.TraitKey`): as
-`spellTy` spells it, a type not known yet by its variable. -/
+`TypeExpr.spell` spells it, a type not known yet by its variable. -/
 partial def keyTy (t : Ty) (seen : List Nat := []) : M TypeExpr := do
   match ← find t with
   | .var id => do
@@ -471,7 +469,7 @@ def implKey (trait : String) (self : Ty) (args : List Ty) : M Syntax.TraitKey :=
   let zself ← zonk self
   unless (Ty.rigidNames zself).isEmpty do
     let key ← traitKey trait args
-    if (← get).implConds.contains (key, ← spellTy zself) then return key
+    if (← get).implConds.contains (key, ← tyKey zself) then return key
   let head ← headFor trait (← find self)
   if let some (h, hargs) := head then
     let family := (← implsOfHead trait h).filter fun im => im.targs.length == args.length
@@ -513,8 +511,7 @@ def implKey (trait : String) (self : Ty) (args : List Ty) : M Syntax.TraitKey :=
           -- not by one of these.)
           if !rigids.isEmpty then
             let key ← traitKey trait args
-            let spelled ← spellTy (← zonk self)
-            if (← get).implConds.contains (key, spelled) then return key
+            if (← get).implConds.contains (key, ← tyKey (← zonk self)) then return key
           throw s!"which implementation of `{bareName trait}` this is, is not known here: `{showTy (← zonk self)}` may turn out to be a type that another implementation of `{other.trait.shown}` is for. Say it of the type, `where .. : {bareName trait}`"
         return ← commit im
       | none =>
@@ -577,8 +574,8 @@ def settleAssocs : M Unit := do
       try unifyAt what found a catch e => throw (pos ++ e)
     -- (Asked before of the same type, all known: the same answer.)
     let zsubject ← zonk subject
-    let spelled ← spellTy zsubject
-    let memoKey := if (freeTys zsubject).isEmpty then some s!"{tr}|{name}|{spelled}" else none
+    let subjectKey ← tyKey zsubject
+    let memoKey := if (freeTys zsubject).isEmpty then some (tr, name, subjectKey) else none
     if let some found := memoKey.bind ((← get).assocMemo[·]?) then
       fit s!"`{name}` of `{Syntax.lastSegment tr}`" found
       continue
@@ -634,9 +631,9 @@ def settleAssocs : M Unit := do
       | none => left := left.push (tr, subject, name, a, owner, pos)
     | _, _ => left := left.push (tr, subject, name, a, owner, pos)
   -- Asked of the same type, the same answer.
-  let mut seen : List (String × Ty) := []
+  let mut seen : List ((String × String × UInt64) × Ty) := []
   for (tr, subject, name, a, _, _) in left do
-    let question := s!"{tr}|{name}|{← spellTy subject}"
+    let question := (tr, name, ← tyKey subject)
     match seen.lookup question with
     | some first => unify first a
     | none => seen := (question, a) :: seen
@@ -673,7 +670,7 @@ partial def settleAssocsAll (fuel : Nat := 256) : M Unit := do
   -- (Again while any was answered: an answer may itself ask another,
   -- `<Q as ItemTouches>::List`, which is then there in its place.)
   if fuel > 0 && (after.size < before.size || after.map (·.1) != before.map (·.1)
-      || (← after.mapM fun u => spellTy u.2.1) != (← before.mapM fun u => spellTy u.2.1)) then
+      || (← after.mapM fun u => tyKey u.2.1) != (← before.mapM fun u => tyKey u.2.1)) then
     settleAssocsAll (fuel - 1)
 
 

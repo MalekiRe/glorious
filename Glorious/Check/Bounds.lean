@@ -232,7 +232,7 @@ def partsOf (t : Ty) : M (List Ty) := do
 /-- Is there anything to do when a value of this type is destroyed: is it, or
 does it hold, a value of a type with `Drop`? A type being asked about above
 holds nothing more than was seen on the way. -/
-partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
+partial def needsDestroying (seen : List UInt64) (t : Ty) : M Bool := do
   match ← find t with
   | .tuple args => args.anyM (needsDestroying seen)
   | .fn _ _ _ _ cap =>
@@ -262,7 +262,7 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
     pure held.isSome
   | .con name args =>
     if (← get).kimpls.has (.of "Drop") name then return true
-    let key ← spellTy (.con name args)
+    let key ← tyKey (.con name args)
     if seen.contains key then return false
     (← partsOf (.con name args)).anyM (needsDestroying (key :: seen))
   | _ => pure false
@@ -282,17 +282,17 @@ def unprojectedCondition (subject : Ty) (cargs : List Ty) : M (Ty × List Ty) :=
   if (← get).assocUses.size != before then settleAssocsAll
   pure (subject, cargs)
 
-/-- A type all known, as its number in the pool of such types (`St.tyIds`):
-the same number for the same type, made of its head and its parts' numbers.
-None where a part is not known yet. -/
-partial def internTy (t : Ty) : M (Option Nat) := do
+/-- A type all known, as its identity: the same number for the same type,
+made of its head and its parts' (as `tyKey`, and what a callable performs
+and holds too). None where a part is not known yet. -/
+partial def internTy (t : Ty) : M (Option UInt64) := do
   if let some (_, n) := (← get).tyMemo[addrOf t]? then return some n
   let r ← internTyAt t
   if let some n := r then
     modify fun s => { s with tyMemo := s.tyMemo.insert (addrOf t) (t, n) }
   pure r
 where
-  internTyAt : Ty → M (Option Nat)
+  internTyAt : Ty → M (Option UInt64)
   | .con n args => do
     let some parts ← internAll args | return none
     poolId ("c" ++ n) parts
@@ -309,7 +309,7 @@ where
     let some parts ← internAll ps | return none
     let some out ← internTy (← find r) | return none
     let row ← flattenRow ⟨effs, tail⟩
-    let mut said : Array Nat := #[]
+    let mut said : Array UInt64 := #[]
     for (e, as) in row.effs do
       let some ss ← internAll as | return none
       let some n ← poolId ("!" ++ e) ss | return none
@@ -319,22 +319,17 @@ where
       | none => ""
     poolId s!"fn'{← findCap cap}{rest}" (parts ++ [out] ++ said.toList)
   | _ => pure none
-  internAll (ts : List Ty) : M (Option (List Nat)) := do
+  internAll (ts : List Ty) : M (Option (List UInt64)) := do
     let mut out := #[]
     for t in ts do
       let some s ← internTy (← find t) | return none
       out := out.push s
     pure (some out.toList)
-  poolId (head : String) (parts : List Nat) : M (Option Nat) := do
-    match (← get).tyIds[(head, parts)]? with
-    | some n => pure (some n)
-    | none =>
-      let n := (← get).tyIdCount
-      modify fun s => { s with tyIds := s.tyIds.insert (head, parts) n, tyIdCount := n + 1 }
-      pure (some n)
+  poolId (head : String) (parts : List UInt64) : M (Option UInt64) :=
+    pure (some (parts.foldl mixHash (hash head)))
 
 /-- The type and arguments so numbered, where each can be. -/
-def fitKey (ty : Ty) (args : List Ty) : M (Option (List Nat)) := internTy.internAll (ty :: args)
+def fitKey (ty : Ty) (args : List Ty) : M (Option (List UInt64)) := internTy.internAll (ty :: args)
 
 /-- A type's shape as far as destroying it goes: a part that nothing
 decides, and that the function is not given how to destroy, holds nothing
@@ -412,7 +407,7 @@ mutual
 
 /-- `leaves`, where implementations are chosen by fitting types. -/
 partial def leavesFitting (pos : String) (key : Syntax.TraitKey) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List (String × Ty) := []) (asking : List ((Syntax.TraitKey × List Nat) × Ty) := []) : M (List (Syntax.TraitKey × Nat × Ty × List Ty)) := do
+    (via : List (String × Ty) := []) (asking : List ((Syntax.TraitKey × List UInt64) × Ty) := []) : M (List (Syntax.TraitKey × Nat × Ty × List Ty)) := do
   if key == Syntax.destroyKey then
     -- (A type of nothing still to be found, and no type parameter: how it
     -- is destroyed asks nothing of anyone. What destroys it is found when
@@ -444,7 +439,7 @@ partial def leavesFitting (pos : String) (key : Syntax.TraitKey) (t : Ty) (args 
   pure ls
 
 partial def leavesFittingNow (pos : String) (key : Syntax.TraitKey) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List (String × Ty) := []) (asking : List ((Syntax.TraitKey × List Nat) × Ty) := []) : M (List (Syntax.TraitKey × Nat × Ty × List Ty)) := do
+    (via : List (String × Ty) := []) (asking : List ((Syntax.TraitKey × List UInt64) × Ty) := []) : M (List (Syntax.TraitKey × Nat × Ty × List Ty)) := do
   let t ← find t
   -- (How a value is destroyed is found by the type's shape alone, as
   -- `solveFitting` finds it: no condition is left of what it finds.)
@@ -563,8 +558,8 @@ it is given, each with this function's added. -/
 def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
     (instSites : Array (String × Nat × String × String × List Ty)) (leafs : Array (Syntax.TraitKey × Nat × Ty))
     (heldIncl : List (Ty × Ty)) (d : FnDecl) (keyed : List (Syntax.TraitKey × Syntax.TraitKey × List Ty))
-    (compound : List (String × Syntax.TraitKey × String × Ty)) (givensOf : List (String × Traits.Givens Syntax.TraitKey)) :
-    M (List (Syntax.TraitKey × Syntax.TraitKey × List Ty) × List (String × Syntax.TraitKey × String × Ty)
+    (compound : List (String × Syntax.TraitKey × UInt64 × Ty)) (givensOf : List (String × Traits.Givens Syntax.TraitKey)) :
+    M (List (Syntax.TraitKey × Syntax.TraitKey × List Ty) × List (String × Syntax.TraitKey × UInt64 × Ty)
       × List (String × Traits.Givens Syntax.TraitKey)) := do
   let mut keyed := keyed
   let mut compound := compound
@@ -796,7 +791,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
           pure (key, own.getD 0, t)
       for (key, _, t) in apart do
         if (← keyOf t).isNone then
-          compound := (d.name, key, ← spellTy t, Ty.rigid (.cond d.name key (← keyTy t))) :: compound
+          compound := (d.name, key, ← tyKey t, Ty.rigid (.cond d.name key (← keyTy t))) :: compound
       pure (plain ++ apart)
     | none =>
       let inferred := leafs.toList.filter fun (_, _, k) =>
@@ -928,11 +923,11 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
             if mark == Syntax.gatMark then pure (self, asked) else pure (subject, [])
           | t => pure (t, [])
         let subject ← match ← find subject with
-          | .tuple (self :: _) => spellTy self
-          | t => spellTy t
+          | .tuple (self :: _) => tyKey self
+          | t => tyKey t
         let mut at_ : List Nat := []
         for ((key, _, ty), j) in mine.zipIdx do
-          if key.base == tr && (← spellTy ty) == subject then at_ := at_ ++ [j]
+          if key.base == tr && (← tyKey ty) == subject then at_ := at_ ++ [j]
         -- (Of two questions with one answer, `S::Holding<T1>` given where
         -- `S::Holding<Int>` is wanted, the one asked at what is known.)
         if let [j] := at_ then
@@ -968,7 +963,7 @@ def settleScheme (decls : List FnDecl) (defs : List (String × Ty))
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
 def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
-  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {}, fitParams := {} }
+  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {}, fitParams := {} }
   -- A name of which parts were read before its type was known, which is now:
   -- if the type has a `drop` of its own and the parts read can be used any
   -- number of times, the value stayed whole and is destroyed when its block
@@ -1286,7 +1281,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- Conditions of an implementation on a type made from its parameters,
   -- `(A, B): Apart`, by the function and the trait at its arguments: the
   -- type as written, and the number it is known by in the function.
-  let mut compound : List (String × Syntax.TraitKey × String × Ty) := []
+  let mut compound : List (String × Syntax.TraitKey × UInt64 × Ty) := []
   for d in decls do
     let (k, c, g) ← settleScheme decls defs instSites leafs heldIncl d keyed compound givensOf
     keyed := k
@@ -1350,11 +1345,11 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- (A need of the trait of a type the implementation said has it: met by
     -- what it said.)
     -- (Spelled only where it is asked: most are met before.)
-    let saidOf : M (Option (String × Syntax.TraitKey × String × Ty)) := do
+    let saidOf : M (Option (String × Syntax.TraitKey × UInt64 × Ty)) := do
       if compound.isEmpty then return none
-      let spelled ← spellTy b.ty
+      let asked ← tyKey b.ty
       pure (compound.find? fun (owner, key, ty, _) =>
-        owner == b.owner && key.base == b.trait.base && ty == spelled)
+        owner == b.owner && key.base == b.trait.base && ty == asked)
     let solve := fun (trait : Syntax.TraitKey) (ty : Ty) (sty : Traits.STy) => do
       -- (As deep as a condition's conditions go: a list of sixteen, each
       -- apart from those after it, goes some hundreds deep.)
